@@ -53,6 +53,7 @@ pub mod id {
     pub const EXPORT: usize = 125;
     pub const IMPORT: usize = 126;
     pub const HISTORY: usize = 127;
+    pub const HOOKS: usize = 193;
     pub const FLOWS: usize = 128;
     pub const ZOOM_IN: usize = 129;
     pub const ZOOM_OUT: usize = 130;
@@ -163,6 +164,8 @@ pub(super) enum Modal {
     Confirm(String, Confirmed),
     Publish(PubForm),
     History(HistView),
+    /// The flow's webhooks: on or off, the last 20 deliveries, a new address shown once.
+    Webhook(super::flows_hook::HookPanel),
     /// The suggested changes of the agent (Assist): list, stored diff, Approve, Reject.
     Suggestions(super::flows_assist::SugView),
     Import(Form),
@@ -1066,6 +1069,11 @@ impl FlowsApp {
         }
         if self.tick % 30 == 0 {
             self.update_assist();
+        }
+        // the assistant made a webhook address: it waits for this screen only (never in the chat), shown once in the panel
+        if self.tick % 6 == 0 && self.modal.is_none() && self.cur.is_some() && iyakki_agent::flows::hookstore::reveal_waiting(&self.env.user) {
+            self.open_hooks();
+            self.redraw = true;
         }
         if self.tick % 15 == 0 {
             // the assistant (or another window) may have changed the draft

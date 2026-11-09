@@ -184,6 +184,8 @@ pub fn answer(c: &Control) -> Option<Vec<u8>> {
     match c {
         Control::FilterNetType => Some(vec![CONTROL, CTRL_FILTER_NET_RESPONSE, 0, 0]),
         Control::FilterMultiAddr => Some(vec![CONTROL, CTRL_FILTER_MULTI_RESPONSE, 0, 0]),
+        // a phone never opens a connection to a PANU, but if one does, it is told "not allowed" (0x0004) instead of being left waiting
+        Control::SetupRequest { .. } => Some(setup_response(4)),
         _ => None,
     }
 }
@@ -233,7 +235,10 @@ impl Panu {
                 }
             }
             Ok(Packet::Control(Control::SetupResponse(code))) => {
-                self.state = if code == 0 { State::Up } else { State::Refused(code) };
+                // only the answer to our own request counts; a late or repeated one cannot take a working link down
+                if self.state == State::Connecting {
+                    self.state = if code == 0 { State::Up } else { State::Refused(code) };
+                }
             }
             Ok(Packet::Control(c)) => out.replies.extend(answer(&c)),
             Err(Error::Unknown(t)) if data.first().is_some_and(|b| b & 0x7f == CONTROL) => out.replies.push(not_understood(t)),
@@ -322,6 +327,48 @@ mod tests {
         assert_eq!(p.receive(&encode_frame(&f)).unwrap().deliver, None);
         p.receive(&setup_response(0)).unwrap();
         assert_eq!(p.receive(&encode_frame(&f)).unwrap().deliver, Some(f));
+    }
+
+    #[test]
+    fn hostile_input_never_panics_and_never_reads_past_the_packet() {
+        // every prefix of valid packets, every single-byte type and length, and a pseudo-random flood: errors or packets, never a panic
+        let valid = [
+            setup_request(UUID_NAP, UUID_PANU),
+            setup_response(0),
+            encode_frame(&Frame { dst: PHONE, src: ME, proto: 0x0800, payload: vec![1; 40] }),
+            vec![COMPRESSED | 0x80, 8, 0, 0x80, 255, 1, 2, 3],
+            vec![CONTROL, CTRL_FILTER_NET_SET, 0xff, 0xff, 1, 2],
+        ];
+        let (mut p, _) = Panu::start(ME, PHONE, UUID_NAP);
+        for v in &valid {
+            for n in 0..=v.len() {
+                let _ = parse(&v[..n], ME, PHONE);
+                let _ = p.receive(&v[..n]);
+            }
+        }
+        for t in 0..=255u8 {
+            for l in 0..=255u8 {
+                let _ = parse(&[t, l, 255, l, t, 0, 0], ME, PHONE);
+                let _ = parse(&[t | 0x80, 0x80, l, 0x80, 255], ME, PHONE);
+            }
+        }
+        let mut x: u32 = 0x1234_5678;
+        for _ in 0..4000 {
+            let len = (x >> 24) as usize % 64;
+            let data: Vec<u8> = (0..len).map(|_| { x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223); (x >> 16) as u8 }).collect();
+            let _ = parse(&data, ME, PHONE);
+            let _ = p.receive(&data);
+        }
+    }
+
+    #[test]
+    fn a_setup_request_from_the_phone_is_refused_and_a_late_response_cannot_end_a_working_link() {
+        let (mut p, _) = Panu::start(ME, PHONE, UUID_NAP);
+        let r = p.receive(&setup_request(UUID_PANU, UUID_NAP)).unwrap();
+        assert_eq!(r.replies, vec![setup_response(4)]);
+        p.receive(&setup_response(0)).unwrap();
+        p.receive(&setup_response(4)).unwrap();
+        assert_eq!(p.state, State::Up, "the first answer decides");
     }
 
     #[test]

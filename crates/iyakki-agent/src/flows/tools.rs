@@ -18,7 +18,11 @@ use crate::services::Services;
 pub const MAX_CHARS: usize = 6000;
 
 pub fn is_flow_tool(name: &str) -> bool {
-    matches!(name, "flow_list" | "flow_get" | "flow_runs" | "flow_run_status" | "flow_logs" | "flow_explain_failure" | "flow_create" | "flow_edit" | "flow_run" | "flow_cancel" | "flow_publish" | "flow_rollback" | "flow_apply_to_runs" | "flow_set_heal_policy" | "flow_delete" | "flow_drop_version" | "flow_prune_history")
+    matches!(name, "flow_list" | "flow_get" | "flow_runs" | "flow_run_status" | "flow_logs" | "flow_explain_failure" | "flow_create" | "flow_edit" | "flow_run" | "flow_cancel" | "flow_publish" | "flow_rollback" | "flow_apply_to_runs" | "flow_set_heal_policy" | "flow_delete" | "flow_drop_version" | "flow_prune_history") || is_webhook_tool(name)
+}
+
+pub fn is_webhook_tool(name: &str) -> bool {
+    matches!(name, "webhook_list" | "webhook_create" | "webhook_regenerate" | "webhook_enable" | "webhook_disable" | "webhook_public")
 }
 
 pub fn offered(p: &Policy) -> bool {
@@ -58,6 +62,12 @@ pub fn defs(p: &Policy) -> Vec<ToolDef> {
         tool("flow_drop_version", "Drop one published version of a flow (its content is lost; runs keep their own copy). The current published version is never dropped: publish or roll back to another first. Refused while an active run uses that version. The person always confirms, with the flow and version named.", obj(json!({"flow": flow_arg.clone(), "version": {"type": "integer"}}), &["version"]), Risk::Ask, false),
         tool("flow_prune_history", "Remove old FINISHED runs from the history (their logs and results go; the flows stay). `keep` = how many finished runs of each flow stay (default: the tenant's history_keep, else 200), `days` = finished runs older than this go (default: the tenant's history_days, else 30; 0 = no age limit). The newest finished run of each flow, runs still going or waiting for someone, and runs with an open fix card are never removed. `dry_run: true` only lists what would go. The person always confirms, and sees the list first.", obj(json!({"keep": {"type": "integer"}, "days": {"type": "integer"}, "dry_run": {"type": "boolean"}}), &[]), Risk::Ask, false),
         tool("flow_set_heal_policy", "Set who may fix failed steps: `mode` off, suggest (the agent proposes, the person approves), auto_fix_simple (simple fixes are applied by themselves), always_ask. Optional `node` for one node, `max_per_run`, `max_per_day`, `cost_cap_cents`, `auto_publish_simple`. Anything but `off` always asks the person.", obj(json!({"flow": flow_arg, "node": {"type": "string"}, "mode": {"type": "string", "enum": ["off", "suggest", "auto_fix_simple", "always_ask"]}, "max_per_run": {"type": "integer"}, "max_per_day": {"type": "integer"}, "cost_cap_cents": {"type": "integer"}, "auto_publish_simple": {"type": "boolean"}}), &["mode"]), Risk::Ask, false),
+        tool("webhook_list", "List the person's webhooks (an authenticated local HTTP address that starts a flow): id, flow, on or off, signed or not, whether the flow is published, the last delivery. Never shows an address or a secret.", obj(json!({"flow": {"type": "string", "description": "only this flow's"}}), &[]), Risk::Safe, false),
+        tool("webhook_create", "Add a webhook to a flow's draft and make its secret address (and, when `signed` (default yes), a shared secret for HMAC-SHA256 signatures). The address and secret are shown ONLY on the person's screen: you never get them, so never ask for them or guess them; tell the person to open the flow's Webhook panel (key w). The hook is OFF and fires nothing until the flow is published and webhook_enable is called. Optional: `methods` (POST default; GET, PUT, PATCH), `max_body` bytes (default 16384, at most 65536), `content_types` (json default, form, text), `rate_per_min` (default 30). The request body reaches the flow as untrusted data under the input `webhook`. Asks the person first.", obj(json!({"flow": flow_arg.clone(), "signed": {"type": "boolean"}, "methods": {"type": "array", "items": {"type": "string"}}, "max_body": {"type": "integer"}, "content_types": {"type": "array", "items": {"type": "string"}}, "rate_per_min": {"type": "integer"}}), &[]), Risk::Ask, false),
+        tool("webhook_regenerate", "Make a webhook's secret address (and shared secret) again; the old ones stop working at once. The new ones are shown only on the person's screen. Asks the person first.", obj(json!({"id": {"type": "string"}}), &["id"]), Risk::Ask, false),
+        tool("webhook_enable", "Switch a webhook on. Only works when the flow is published with the trigger and the person may run flows. Asks the person first.", obj(json!({"id": {"type": "string"}}), &["id"]), Risk::Ask, false),
+        tool("webhook_disable", "Switch a webhook off: it answers 404 from then on. Asks the person first.", obj(json!({"id": {"type": "string"}}), &["id"]), Risk::Ask, false),
+        tool("webhook_public", "Let a webhook take senders from OUTSIDE the local network for `minutes` (at most 10080 = 7 days; 0 closes it again). Always asks, in every approval mode.", obj(json!({"id": {"type": "string"}, "minutes": {"type": "integer"}}), &["id", "minutes"]), Risk::Ask, false),
     ]
 }
 
@@ -76,6 +86,11 @@ pub fn describe(name: &str, args: &Value) -> String {
         "flow_prune_history" => format!("{} finished runs from the history{}", if args.get("dry_run").and_then(Value::as_bool).unwrap_or(false) { "list" } else { "REMOVE" }, match (args.get("keep").and_then(Value::as_u64), args.get("days").and_then(Value::as_u64)) { (None, None) => " (by the tenant's history rule)".to_string(), (k, d) => format!(" (keep {} per flow, older than {} days)", k.map_or("the rule's".to_string(), |k| k.to_string()), d.map_or("the rule's".to_string(), |d| d.to_string())) }),
         "flow_apply_to_runs" => format!("give {} runs of {flow} the newest definition of step {}", s("scope"), s("node")),
         "flow_set_heal_policy" => format!("let the agent {} for {}{}", match s("mode").as_str() { "off" => "not fix anything".to_string(), "suggest" => "propose fixes you approve".to_string(), "auto_fix_simple" => "apply simple fixes by itself".to_string(), "always_ask" => "ask you before every fix".to_string(), o => o.to_string() }, flow, if s("node").is_empty() { String::new() } else { format!(", step {}", s("node")) }),
+        "webhook_create" => format!("make a webhook for {flow}{} (off until you switch it on; the address is shown only on your screen)", if args.get("signed").and_then(Value::as_bool) == Some(false) { ", NOT signed" } else { ", signed" }),
+        "webhook_regenerate" => format!("make webhook {} new (its old address stops working at once)", s("id")),
+        "webhook_enable" => format!("switch webhook {} ON (it starts its flow when called)", s("id")),
+        "webhook_disable" => format!("switch webhook {} off", s("id")),
+        "webhook_public" => format!("{} for webhook {} to take requests from outside the local network", if args.get("minutes").and_then(Value::as_u64).unwrap_or(0) == 0 { "STOP letting".to_string() } else { format!("LET, for {} minutes,", args.get("minutes").and_then(Value::as_u64).unwrap_or(0)) }, s("id")),
         other => format!("{other} {}", s("flow")),
     }
 }
@@ -348,8 +363,66 @@ impl FlowEnv {
                 self.host_audit("flow.heal_policy", &format!("{id}{} -> {} by {AGENT} (approved)", if node.is_empty() { String::new() } else { format!("/{node}") }, mode.label()));
                 Ok(format!("The heal policy of `{id}`{} is now: {}. (A draft change: publish it for scheduled runs to use it.)", if node.is_empty() { String::new() } else { format!(" step {node}") }, mode.label()))
             }
+            n if is_webhook_tool(n) => self.webhook_call(n, args, open),
             other => Err(format!("`{other}` is not a flows tool")),
         }
+    }
+
+    /// The webhook tools. The address and the shared secret go to the person's screen (a [`Reveal`](super::hookstore::Reveal)) and a
+    /// note in the INBOX says so; the text returned here, which the model reads, never has them.
+    fn webhook_call(&self, name: &str, args: &Value, open: Option<&SharedOpen>) -> Result<String, String> {
+        use super::hookenv::HookOpts;
+        use super::hookstore::{stash_reveal, Reveal};
+        let id = s(args, "id");
+        match name {
+            "webhook_list" => {
+                let flow = s(args, "flow");
+                let v = self.hook_views(if flow.is_empty() { None } else { Some(flow) });
+                let now = crate::clock::now_unix();
+                Ok(if v.is_empty() { "There are no webhooks. webhook_create adds one to a flow.".into() } else { cut(v.iter().map(|h| h.line(now)).collect::<Vec<_>>().join("\n")) })
+            }
+            "webhook_create" => {
+                let flow = self.flow_id(args, open)?;
+                let strs = |k: &str| args.get(k).and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>()).unwrap_or_default();
+                let o = HookOpts {
+                    signed: args.get("signed").and_then(Value::as_bool).unwrap_or(true),
+                    methods: strs("methods"),
+                    max_body: args.get("max_body").and_then(Value::as_u64).unwrap_or(0) as usize,
+                    content_types: strs("content_types"),
+                    rate_per_min: args.get("rate_per_min").and_then(Value::as_u64).unwrap_or(0).min(100_000) as u32,
+                };
+                let c = self.hook_create(&flow, &o, AGENT)?;
+                self.reveal_to_screen(&c);
+                stash_reveal(&self.user, Reveal { hook: c.id.clone(), flow: flow.clone(), path: c.path.clone(), secret: c.secret.clone() });
+                Ok(format!("Made webhook `{}` on flow `{flow}`{}. It is OFF. Its secret address{} is shown on the person's screen only (the Webhook panel of the flow, key w): you cannot see it, so do not ask for it. Next: the person publishes the flow (flow_publish), then webhook_enable `{}`.", c.id, if o.signed { " (signed: HMAC-SHA256)" } else { " (not signed: the address alone is the protection)" }, if c.secret.is_some() { " and shared secret" } else { "" }, c.id))
+            }
+            "webhook_regenerate" => {
+                let c = self.hook_regenerate(id, AGENT)?;
+                self.reveal_to_screen(&c);
+                stash_reveal(&self.user, Reveal { hook: c.id.clone(), flow: c.flow.clone(), path: c.path.clone(), secret: c.secret.clone() });
+                Ok(format!("Made webhook `{}` new. The old address stopped working. The new one{} is shown on the person's screen only (key w in the flow).", c.id, if c.secret.is_some() { " and the new shared secret" } else { "" }))
+            }
+            "webhook_enable" => {
+                self.hook_enable(id, AGENT)?;
+                Ok(format!("Webhook `{id}` is ON: a call with the right address{} starts the published flow as the person.", if self.hook_views(None).iter().any(|h| h.id == id && h.signed) { " and signature" } else { "" }))
+            }
+            "webhook_disable" => {
+                self.hook_disable(id, AGENT)?;
+                Ok(format!("Webhook `{id}` is off. It answers 404 and any opening to the public is closed."))
+            }
+            "webhook_public" => {
+                let minutes = args.get("minutes").and_then(Value::as_u64).ok_or("give `minutes` (0 closes it)")?;
+                let until = self.hook_public(id, minutes, AGENT)?;
+                Ok(if until == 0 { format!("Webhook `{id}` takes requests from the local network only.") } else { format!("Webhook `{id}` takes requests from outside the local network until {until} (Unix seconds). The firewall still decides what reaches the web port at all.") })
+            }
+            other => Err(format!("`{other}` is not a webhook tool")),
+        }
+    }
+
+    /// A note in the INBOX that something is waiting on the screen; it never carries the address or the secret.
+    fn reveal_to_screen(&self, c: &super::hookenv::Created) {
+        use crate::inbox::{Kind, Link};
+        let _ = self.svc.notify(&self.user, Kind::Agent, "A webhook address is waiting", &format!("Webhook {} on flow {}: open the flow in FLOWS and press w to see its address and secret once.", c.id, c.flow), Some(Link::new("flows", &c.flow)));
     }
 
     pub fn preview(&self, name: &str, args: &Value, open: Option<&SharedOpen>) -> Option<String> {

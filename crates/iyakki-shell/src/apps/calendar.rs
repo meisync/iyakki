@@ -124,7 +124,7 @@ impl CalendarApp {
         let usage = ShellUsage(&cx.services);
         let cal = ShellCalendar { store: &cx.services.calendar, zone };
         let audit = ShellAudit(&cx.audit);
-        f(&TileCx { user: cx.session.user.as_str(), manage_settings: cx.session.policy.manage_settings, usage: &usage, calendar: &cal, audit: &audit })
+        f(&TileCx { user: cx.session.user.as_str(), manage_settings: cx.session.policy.manage_settings, usage: &usage, calendar: &cal, audit: &audit, remote: &iyakki_tile_api::remote::NoRemote, cameras: &iyakki_tile_api::cameras::NoCameras })
     }
 }
 

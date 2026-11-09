@@ -723,7 +723,7 @@ mod tests {
             Fx { cal: FakeCal::default(), audit: FakeAudit::default(), usage: NoUsage }
         }
         fn cx(&self) -> TileCx<'_> {
-            TileCx { user: "root", manage_settings: true, usage: &self.usage, calendar: &self.cal, audit: &self.audit }
+            TileCx { user: "root", manage_settings: true, usage: &self.usage, calendar: &self.cal, audit: &self.audit, remote: &iyakki_tile_api::remote::NoRemote, cameras: &iyakki_tile_api::cameras::NoCameras }
         }
     }
 

@@ -150,6 +150,8 @@ pub struct Status {
     pub v6: Vec<Ipv6Addr>,
     pub interfaces: Vec<String>,
     pub services: Vec<String>,
+    /// The extra `.local` names announced besides the device name.
+    pub extra_names: Vec<String>,
     pub answered: u64,
     pub dropped: u64,
     pub rate_limited: u64,
@@ -158,6 +160,7 @@ pub struct Status {
 
 struct Shared {
     svcs: Vec<Svc>,
+    extra: Vec<String>,
     status: Status,
 }
 
@@ -177,7 +180,7 @@ impl Announcer {
     pub fn start_on(label: &str, svcs: Vec<Svc>, port: u16) -> Result<Announcer, String> {
         let sock = bind_shared(port)?;
         sock.set_read_timeout(Some(Duration::from_millis(100))).map_err(|e| e.to_string())?;
-        let shared = Arc::new(Mutex::new(Shared { svcs, status: Status { running: true, host: format!("{label}.local"), probing: true, ..Default::default() } }));
+        let shared = Arc::new(Mutex::new(Shared { svcs, extra: Vec::new(), status: Status { running: true, host: format!("{label}.local"), probing: true, ..Default::default() } }));
         let stop = Arc::new(AtomicBool::new(false));
         let (sh, st, label) = (shared.clone(), stop.clone(), label.to_string());
         let thread = std::thread::Builder::new().name("iyakki-mdns".into()).spawn(move || run(sock, &label, sh, st)).map_err(|e| e.to_string())?;
@@ -186,6 +189,11 @@ impl Announcer {
 
     pub fn set_services(&self, svcs: Vec<Svc>) {
         self.shared.lock().unwrap_or_else(|e| e.into_inner()).svcs = svcs;
+    }
+
+    /// Extra `.local` names this device answers for with its own addresses (domain routes). Picked up within two seconds.
+    pub fn set_extra_names(&self, names: Vec<String>) {
+        self.shared.lock().unwrap_or_else(|e| e.into_inner()).extra = names;
     }
 
     pub fn status(&self) -> Status {
@@ -257,6 +265,8 @@ fn run(sock: UdpSocket, label: &str, shared: Arc<Mutex<Shared>>, stop: Arc<Atomi
             r.set_addresses(nets.iter().map(|n| n.v4).collect(), if nets.is_empty() { vec![] } else { n6 }, now);
             let svcs = shared.lock().unwrap_or_else(|e| e.into_inner()).svcs.clone();
             r.set_services(svcs, now);
+            let extra = shared.lock().unwrap_or_else(|e| e.into_inner()).extra.clone();
+            r.set_extra_names(extra, now);
         }
         match sock.recv_from(&mut buf) {
             Ok((n, SocketAddr::V4(from))) => {
@@ -281,6 +291,7 @@ fn run(sock: UdpSocket, label: &str, shared: Arc<Mutex<Shared>>, stop: Arc<Atomi
             v6,
             interfaces: nets.iter().map(|n| n.iface.clone()).collect(),
             services: r.services().iter().map(|s| format!("{} {}", s.kind, s.port)).collect(),
+            extra_names: r.extra_names().to_vec(),
             answered: r.answered,
             dropped: r.dropped,
             rate_limited: r.rate_limited,

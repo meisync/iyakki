@@ -49,9 +49,10 @@ pub fn list_ifaces(sys_class_net: &Path) -> Vec<Iface> {
             let p = e.path();
             let name = e.file_name().to_string_lossy().into_owned();
             let read = |f: &str| std::fs::read_to_string(p.join(f)).unwrap_or_default().trim().to_string();
-            let kind = if name == iyakki_devctl::HOTSPOT_IFACE {
+            let kind = if name == iyakki_devctl::HOTSPOT_IFACE || name == iyakki_devctl::BT_PAN_IFACE {
                 // the hotspot's access point (made by the sharing service next to the Wi-Fi client): never a client to join or run DHCP on,
-                // which would stop the access point a second after it started
+                // which would stop the access point a second after it started; the phone's tethering link (iyakbt0) likewise
+                // runs its own DHCP client once the phone has accepted, so no DHCP before that
                 IfaceKind::Other
             } else if p.join("wireless").exists() || p.join("phy80211").exists() {
                 IfaceKind::Wifi
@@ -560,7 +561,7 @@ mod tests {
     fn classifies_sysfs() {
         let d = std::env::temp_dir().join(format!("iyakki-net-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        for (n, wireless, ty) in [("lo", false, "772"), ("eth0", false, "1"), ("wlan0", true, "1"), ("docker0", false, "1"), ("eth1", false, "1"), ("iyakap0", true, "1")] {
+        for (n, wireless, ty) in [("lo", false, "772"), ("eth0", false, "1"), ("wlan0", true, "1"), ("docker0", false, "1"), ("eth1", false, "1"), ("iyakap0", true, "1"), ("iyakbt0", false, "1")] {
             std::fs::create_dir_all(d.join(n)).unwrap();
             std::fs::write(d.join(n).join("type"), ty).unwrap();
             std::fs::write(d.join(n).join("address"), if n == "eth1" { "ac:de:48:00:11:22\n" } else { "68:fe:f7:14:24:16\n" }).unwrap();
@@ -578,6 +579,8 @@ mod tests {
                 ("eth1".into(), IfaceKind::Other),
                 // the hotspot's access point is never set up as a Wi-Fi client
                 ("iyakap0".into(), IfaceKind::Other),
+                // the phone's tethering link runs its own DHCP client after the phone accepted
+                ("iyakbt0".into(), IfaceKind::Other),
                 ("lo".into(), IfaceKind::Loopback),
                 ("wlan0".into(), IfaceKind::Wifi)
             ]

@@ -295,6 +295,9 @@ impl Shell {
     /// is never closed by the strip.
     fn tbar_open(&mut self, id: &str) {
         let Some(pa) = PApp::ALL.into_iter().find(|a| a.id() == id) else { return };
+        if self.lockui.active {
+            return; // the strip opens nothing behind the lock screen
+        }
         match &self.screen {
             Screen::App(_, cur) if *cur == pa && self.custom_open.is_none() => {}
             Screen::Launcher => self.open(pa),

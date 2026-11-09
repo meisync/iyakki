@@ -1,0 +1,16 @@
+[package]
+name = "iyakki-tile-cameras"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The CAMERAS tile (a live view of USB and network cameras, F-CAM-02). Rule (crates/iyakki-core/tests/dependency_ratchet.rs): depends on
+# `iyakki-uikit` and `iyakki-tile-api` only, never on the agent; its tests run against a fake `CameraSource`.
+
+[dependencies]
+iyakki-uikit = { path = "../iyakki-uikit" }
+iyakki-tile-api = { path = "../iyakki-tile-api" }
+tiny-skia = "0.11"
+
+[dev-dependencies]
+iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }

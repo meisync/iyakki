@@ -875,7 +875,8 @@ impl Shell {
         match pa {
             PApp::Radio => svc.radio.is_active(),
             PApp::Cli => tick % 6 == 0 && (svc.clis.running() || svc.cluster.state() == iyakki_agent::cluster::ClusterState::Starting),
-            PApp::Calendar => tick % 10 == 0,
+            PApp::Calendar | PApp::Remote => tick % 10 == 0,
+            PApp::Cameras => tick % 3 == 0,
             PApp::Media => tick % 10 == 0 || (tick % 3 == 0 && iyakki_agent::media::shared().now_playing().is_some()),
             _ => false,
         }

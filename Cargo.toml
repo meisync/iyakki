@@ -18,6 +18,8 @@ members = [
     "crates/iyakki-tile-api",
     "crates/iyakki-tile-usage",
     "crates/iyakki-tile-calendar",
+    "crates/iyakki-tile-remotefiles",
+    "crates/iyakki-tile-cameras",
     "crates/iyakki-proxy",
     "crates/iyakki-swarm",
     "crates/iyakki-storage",
@@ -28,6 +30,7 @@ members = [
     "crates/iyakki-web",
     "crates/iyakki-js",
     "crates/iyakki-netscan",
+    "crates/iyakki-rtsp",
     "crates/iyakki-remote",
     "crates/iyakki-webview",
     "crates/iyakki-data",
@@ -45,8 +48,12 @@ members = [
     "crates/iyakki-tile-abi",
     "crates/iyakki-tile-host",
     "crates/iyakki-tile-example",
+    "crates/iyakki-sdk-emulator",
     "crates/iyakki-connect",
     "crates/iyakki-hotspot",
+    "crates/iyakki-volcrypt",
+    "crates/iyakki-pdf",
+    "crates/iyakki-wake",
 ]
 
 [workspace.package]
@@ -58,6 +65,8 @@ license = "Apache-2.0"
 iyakki-sec = { path = "crates/iyakki-sec" }
 iyakki-devctl = { path = "crates/iyakki-devctl" }
 iyakki-web = { path = "crates/iyakki-web" }
+iyakki-pdf = { path = "crates/iyakki-pdf" }
+iyakki-wake = { path = "crates/iyakki-wake" }
 iyakki-webview = { path = "crates/iyakki-webview" }
 iyakki-rfb = { path = "crates/iyakki-rfb" }
 iyakki-js = { path = "crates/iyakki-js" }
@@ -71,6 +80,8 @@ iyakki-storage = { path = "crates/iyakki-storage" }
 iyakki-edit = { path = "crates/iyakki-edit" }
 iyakki-hwinfo = { path = "crates/iyakki-hwinfo" }
 iyakki-netscan = { path = "crates/iyakki-netscan" }
+iyakki-rtsp = { path = "crates/iyakki-rtsp" }
+iyakki-volcrypt = { path = "crates/iyakki-volcrypt" }
 iyakki-data = { path = "crates/iyakki-data" }
 iyakki-drivers = { path = "crates/iyakki-drivers" }
 iyakki-flow = { path = "crates/iyakki-flow" }

@@ -1,8 +1,9 @@
 //! DISKS partition manager: make a new partition table (GPT or MBR), add, delete, format and rename partitions (docs/DISKS.md).
 //!
 //! Built from our own code: the GPT writer and reader of `iyakki-storage`, an MBR writer, a FAT32 formatter, label changes for
-//! ext2/3/4 and FAT, and `mke2fs` (already part of the image, BOUNDARY.md) for ext4. exFAT and NTFS formatting and any
-//! resizing are not supported yet, and say so: nothing is faked.
+//! ext2/3/4 and FAT, and `mke2fs` (already part of the image, BOUNDARY.md) for ext4. exFAT and NTFS formatting and resizing
+//! (ext2/3/4 and NTFS) use person-installed programs run as sub-processes (`disks_fmt.rs`); without them the plan is refused
+//! in words and nothing is faked.
 //!
 //! Every change goes through [`Disks::apply_partition`], which checks again, on a fresh look at the machine, that:
 //! the person is an administrator; the drive is not the system disk (never offered, never written: the engine refuses); nothing
@@ -14,6 +15,7 @@ use iyakki_sec::policy::Role;
 use iyakki_storage::gpt::{self, Entry, Guid};
 
 use crate::disks::{Actor, AuditFn, Disk, Disks, Fs, Snapshot, Table};
+use crate::disks_fmt::{self, Tool};
 
 /// One mebibyte: partitions start and end on it.
 const MIB: u64 = 1 << 20;
@@ -36,11 +38,16 @@ impl FormatFs {
         }
     }
 
-    /// Why this cannot be done (the honest answer), or `None`.
+    /// Why this cannot be done in principle, or `None`. exFAT and NTFS need a person-installed program, which the planner checks.
     pub fn unsupported(self) -> Option<&'static str> {
+        None
+    }
+
+    /// The program that makes this file system when it is not made in-house.
+    pub fn tool(self) -> Option<Tool> {
         match self {
-            FormatFs::Exfat => Some("Formatting as exFAT is not supported yet: IYAKKI has no permissive in-house exFAT formatter. Use FAT32 (files up to 4 GB) or ext4, or format it on a Mac or Windows computer."),
-            FormatFs::Ntfs => Some("Formatting as NTFS is not supported yet: IYAKKI has no permissive in-house NTFS formatter. Use FAT32 or ext4, or format it on a Windows computer."),
+            FormatFs::Exfat => Some(Tool::MkfsExfat),
+            FormatFs::Ntfs => Some(Tool::Mkntfs),
             _ => None,
         }
     }
@@ -97,6 +104,55 @@ pub fn check_confirmation(d: &Disk, c: &Confirm) -> Result<(), String> {
         return Err("Press the second confirmation button to go on. Nothing was changed.".into());
     }
     Ok(())
+}
+
+/// How many seconds the screen waits, with a visible countdown the person can cancel, after the last button and before the first write.
+pub const CANCEL_WINDOW_SECS: u64 = 5;
+
+/// The partition a change is about, if it is about one.
+pub fn op_partition(op: &PartOp) -> Option<u32> {
+    match op {
+        PartOp::Delete { number } | PartOp::Format { number, .. } | PartOp::Rename { number, .. } | PartOp::Resize { number, .. } => Some(*number),
+        _ => None,
+    }
+}
+
+/// What the person may type to confirm `op` on `d`: the drive's name, the last four of its serial, and for a change to one partition
+/// also that partition's device name and its label (an exact match for the label).
+pub fn accepted_names(d: &Disk, op: &PartOp) -> Vec<String> {
+    let mut v = vec![d.name.clone()];
+    let tail = d.serial_tail();
+    if !tail.is_empty() {
+        v.push(tail);
+    }
+    if let Some(p) = op_partition(op).and_then(|n| d.parts.iter().find(|p| p.number == n)) {
+        v.push(p.name.clone());
+        if !p.label.trim().is_empty() {
+            v.push(p.label.trim().to_string());
+        }
+    }
+    v
+}
+
+/// Like [`check_confirmation`], but a change to one partition may also be confirmed with the partition's device name (`sdb2`) or its
+/// label, typed exactly. Never a plain Yes.
+pub fn check_confirmation_for(d: &Disk, op: &PartOp, c: &Confirm) -> Result<(), String> {
+    let part = op_partition(op).and_then(|n| d.parts.iter().find(|p| p.number == n));
+    let t = c.typed.trim();
+    if let Some(p) = part {
+        let hit = t.eq_ignore_ascii_case(&p.name) || t.eq_ignore_ascii_case(&p.path) || (!p.label.trim().is_empty() && t == p.label.trim());
+        if hit {
+            return if c.second { Ok(()) } else { Err("Press the second confirmation button to go on. Nothing was changed.".into()) };
+        }
+        let others = accepted_names(d, op).join(", ");
+        if t.is_empty() {
+            return Err(format!("Type one of these exactly to confirm: {others}."));
+        }
+        if !(t.eq_ignore_ascii_case(&d.name) || t.eq_ignore_ascii_case(&d.path) || (!d.serial_tail().is_empty() && t.eq_ignore_ascii_case(&d.serial_tail()))) {
+            return Err(format!("\"{t}\" is not one of: {others}. Nothing was changed."));
+        }
+    }
+    check_confirmation(d, c)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -244,6 +300,10 @@ pub enum Step {
     Zero { dev: String, offset: u64, len: u64, what: String },
     Write { dev: String, offset: u64, data: Vec<u8>, what: String },
     Mke2fs { dev: String, label: String, uuid: String, what: String },
+    /// A person-installed program (exFAT, NTFS, resize) with a fixed argument list.
+    Tool { tool: Tool, args: Vec<String>, what: String },
+    /// Ask a program how small the file system can get and stop unless `need` bytes is enough (reads only). `block` is the ext block size.
+    MinSize { tool: Tool, args: Vec<String>, block: u64, need: u64, what: String },
     Reread { dev: String },
     WaitNode { dev: String },
     Sync,
@@ -254,7 +314,7 @@ impl Step {
         match self {
             Step::Zero { offset, len, what, .. } => format!("{what} (clear bytes {offset} to {})", offset + len),
             Step::Write { offset, data, what, .. } => format!("{what} (write {} bytes at byte {offset})", data.len()),
-            Step::Mke2fs { what, .. } => what.clone(),
+            Step::Mke2fs { what, .. } | Step::Tool { what, .. } | Step::MinSize { what, .. } => what.clone(),
             Step::Reread { dev } => format!("Ask the kernel to read the partition table of {dev} again"),
             Step::WaitNode { dev } => format!("Wait for {dev} to appear"),
             Step::Sync => "Flush everything to the drive".into(),
@@ -451,7 +511,20 @@ pub struct Plan {
     pub after: Vec<String>,
     pub steps: Vec<Step>,
     pub warnings: Vec<String>,
+    /// What must be true on the drive afterwards, checked by looking again.
+    pub expect: Vec<Expect>,
     audit: String,
+}
+
+/// One thing the executor checks after the last step.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Expect {
+    /// The partition shows this file system.
+    Fs { part: String, fs: Fs },
+    /// The partition is this many bytes.
+    Size { part: String, bytes: u64 },
+    /// The partition is gone.
+    Gone { part: String },
 }
 
 impl Plan {
@@ -493,7 +566,7 @@ impl Plan {
     }
 
     pub fn writes_anything(&self) -> bool {
-        self.steps.iter().any(|s| matches!(s, Step::Zero { .. } | Step::Write { .. } | Step::Mke2fs { .. }))
+        self.steps.iter().any(|s| matches!(s, Step::Zero { .. } | Step::Write { .. } | Step::Mke2fs { .. } | Step::Tool { .. }))
     }
 }
 
@@ -544,15 +617,13 @@ impl Disks {
         }
         let identity = d.identity();
         let audit = |extra: &str| format!("{} op={}{}", d.audit_id(), op.name(), extra);
-        let mut plan = Plan { disk: d.name.clone(), identity: identity.clone(), op: op.clone(), lost: vec![], after: vec![], steps: vec![], warnings: vec![], audit: audit("") };
+        let mut plan = Plan { disk: d.name.clone(), identity: identity.clone(), op: op.clone(), lost: vec![], after: vec![], steps: vec![], warnings: vec![], expect: vec![], audit: audit("") };
         let part_dev = |n: u32| iyakki_storage::partition_name(&d.name, n);
         match op {
             PartOp::Reread => {
                 plan.steps = vec![Step::Reread { dev: d.path.clone() }];
             }
-            PartOp::Resize { .. } => {
-                return Err("Resizing is not supported yet: IYAKKI has no safe, in-house way to grow or shrink a file system, so it does not pretend. Copy the files off, delete the partition and add a new one.".into());
-            }
+            PartOp::Resize { number, size_bytes } => self.plan_resize(d, &mut plan, *number, *size_bytes)?,
             PartOp::NewTable(kind) => {
                 if *kind == Table::None {
                     return Err("Choose GPT or MBR.".into());
@@ -591,9 +662,6 @@ impl Disks {
                 if l.table == Table::None {
                     return Err("The drive has no partition table yet. Make a new partition table first.".into());
                 }
-                if let Some(f) = fs.and_then(|f| f.unsupported()) {
-                    return Err(f.into());
-                }
                 let free = l.free();
                 let a = l.align();
                 let want = size_bytes.map(|b| (b.div_ceil(MIB) * MIB).div_ceil(l.sector as u64));
@@ -616,6 +684,7 @@ impl Disks {
                 let number = (1..=max_parts).find(|n| !l.parts.iter().any(|p| p.number == *n)).ok_or("The partition table is full.")?;
                 let (mbr_type, type_guid) = match fs {
                     Some(FormatFs::Ext4) => (0x83, gpt::TYPE_LINUX_DATA),
+                    Some(FormatFs::Exfat | FormatFs::Ntfs) => (0x07, type_basic_data()),
                     Some(_) => (0x0C, type_basic_data()),
                     None => (0x83, gpt::TYPE_LINUX_DATA),
                 };
@@ -631,6 +700,7 @@ impl Disks {
                     plan.steps.push(Step::WaitNode { dev: pd.clone() });
                     plan.steps.extend(self.format_steps(&pd, l.bytes(last - first + 1), l.sector, first, *f, label)?);
                     plan.steps.push(Step::Sync);
+                    plan.expect.push(Expect::Fs { part: part_dev(number), fs: fs_of(*f) });
                 }
                 plan.after = layout_lines(&l);
                 plan.audit = audit(&format!(" part={number} size={} fs={}", l.bytes(last - first + 1), fs.map_or("none", |f| f.name())));
@@ -641,7 +711,8 @@ impl Disks {
                 let gone = l.parts.remove(i);
                 let known = d.parts.iter().find(|p| p.number == *number);
                 plan.lost.push(format!("Partition {number}  {}  {}", iyakki_storage::human(l.bytes(gone.last - gone.first + 1)), known.map_or(gone.type_name.clone(), |p| p.title())));
-                plan.lost.push("Every file on it becomes unreachable.".into());
+                plan.lost.push(format!("Everything on /dev/{} ({}{}) will be erased.", part_dev(*number), iyakki_storage::human(l.bytes(gone.last - gone.first + 1)), known.map_or(String::new(), |p| label_words(&p.label))));
+                plan.expect.push(Expect::Gone { part: part_dev(*number) });
                 plan.steps = self.table_steps(d, &l)?;
                 plan.steps.push(Step::Zero { dev: d.path.clone(), offset: gone.first * l.sector as u64, len: (MIB).min(l.bytes(gone.last - gone.first + 1)), what: format!("Erase the start of partition {number} so it is not found again") });
                 plan.steps.push(Step::Sync);
@@ -650,14 +721,15 @@ impl Disks {
                 plan.audit = audit(&format!(" part={number} size={}", l.bytes(gone.last - gone.first + 1)));
             }
             PartOp::Format { number, fs, label } => {
-                if let Some(f) = fs.unsupported() {
-                    return Err(f.into());
-                }
                 let l = read_layout(self, d)?;
                 let Some(p) = l.parts.iter().find(|p| p.number == *number) else { return Err(format!("There is no partition {number} on {}.", d.name)) };
                 let known = d.parts.iter().find(|q| q.number == *number);
-                plan.lost.push(format!("Partition {number}  {}  {}", iyakki_storage::human(l.bytes(p.last - p.first + 1)), known.map_or(p.type_name.clone(), |q| q.title())));
-                plan.lost.push("Every file on it becomes unreachable.".into());
+                if let Some(k) = known {
+                    refuse_partition_in_use(k)?;
+                }
+                plan.lost.push(format!("Everything on /dev/{} ({}{}) will be erased.", part_dev(*number), iyakki_storage::human(l.bytes(p.last - p.first + 1)), known.map_or(String::new(), |k| label_words(&k.label))));
+                plan.lost.push(format!("Now it is {}. Every file on it becomes unreachable.", known.map_or(p.type_name.clone(), |q| q.title())));
+                plan.expect.push(Expect::Fs { part: part_dev(*number), fs: fs_of(*fs) });
                 let pd = format!("/dev/{}", part_dev(*number));
                 plan.steps = self.format_steps(&pd, l.bytes(p.last - p.first + 1), l.sector, p.first, *fs, label)?;
                 plan.steps.push(Step::Sync);
@@ -697,11 +769,13 @@ impl Disks {
 
     /// Wipe the start of the partition (so no old file system is found) and make the new one.
     fn format_steps(&self, part_dev: &str, size: u64, sector: u32, start_lba: u64, fs: FormatFs, label: &str) -> Result<Vec<Step>, String> {
-        if let Some(f) = fs.unsupported() {
-            return Err(f.into());
+        if let Some(t) = fs.tool() {
+            self.need_tool(t, &format!("Formatting as {}", fs.name()))?;
         }
         let mut v = vec![Step::Zero { dev: part_dev.to_string(), offset: 0, len: MIB.min(size), what: "Erase the start of the partition".into() }];
         match fs {
+            FormatFs::Exfat => v.push(Step::Tool { tool: Tool::MkfsExfat, args: disks_fmt::mkfs_exfat_args(part_dev, label)?, what: format!("Create an exFAT file system on {part_dev} (mkfs.exfat)") }),
+            FormatFs::Ntfs => v.push(Step::Tool { tool: Tool::Mkntfs, args: disks_fmt::mkntfs_args(part_dev, label)?, what: format!("Create an NTFS file system on {part_dev} (mkntfs, quick)") }),
             FormatFs::Ext4 => {
                 if label.len() > 16 {
                     return Err("An ext4 label has 16 characters at most.".into());
@@ -790,7 +864,7 @@ impl Disks {
             return Err(refused(&r));
         }
         if op.destructive() {
-            check_confirmation(d, confirm).map_err(|e| refused(&e))?;
+            check_confirmation_for(d, op, confirm).map_err(|e| refused(&e))?;
         }
         let plan = self.plan_in(&snap, who, disk_name, op).map_err(|e| refused(&e))?;
         audit("disks.partition.apply", &plan.audit);
@@ -805,6 +879,8 @@ impl Disks {
                 Step::Zero { dev, offset, len, .. } => self.env.dev_zero(dev, *offset, *len),
                 Step::Write { dev, offset, data, .. } => self.env.dev_write(dev, *offset, data),
                 Step::Mke2fs { dev, label, uuid, .. } => self.env.mke2fs(dev, label, uuid),
+                Step::Tool { tool, args, .. } => self.run_tool_step(*tool, args, &plan.audit, &audit),
+                Step::MinSize { tool, args, block, need, .. } => self.min_size_step(*tool, args, *block, *need),
                 Step::Reread { dev } => self.env.reread_table(dev),
                 Step::WaitNode { dev } => {
                     if self.env.wait_node(dev) { Ok(()) } else { Err(format!("{dev} did not appear")) }
@@ -821,7 +897,210 @@ impl Disks {
             }
         }
         self.forget();
+        if let Err(e) = self.verify_plan(&plan) {
+            audit("disks.partition.verify_failed", &format!("{} error={e}", plan.audit));
+            return Err(format!("The steps ran, but looking at the drive again shows something else: {e} Do not rely on it; check the drive."));
+        }
         audit("disks.partition.done", &plan.audit);
         Ok(format!("Done: {} on {}.", plan.headline(), d.name))
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// exFAT, NTFS and resizing (person-installed programs, docs/DISKS.md)
+// ---------------------------------------------------------------------------------------------------------------------
+
+fn fs_of(f: FormatFs) -> Fs {
+    match f {
+        FormatFs::Ext4 => Fs::Ext4,
+        FormatFs::Fat32 => Fs::Fat32,
+        FormatFs::Exfat => Fs::Exfat,
+        FormatFs::Ntfs => Fs::Ntfs,
+    }
+}
+
+fn label_words(label: &str) -> String {
+    if label.trim().is_empty() { String::new() } else { format!(", label {}", label.trim()) }
+}
+
+/// Partition-level refusals the drive-level ones do not cover: the running system, an unlocked encrypted volume, anything open.
+fn refuse_partition_in_use(p: &crate::disks::Part) -> Result<(), String> {
+    if p.system {
+        return Err(format!("{} holds the running IYAKKI system (its boot or data volume). It is never changed.", p.name));
+    }
+    if p.unlocked {
+        return Err(format!("{} is an encrypted volume that is unlocked right now. Lock it first.", p.name));
+    }
+    if p.mounted() {
+        return Err(format!("{} is open at {}. Unmount it first.", p.name, p.mountpoints.join(", ")));
+    }
+    if p.swap_in_use {
+        return Err(format!("{} is in use as swap space.", p.name));
+    }
+    Ok(())
+}
+
+impl Disks {
+    /// The program is on the machine, or the plan stops with the words that say how to get it.
+    pub(crate) fn need_tool(&self, t: Tool, doing: &str) -> Result<(), String> {
+        if self.tools().find(t).is_some() { Ok(()) } else { Err(t.missing_words(doing)) }
+    }
+
+    fn run_tool_step(&self, tool: Tool, args: &[String], plan_audit: &str, audit: AuditFn) -> Result<(), String> {
+        // the audit line names the program and the drive, never an argument list
+        audit("disks.partition.tool", &format!("{plan_audit} tool={}", tool.prog()));
+        let out = self.tools().run(tool, args)?;
+        if disks_fmt::exit_ok(tool, out.code) {
+            Ok(())
+        } else {
+            Err(format!("{} failed (exit {}): {}", tool.prog(), out.code, disks_fmt::first_line(&out)))
+        }
+    }
+
+    fn min_size_step(&self, tool: Tool, args: &[String], block: u64, need: u64) -> Result<(), String> {
+        let out = self.tools().run(tool, args)?;
+        if out.code != 0 {
+            return Err(format!("{} could not check how small the file system can get (exit {}): {}. Nothing was resized.", tool.prog(), out.code, disks_fmt::first_line(&out)));
+        }
+        match disks_fmt::parse_min_bytes(tool, &format!("{}\n{}", out.stdout, out.stderr), block) {
+            Some(min) if min <= need => Ok(()),
+            Some(min) => Err(format!("The files on it need at least {}, but the new size is {}. Nothing was resized.", iyakki_storage::human(min), iyakki_storage::human(need))),
+            None => Err("Could not tell how small the file system can get, so the shrink is refused. Nothing was resized.".into()),
+        }
+    }
+
+    /// Look at the drive again and compare it with what the plan promised.
+    fn verify_plan(&self, plan: &Plan) -> Result<(), String> {
+        if plan.expect.is_empty() {
+            return Ok(());
+        }
+        self.forget();
+        let snap = self.scan();
+        let find = |name: &str| snap.disks.iter().flat_map(|d| d.parts.iter()).find(|p| p.name == name);
+        for e in &plan.expect {
+            match e {
+                Expect::Fs { part, fs } => match find(part) {
+                    Some(p) if p.fs == *fs => {}
+                    Some(p) => return Err(format!("{part} shows as {} instead of {}.", p.fs.name(), fs.name())),
+                    None => return Err(format!("{part} is not there.")),
+                },
+                Expect::Size { part, bytes } => match find(part) {
+                    Some(p) if p.size_bytes == *bytes => {}
+                    Some(p) => return Err(format!("{part} is {} instead of {}.", iyakki_storage::human(p.size_bytes), iyakki_storage::human(*bytes))),
+                    None => return Err(format!("{part} is not there.")),
+                },
+                Expect::Gone { part } => {
+                    if find(part).is_some() {
+                        return Err(format!("{part} is still there."));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Grow or shrink partition `number` (its start stays where it is) together with its file system.
+    fn plan_resize(&self, d: &Disk, plan: &mut Plan, number: u32, size_bytes: u64) -> Result<(), String> {
+        let mut l = read_layout(self, d)?;
+        if l.table == Table::None {
+            return Err("The drive has no partition table, so there is no partition to resize.".into());
+        }
+        let Some(i) = l.parts.iter().position(|p| p.number == number) else { return Err(format!("There is no partition {number} on {}.", d.name)) };
+        let known = d.parts.iter().find(|q| q.number == number).ok_or("The partition is not known to the kernel; read the partition table again first.")?.clone();
+        refuse_partition_in_use(&known)?;
+        let p = l.parts[i].clone();
+        let a = l.align();
+        if p.first % a != 0 {
+            return Err(format!("Partition {number} does not start on a 1 MiB boundary (sector {}). IYAKKI only resizes properly aligned partitions.", p.first));
+        }
+        if size_bytes < MIB {
+            return Err("A partition must be at least 1 MiB.".into());
+        }
+        let new_sectors = size_bytes.div_ceil(MIB) * MIB / l.sector as u64;
+        let old_sectors = p.last - p.first + 1;
+        if new_sectors == old_sectors {
+            return Err(format!("Partition {number} is already {}.", iyakki_storage::human(l.bytes(old_sectors))));
+        }
+        let (_, hi) = l.usable();
+        let next = l.parts.iter().filter(|q| q.first > p.first).map(|q| q.first).min();
+        let limit = next.map_or(hi, |n| (n - 1).min(hi));
+        let limit = ((limit + 1) / a * a).saturating_sub(1);
+        let new_last = p.first + new_sectors - 1;
+        if new_last > limit {
+            return Err(format!("Only {} (at most) can be used for partition {number} here: the next partition or the end of the drive is in the way. Nothing was changed.", iyakki_storage::human(l.bytes(limit - p.first + 1))));
+        }
+        if l.table == Table::Mbr && new_last > 0xFFFF_FFFF {
+            return Err("An MBR cannot describe space beyond 2 TB.".into());
+        }
+        let grow = new_sectors > old_sectors;
+        let dev = format!("/dev/{}", known.name);
+        let (old_b, new_b) = (l.bytes(old_sectors), l.bytes(new_sectors));
+        let (mut before, mut after) = (Vec::new(), Vec::new());
+        match known.fs {
+            Fs::Ext2 | Fs::Ext3 | Fs::Ext4 => {
+                self.need_tool(Tool::E2fsck, "Resizing an ext4 partition")?;
+                self.need_tool(Tool::Resize2fs, "Resizing an ext4 partition")?;
+                let sb = self.env.dev_read(&dev, 1024, 1024)?;
+                if sb.len() < 1024 || sb[56..58] != [0x53, 0xEF] {
+                    return Err("The superblock could not be read, so the partition is left alone.".into());
+                }
+                let block = 1024u64 << (le32(&sb, 24).min(6));
+                let check = Step::Tool { tool: Tool::E2fsck, args: disks_fmt::e2fsck_args(&dev)?, what: format!("Check the {} file system on {dev} (e2fsck -f)", known.fs.name()) };
+                if grow {
+                    after = vec![check, Step::Tool { tool: Tool::Resize2fs, args: disks_fmt::resize2fs_args(&dev, None)?, what: format!("Grow the file system to fill {dev} (resize2fs)") }];
+                } else {
+                    before = vec![
+                        check,
+                        Step::MinSize { tool: Tool::Resize2fs, args: disks_fmt::resize2fs_min_args(&dev)?, block, need: new_b, what: format!("Ask how small the file system can get and stop unless {} is enough (resize2fs -P)", iyakki_storage::human(new_b)) },
+                        Step::Tool { tool: Tool::Resize2fs, args: disks_fmt::resize2fs_args(&dev, Some(new_b))?, what: format!("Shrink the file system to {} (resize2fs)", iyakki_storage::human(new_b)) },
+                    ];
+                }
+            }
+            Fs::Ntfs => {
+                self.need_tool(Tool::Ntfsresize, "Resizing an NTFS partition")?;
+                let check = Step::Tool { tool: Tool::Ntfsresize, args: disks_fmt::ntfsresize_check_args(&dev)?, what: format!("Check the NTFS file system on {dev} (ntfsresize --check)") };
+                if grow {
+                    after = vec![check, Step::Tool { tool: Tool::Ntfsresize, args: disks_fmt::ntfsresize_args(&dev, None)?, what: format!("Grow the file system to fill {dev} (ntfsresize)") }];
+                } else {
+                    before = vec![
+                        check,
+                        Step::MinSize { tool: Tool::Ntfsresize, args: disks_fmt::ntfsresize_min_args(&dev)?, block: 1, need: new_b, what: format!("Ask how small the file system can get and stop unless {} is enough (ntfsresize --info)", iyakki_storage::human(new_b)) },
+                        Step::Tool { tool: Tool::Ntfsresize, args: disks_fmt::ntfsresize_args(&dev, Some(new_b))?, what: format!("Shrink the file system to {} (ntfsresize)", iyakki_storage::human(new_b)) },
+                    ];
+                    plan.warnings.push("Windows may want to check an NTFS volume after it was shrunk; that is normal.".into());
+                }
+            }
+            Fs::Empty => {}
+            Fs::Fat12 | Fs::Fat16 | Fs::Fat32 | Fs::Exfat => {
+                return Err(format!("IYAKKI cannot resize a {} volume: there is no resize program for it that IYAKKI can use. Copy the files off, delete the partition, add a bigger or smaller one and format it. Nothing was changed.", known.fs.name()));
+            }
+            Fs::Unknown => {
+                return Err(format!("IYAKKI cannot tell what is on {}, so it will not change its size: a shrink could cut off files. Nothing was changed.", known.name));
+            }
+            other => {
+                return Err(format!("IYAKKI cannot resize a {} volume. Nothing was changed.", other.name()));
+            }
+        }
+        l.parts[i].last = new_last;
+        plan.lost.push(if grow {
+            format!("Nothing is lost: {} ({}{}) grows from {} to {} into free space.", known.name, known.fs.name(), label_words(&known.label), iyakki_storage::human(old_b), iyakki_storage::human(new_b))
+        } else {
+            format!("{} ({}{}) shrinks from {} to {}. Nothing is lost if the files fit: the smallest possible size is checked first and the shrink stops if it does not fit. The space freed becomes unused.", known.name, known.fs.name(), label_words(&known.label), iyakki_storage::human(old_b), iyakki_storage::human(new_b))
+        });
+        plan.warnings.push("If the power fails or the drive is pulled out in the middle of a resize, files can be lost. Copy what matters somewhere else first.".into());
+        let table = self.table_steps(d, &l)?;
+        plan.steps = before;
+        plan.steps.extend(table);
+        plan.steps.push(Step::Sync);
+        plan.steps.push(Step::Reread { dev: d.path.clone() });
+        if !after.is_empty() {
+            plan.steps.push(Step::WaitNode { dev: dev.clone() });
+            plan.steps.extend(after);
+            plan.steps.push(Step::Sync);
+        }
+        plan.expect.push(Expect::Size { part: known.name.clone(), bytes: new_b });
+        plan.after = layout_lines(&l);
+        plan.audit = format!("{} op=resize part={number} from={old_b} to={new_b} fs={}", d.audit_id(), known.fs.name());
+        Ok(())
     }
 }

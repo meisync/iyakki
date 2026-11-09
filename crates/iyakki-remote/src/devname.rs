@@ -19,6 +19,8 @@ use mdns::responder::Svc;
 pub trait Net {
     fn start(&mut self, label: &str, svcs: Vec<Svc>) -> Result<(), String>;
     fn set_services(&mut self, svcs: Vec<Svc>);
+    /// Extra `.local` names for this device's addresses (domain routes, `iyakki_agent::domains`).
+    fn set_extra_names(&mut self, names: Vec<String>);
     fn stop(&mut self);
     fn status(&self) -> Option<mdns::net::Status>;
 }
@@ -34,6 +36,11 @@ impl Net for Real {
     fn set_services(&mut self, svcs: Vec<Svc>) {
         if let Some(a) = &self.0 {
             a.set_services(svcs);
+        }
+    }
+    fn set_extra_names(&mut self, names: Vec<String>) {
+        if let Some(a) = &self.0 {
+            a.set_extra_names(names);
         }
     }
     fn stop(&mut self) {
@@ -53,6 +60,8 @@ pub struct Want {
     pub dev_on: bool,
     pub dev_port: u16,
     pub web_port: Option<u16>,
+    /// Names of domain routes (`store.local`) while the domain listener runs: announced as more names for this device.
+    pub extra_names: Vec<String>,
 }
 
 pub struct Watcher<N: Net> {
@@ -121,6 +130,7 @@ impl<N: Net> Watcher<N> {
         } else {
             self.net.set_services(svcs);
         }
+        self.net.set_extra_names(want.extra_names.clone());
         if let Some(s) = self.net.status() {
             let st = Status {
                 on: true,
@@ -170,7 +180,7 @@ pub fn watch(env: iyakki_shell::shell::ShellEnv) -> std::io::Result<std::thread:
         let dm = iyakki_agent::devmode::DevMode::open(env.services.dir());
         let mut w = Watcher::new(Real::default());
         loop {
-            let want = Want { on: env.services.announce_name_on(), dev_on: dm.is_on(), dev_port: dm.state().port(), web_port: Some(iyakki_agent::webaccess::read_status(env.services.dir())).filter(|s| s.listening).map(|s| s.port) };
+            let want = Want { on: env.services.announce_name_on(), dev_on: dm.is_on(), dev_port: dm.state().port(), web_port: Some(iyakki_agent::webaccess::read_status(env.services.dir())).filter(|s| s.listening).map(|s| s.port), extra_names: iyakki_agent::domains::read_names(env.services.dir()) };
             let reg = iyakki_agent::startup::global();
             let events = w.tick(&want, env.services.dir(), &Handle::Global, reg, &|a, d| env.audit.record("system", a, d));
             for e in events {
@@ -228,6 +238,11 @@ mod tests {
         fn set_services(&mut self, svcs: Vec<Svc>) {
             self.0.lock().unwrap().1 = svcs;
         }
+        fn set_extra_names(&mut self, names: Vec<String>) {
+            let mut g = self.0.lock().unwrap();
+            let label = g.2[0].clone();
+            g.2 = std::iter::once(label).chain(names).collect();
+        }
         fn stop(&mut self) {
             self.0.lock().unwrap().0 = false;
         }
@@ -261,11 +276,11 @@ mod tests {
         let (dir, h, reg) = rig("flow");
         let fake = Fake::default();
         let mut w = Watcher::new(fake.clone());
-        let off = Want { on: false, dev_on: true, dev_port: 7979, web_port: None };
+        let off = Want { on: false, dev_on: true, dev_port: 7979, web_port: None, extra_names: vec![] };
         let (ev, log) = run(&mut w, &off, &dir, &h, &reg);
         assert!(ev.is_empty() && log.is_empty() && !fake.0.lock().unwrap().0 && !h.lock().config().rules.iter().any(namerule::is_mdns));
         // on: the announcer starts with the random label, the rule appears with its reason
-        let on = Want { on: true, dev_on: false, dev_port: 7979, web_port: None };
+        let on = Want { on: true, dev_on: false, dev_port: 7979, web_port: None, extra_names: vec![] };
         let (_, log) = run(&mut w, &on, &dir, &h, &reg);
         assert!(log.iter().any(|l| l.starts_with("devname.firewall.allow: UDP 5353")) && log.iter().any(|l| l.starts_with("devname.announce.start")), "{log:?}");
         assert!(allows_udp(&h, "192.168.50.20"));
@@ -286,10 +301,25 @@ mod tests {
     }
 
     #[test]
+    fn domain_route_names_are_announced_beside_the_device_name_only_while_announcing_is_on() {
+        let (dir, h, reg) = rig("extra");
+        let fake = Fake::default();
+        let mut w = Watcher::new(fake.clone());
+        let on = Want { on: true, dev_on: false, dev_port: 7979, web_port: None, extra_names: vec!["store.local".into()] };
+        run(&mut w, &on, &dir, &h, &reg);
+        assert_eq!(&fake.0.lock().unwrap().2[1..], ["store.local"]);
+        run(&mut w, &Want { extra_names: vec![], ..on.clone() }, &dir, &h, &reg);
+        assert_eq!(fake.0.lock().unwrap().2.len(), 1, "withdrawn when the listener stops");
+        // announcing off: nothing is announced, whatever the routes say
+        run(&mut w, &Want { on: false, ..on }, &dir, &h, &reg);
+        assert!(!fake.0.lock().unwrap().0);
+    }
+
+    #[test]
     fn a_person_removing_the_rule_switches_announcing_off_and_it_is_not_made_again() {
         let (dir, h, reg) = rig("removed");
         let mut w = Watcher::new(Fake::default());
-        let on = Want { on: true, dev_on: false, dev_port: 7979, web_port: None };
+        let on = Want { on: true, dev_on: false, dev_port: 7979, web_port: None, extra_names: vec![] };
         run(&mut w, &on, &dir, &h, &reg);
         // the person removes the rules in the firewall list
         {
@@ -320,7 +350,7 @@ mod tests {
         }
         let (dir, h, reg) = rig("fail");
         let mut w = Watcher::new(Broken);
-        let on = Want { on: true, dev_on: false, dev_port: 7979, web_port: None };
+        let on = Want { on: true, dev_on: false, dev_port: 7979, web_port: None, extra_names: vec![] };
         let log = Mutex::new(Vec::new());
         for _ in 0..3 {
             w.tick(&on, &dir, &h, &reg, &|a, d| log.lock().unwrap().push(format!("{a}: {d}")));

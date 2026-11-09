@@ -38,7 +38,7 @@ fn every_key_code_maps_to_one_action_and_is_not_also_typed() {
         assert!(crate::input::translate(i.code, false, false).is_none(), "{} must not also be typed as a character", i.name);
     }
     // the table of the specification, code by code (linux/input-event-codes.h)
-    let want: [(u16, FnKey); 27] = [
+    let want: [(u16, FnKey); 28] = [
         (115, FnKey::VolumeUp), (114, FnKey::VolumeDown), (113, FnKey::VolumeMute), (248, FnKey::MicMute),
         (225, FnKey::BrightnessUp), (224, FnKey::BrightnessDown), (244, FnKey::BrightnessAuto),
         (230, FnKey::KbdLightUp), (229, FnKey::KbdLightDown), (228, FnKey::KbdLightToggle),
@@ -46,7 +46,7 @@ fn every_key_code_maps_to_one_action_and_is_not_also_typed() {
         (163, FnKey::Next), (165, FnKey::Prev), (166, FnKey::Stop),
         (142, FnKey::Sleep), (205, FnKey::Sleep), (116, FnKey::Power),
         (247, FnKey::RfKill), (238, FnKey::Wlan), (237, FnKey::Bluetooth),
-        (227, FnKey::SwitchVideo), (210, FnKey::Print), (140, FnKey::Calc), (172, FnKey::Homepage),
+        (227, FnKey::SwitchVideo), (210, FnKey::Print), (140, FnKey::Calc), (172, FnKey::Homepage), (152, FnKey::Lock),
     ];
     assert_eq!(KEYS.len(), want.len());
     for (c, k) in want {

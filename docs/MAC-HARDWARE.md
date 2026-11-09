@@ -241,6 +241,22 @@ What the Mac image does about it:
   has one line starting `CS8409 sound:`.
 * **Settings -> Sound** (and the Devices Sound tab) shows `Built-in speakers: This Mac's speakers need the CS8409 driver (not loaded)`
   with the model when the driver is missing, instead of only an empty mixer.
+* **Quiet speakers, found 2026-11-08 (owner: "ear at the speaker", the same stick loud on the Mac mini, Lenovo and HP)**: this codec
+  offers `S24_LE` AND `S32_LE` (standard HDA codecs offer `S32_LE` only). The agent's exclusive software-volume path (`plughw` under
+  `softvol`, used because `dmix` cannot open this device) named no format, so ALSA's `plug` picked `S24_LE` for the players' 16-bit
+  stream (`/proc/asound/card0/pcm0p/sub0/hw_params`: `format: S24_LE`): the 24 bits sit in the low bits of each 32-bit word while the
+  hardware takes the top ones, 48 dB too quiet; no boost (12 dB at most) could make up for it. Fix in `softvol.rs`: the exclusive
+  fan-out plan carries the format the probe learned (`S32_LE`) and names it for the `route` slave and the speaker-test PCM. Image
+  1107k carries it; to be heard on the Mac.
+* **Microphone: noise instead of voice, found 2026-11-08 (voice recorder: full-scale scratching, 7000 zero crossings a second)**: the
+  capture side offers `S24_LE S32_LE S24_3LE`, stereo, 44.1 kHz only. `arecord -D plughw:0,0 -f S16_LE` (the recorder's command) let
+  `plug` pick `S24_LE`, and the hardware fills each 32-bit word from the top (bits 31 to 13 carry the signal, the low byte is always 0, root
+  over SSH, three clips compared bit by bit): read the `S24_LE` way every sample wraps. Read as `S32_LE` the same bytes are the voice (the
+  owner heard the 8-second clip played back). Fix: `micpcm.rs`: once per start the agent asks every capture device for its formats
+  (`arecord --dump-hw-params`); a card offering both 32-bit-container formats gets `pcm.iyakkimicCdD` (plug over `hw:C,D`, `format
+  S32_LE`) in `/etc/asound.conf`, and the voice recorder, dictation and the browser's microphone plugin (`IYAKKI_WEBVIEW_MIC_PCMS`)
+  open that PCM instead of `plughw:C,D`. Image 1107l; to be verified with the recorder on this Mac. The driver's own note about a "fake
+  24 bits" internal microphone is about level, not this.
 * **What works, by the project's own README:** speaker and headphone output (a fixed 44.1 kHz, 24-bit, 4-channel hardware format; other
   formats and rates work through ALSA's default device, which converts). **What does not:** the microphone (no input is connected), sleep and resume (untested, "everything
   is permanently powered on"), and the direct hardware devices `hw:0,0` / `plughw:0,0` have no volume control and are very loud: use the

@@ -57,3 +57,4 @@ dist/tts-indic/venv/
 # device screenshots and logs saved in the repository folder by tools
 /iyakki-screen-*.png
 /kmsg-previous-*.log
+__pycache__/

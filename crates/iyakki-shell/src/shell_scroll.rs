@@ -20,6 +20,9 @@ impl Shell {
             self.saver_after();
             return; // the first input only wakes the screen
         }
+        if self.lockui.active {
+            return; // locked: the wheel does nothing
+        }
         self.tbar_activity();
         if self.scroll_px_direct() {
             let cx = self.cx();

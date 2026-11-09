@@ -372,6 +372,7 @@ impl StoreServer {
             ("GET", super::compmanifest::PATH) => self.components_doc(),
             ("POST", "/v1/components") => self.component_publish(r, peer),
             ("POST", "/v1/components/retention") => self.component_retention(r, peer),
+            ("POST", "/v1/components/promote") => self.component_promote(r, peer),
             ("DELETE", p) if p.starts_with("/v1/components/") => self.component_yank(r, peer),
             // a small blob through `handle` (tests, tools); the socket code streams the body instead (`blob_put`, `blob_get`)
             ("PUT", p) if p.starts_with("/v1/blobs/") => self.blob_put(r, r.body.len() as u64, &mut &r.body[..], peer),

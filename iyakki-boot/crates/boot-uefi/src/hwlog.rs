@@ -14,14 +14,23 @@ use core::ptr::null_mut;
 use uefi_sys::*;
 
 /// Write the summary (`hw:` lines) to the log.
-pub fn summary() {
+/// `save` writes the log so far after every section: a firmware that faults inside one of these walks (a MacBook Pro 16,2 showed no
+/// logo and left no log, 2026-11-08) then leaves the sections before it on the volume, and the last line names the one that stopped.
+pub fn summary(save: &dyn Fn(&str)) {
     firmware();
+    save("firmware listed; next: SMBIOS");
     smbios();
+    save("machine listed; next: memory map");
     memory();
+    save("memory listed; next: PCI");
     pci();
+    save("PCI listed; next: USB");
     usb();
+    save("USB listed; next: disks");
     disks();
+    save("disks listed; next: screen");
     screen();
+    save("screen listed; next: input");
     input();
 }
 
@@ -207,9 +216,25 @@ pub fn path_text(h: Handle) -> String {
     out
 }
 
+/// The firmware vendor string ("Apple", "American Megatrends", "INSYDE Corp.", "EDK II" ...).
+fn vendor() -> String {
+    let t = st();
+    if t.firmware_vendor.is_null() {
+        String::new()
+    } else {
+        unsafe { cstr16(t.firmware_vendor) }
+    }
+}
+
 fn usb() {
     let handles = handles_with(&USB_IO_PROTOCOL_GUID);
     say!("hw: usb: {} interfaces\n", handles.len());
+    // Apple's firmware never returns from the USB I/O descriptor call for one of its internal devices (MacBookPro14,1, 2026-11-08:
+    // the logo stayed and the log ended at "next: USB"); the count is listed, the devices are not asked
+    if vendor().starts_with("Apple") {
+        say!("hw: usb: not described on Apple firmware (its USB I/O descriptor call does not return on some Macs)\n");
+        return;
+    }
     for h in handles.into_iter().take(64) {
         let Some(u) = protocol::<UsbIo>(h, &USB_IO_PROTOCOL_GUID) else { continue };
         let mut d = UsbDeviceDescriptor::default();

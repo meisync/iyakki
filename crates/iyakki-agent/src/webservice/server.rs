@@ -58,6 +58,8 @@ pub struct Shared {
     pub deps: Arc<Deps>,
     pub tokens: Tokens,
     pub runs: RunManager,
+    /// WASM tiles run for browsers (`tiles.rs`).
+    pub tiles: super::tiles::TileHost,
     pub allowed_tools: BTreeSet<String>,
     pub fingerprint: String,
     pub(super) addr_limit: Limiter,
@@ -116,6 +118,7 @@ pub fn start(chk: &Checked, deps: Arc<Deps>, tls: Identity) -> Result<Service, S
         deps: deps.clone(),
         tokens: Tokens::new(store, Duration::from_secs(l.token_idle_secs), l.token_lifetime_secs),
         runs: RunManager::new(deps, Duration::from_secs(l.approval_timeout_secs)),
+        tiles: super::tiles::TileHost::new(super::tiles::builtin()),
         allowed_tools,
         fingerprint: tls.fingerprint.clone(),
         addr_limit: Limiter::new(600),
@@ -144,6 +147,7 @@ impl Shared {
             deps: deps.clone(),
             tokens: Tokens::new(None, Duration::from_secs(l.token_idle_secs), l.token_lifetime_secs),
             runs: RunManager::new(deps, Duration::from_secs(l.approval_timeout_secs)),
+            tiles: super::tiles::TileHost::new(super::tiles::builtin()),
             allowed_tools,
             fingerprint: String::new(),
             addr_limit: Limiter::new(600),
@@ -393,6 +397,10 @@ pub fn handle(sh: &Shared, req: &Request, peer: IpAddr) -> Response {
     if !sh.addr_limit.allow(&ip).0 {
         return error_response(429, "rate_limited", "too many requests from this address").header("Retry-After", "30");
     }
+    if super::hooks::is_hook_path(&req.path) {
+        // webhooks: no bearer token, the secret address and the optional signature are the sender's proof (hooks.rs)
+        return super::hooks::serve(sh, req, peer);
+    }
     if super::ui::is_ui_path(&req.path) {
         // the web UI's static files: no sign-in, no API route (see `ui.rs`)
         return super::ui::serve(req).unwrap_or_else(|| error_response(404, "not_found", "not found"));
@@ -418,7 +426,8 @@ pub fn handle(sh: &Shared, req: &Request, peer: IpAddr) -> Response {
         if !need_ok(&p, route.needs) {
             return decorate(error_response(403, "denied", "your role does not allow this"), &allow_origin);
         }
-        let (ok, wait) = sh.user_limit.allow(&p.user);
+        // the tile events route has its own, higher limit (tiles.rs): a pointer-driven page sends many small requests
+        let (ok, wait) = if route.id == "tile_events" { (true, 0) } else { sh.user_limit.allow(&p.user) };
         if !ok {
             return decorate(error_response(429, "rate_limited", "too many requests").header("Retry-After", &wait.to_string()), &allow_origin);
         }

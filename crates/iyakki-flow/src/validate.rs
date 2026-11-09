@@ -197,7 +197,29 @@ pub fn validate_flow(flow: &Flow, reg: &Registry) -> Vec<Issue> {
                 }
             }
             TriggerKind::Interval { every_s, .. } if *every_s < 5 => v.push(gerr(format!("trigger {}: an interval is at least 5 seconds", t.id))),
-            TriggerKind::Webhook { .. } => v.push(gwarn(format!("trigger {}: webhooks are planned and will not fire yet", t.id))),
+            TriggerKind::Webhook { path, methods, max_body, content_types, rate_per_min, signed } => {
+                if !valid_id(path) || path.len() > 48 {
+                    v.push(gerr(format!("trigger {}: the hook id `{path}` is letters, digits, - and _ (at most 48)", t.id)));
+                }
+                if let Some(m) = methods.iter().find(|m| !matches!(m.as_str(), "POST" | "PUT" | "PATCH" | "GET")) {
+                    v.push(gerr(format!("trigger {}: `{m}` is not an allowed method (POST, PUT, PATCH, GET)", t.id)));
+                }
+                if *max_body > 64 * 1024 {
+                    v.push(gerr(format!("trigger {}: a webhook takes at most 65536 bytes", t.id)));
+                }
+                if let Some(c) = content_types.iter().find(|c| !matches!(c.as_str(), "json" | "form" | "text")) {
+                    v.push(gerr(format!("trigger {}: `{c}` is not a content type (json, form, text)", t.id)));
+                }
+                if *rate_per_min > 600 {
+                    v.push(gerr(format!("trigger {}: at most 600 calls a minute", t.id)));
+                }
+                if t.inputs.get("webhook").is_some() {
+                    v.push(gerr(format!("trigger {}: the input name `webhook` is reserved for the request", t.id)));
+                }
+                if !*signed {
+                    v.push(gwarn(format!("trigger {}: the webhook is not signed; the secret address is its only protection", t.id)));
+                }
+            }
             TriggerKind::OnFailure { flow: f } if *f == flow.id => v.push(gerr(format!("trigger {}: a flow cannot start on its own failure", t.id))),
             _ => {}
         }
@@ -305,10 +327,10 @@ mod tests {
         let mut f = linear();
         f.triggers.push(Trigger::new("c", TriggerKind::Cron { expr: "61 * * * *".into(), tz: "local".into() }));
         f.triggers.push(Trigger::new("i", TriggerKind::Interval { every_s: 1, anchor_ms: None }));
-        f.triggers.push(Trigger::new("w", TriggerKind::Webhook { path: "/x".into() }));
+        f.triggers.push(Trigger::new("w", TriggerKind::webhook("/x")));
         f.triggers.push(Trigger::new("z", TriggerKind::Cron { expr: "* * * * *".into(), tz: "Mars".into() }));
         let m = msgs(&f);
-        assert!(m.iter().any(|x| x.contains("minute")) && m.iter().any(|x| x.contains("at least 5")) && m.iter().any(|x| x.contains("planned")) && m.iter().any(|x| x.contains("time zone")), "{m:?}");
+        assert!(m.iter().any(|x| x.contains("minute")) && m.iter().any(|x| x.contains("at least 5")) && m.iter().any(|x| x.contains("hook id")) && m.iter().any(|x| x.contains("time zone")), "{m:?}");
         let mut g = linear();
         g.triggers.push(Trigger::new("of", TriggerKind::OnFailure { flow: "f".into() }));
         assert!(msgs(&g).iter().any(|m| m.contains("its own failure")));

@@ -57,6 +57,9 @@ pub struct Data {
     pub dark: std::collections::BTreeSet<String>,
     #[serde(default)]
     pub downloads: Vec<Download>,
+    /// The page size of pages saved as PDF: "A4" (the default) or "Letter".
+    #[serde(default)]
+    pub pdf_size: String,
 }
 
 /// Something the address bar offers while typing.

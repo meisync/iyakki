@@ -307,7 +307,7 @@ mod tests {
     }
 
     fn cx_of<'a>(u: &'a FakeUsage, user: &'a str, admin: bool) -> TileCx<'a> {
-        TileCx { user, manage_settings: admin, usage: u, calendar: &iyakki_tile_api::calendar::NoCalendar, audit: &iyakki_tile_api::NoAudit }
+        TileCx { user, manage_settings: admin, usage: u, calendar: &iyakki_tile_api::calendar::NoCalendar, audit: &iyakki_tile_api::NoAudit, remote: &iyakki_tile_api::remote::NoRemote, cameras: &iyakki_tile_api::cameras::NoCameras }
     }
 
     #[test]

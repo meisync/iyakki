@@ -332,3 +332,7 @@ calls to the parts) was not established from this code, so the plain part is use
 Record for each: wall-clock time (first call includes loading), quality (good, poor, wrong), and the server's memory use while the
 parts are loaded (for example with `free -h` or the Lemonade log) and any part that Lemonade unloads to make room. Press Undo
 afterwards if the old setup should come back.
+
+## My IYAKKI (push to talk), Voice -> ASSISTANT (F5)
+
+A voice assistant joined to the chat assistant (F-VOICE-28, [`development/MY-IYAKKI-PLAN.md`](development/MY-IYAKKI-PLAN.md)). Off by default; an administrator turns it on in the tab (or with the chat tool `voice_assistant_set`, which always asks and can only be approved by a tap or key). Press Talk (or Space), speak, pause; the assistant answers aloud in short sentences and listens again for a few seconds for a follow-up. The microphone is open only while the red dot shows. Say stop, cancel, louder, quieter, mute, repeat or that's all at any time. A tool that asks shows a card: ordinary asks can be answered by saying yes or no; deleting, installing, sending, sharing and the rest of the hard-ask list can only be approved by a tap or key (saying no still denies). If the assistant is unsure what it heard it asks "Did you say ...?" first. No sound is kept; the conversation is saved as text in a chat titled "Voice conversation". Settings: `voice.my_iyakki`, `voice.my_iyakki_muted`, `voice.my_iyakki_follow_ms`. The wake phrase is not built yet.

@@ -436,6 +436,64 @@ impl StoreServer {
         Resp::json(200, json!({"ok": true, "yanked": n, "serial": st.serial}))
     }
 
+    /// `POST /v1/components/promote?component=&version=&from=&to=`: copy a published entry to another channel (nightly -> beta -> stable).
+    /// Nothing is rebuilt or uploaded: the copy names the same artifact and keeps the same delta references; the publishing rules still
+    /// hold (versions only go up in the target channel, the name's owner or the administrator, files still on the store).
+    pub(super) fn component_promote(&self, r: &Req, peer: &str) -> Resp {
+        let owner = match self.writer(r, peer) {
+            Ok(o) => o,
+            Err(e) => return e,
+        };
+        let q = |k: &str| r.query.get(k).map(String::as_str).unwrap_or("");
+        let (name, version, from, to) = (q("component"), q("version"), q("from"), q("to"));
+        if !cm::valid_component_name(name) || !cm::valid_version(version) || !cm::valid_channel(from) || !cm::valid_channel(to) {
+            return Resp::err(400, "give component, version, from and to (a channel name such as nightly, beta, stable)");
+        }
+        if from == to {
+            return Resp::err(400, "from and to are the same channel");
+        }
+        let _g = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        let mut st = self.cstate();
+        if owner != "admin" && st.records.iter().any(|x| x.entry.component == name && x.owner != owner) {
+            return Resp::err(403, "only the administrator or the publisher who owns this component can promote it");
+        }
+        let Some(src) = st.records.iter().find(|x| x.entry.component == name && x.entry.version == version && x.entry.channel == from).cloned() else {
+            return Resp::err(404, &format!("{name} {version} is not published in channel {from}"));
+        };
+        if let Some(why) = &src.yanked {
+            return Resp::err(409, &format!("{name} {version} in {from} was withdrawn ({why}) and cannot be promoted"));
+        }
+        if src.purged {
+            return Resp::err(409, &format!("the files of {name} {version} were removed by a cleanup and cannot be promoted"));
+        }
+        if st.records.iter().any(|x| x.entry.component == name && x.entry.version == version && x.entry.channel == to) {
+            return Resp::err(409, &format!("{name} {version} is already in channel {to} (or was, and was withdrawn: a version number is not reused)"));
+        }
+        let top = st.records.iter().filter(|x| x.entry.component == name && x.entry.channel == to).map(|x| x.entry.version.as_str()).max_by(|a, b| compare_versions(a, b));
+        if let Some(top) = top {
+            if compare_versions(version, top) != std::cmp::Ordering::Greater {
+                return Resp::err(409, &format!("version {version} is not newer than {top} in channel {to}: versions only go up"));
+            }
+        }
+        let on_disk = |sha: &str| std::fs::metadata(self.blob_path(sha)).is_ok_and(|m| m.is_file());
+        if !on_disk(&src.entry.sha256) || src.entry.delta.iter().any(|d| !on_disk(&d.sha256)) {
+            return Resp::err(422, &format!("a file of {name} {version} is no longer on this store"));
+        }
+        let mut e = src.entry.clone();
+        e.channel = to.to_string();
+        e.added = self.now();
+        if let Err(m) = cm::check_entry(&e) {
+            return Resp::err(422, &format!("not accepted: {m}"));
+        }
+        st.records.push(Record { entry: e.clone(), owner: src.owner.clone(), yanked: None, purged: false });
+        st.serial += 1;
+        if let Err(m) = self.save_cstate(&st) {
+            return Resp::err(500, &m);
+        }
+        self.audit(peer, &owner, "component-promote", &format!("{name} {version} {from} -> {to} {}", e.sha256), "200");
+        Resp::json(200, json!({"ok": true, "component": name, "version": version, "from": from, "to": to, "sha256": e.sha256, "deltas": e.delta.len(), "serial": st.serial}))
+    }
+
     /// `POST /v1/components/retention?keep=3[&apply=1]` (administrator): what a cleanup would remove, and with `apply=1` removes it.
     pub(super) fn component_retention(&self, r: &Req, peer: &str) -> Resp {
         match self.writer(r, peer) {

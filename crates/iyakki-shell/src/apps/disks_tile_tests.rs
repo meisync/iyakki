@@ -31,6 +31,8 @@ fn fixture(tag: &str, role: Role, w: u32, h: u32, s: f32) -> Fx {
     blank_stick(&f);
     let mut app = DisksApp::with_engine(&cx, Arc::new(f.disks()), true);
     app.poll_every = 1;
+    // the tests do not wait five seconds; the countdown has its own tests
+    app.cancel_window = std::time::Duration::ZERO;
     Fx { app, cx, f, g: Gfx::new(w, h), area: R::new(0.0, 0.0, w as f32, h as f32), s, tick: 0 }
 }
 
@@ -368,9 +370,9 @@ fn the_partition_manager_asks_for_the_name_shows_the_plan_and_needs_a_second_pre
     assert!(f.has_hit(&Event::Tab(T_ADV)), "the way in is a button, the view starts closed");
     assert!(!f.app.manager && !f.has_hit(&Event::Tab(T_NEWTABLE)));
     f.ev(Event::Tab(T_ADV));
-    assert!(f.app.manager && f.has_hit(&Event::Tab(T_NEWTABLE)) && f.has_hit(&Event::Tab(T_RESIZE)));
+    assert!(f.app.manager && f.has_hit(&Event::Tab(T_NEWTABLE)));
     f.ev(Event::Tab(T_RESIZE));
-    assert!(f.msg().contains("Resizing is not supported yet"), "{}", f.msg());
+    assert!(f.msg().contains("no partitions yet"), "{}", f.msg());
     f.ev(Event::Tab(T_NEWTABLE));
     let Modal::Form(form) = &f.app.modal else { panic!("the form") };
     assert_eq!(form.kind, FormKind::NewTable);
@@ -431,12 +433,12 @@ fn adding_formatting_and_deleting_through_the_forms() {
     let Modal::Form(form) = &f.app.modal else { panic!() };
     assert!(form.error.contains("is not a size"), "{}", form.error);
     f.key(Key::Esc);
-    // exFAT is offered but honest
+    // exFAT is offered; without its program the plan says which one is missing
     f.chr('f');
     f.ev(Event::Tab(T_FS + 2));
     f.ev(Event::Tab(T_REVIEW));
     let Modal::Form(form) = &f.app.modal else { panic!() };
-    assert!(form.error.contains("exFAT is not supported yet"), "{}", form.error);
+    assert!(form.error.contains("mkfs.exfat") && form.error.contains("not installed"), "{}", form.error);
     f.key(Key::Esc);
     // delete the partition
     f.chr('d');
@@ -588,4 +590,316 @@ fn the_pickers_drives_button_goes_to_the_open_drives_of_the_account_and_is_drawn
         assert!(r.x >= 0.0 && r.y >= 0.0 && r.x + r.w <= w as f32 && r.y + r.h <= h as f32, "{w}x{h}: {r:?}");
     }
     let _ = std::fs::remove_dir_all(&base);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// encrypted volumes: unlock, allow writing, lock
+// ---------------------------------------------------------------------------------------------------------------------
+
+fn with_helper(f: &mut Fx) -> Arc<iyakki_agent::disks_helper::FakeCrypt> {
+    use iyakki_agent::disks_helper::FakeCrypt;
+    let c = FakeCrypt::new(f.f.clone());
+    c.add("sdb1", "open sesame", iyakki_agent::disks_fake::sb_ext4("secrets"));
+    c.add("nvme1n1p2", "123456-234567-345678-456789-567890-678901-789012-890123", iyakki_agent::disks_fake::sb_ext4("win"));
+    f.app.crypt = c.clone();
+    c
+}
+
+fn choose_sdb1(f: &mut Fx) {
+    f.pick("sdb");
+    f.key(Key::Right);
+    assert_eq!(f.app.part().map(|p| p.name.clone()).as_deref(), Some("sdb1"));
+}
+
+fn modal_is_unlock(f: &Fx) -> bool {
+    matches!(f.app.modal, Modal::Unlock(_))
+}
+
+#[test]
+fn an_encrypted_partition_offers_unlock_and_says_what_it_is() {
+    let mut f = admin();
+    with_helper(&mut f);
+    choose_sdb1(&mut f);
+    f.draw();
+    assert_eq!(f.app.part().and_then(|p| p.crypt.as_ref()).map(|c| c.headline()).as_deref(), Some("Encrypted: LUKS2"));
+    assert!(f.has_hit(&Event::Tab(T_UNLOCK)), "Unlock is a button");
+    assert!(!f.has_hit(&Event::Tab(T_LOCK)) && !f.has_hit(&Event::Tab(T_ALLOW_WRITE)), "nothing to lock or write yet");
+    assert!(!f.has_hit(&Event::Tab(T_MOUNT)), "a locked volume is not mounted plainly");
+    // an ordinary partition has none of these buttons
+    f.pick("sda");
+    f.draw();
+    assert!(!f.has_hit(&Event::Tab(T_UNLOCK)));
+    // the BitLocker volume
+    f.pick("nvme1n1");
+    f.key(Key::Right);
+    f.key(Key::Down);
+    f.draw();
+    assert_eq!(f.app.part().and_then(|p| p.crypt.as_ref()).map(|c| c.headline()).as_deref(), Some("Encrypted: BitLocker"));
+    assert!(f.has_hit(&Event::Tab(T_UNLOCK)));
+}
+
+#[test]
+fn the_password_box_is_masked_unlocks_read_only_then_writing_and_lock_are_separate_steps() {
+    let mut f = admin();
+    let c = with_helper(&mut f);
+    choose_sdb1(&mut f);
+    f.chr('k');
+    assert!(modal_is_unlock(&f));
+    if let Modal::Unlock(u) = &f.app.modal {
+        assert!(u.field.mask, "the box is masked");
+    }
+    f.draw();
+    assert!(f.has_hit(&Event::Tab(T_DO_UNLOCK)) && f.has_hit(&Event::Tab(T_CANCEL)));
+    assert_hits_sane(&f, "unlock box");
+    f.type_text("open sesame");
+    f.key(Key::Enter);
+    assert!(!modal_is_unlock(&f), "the box closes and its text is gone");
+    assert!(f.msg().contains("Opened at") && f.msg().contains("read-only"), "{}", f.msg());
+    let p = f.app.part().cloned().unwrap();
+    assert!(p.unlocked && p.mounted() && p.mounted_ro);
+    // the secret is not in the audit log, the message or anything the tile keeps
+    assert!(!f.audit().contains("open sesame") && !f.msg().contains("open sesame"));
+    assert!(f.audit().contains("disks.unlock"), "{}", f.audit());
+    // buttons now
+    f.draw();
+    assert!(f.has_hit(&Event::Tab(T_LOCK)) && f.has_hit(&Event::Tab(T_ALLOW_WRITE)) && !f.has_hit(&Event::Tab(T_UNLOCK)));
+    // writing is its own press
+    f.ev(Event::Tab(T_ALLOW_WRITE));
+    assert!(f.msg().contains("Open for writing"), "{}", f.msg());
+    assert!(!f.app.part().unwrap().mounted_ro);
+    // lock
+    f.ev(Event::Tab(T_LOCK));
+    assert!(f.msg().contains("locked again"), "{}", f.msg());
+    let p = f.app.part().unwrap();
+    assert!(!p.unlocked && !p.mounted());
+    assert_eq!(c.log(), ["open sdb1 ro=false", "close sdb1"]);
+    assert!(!f.f.wrote(), "no byte of any drive was written");
+}
+
+#[test]
+fn a_wrong_password_is_a_plain_message_and_the_next_try_has_to_wait() {
+    let mut f = admin();
+    let c = with_helper(&mut f);
+    f.app.engine.hold_clock(1000);
+    choose_sdb1(&mut f);
+    f.chr('k');
+    f.type_text("not it");
+    f.key(Key::Enter);
+    assert!(f.msg().contains("did not unlock") && !f.msg().contains("not it"), "{}", f.msg());
+    assert!(!f.audit().contains("not it"));
+    assert!(!f.app.part().unwrap().unlocked);
+    f.chr('k');
+    f.type_text("open sesame");
+    f.key(Key::Enter);
+    assert!(f.msg().contains("Wait") && f.msg().contains("seconds"), "{}", f.msg());
+    assert_eq!(c.log().len(), 1, "the helper was asked once");
+}
+
+#[test]
+fn escape_and_cancel_close_the_box_and_an_empty_box_asks_for_the_password() {
+    let mut f = admin();
+    let c = with_helper(&mut f);
+    choose_sdb1(&mut f);
+    f.chr('k');
+    f.type_text("abc");
+    f.key(Key::Esc);
+    assert!(matches!(f.app.modal, Modal::None));
+    f.chr('k');
+    f.key(Key::Enter);
+    assert!(modal_is_unlock(&f), "an empty box stays open");
+    if let Modal::Unlock(u) = &f.app.modal {
+        assert!(u.error.contains("Type the password"), "{}", u.error);
+    }
+    f.ev(Event::Tab(T_CANCEL));
+    assert!(matches!(f.app.modal, Modal::None));
+    assert!(c.log().is_empty());
+}
+
+#[test]
+fn a_bitlocker_volume_takes_a_recovery_key_and_stays_read_only() {
+    let mut f = admin();
+    let c = with_helper(&mut f);
+    f.pick("nvme1n1");
+    f.key(Key::Right);
+    f.key(Key::Down);
+    f.chr('k');
+    f.type_text("123456-234567-345678-456789-567890-678901-789012-890123");
+    f.key(Key::Enter);
+    assert!(f.msg().contains("Opened at"), "{}", f.msg());
+    assert_eq!(c.log()[0], "open nvme1n1p2 ro=true");
+    f.draw();
+    assert!(!f.has_hit(&Event::Tab(T_ALLOW_WRITE)), "no writing for BitLocker");
+    f.chr('w');
+    assert!(f.msg().contains("Writing can be allowed only"), "{}", f.msg());
+}
+
+#[test]
+fn without_the_helper_program_the_tile_says_how_to_get_it_and_opens_no_box() {
+    let mut f = admin();
+    choose_sdb1(&mut f);
+    f.draw();
+    assert!(!f.has_hit(&Event::Tab(T_UNLOCK)), "the button is grey");
+    f.chr('k');
+    assert!(matches!(f.app.modal, Modal::None));
+    assert!(f.msg().contains("cryptsetup") && f.msg().contains("does not ship it") && f.msg().contains("CLI tools"), "{}", f.msg());
+}
+
+#[test]
+fn people_who_may_not_use_the_drive_get_no_box() {
+    let mut f = fixture("disks-user", Role::User, 1280, 720, 1.0);
+    with_helper(&mut f);
+    choose_sdb1(&mut f);
+    f.chr('k');
+    assert!(matches!(f.app.modal, Modal::None));
+    assert!(f.msg().contains("removable"), "{}", f.msg());
+}
+
+#[test]
+fn the_assistants_request_opens_the_box_for_that_partition_once() {
+    let mut f = admin();
+    with_helper(&mut f);
+    f.pick("sda");
+    iyakki_agent::disksunlocktools::request(f.cx.services.dir(), &f.cx.session.user, "sdb1");
+    for _ in 0..40 {
+        f.ev(Event::Tick);
+    }
+    assert!(modal_is_unlock(&f), "the box is open");
+    assert_eq!(f.app.part().map(|p| p.name.clone()).as_deref(), Some("sdb1"), "the partition is chosen");
+    f.key(Key::Esc);
+    for _ in 0..40 {
+        f.ev(Event::Tick);
+    }
+    assert!(matches!(f.app.modal, Modal::None), "one request, one box");
+}
+
+#[test]
+fn the_unlock_box_draws_inside_the_window_at_every_size() {
+    for (w, h, s) in [(1280u32, 720u32, 1.0f32), (800, 480, 1.0), (480, 320, 0.8), (1920, 1080, 1.5)] {
+        let mut f = fixture("disks-box", Role::Admin, w, h, s);
+        with_helper(&mut f);
+        choose_sdb1(&mut f);
+        f.chr('k');
+        f.type_text("x");
+        f.draw();
+        assert_hits_sane(&f, &format!("unlock box {w}x{h}"));
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// resize, exFAT and the cancel window
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// The blank stick with a GPT and one 40 MiB ext4 partition "data", the programs made up.
+fn stick_with_data() -> Fx {
+    use iyakki_agent::disks::Table;
+    use iyakki_agent::disks_part::{Confirm, FormatFs, PartOp};
+    let mut f = admin();
+    let sys = iyakki_agent::disks_helper::FakeSys::with_programs(&["e2fsck", "resize2fs", "mkfs.exfat", "mkntfs", "ntfsresize"]);
+    f.app.engine.set_tools(Arc::new(iyakki_agent::disks_fmt::ProcTools::new(sys, "/none")));
+    let (a, c) = (f.app.who.clone(), Confirm { typed: "sdc".into(), second: true });
+    f.app.engine.apply_partition(&a, "sdc", &PartOp::NewTable(Table::Gpt), &c, &|_, _| {}).unwrap();
+    f.app.engine.apply_partition(&a, "sdc", &PartOp::Add { size_bytes: Some(40 << 20), fs: Some(FormatFs::Ext4), label: "data".into() }, &c, &|_, _| {}).unwrap();
+    f.app.engine.forget();
+    f.ev(Event::Tab(T_REFRESH));
+    f.pick("sdc");
+    f
+}
+
+fn open_resize(f: &mut Fx, size: &str) {
+    f.ev(Event::Tab(T_ADV));
+    f.app.select_part(0);
+    f.draw();
+    assert!(f.has_hit(&Event::Tab(T_RESIZE)), "Resize is a real button once a partition is chosen");
+    f.chr('z');
+    assert!(matches!(&f.app.modal, Modal::Form(x) if x.kind == FormKind::Resize));
+    f.type_text(size);
+    f.key(Key::Enter);
+    assert!(matches!(f.app.modal, Modal::Review(_)), "{}", f.msg());
+}
+
+#[test]
+fn resize_shows_the_dry_run_then_needs_the_typed_name_and_waits_out_a_visible_countdown() {
+    let mut f = stick_with_data();
+    open_resize(&mut f, "80 MB");
+    let Modal::Review(r) = &f.app.modal else { panic!() };
+    let text = r.lines.join("\n");
+    assert!(text.contains("Resize a partition") && text.contains("Grow the file system") && text.contains("If the power fails"), "{text}");
+    let writes = f.f.calls().len();
+    // a plain Yes, or nothing, never starts it
+    for wrong in ["", "yes"] {
+        if let Modal::Review(r) = &mut f.app.modal {
+            r.field.set(wrong);
+        }
+        f.ev(Event::Tab(T_APPLY));
+        assert!(f.app.countdown_left().is_none() && f.f.calls().len() == writes, "{wrong:?}");
+    }
+    // the label, typed exactly, starts the countdown (not the change)
+    f.app.cancel_window = std::time::Duration::from_secs(5);
+    if let Modal::Review(r) = &mut f.app.modal {
+        r.field.set("data");
+    }
+    f.draw();
+    assert!(f.has_hit(&Event::Tab(T_APPLY)));
+    f.ev(Event::Tab(T_APPLY));
+    assert_eq!(f.app.countdown_left(), Some(5));
+    assert!(f.app.job.is_none() && f.f.calls().len() == writes, "nothing is written during the window");
+    assert!(!f.has_hit(&Event::Tab(T_APPLY)) && f.has_hit(&Event::Tab(T_CANCEL)), "only Cancel is offered while it counts down");
+    // typing does nothing then; Cancel stops it
+    f.type_text("x");
+    assert_eq!(f.app.countdown_left(), Some(5));
+    f.ev(Event::Tab(T_CANCEL));
+    assert!(matches!(f.app.modal, Modal::None) && f.msg().contains("Cancelled") && f.f.calls().len() == writes);
+    assert_eq!(f.app.snap.disk("sdc").unwrap().parts[0].size_bytes, 40 << 20);
+}
+
+#[test]
+fn escape_cancels_the_countdown_and_the_end_of_it_starts_the_change() {
+    let mut f = stick_with_data();
+    f.app.cancel_window = std::time::Duration::from_secs(5);
+    open_resize(&mut f, "80 MB");
+    let writes = f.f.calls().len();
+    let arm = |f: &mut Fx| {
+        if let Modal::Review(r) = &mut f.app.modal {
+            r.field.set("sdc1");
+        }
+        f.ev(Event::Tab(T_APPLY));
+    };
+    arm(&mut f);
+    assert!(f.app.countdown_left().is_some());
+    f.key(Key::Esc);
+    assert!(matches!(f.app.modal, Modal::None) && f.f.calls().len() == writes && f.msg().contains("Cancelled"));
+    // again, and this time the window runs out
+    open_resize(&mut f, "80 MB");
+    arm(&mut f);
+    f.ev(Event::Tick);
+    assert!(f.app.countdown_left().is_some(), "the window has not ended yet");
+    if let Modal::Review(r) = &mut f.app.modal {
+        r.armed = Some(std::time::Instant::now() - std::time::Duration::from_secs(6));
+    }
+    f.ev(Event::Tick);
+    f.ev(Event::Tick);
+    assert!(f.f.calls().len() > writes, "{}", f.msg());
+    assert_eq!(f.app.snap.disk("sdc").unwrap().parts[0].size_bytes, 80 << 20, "{}", f.msg());
+    assert!(f.audit().contains("disks.partition.apply"), "{}", f.audit());
+}
+
+#[test]
+fn what_the_assistant_asked_for_opens_the_review_but_the_person_does_the_confirming() {
+    use iyakki_agent::disks_part::FormatFs;
+    let mut f = stick_with_data();
+    let user = f.cx.session.user.clone();
+    let writes = f.f.calls().len();
+    iyakki_agent::disksformattools::request(f.cx.services.dir(), &user, &iyakki_agent::disksformattools::Req::Format { part: "sdc1".into(), fs: FormatFs::Exfat, label: "BK".into() });
+    for _ in 0..40 {
+        f.ev(Event::Tick);
+        if matches!(f.app.modal, Modal::Review(_)) {
+            break;
+        }
+    }
+    let Modal::Review(r) = &f.app.modal else { panic!("the review is waiting: {}", f.msg()) };
+    assert!(r.lines.join("\n").contains("Everything on /dev/sdc1") && r.lines.join("\n").contains("mkfs.exfat"));
+    assert!(r.field.value.is_empty() && r.armed.is_none(), "nothing is typed or confirmed for the person");
+    assert_eq!(f.f.calls().len(), writes, "only the dry run so far");
+    f.ev(Event::Tab(T_APPLY));
+    assert_eq!(f.f.calls().len(), writes, "and pressing Apply without the name still does nothing");
 }

@@ -410,6 +410,9 @@ pub struct BrowserApp {
     ctx_link: Option<String>,
     /// A file being saved: its name, the way to cancel it and where the result arrives.
     download: Option<(String, Arc<std::sync::atomic::AtomicBool>, Receiver<Result<(String, u64), String>>)>,
+    /// A PDF open in the viewer (docs/PDF.md), over the page area; and: the download in progress is to be opened when it is saved.
+    pdf: Option<super::pdfview::PdfView>,
+    pdf_after: Option<String>,
     /// The tabs; the one in use (`active`) is `None` here because its state is in the fields above.
     tabs: Vec<Option<TabState>>,
     active: usize,
@@ -576,6 +579,8 @@ impl BrowserApp {
             ctx_link: None,
             start_links: Vec::new(),
             download: None,
+            pdf: None,
+            pdf_after: None,
             tabs: vec![None],
             active: 0,
             groups: Groups::default(),
@@ -1472,7 +1477,7 @@ impl BrowserApp {
 
     /// The person's Downloads folder: `/home/<name>/Downloads` when their account may write there (the other apps can then
     /// open what was saved), otherwise a private one next to their other browser data.
-    fn downloads_dir(cx: &AppCx) -> Result<std::path::PathBuf, String> {
+    pub(crate) fn downloads_dir(cx: &AppCx) -> Result<std::path::PathBuf, String> {
         let home = std::path::PathBuf::from(format!("/home/{}/Downloads", cx.session.user));
         if iyakki_agent::scope::check_write(&cx.session.policy, &cx.session.user, &home).is_ok() && std::fs::create_dir_all(&home).is_ok() {
             return Ok(home);
@@ -1574,7 +1579,12 @@ impl BrowserApp {
             Ok((n, b)) => (format!("Saved {n} ({}) to Downloads.", human_bytes(b)), true),
             Err(e) => (format!("Download failed: {e}"), false),
         });
-        let _ = (name, status);
+        let _ = (name.clone(), status);
+        if self.status.as_ref().is_some_and(|s| s.1) {
+            self.pdf_download_done(&name, cx);
+        } else {
+            self.pdf_after = None;
+        }
     }
 
     fn export_bookmarks(&mut self, cx: &AppCx) {
@@ -2466,6 +2476,9 @@ impl BrowserApp {
                 self.refresh_suggestions();
             }
             Key::Char('d') if self.page().is_some_and(|p| p.download) => self.start_download(cx),
+            Key::Char('o') if self.page().is_some_and(|p| p.download && p.ctype.to_ascii_lowercase().contains("pdf")) => self.open_pdf_page(cx),
+            Key::Ctrl('p') => self.save_page_pdf(cx),
+            Key::Ctrl('P') => self.toggle_pdf_size(cx),
             Key::Ctrl('e') if self.page().is_none() && self.view() == StartView::Bookmarks => self.export_bookmarks(cx),
             Key::Char('I') if self.page().is_none() && self.view() == StartView::Bookmarks => self.import_bookmarks(cx),
             Key::Char('D') if self.page().is_none() && self.view() == StartView::History => {
@@ -4092,6 +4105,8 @@ impl BrowserApp {
     }
 }
 
+mod pdfhost;
+
 impl App for BrowserApp {
     fn take_request(&mut self) -> Option<(String, String)> {
         self.av_request.take()
@@ -4118,6 +4133,8 @@ impl App for BrowserApp {
     fn hint(&self) -> String {
         if self.agent_view {
             "the assistant's tab · your clicks and keys work as usual · Stop or Take over above · Esc back to your tabs".into()
+        } else if self.pdf.is_some() && !self.addr_focus {
+            super::pdfview::PdfView::hint().into()
         } else if self.addr_focus {
             "Enter open · Esc stop typing".into()
         } else if self.full.as_ref().is_some_and(|f| f.page_focus) {
@@ -4138,7 +4155,7 @@ impl App for BrowserApp {
             "Enter · open the link, or send the form",
             "b · back      f · forward      r · reload",
             "Ctrl+T new tab · Ctrl+W close it · Ctrl+Shift+T bring it back · Ctrl+PgUp/PgDn switch",
-            "Ctrl+D bookmark · Ctrl+B bookmarks · Ctrl+H history · Ctrl+J downloads · D save a file",
+            "Ctrl+D bookmark · Ctrl+B bookmarks · Ctrl+H history · Ctrl+J downloads · D save a file · O open a PDF file · Ctrl+P save the page as PDF (Ctrl+Shift+P A4/Letter)",
             "Ctrl+K fill the saved sign-in · Ctrl+S keep one · Ctrl+G make a password · Ctrl+F find · Y copy a link",
             "j · allow JavaScript for this site (Settings → Browser for all)",
             "c · developer panel: notes about what was blocked or failed, then the network list",
@@ -4194,6 +4211,9 @@ impl App for BrowserApp {
             if super::web_agent::handle(ev, &cx.services, &cx.session.user) {
                 return Flow::Stay;
             }
+        }
+        if let Some(flow) = self.pdf_event(ev) {
+            return flow;
         }
         match ev {
             Event::Tick => {
@@ -4453,6 +4473,9 @@ impl App for BrowserApp {
     }
 
     fn wants_redraw(&mut self) -> bool {
+        if self.pdf.as_mut().is_some_and(|v| v.poll()) {
+            return true;
+        }
         // the caller answers with a whole redraw (panes, other displays): a live picture needs nothing more than that
         match self.redraw_kind() {
             Redraw::None => false,
@@ -4614,7 +4637,9 @@ impl App for BrowserApp {
         } else {
             view
         };
-        if self.full.is_some() {
+        if let Some(v) = &mut self.pdf {
+            v.render(g, view, s, tick);
+        } else if self.full.is_some() {
             self.render_full(g, view, s, tick);
         } else {
             self.render_reader(g, view, s, tick);
@@ -7035,6 +7060,59 @@ mod tests {
         key(&mut a, &cx, Key::Ctrl('j'));
         let _ = frame(&mut a, &cx, 1280, 720);
         assert!(cx.audit.recent(20).iter().any(|l| l.contains("browser.download") && l.contains("files.org")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_pdf_file_page_opens_in_the_viewer_and_a_page_is_saved_as_pdf() {
+        // a real (tiny) PDF served as a file page: O saves it, then opens it in the viewer over the page area
+        let mut w = iyakki_pdf::Builder::new(iyakki_pdf::PageSize::A4);
+        w.title = "Served".into();
+        w.blocks.push(iyakki_pdf::Block::Para("Served paragraph about elephants.".into()));
+        let pdf = Response { status: 200, content_type: "application/pdf".into(), body: w.build().0, ..Response::default() };
+        let web = site(vec![("https://files.org/docs/report.pdf", pdf), ("https://a.org/", html(GUIDE))]);
+        let cx = cx_with("brpdf", web);
+        let mut a = BrowserApp::new(&cx);
+        a.open_url("https://files.org/docs/report.pdf", &cx);
+        settle(&mut a, &cx);
+        key(&mut a, &cx, Key::Char('o'));
+        for _ in 0..2000 {
+            a.handle(&Event::Tick, &cx);
+            if a.pdf.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let v = a.pdf.as_mut().expect("the PDF opened in the viewer after it was saved");
+        for _ in 0..2000 {
+            v.poll();
+            if v.pages > 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(v.pages, 1);
+        let g = frame(&mut a, &cx, 1280, 720);
+        assert!(g.text_log.iter().any(|t| t.2.contains("Page 1 / 1")), "the viewer is drawn over the page area");
+        assert!(a.hint().contains("search"));
+        // Esc closes the viewer
+        key(&mut a, &cx, Key::Esc);
+        assert!(a.pdf.is_none());
+        // a page saved as PDF with Ctrl+P, A4 first, Letter after Ctrl+Shift+P
+        a.open_url("a.org", &cx);
+        settle(&mut a, &cx);
+        key(&mut a, &cx, Key::Ctrl('p'));
+        assert!(a.status_text().unwrap().contains("Saved The Guide.pdf") && a.status_text().unwrap().contains("A4"), "{:?}", a.status_text());
+        let dir = BrowserApp::downloads_dir(&cx).unwrap();
+        let bytes = std::fs::read(dir.join("The Guide.pdf")).unwrap();
+        let d = iyakki_pdf::Document::open(bytes).unwrap();
+        assert!(d.page_text(0).unwrap().contains("Read the more page or go elsewhere."), "{}", d.page_text(0).unwrap());
+        key(&mut a, &cx, Key::Ctrl('P'));
+        key(&mut a, &cx, Key::Ctrl('p'));
+        assert!(a.status_text().unwrap().contains("Saved The Guide (1).pdf") && a.status_text().unwrap().contains("Letter"), "{:?}", a.status_text());
+        let l = iyakki_pdf::Document::open(std::fs::read(dir.join("The Guide (1).pdf")).unwrap()).unwrap();
+        assert_eq!(l.page_size(0).unwrap(), (612.0, 792.0));
+        assert!(cx.audit.recent(30).iter().any(|x| x.contains("browser.save_pdf")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -1,0 +1,15 @@
+[package]
+name = "iyakki-volcrypt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# AES block function, Argon2id and SHA-256 are the same permissive crates the vault and the SSH keys already use;
+# everything built on them (XTS, key wrap, HMAC, header format, recovery key) is in this crate.
+aes = "0.8"
+argon2 = { version = "0.5", features = ["std"] }
+sha2 = "0.10"
+zeroize = "1"
+thiserror.workspace = true
+iyakki-sec.workspace = true

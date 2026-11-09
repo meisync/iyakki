@@ -10,7 +10,9 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use iyakki_agent::disks::{may_use, Actor, Disk, Disks, MountOpts, MountPlan, Part, Snapshot, Table};
-use iyakki_agent::disks_part::{check_confirmation, Confirm, FormatFs, PartOp};
+use iyakki_agent::disks_crypt::{wipe_string, CryptKind, Secret};
+use iyakki_agent::disks_helper::CryptRunner;
+use iyakki_agent::disks_part::{check_confirmation_for, Confirm, FormatFs, PartOp};
 use iyakki_sec::policy::Role;
 
 use super::{App, AppCx, Flow};
@@ -35,6 +37,10 @@ pub(super) const T_BACK: usize = 10;
 pub(super) const T_CLEAR_FILTER: usize = 11;
 pub(super) const T_ADV_CLOSE: usize = 12;
 pub(super) const T_DISMISS: usize = 13;
+pub(super) const T_UNLOCK: usize = 14;
+pub(super) const T_LOCK: usize = 15;
+pub(super) const T_ALLOW_WRITE: usize = 16;
+pub(super) const T_DO_UNLOCK: usize = 17;
 pub(super) const T_NEWTABLE: usize = 20;
 pub(super) const T_ADD: usize = 21;
 pub(super) const T_DELETE: usize = 22;
@@ -57,9 +63,10 @@ pub(super) const F_FILTER: usize = 62_510;
 pub(super) const F_CONFIRM: usize = 62_511;
 pub(super) const F_SIZE: usize = 62_512;
 pub(super) const F_LABEL: usize = 62_513;
+pub(super) const F_SECRET: usize = 62_514;
 
 /// What the form of an operation offers as a file system: (what to format, the chip's text).
-pub(super) const FS_CHOICES: [(Option<FormatFs>, &str); 5] = [(Some(FormatFs::Ext4), "ext4"), (Some(FormatFs::Fat32), "FAT32"), (Some(FormatFs::Exfat), "exFAT (not yet)"), (Some(FormatFs::Ntfs), "NTFS (not yet)"), (None, "No file system")];
+pub(super) const FS_CHOICES: [(Option<FormatFs>, &str); 5] = [(Some(FormatFs::Ext4), "ext4"), (Some(FormatFs::Fat32), "FAT32"), (Some(FormatFs::Exfat), "exFAT"), (Some(FormatFs::Ntfs), "NTFS"), (None, "No file system")];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Page {
@@ -80,6 +87,7 @@ pub(super) enum FormKind {
     Add,
     Format,
     Rename,
+    Resize,
 }
 
 #[derive(Clone, Debug)]
@@ -106,6 +114,27 @@ pub(super) struct Review {
     pub error: String,
     /// 0 = the typed name, 1 = Cancel, 2 = Apply.
     pub focus: usize,
+    /// The moment the person pressed the last button: the cancel window runs from here.
+    pub armed: Option<std::time::Instant>,
+}
+
+/// The masked box for the password or recovery key of an encrypted volume. What is typed lives only here until Unlock is pressed,
+/// then it moves into a [`Secret`] for the helper; every copy of this form wipes its text when it is dropped.
+#[derive(Clone, Debug)]
+pub(super) struct UnlockForm {
+    pub part: String,
+    pub title: String,
+    pub kind: CryptKind,
+    pub field: TextField,
+    pub error: String,
+    /// 0 = the field, 1 = Unlock, 2 = Cancel.
+    pub focus: usize,
+}
+
+impl Drop for UnlockForm {
+    fn drop(&mut self) {
+        wipe_string(&mut self.field.value);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -113,6 +142,7 @@ pub(super) enum Modal {
     None,
     Form(Form),
     Review(Review),
+    Unlock(UnlockForm),
 }
 
 type Slot<T> = Arc<Mutex<Option<T>>>;
@@ -124,6 +154,14 @@ pub(super) struct Running {
 
 pub struct DisksApp {
     pub(super) engine: Arc<Disks>,
+    /// Opens and closes LUKS and BitLocker volumes (the helper programs; a made-up one in tests).
+    pub(super) crypt: Arc<dyn CryptRunner>,
+    /// The assistant asked for the password box of this partition; shown once the drives are listed.
+    want_unlock: Option<String>,
+    /// The assistant asked (and the person approved) a format or resize: its review is shown once the drives are listed.
+    want_op: Option<iyakki_agent::disksformattools::Req>,
+    /// How long the Cancel countdown runs after the last button (5 seconds; zero only in tests).
+    pub(super) cancel_window: std::time::Duration,
     pub(super) who: Actor,
     pub(super) snap: Snapshot,
     pub(super) loaded: bool,
@@ -149,6 +187,8 @@ pub struct DisksApp {
     seen: HashSet<String>,
     /// What mounting the chosen partition would do (or why not).
     pub(super) plan: Result<MountPlan, String>,
+    /// Whether the chosen partition can be unlocked, and as what (or why not).
+    pub(super) unlock_plan: Result<CryptKind, String>,
     /// Where to look: how often (heartbeats) the machine is polled; tests set it to 1.
     pub(super) poll_every: u32,
     /// Run the engine's work on the calling thread (tests).
@@ -183,8 +223,20 @@ impl DisksApp {
         let (home, uid, gid) = (format!("/home/{user}"), 1000, 1000);
         #[cfg(not(test))]
         let (home, (uid, gid)) = (iyakki_agent::scope::home_root(&user, std::path::Path::new("/var/lib/iyakki")).display().to_string(), iyakki_agent::disks::account_owner(&user, "/etc/passwd").unwrap_or_else(process_owner));
+        #[cfg(not(test))]
+        let crypt: Arc<dyn CryptRunner> = Arc::new(iyakki_agent::disks_helper::ProcRunner::real(&cx.services.clis.bin_dir()));
+        // the tests never start a program: the helpers are "not installed" unless a test sets its own runner
+        #[cfg(test)]
+        let crypt: Arc<dyn CryptRunner> = Arc::new(iyakki_agent::disks_helper::ProcRunner::new(Arc::new(iyakki_agent::disks_helper::FakeSys::default()), "/none", "/none"));
+        // exFAT, NTFS and resizing use the programs the person installed (the tests never start one)
+        #[cfg(not(test))]
+        engine.set_tools(Arc::new(iyakki_agent::disks_fmt::ProcTools::real(&cx.services.clis.bin_dir())));
         let mut a = DisksApp {
             engine,
+            crypt,
+            want_unlock: iyakki_agent::disksunlocktools::take_request(cx.services.dir(), &cx.session.user),
+            want_op: iyakki_agent::disksformattools::take_request(cx.services.dir(), &cx.session.user),
+            cancel_window: std::time::Duration::from_secs(iyakki_agent::disks_part::CANCEL_WINDOW_SECS),
             who: Actor { user, role: cx.session.role, uid, gid, home },
             snap: Snapshot::default(),
             loaded: false,
@@ -207,6 +259,7 @@ impl DisksApp {
             scan: None,
             seen: HashSet::new(),
             plan: Err(String::new()),
+            unlock_plan: Err(String::new()),
             poll_every: 60,
             inline,
             dirty: false,
@@ -268,6 +321,10 @@ impl DisksApp {
         self.plan = match self.part() {
             Some(p) => self.engine.plan_mount(&self.snap, &self.who, &p.name, &MountOpts { read_only: self.read_only, allow_exec: self.allow_exec }),
             None => Err(String::new()),
+        };
+        self.unlock_plan = match self.part() {
+            Some(p) if p.crypt.is_some() => self.engine.plan_unlock(&self.snap, &self.who, &p.name, &*self.crypt),
+            _ => Err(String::new()),
         };
         if !self.is_admin() {
             self.manager = false;
@@ -409,6 +466,17 @@ impl DisksApp {
         self.ticks = self.ticks.wrapping_add(1);
         self.poll_job();
         self.poll_scan();
+        if self.loaded && self.job.is_none() && matches!(self.modal, Modal::None) {
+            if let Some(name) = self.want_unlock.take() {
+                self.show_unlock_for(&name);
+            } else if let Some(req) = self.want_op.take() {
+                if self.is_admin() {
+                    self.show_op_for(&req);
+                } else {
+                    self.say("Only an administrator can change partitions.", false);
+                }
+            }
+        }
         if self.scan.is_none() && self.job.is_none() && self.ticks % self.poll_every.max(1) == 0 && self.engine.fingerprint() != self.finger {
             self.start_scan();
         }
@@ -461,6 +529,94 @@ impl DisksApp {
         self.run("Ejecting the drive", cx, move |d, a| d.eject(&who, &n, a));
     }
 
+    /// Choose partition `name` and open the password box for it (the assistant's `disks_unlock`).
+    fn show_unlock_for(&mut self, name: &str) {
+        let Some((i, j)) = self.snap.disks.iter().enumerate().find_map(|(i, d)| d.parts.iter().position(|p| p.name == name).map(|j| (i, j))) else {
+            self.say(format!("{name}: there is no such partition (the drive may have been unplugged)."), false);
+            return;
+        };
+        self.select(i);
+        self.select_part(j);
+        self.page = Page::Detail;
+        self.focus = Focus::Parts;
+        self.begin_unlock();
+    }
+
+    /// The Unlock button: check it can be done, then show the masked box.
+    pub(super) fn begin_unlock(&mut self) {
+        self.derive();
+        let Some(p) = self.part().cloned() else { return };
+        match &self.unlock_plan {
+            Ok(kind) => {
+                let mut field = TextField::new(&format!("type the {}", kind.secret_word()), true);
+                field.max = 128;
+                self.modal = Modal::Unlock(UnlockForm { part: p.name.clone(), title: p.title(), kind: *kind, field, error: String::new(), focus: 0 });
+            }
+            Err(e) if !e.is_empty() => {
+                let e = e.clone();
+                self.say(e, false);
+            }
+            Err(_) => self.say("Choose an encrypted partition first.", false),
+        }
+    }
+
+    /// Unlock: the typed text moves into a `Secret` (and is wiped from the box); the helper gets it through its pipe.
+    pub(super) fn submit_unlock(&mut self, cx: &AppCx) {
+        let Modal::Unlock(f) = &mut self.modal else { return };
+        if f.field.value.is_empty() {
+            f.error = format!("Type the {} first.", f.kind.secret_word());
+            return;
+        }
+        let secret = Secret::new(&f.field.value);
+        wipe_string(&mut f.field.value);
+        let (part, who, runner) = (f.part.clone(), self.who.clone(), self.crypt.clone());
+        self.modal = Modal::None;
+        self.run("Unlocking the drive", cx, move |d, a| {
+            let r = d.unlock(&who, &part, &secret, &*runner, a);
+            drop(secret);
+            r.map(|m| {
+                let mut t = format!("Opened at {} (read-only).", m.target);
+                for n in m.notes {
+                    t.push(' ');
+                    t.push_str(&n);
+                }
+                t
+            })
+        });
+    }
+
+    pub(super) fn cancel_unlock(&mut self) {
+        // dropping the form wipes the text
+        self.modal = Modal::None;
+    }
+
+    pub(super) fn can_lock(&self) -> bool {
+        self.part().is_some_and(|p| p.unlocked) && self.disk().is_some_and(|d| may_use(&self.who, d).is_ok())
+    }
+
+    pub(super) fn can_allow_writing(&self) -> bool {
+        self.part().is_some_and(|p| p.unlocked && p.mounted() && p.mounted_ro && p.crypt.as_ref().is_some_and(|c| c.kind != CryptKind::BitLocker)) && self.disk().is_some_and(|d| !d.read_only && may_use(&self.who, d).is_ok())
+    }
+
+    pub(super) fn do_lock(&mut self, cx: &AppCx) {
+        let Some(p) = self.part().filter(|p| p.unlocked).map(|p| p.name.clone()) else {
+            self.say("This partition is not unlocked.", false);
+            return;
+        };
+        let (who, runner) = (self.who.clone(), self.crypt.clone());
+        self.run("Locking the drive", cx, move |d, a| d.lock(&who, &p, &*runner, a));
+    }
+
+    pub(super) fn do_allow_writing(&mut self, cx: &AppCx) {
+        let Some(p) = self.part().map(|p| p.name.clone()) else { return };
+        if !self.can_allow_writing() {
+            self.say("Writing can be allowed only for an unlocked, read-only LUKS volume (a BitLocker volume always stays read-only here).", false);
+            return;
+        }
+        let who = self.who.clone();
+        self.run("Opening for writing", cx, move |d, a| d.allow_writing(&who, &p, a).map(|m| format!("Open for writing at {}. Lock it when you are done.", m.target)));
+    }
+
     /// There is no Files app: the folder's path goes to the clipboard, where the file picker's path box takes it.
     pub(super) fn do_open(&mut self) {
         let Some(mp) = self.part().and_then(|p| p.mountpoints.first().cloned()) else {
@@ -497,14 +653,18 @@ impl DisksApp {
             return;
         }
         let number = self.part().map_or(0, |p| p.number);
-        if matches!(kind, FormKind::Format | FormKind::Rename) && number == 0 {
+        if matches!(kind, FormKind::Format | FormKind::Rename | FormKind::Resize) && number == 0 {
             let m = if d.parts.is_empty() { "This drive has no partitions yet." } else { "This drive has a file system but no partition table. Make a new partition table first (it erases the drive), then add partitions." };
             self.say(m, false);
             return;
         }
         let mut f = Form { kind, number, size: TextField::new("empty = all free space (e.g. 8 GB, 500 MB)", false), label: TextField::new("label (optional)", false), fs: 0, table: Table::Gpt, focus: if kind == FormKind::Rename { 1 } else { 0 }, error: String::new() };
         f.size.max = 16;
-        f.label.max = 16;
+        f.label.max = 32;
+        if kind == FormKind::Resize {
+            f.size = TextField::new("new size, e.g. 8 GB or 500 MB", false);
+            f.size.max = 16;
+        }
         if kind == FormKind::Rename {
             if let Some(p) = self.part() {
                 let l = p.label.clone();
@@ -540,7 +700,7 @@ impl DisksApp {
                 let lines: Vec<String> = plan.render().lines().map(str::to_string).collect();
                 let mut field = TextField::new("type the drive's name or the last 4 of its serial", false);
                 field.max = 40;
-                self.modal = Modal::Review(Review { op, disk: name, lines, field, scroll: 0, error: String::new(), focus: 0 });
+                self.modal = Modal::Review(Review { op, disk: name, lines, field, scroll: 0, error: String::new(), focus: 0, armed: None });
             }
             Err(e) => match &mut self.modal {
                 Modal::Form(f) => f.error = e,
@@ -566,6 +726,11 @@ impl DisksApp {
                 None => return self.form_error("Choose a file system.".into()),
             },
             FormKind::Rename => PartOp::Rename { number, label },
+            FormKind::Resize => match parse_size(&size) {
+                Ok(Some(s)) => PartOp::Resize { number, size_bytes: s },
+                Ok(None) => return self.form_error("Type the new size, for example 8 GB.".into()),
+                Err(e) => return self.form_error(e),
+            },
         };
         self.review(op);
     }
@@ -579,26 +744,84 @@ impl DisksApp {
     /// The typed name matches (what the engine will check again, with the second confirmation).
     pub(super) fn review_typed_ok(&self) -> bool {
         match (&self.modal, self.disk()) {
-            (Modal::Review(r), Some(d)) => check_confirmation(d, &Confirm { typed: r.field.value.clone(), second: true }).is_ok(),
+            (Modal::Review(r), Some(d)) => check_confirmation_for(d, &r.op, &Confirm { typed: r.field.value.clone(), second: true }).is_ok(),
             _ => false,
         }
     }
 
-    /// The "Apply" button: the second confirmation. The engine checks everything again before it writes a byte.
+    /// The "Apply" button: the second confirmation. It starts the cancel window (a visible countdown); the change starts when it ends.
     pub(super) fn apply(&mut self, cx: &AppCx) {
         let Modal::Review(r) = &mut self.modal else { return };
+        if r.armed.is_some() {
+            return;
+        }
         let Some(d) = self.snap.disk(&r.disk).cloned() else {
             r.error = "The drive is gone.".into();
             return;
         };
-        let confirm = Confirm { typed: r.field.value.clone(), second: true };
-        if let Err(e) = check_confirmation(&d, &confirm) {
+        if let Err(e) = check_confirmation_for(&d, &r.op, &Confirm { typed: r.field.value.clone(), second: true }) {
             r.error = e;
             r.focus = 0;
             return;
         }
+        r.armed = Some(std::time::Instant::now());
+        if self.cancel_window.is_zero() {
+            self.fire(cx);
+        }
+    }
+
+    /// Seconds left of the cancel window, when it is running.
+    pub(super) fn countdown_left(&self) -> Option<u64> {
+        match &self.modal {
+            Modal::Review(r) => r.armed.map(|t| self.cancel_window.saturating_sub(t.elapsed()).as_secs_f32().ceil() as u64),
+            _ => None,
+        }
+    }
+
+    /// The window is over: the engine checks everything again before it writes a byte.
+    fn fire(&mut self, cx: &AppCx) {
+        let Modal::Review(r) = &mut self.modal else { return };
+        let Some(d) = self.snap.disk(&r.disk).cloned() else {
+            r.error = "The drive is gone.".into();
+            r.armed = None;
+            return;
+        };
+        let confirm = Confirm { typed: r.field.value.clone(), second: true };
+        if let Err(e) = check_confirmation_for(&d, &r.op, &confirm) {
+            r.error = e;
+            r.focus = 0;
+            r.armed = None;
+            return;
+        }
         let (who, op, name) = (self.who.clone(), r.op.clone(), r.disk.clone());
         self.run("Changing the drive", cx, move |e, a| e.apply_partition(&who, &name, &op, &confirm, a));
+    }
+
+    /// Heartbeat: the cancel window ended without a Cancel.
+    fn check_window(&mut self, cx: &AppCx) {
+        if let Modal::Review(r) = &self.modal {
+            if r.armed.is_some_and(|t| t.elapsed() >= self.cancel_window) && self.job.is_none() {
+                self.fire(cx);
+            }
+        }
+    }
+
+    /// The assistant's approved format or resize: select the partition and show the dry run, nothing more.
+    fn show_op_for(&mut self, req: &iyakki_agent::disksformattools::Req) {
+        match iyakki_agent::disksformattools::to_op(&self.snap, req) {
+            Ok((disk, op)) => {
+                let Some(i) = self.snap.disks.iter().position(|d| d.name == disk) else { return };
+                self.select(i);
+                if let Some(j) = self.snap.disks[i].parts.iter().position(|p| p.name == req.part()) {
+                    self.select_part(j);
+                }
+                self.page = Page::Detail;
+                self.focus = Focus::Parts;
+                self.manager = true;
+                self.review(op);
+            }
+            Err(e) => self.say(e, false),
+        }
     }
 
     // ----------------------------------------------------------------------------------------------------------------
@@ -631,6 +854,10 @@ impl DisksApp {
             }
             T_BACK => self.page = Page::List,
             T_DISMISS => self.msg = None,
+            T_UNLOCK => self.begin_unlock(),
+            T_DO_UNLOCK => self.submit_unlock(cx),
+            T_LOCK => self.do_lock(cx),
+            T_ALLOW_WRITE => self.do_allow_writing(cx),
             T_CLEAR_FILTER => {
                 self.filter.clear();
                 self.focus = Focus::Drives;
@@ -640,10 +867,16 @@ impl DisksApp {
             T_DELETE => self.begin_delete(),
             T_FORMAT => self.begin(FormKind::Format),
             T_RENAME => self.begin(FormKind::Rename),
-            T_RESIZE => self.say("Resizing is not supported yet: IYAKKI has no safe, in-house way to grow or shrink a file system, so it does not pretend. Copy the files off, delete the partition and add a new one.", false),
+            T_RESIZE => self.begin(FormKind::Resize),
             T_REREAD => self.begin_reread(cx),
             T_REVIEW => self.submit_form(),
-            T_CANCEL => self.modal = Modal::None,
+            T_CANCEL => {
+                let was_counting = self.countdown_left().is_some();
+                self.modal = Modal::None;
+                if was_counting {
+                    self.say("Cancelled. Nothing was changed.", true);
+                }
+            }
             T_APPLY => self.apply(cx),
             T_GPT | T_MBR => {
                 if let Modal::Form(f) = &mut self.modal {
@@ -671,6 +904,9 @@ impl DisksApp {
     }
 
     fn modal_key(&mut self, k: &Key, cx: &AppCx) {
+        if matches!(self.modal, Modal::Unlock(_)) {
+            return self.unlock_key(k, cx);
+        }
         let typed_ok = self.review_typed_ok();
         match &mut self.modal {
             Modal::Form(f) => match k {
@@ -680,13 +916,20 @@ impl DisksApp {
                 Key::Left | Key::Right if f.kind == FormKind::NewTable => f.table = if f.table == Table::Gpt { Table::Mbr } else { Table::Gpt },
                 Key::Ctrl('f') if matches!(f.kind, FormKind::Add | FormKind::Format) => f.fs = (f.fs + 1) % FS_CHOICES.len(),
                 other => {
-                    let field = if f.focus == 0 && f.kind == FormKind::Add { &mut f.size } else { &mut f.label };
+                    let field = if f.focus == 0 && matches!(f.kind, FormKind::Add | FormKind::Resize) { &mut f.size } else { &mut f.label };
                     if f.kind != FormKind::NewTable {
                         field.handle(other);
                     }
                     f.error.clear();
                 }
             },
+            Modal::Review(r) if r.armed.is_some() => {
+                // the countdown is running: Escape or Enter on Cancel stops it, nothing else does anything
+                if matches!(k, Key::Esc | Key::Enter) {
+                    self.modal = Modal::None;
+                    self.say("Cancelled. Nothing was changed.", true);
+                }
+            }
             Modal::Review(r) => match k {
                 Key::Esc => self.modal = Modal::None,
                 Key::Tab => r.focus = (r.focus + 1) % 3,
@@ -705,7 +948,25 @@ impl DisksApp {
                     }
                 }
             },
+            Modal::Unlock(_) => {}
             Modal::None => {}
+        }
+    }
+
+    fn unlock_key(&mut self, k: &Key, cx: &AppCx) {
+        let Modal::Unlock(f) = &mut self.modal else { return };
+        match k {
+            Key::Esc => self.cancel_unlock(),
+            Key::Tab => f.focus = (f.focus + 1) % 3,
+            Key::BackTab => f.focus = (f.focus + 2) % 3,
+            Key::Enter if f.focus == 2 => self.cancel_unlock(),
+            Key::Enter => self.submit_unlock(cx),
+            other => {
+                if f.focus == 0 {
+                    f.field.handle(other);
+                    f.error.clear();
+                }
+            }
         }
     }
 
@@ -791,6 +1052,9 @@ impl DisksApp {
                 }
             }
             Key::Char('m') => self.do_mount(cx),
+            Key::Char('k') => self.begin_unlock(),
+            Key::Char('l') if !self.manager => self.do_lock(cx),
+            Key::Char('w') => self.do_allow_writing(cx),
             Key::Char('u') => self.do_unmount(cx),
             Key::Char('e') => self.do_eject(cx, None),
             Key::Char('o') => self.do_open(),
@@ -802,6 +1066,7 @@ impl DisksApp {
             Key::Char('d') if self.manager => self.begin_delete(),
             Key::Char('f') if self.manager => self.begin(FormKind::Format),
             Key::Char('r') if self.manager => self.begin(FormKind::Rename),
+            Key::Char('z') if self.manager => self.begin(FormKind::Resize),
             Key::Char('l') if self.manager => self.begin_reread(cx),
             other => {
                 if !self.detail.key(other) {
@@ -816,6 +1081,13 @@ impl DisksApp {
         match ev {
             Event::Tick => {
                 self.tick();
+                self.check_window(cx);
+                if self.ticks % 15 == 0 && self.want_op.is_none() {
+                    self.want_op = iyakki_agent::disksformattools::take_request(cx.services.dir(), &cx.session.user);
+                }
+                if self.ticks % 15 == 0 && self.want_unlock.is_none() {
+                    self.want_unlock = iyakki_agent::disksunlocktools::take_request(cx.services.dir(), &cx.session.user);
+                }
                 return Flow::Stay;
             }
             Event::Key(k) => return self.key(k, cx),
@@ -823,6 +1095,10 @@ impl DisksApp {
                 match (&mut self.modal, self.focus) {
                     (Modal::Review(r), _) if r.focus == 0 => {
                         r.field.paste(t);
+                    }
+                    (Modal::Unlock(f), _) => {
+                        f.field.paste(t);
+                        f.error.clear();
                     }
                     (Modal::Form(f), _) => {
                         let field = if f.focus == 0 && f.kind == FormKind::Add { &mut f.size } else { &mut f.label };
@@ -850,6 +1126,12 @@ impl DisksApp {
                     if let Modal::Review(r) = &mut self.modal {
                         r.focus = 0;
                         r.field.click(*x);
+                    }
+                }
+                F_SECRET => {
+                    if let Modal::Unlock(f) = &mut self.modal {
+                        f.focus = 0;
+                        f.field.click(*x);
                     }
                 }
                 F_SIZE | F_LABEL => {
@@ -918,6 +1200,7 @@ impl App for DisksApp {
             "Up / Down · choose a drive (or a partition, after Right or Enter)",
             "Right or Enter · move to the drive's partitions · Left or Esc · back",
             "m · mount the chosen partition (read-only with the switch)   u · unmount   e · eject the whole drive safely",
+            "k · unlock an encrypted LUKS or BitLocker partition (type the password in the box; it opens read-only)   w · allow writing   l · lock it again",
             "o · copy the folder's path (paste it into a file picker)   p · properties   r · look at the drives again",
             "/ · filter the drives by name, size type, serial or label",
             "a · Advanced: change partitions (administrators). There: n new table, a add, d delete, f format, r rename, l read the table again",

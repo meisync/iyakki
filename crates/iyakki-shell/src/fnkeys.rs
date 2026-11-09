@@ -64,6 +64,7 @@ pub const KEYS: &[KeyInfo] = &[
     k(210, "KEY_PRINT", FnKey::Print, "Screenshot"),
     k(140, "KEY_CALC", FnKey::Calc, "Notice only (no calculator app)"),
     k(172, "KEY_HOMEPAGE", FnKey::Homepage, "Opens the browser (from the launcher)"),
+    k(152, "KEY_SCREENLOCK", FnKey::Lock, "Locks the screen (Super+L does the same)"),
 ];
 
 pub fn fn_key(code: u16) -> Option<FnKey> {

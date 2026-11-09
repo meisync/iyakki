@@ -1063,3 +1063,61 @@ fn the_staged_payload_is_labelled_with_the_signed_release_unless_flags_override(
     assert!(super::compcli::run(&args2).unwrap_err().contains("carries no release label"));
     let _ = std::fs::remove_dir_all(&w);
 }
+
+#[test]
+fn promote_copies_an_entry_to_another_channel_without_rebuilding_and_keeps_the_delta_references() {
+    let r = rig("promote", |_| {});
+    let w = dir("promote-work");
+    let v1 = bytes(41, 400_000);
+    let mut v2 = v1.clone();
+    v2[1000..5000].copy_from_slice(&bytes(42, 4000));
+    let (f1, f2) = (w.join("core-1"), w.join("core-2"));
+    std::fs::write(&f1, &v1).unwrap();
+    std::fs::write(&f2, &v2).unwrap();
+    let up = iyakki_proxy::https::UreqUpstream::default();
+    let pr = |ver: &str, f: &Path, from: Vec<PathBuf>| super::compcli::PublishReq { component: "core".into(), version: ver.into(), channel: "nightly".into(), file: f.to_path_buf(), requires: BTreeMap::new(), built_from: "main@abc".into(), install_path: String::new(), release: None, delta_from: from };
+    super::compcli::publish_component(&up, &r.base(), &r.ptoken, &pr("1100", &f1, vec![]), &mut |_| {}).unwrap();
+    super::compcli::publish_component(&up, &r.base(), &r.ptoken, &pr("1101", &f2, vec![f1.clone()]), &mut |_| {}).unwrap();
+    let doc = |r: &Rig| cm::verify(&r.srv.handle(&req("GET", "/v1/components.json", None, b""), "10.0.0.1").body, &r.srv.catalog_key()).unwrap();
+    assert!(doc(&r).latest("core", "stable").is_none());
+    let blobs_before = std::fs::read_dir(r.data().join("blobs")).unwrap().count();
+    let promote = |tok: &str, v: &str, from: &str, to: &str| r.srv.handle(&req("POST", &format!("/v1/components/promote?component=core&version={v}&from={from}&to={to}"), Some(tok), b""), "10.0.0.1");
+    // who may: not unknown tokens, not another publisher
+    assert_eq!(promote("nope", "1101", "nightly", "stable").status, 401);
+    assert_eq!(promote(&r.other, "1101", "nightly", "stable").status, 403);
+    // what is asked must exist
+    assert_eq!(promote(&r.ptoken, "9999", "nightly", "stable").status, 404);
+    assert_eq!(promote(&r.ptoken, "1101", "nightly", "nightly").status, 400);
+    assert_eq!(promote(&r.ptoken, "1101", "nightly", "bad/channel").status, 400);
+    let ok = promote(&r.ptoken, "1101", "nightly", "stable");
+    assert_eq!(ok.status, 200, "{}", ok.text());
+    let d = doc(&r);
+    let (n, s) = (d.entries.iter().find(|e| e.version == "1101" && e.channel == "nightly").unwrap(), d.latest("core", "stable").unwrap());
+    assert_eq!((s.version.as_str(), s.sha256.as_str(), s.size), ("1101", n.sha256.as_str(), n.size), "the same file");
+    assert_eq!(s.delta, n.delta, "the delta references are kept");
+    assert_eq!(s.delta.len(), 1);
+    assert_eq!((s.install_path.as_str(), s.built_from.as_str()), (n.install_path.as_str(), n.built_from.as_str()));
+    assert_eq!(std::fs::read_dir(r.data().join("blobs")).unwrap().count(), blobs_before, "nothing was uploaded or rebuilt");
+    assert!(d.entries.iter().any(|e| e.version == "1101" && e.channel == "nightly"), "the nightly entry stays");
+    // not twice, and versions only go up in the target channel
+    assert_eq!(promote(&r.ptoken, "1101", "nightly", "stable").status, 409);
+    let e = promote(&r.ptoken, "1100", "nightly", "stable");
+    assert_eq!(e.status, 409);
+    assert!(e.text().contains("not newer than 1101"), "{}", e.text());
+    // a withdrawn version cannot be promoted
+    assert_eq!(publish(&r, &r.ptoken, "core", "1102", "nightly", &bytes(43, 3000), &[], &[]).status, 200);
+    assert_eq!(r.srv.handle(&req("DELETE", "/v1/components/core/1102?channel=nightly&reason=bad", Some(&r.ptoken), b""), "10.0.0.1").status, 200);
+    let e = promote(ADMIN, "1102", "nightly", "stable");
+    assert_eq!(e.status, 409);
+    assert!(e.text().contains("withdrawn"), "{}", e.text());
+    // the command line, as the administrator
+    assert_eq!(publish(&r, &r.ptoken, "core", "1103", "nightly", &bytes(44, 3000), &[], &[]).status, 200);
+    let var = format!("IYAKKI_TEST_COMP_TOKEN_{}", r.addr.port());
+    std::env::set_var(&var, ADMIN);
+    let line: Vec<String> = ["component", "promote", "--server", &r.base(), "--token-env", &var, "--component", "core", "--version", "1103", "--from", "nightly", "--to", "stable"].iter().map(|s| s.to_string()).collect();
+    let said = super::compcli::run(&line).unwrap();
+    assert!(said.contains("promoted core 1103 from nightly to stable") && said.contains("list serial"), "{said}");
+    assert_eq!(doc(&r).latest("core", "stable").unwrap().version, "1103");
+    assert!(super::compcli::run(&line).unwrap_err().contains("409"), "again is refused");
+    let _ = std::fs::remove_dir_all(&w);
+}

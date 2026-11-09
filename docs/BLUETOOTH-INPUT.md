@@ -19,6 +19,13 @@ connected and hands its reports to the kernel, so the shell sees an ordinary inp
 * **Chat**: `bluetooth_list` (free), `bluetooth_connect`, `bluetooth_disconnect`, `bluetooth_forget` (each asks; forgetting
   asks every time). Pairing needs you at the device, so it is only in Settings.
 
+## Phones (tethering)
+
+A scanned phone is also pairable (same pairing, the person always confirms; a phone that shows no number is still asked). It is
+stored as kind `phone`, never opens input channels, and gets a "<name> · Tether" row: Enter uses its Bluetooth tethering as this
+computer's internet (BNEP over L2CAP PSM 15 into the TAP `iyakbt0`, own code, see docs/development/BLUETOOTH-TETHERING-PLAN.md).
+Chat: `bluetooth_tether_status`, `bluetooth_tether_connect`, `bluetooth_tether_disconnect`. Audio is still not supported.
+
 ## What it does not do
 
 * **No audio** (A2DP, headphones, speakers): the page says so next to such devices.

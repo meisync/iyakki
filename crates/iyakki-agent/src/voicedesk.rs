@@ -63,6 +63,11 @@ impl PauseDetector {
         v.auto_stop.then(|| PauseDetector::with_pause(v.pause_ms as u64))
     }
 
+    /// Talking has been confirmed at least once (a pause can now end it).
+    pub fn has_heard(&self) -> bool {
+        self.heard
+    }
+
     /// One look at the level at `now_ms`; true when the dictation should end now.
     pub fn tick(&mut self, level: f32, now_ms: u64) -> bool {
         let dt = if self.last_tick_ms == 0 { 100 } else { now_ms.saturating_sub(self.last_tick_ms).clamp(1, 500) };
@@ -462,8 +467,13 @@ pub fn record_cmd_for(base: &str, mic: Option<&Mic>) -> String {
     if args.is_empty() || args[0].rsplit('/').next() != Some("arecord") || crate::audioout::names_device(&args) {
         return base.to_string();
     }
-    let mut a = args;
-    a.insert(1, m.id.clone());
+    record_cmd_for_device(&args, &crate::micpcm::pcm_for(&m.id).unwrap_or_else(|| m.id.clone()))
+}
+
+/// `arecord` aimed at `device` (`plughw:0,0`, or the capture PCM with the format named, `iyakkimic0d0`, where the card needs it).
+pub fn record_cmd_for_device(args: &[String], device: &str) -> String {
+    let mut a = args.to_vec();
+    a.insert(1, device.to_string());
     a.insert(1, "-D".to_string());
     crate::audioout::join_command(&a)
 }

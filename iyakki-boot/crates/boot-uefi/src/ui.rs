@@ -57,6 +57,18 @@ pub fn read_key() -> Option<InputKey> {
     }
 }
 
+/// Keys already waiting in the firmware's input buffer: read and thrown away, their number returned. Called once before the loader
+/// starts listening, because a key pressed in the firmware's own startup picker (the Enter that chose this disk on a Mac) can still be
+/// in that buffer and would otherwise open the menu as if the person had asked for it. A key held down keeps producing strokes, so a
+/// person who wants the menu still gets it from the listening window that follows.
+pub fn drain_keys() -> usize {
+    let mut n = 0;
+    while read_key().is_some() && n < 64 {
+        n += 1;
+    }
+    n
+}
+
 /// Mouse state for the graphics menu: every pointer device the firmware offers (a PS/2 and a USB mouse can both exist).
 struct Mouse {
     devices: Vec<(*mut SimplePointer, u64, u64)>,

@@ -173,11 +173,9 @@ export sets `textLength`, so a browser lays the text out like the device even wi
   drawing the same list.
 * `iyakki_tile_host::export::to_json` writes `{"abi":1,"width":W,"height":H,"ops":[...]}` with colours as `#rrggbbaa`; `to_svg` writes a
   standalone SVG (clip paths, `data-hit-id` rectangles, `iyakki-image:HANDLE` image references).
-* **Browser side (later job).** A thin page loads the same `.wasm` with the browser's WebAssembly engine, implements the imports in about 150
-  lines of JavaScript (`measure_text` from the shared tables, `call` as a request to the connector, `random_u32` from the host-provided seed),
-  decodes the display list (or receives the JSON form from a runner on the device) and draws it on a canvas; pointer and key events go back as
-  event batches, hit ids come back as `Hit`. Whether the tile runs in the browser or on the device is then a deployment choice; with the OS in
-  the cloud the connector carries `call`. Not built in this slice.
+* **Browser side.** Built as "the tile stays on the server, the browser draws": see section 12. (The other design, the browser loading the
+  `.wasm` with its own WebAssembly engine, is not built; the display-list path below replaced it for the first slice because it keeps the
+  tile, its state and its permissions in one place.)
 
 ## 10. Push and hot reload (target, not built)
 
@@ -193,3 +191,65 @@ refusal, fuel and wall budgets, memory cap, capability scoping, determinism, out
 sandbox, and the renderer and exporters. **Not verified:** a Rust-built wasm32 tile (the `wasm32-unknown-unknown` target is not installed
 here; the example is hand-written WAT plus a native Rust twin that must draw the identical list), browser-side rendering, wiring into
 `iyakki-shell`, real fonts, images, state restore on reload.
+
+## 12. In a browser (built; Q18, F-WASM-10, F-WEB-04)
+
+Idea: the OS (and with it the tile) stays on the machine that serves the web UI (a desktop, or the cloud pod); the browser only draws and
+forwards input. Because the tile is deterministic and the browser draws the same display list with the same integer algorithm and the same
+text metrics, the tile looks the same as on the framebuffer shell.
+
+```
+browser (ui/tiles.js + ui/tilerender.js)             web service (webservice/tiles.rs)
+  pointer / key / text / wheel / resize   --JSON-->   POST /api/v1/tiles/<id>/events
+  canvas <-- tilerender.js <-- display list JSON <--  iyakki-tile-host sandbox (fuel, time, memory) -> display list
+                                                      service calls -> the person's tools (profile list, safe only, audited)
+```
+
+**Routes** (bearer token and origin check exactly like every other route; listed in the OpenAPI document):
+
+* `GET /api/v1/tiles` -> `{"tiles":[{"id","title","abi","width","height"}]}`: the tiles this person may open.
+* `POST /api/v1/tiles/<id>/events`, body at most 64 KiB, JSON `{"width","height","scale_pct","dark","reset","events":[...]}`. `width` and `height`
+  (1..4096) are used when the tile has to start (the first call, `reset: true`, or after the server dropped an idle one); `events` is at most 128
+  events, each an object with a `type`: `pointer_down|pointer_up {x,y,button}`, `pointer_move {x,y}`, `key {code,mods,down}`, `text {text}`,
+  `tick {dt_ms}`, `resize {w,h,scale_pct}`, `theme {dark,accent,background,foreground}`. Every number is a whole number inside the ABI's range
+  (a float, a string, a huge value is refused with 400 before anything runs). `Hit` is never accepted from the page: on a `pointer_up` the host
+  adds the `Hit` for the topmost hit region of the last picture, as `TileRunner::click` does on the device.
+* Reply `{"id","redraw","frame":{"abi","width","height","ops":[...]},"stats":{"fuel","bytes"}}`: `frame` is `export::to_json`, always the
+  current picture. A tile that is refused (wrong interface version, not a tile) answers 501, one that was stopped or crashed (fuel, time,
+  bad picture, trap) answers 502, each with the plain sentence of `TileError`; the crashed tile's state is dropped (the page offers Reload).
+  Other refusals: 400 bad JSON or event, 401, 403 (origin), 404 (no such tile), 413 (body or event count), 429 (`busy` when too many tiles
+  are open on the machine, `rate_limited`).
+
+**Per-person state.** One running tile per (person, tenant volume, tile), at most 32 on a machine, dropped after 30 idle minutes. A second
+person gets their own copy; nothing in a request names a person, the token does. The route has its own limit of 600 requests a minute per person
+instead of the general per-person limit (a page that follows the pointer would never fit in 60). The service's per-address limit (600 a minute
+from one address) still applies, so many people behind one address share it.
+
+**Authority.** A browser session adds none. The tile manifest (`caps`) says what the tile may ask for; the only service domain in this slice is
+`tools`: `call("tools", <tool name>, <args as JSON>)` with `tools.<name>` (or `tools.*`) in the manifest. What passes the manifest is then run
+as the person's own tool, if the service profile lists it, if it is a tool that does not ask first, and if the tool does not refuse it. A tool
+that would ask is **not run** from a tile and the tile is told "no" (the browser has no approval prompt for tile calls yet); that is a limit,
+not a bypass. Every call, refusal and denial is an audit line `tile.call`, `tile.refused` or `tile.denied` with the tile and tool name
+(never the arguments or the reply).
+
+**The renderer** (`ui/tilerender.js`, no library) is a line-by-line port of `iyakki-tile-host/src/render.rs` into integer JavaScript: rectangles,
+rounded rectangles, outlines, lines, clips, alpha, text in the same 5x7 font and the ABI's advance (`6 * size / 7`), images as grey boxes.
+It draws into an RGBA buffer and puts that on the canvas, enlarged by the whole-number device pixel ratio with nearest-neighbour so a dense
+screen stays crisp. The browser's own fonts are not used (that is what keeps the metrics identical); real font tables replace the 5x7 table on
+the device and in the page together, later. Faces are drawn alike for now (the reference renderer does not tell them apart).
+
+**The page** (`ui/tiles.js`, entry "Tiles"): Pointer Events for mouse, touch and pen (a move is sent only while pressed, only the newest);
+the keyboard to a hidden text box so input methods work (text is sent when a composition ends, nothing while it runs); the wheel as the
+Up/Down arrow keys (version 1 has no wheel event); the surface follows the page width and the device pixel ratio (`scale_pct`); one request
+in flight, events meanwhile are merged and sent together; a lost connection retries after 1, 2, 4, 8, 15 s with the same events; a refused or
+crashed tile shows the service's sentence and a Reload button (`reset: true`).
+
+**Chat.** `tiles_list` (safe, no approval) names the tiles and where to open them.
+
+**Verified:** the endpoint through the pipeline and over TLS on a loopback port (events to display list for the example tile, equal to the Rust
+twin's list), budgets (a spinning tile is stopped), refusals (wrong version, junk module), 40 hostile-JSON cases, sign-in and origin, per-person
+isolation, service calls scoped by manifest then by the person's tools, caps and rate limits; the JS renderer against the Rust reference renderer
+(pixel equality, tolerance 0, nine pictures incl. every printable ASCII character) and the page controller, both under node.
+**Not verified:** a real browser (a headless Firefox screenshot comparison is written and runs when Firefox can take screenshots here; see
+the delivering summary for whether it did), latency (not measured), touch on a real touch screen, input methods in a real browser, tiles
+with images (the grey box only), approvals for tile calls, an installed Rust-built tile (only the WAT example exists).

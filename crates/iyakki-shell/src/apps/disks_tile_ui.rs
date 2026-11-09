@@ -3,6 +3,7 @@
 //! outside the area it was given.
 
 use iyakki_agent::disks::{Disk, Fs, Part, Table, Transport};
+use iyakki_agent::disks_crypt::CryptKind;
 
 use super::disks_tile::*;
 use super::AppCx;
@@ -86,7 +87,12 @@ fn part_status(p: &Part) -> (String, [u8; 4]) {
         };
     }
     match p.fs {
-        Fs::Luks | Fs::BitLocker => ("Encrypted: unlock needs the key".into(), rgb(255, 140, 100)),
+        Fs::Luks | Fs::BitLocker => match &p.crypt {
+            Some(c) if c.problem.is_some() => (format!("{} (cannot be read: {})", c.headline(), c.problem.clone().unwrap_or_default()), rgb(255, 140, 100)),
+            Some(c) if p.unlocked => (format!("{} - unlocked, not open", c.headline()), WARN),
+            Some(c) => (format!("{} - locked: unlock needs the {}", c.headline(), c.kind.secret_word()), rgb(255, 140, 100)),
+            None => ("Encrypted: unlock needs the key".into(), rgb(255, 140, 100)),
+        },
         Fs::Apfs => ("Mac APFS: not readable here".into(), MUTED),
         Fs::Swap => (if p.swap_in_use { "swap, in use".into() } else { "swap space".into() }, MUTED),
         Fs::Empty => ("empty".into(), DIM),
@@ -156,6 +162,7 @@ impl DisksApp {
             Modal::None => {}
             Modal::Form(f) => self.draw_form(g, area, s, &f, tick),
             Modal::Review(r) => self.draw_review(g, area, s, &r, tick),
+            Modal::Unlock(f) => self.draw_unlock(g, area, s, &f, tick),
         }
     }
 
@@ -459,6 +466,13 @@ impl DisksApp {
             ("Properties".to_string(), Event::Tab(T_PROPS), self.part().is_some(), MUTED),
             ("Refresh".to_string(), Event::Tab(T_REFRESH), true, MUTED),
         ];
+        let mut items = items;
+        if self.part().is_some_and(|p| p.crypt.is_some()) {
+            let unlocked = self.part().is_some_and(|p| p.unlocked);
+            items.insert(0, ("Unlock…".to_string(), Event::Tab(T_UNLOCK), self.unlock_plan.is_ok(), WARN));
+            items.insert(1, ("Allow writing".to_string(), Event::Tab(T_ALLOW_WRITE), self.can_allow_writing(), WARN));
+            items.insert(2, ("Lock".to_string(), Event::Tab(T_LOCK), unlocked && self.can_lock(), ACCENT));
+        }
         y = Self::button_row(g, x, y, w, s, &items) + 10.0 * s;
         // the switches
         let mut bx = x;
@@ -478,6 +492,12 @@ impl DisksApp {
         y += 42.0 * s;
         // why a button is grey
         let why = match (&self.plan, self.part()) {
+            // an encrypted partition: say what unlocking needs (the helper program, a damaged header) instead of "choose Unlock"
+            (_, Some(p)) if p.crypt.is_some() && !p.unlocked => match &self.unlock_plan {
+                Err(e) if !e.is_empty() => Some(e.clone()),
+                Ok(k) => Some(format!("Encrypted ({}): choose Unlock and type the {}. It opens read-only first; Allow writing is a separate step.", k.name(), k.secret_word())),
+                _ => None,
+            },
             (Err(e), Some(_)) if !e.is_empty() => Some(e.clone()),
             _ => None,
         };
@@ -511,6 +531,9 @@ impl DisksApp {
         let mut rows: Vec<(&str, String)> = vec![("Device", p.path.clone()), ("File system", p.fs.name().to_string()), ("Label", if p.label.is_empty() { "none".into() } else { p.label.clone() }), ("ID", if p.uuid.is_empty() { "none".into() } else { p.uuid.clone() }), ("Size", human(p.size_bytes)), ("Starts at", human(p.start_bytes))];
         if !p.type_name.is_empty() {
             rows.push(("Type", p.type_name.clone()));
+        }
+        if let Some(c) = &p.crypt {
+            rows.push(("Encryption", format!("{} ({}){}", c.kind.name(), c.detail, if p.unlocked { ", unlocked" } else { ", locked" })));
         }
         rows.push(("Mounted at", if p.mounted() { p.mountpoints.join(", ") } else { "not open".into() }));
         if let Ok(plan) = &self.plan {
@@ -551,13 +574,13 @@ impl DisksApp {
             ("Delete".to_string(), Event::Tab(T_DELETE), has_part, ERR),
             ("Format".to_string(), Event::Tab(T_FORMAT), has_part, WARN),
             ("Rename".to_string(), Event::Tab(T_RENAME), has_part, ACCENT),
-            ("Resize (not yet)".to_string(), Event::Tab(T_RESIZE), true, MUTED),
+            ("Resize".to_string(), Event::Tab(T_RESIZE), has_part, WARN),
             ("Read table again".to_string(), Event::Tab(T_REREAD), true, MUTED),
             ("Done".to_string(), Event::Tab(T_ADV_CLOSE), true, CYAN),
         ];
         y = Self::button_row(g, x, y, w, s, &items) + 10.0 * s;
         let hint = match self.part() {
-            Some(p) => format!("Partition {} is chosen: Delete, Format and Rename act on it. Keys: n new table · a add · d delete · f format · r rename · l read the table again.", p.number),
+            Some(p) => format!("Partition {} is chosen: Delete, Format and Rename act on it. Keys: n new table · a add · d delete · f format · r rename · z resize · l read the table again.", p.number),
             None => "This drive has no partitions. Make a new table, then add partitions.".to_string(),
         };
         for l in g.wrap(12.0 * s, &hint, Face::Sans, w).into_iter().take(3) {
@@ -576,6 +599,7 @@ impl DisksApp {
             FormKind::Add => "Add a partition".to_string(),
             FormKind::Format => format!("Format partition {}", f.number),
             FormKind::Rename => format!("Rename partition {}", f.number),
+            FormKind::Resize => format!("Resize partition {}", f.number),
         };
         // as tall as its content needs (the chips wrap on a narrow screen), so nothing is drawn over the buttons
         let inner_w = (560.0 * s).min(area.w - 40.0 * s) - 52.0 * s;
@@ -598,6 +622,7 @@ impl DisksApp {
         let need = match f.kind {
             FormKind::NewTable => 62.0 + 26.0 + 24.0 + 48.0 + 54.0 + 10.0 + 70.0,
             FormKind::Rename => 62.0 + 26.0 + 64.0 + 70.0,
+            FormKind::Resize => 62.0 + 26.0 + 64.0 + 40.0 + 70.0,
             FormKind::Add => 62.0 + 26.0 + 64.0 + 64.0 + 24.0 + chip_rows * 40.0 + 8.0 + 70.0,
             FormKind::Format => 62.0 + 26.0 + 64.0 + 24.0 + chip_rows * 40.0 + 8.0 + 70.0,
         } * s
@@ -632,6 +657,15 @@ impl DisksApp {
                     y += 18.0 * s;
                 }
             }
+            FormKind::Resize => {
+                g.text(x, y, 14.0 * s, TEXT, "New size of the partition", Face::Bold);
+                f.size.render(g, R::new(x, y + 20.0 * s, w, 38.0 * s), true, s, blink, Face::Sans, F_SIZE);
+                y += 64.0 * s;
+                for l in g.wrap(13.0 * s, "The start stays where it is. The file system is checked and resized with it, and a shrink stops if the files would not fit. You see the plan next.", Face::Sans, w).into_iter().take(3) {
+                    g.text(x, y, 13.0 * s, MUTED, &l, Face::Sans);
+                    y += 18.0 * s;
+                }
+            }
             FormKind::Add | FormKind::Format | FormKind::Rename => {
                 if f.kind == FormKind::Add {
                     g.text(x, y, 14.0 * s, TEXT, "Size", Face::Bold);
@@ -655,8 +689,7 @@ impl DisksApp {
                             y += 40.0 * s;
                         }
                         let on = f.fs == i;
-                        let supported = fs.map_or(true, |f| f.unsupported().is_none());
-                        fx::toggle_chip(g, bx, y, s, label, on, if supported { ACCENT } else { MUTED });
+                        fx::toggle_chip(g, bx, y, s, label, on, ACCENT);
                         g.hit(R::new(bx, y, cw, 34.0 * s), Event::Tab(T_FS + i), label);
                         bx += cw + 8.0 * s;
                     }
@@ -672,6 +705,41 @@ impl DisksApp {
         }
         let by = p.y + p.h - 24.0 * s - 14.0 * s * 2.1;
         let b1 = g.button(x, by, 14.0 * s, "Review the plan", ACCENT, Event::Tab(T_REVIEW));
+        g.button(x + b1 + 10.0 * s, by, 14.0 * s, "Cancel", MUTED, Event::Tab(T_CANCEL));
+    }
+
+    fn draw_unlock(&mut self, g: &mut Gfx, area: R, s: f32, f: &UnlockForm, tick: u64) {
+        let inner_w = (520.0 * s).min(area.w - 40.0 * s) - 52.0 * s;
+        let note = "The password is typed here only. It goes straight to the unlock program and is wiped; it is never saved, logged or shown to the assistant. The drive opens read-only.";
+        let note_lines = g.wrap(13.0 * s, note, Face::Sans, inner_w).len().min(5) as f32;
+        let err_lines = if f.error.is_empty() { 0.0 } else { g.wrap(13.0 * s, &f.error, Face::Sans, inner_w).len().min(3) as f32 };
+        let need = (62.0 + 26.0 + 64.0 + 70.0) * s + (note_lines + err_lines) * 18.0 * s;
+        let p = fx::modal(g, area, s, 520.0 * s, need, WARN, false);
+        let mut y = fx::modal_title(g, p, s, &format!("Unlock {}", f.kind.family()), WARN) + 6.0 * s;
+        let x = p.x + 26.0 * s;
+        let w = p.w - 52.0 * s;
+        let name = g.fit(13.0 * s, &f.title, Face::Sans, w);
+        g.text(x, y, 13.0 * s, MUTED, &name, Face::Sans);
+        y += 26.0 * s;
+        let label = match f.kind {
+            CryptKind::BitLocker => "Password or 48-digit recovery key",
+            _ => "Password",
+        };
+        g.text(x, y, 14.0 * s, TEXT, label, Face::Bold);
+        f.field.render(g, R::new(x, y + 20.0 * s, w, 38.0 * s), f.focus == 0, s, super::blink(tick), Face::Sans, F_SECRET);
+        y += 64.0 * s;
+        for l in g.wrap(13.0 * s, note, Face::Sans, w).into_iter().take(5) {
+            g.text(x, y, 13.0 * s, MUTED, &l, Face::Sans);
+            y += 18.0 * s;
+        }
+        if !f.error.is_empty() {
+            for l in g.wrap(13.0 * s, &f.error, Face::Sans, w).into_iter().take(3) {
+                g.text(x, y, 13.0 * s, ERR, &l, Face::Sans);
+                y += 18.0 * s;
+            }
+        }
+        let by = p.y + p.h - 24.0 * s - 14.0 * s * 2.1;
+        let b1 = g.button(x, by, 14.0 * s, "Unlock", WARN, Event::Tab(T_DO_UNLOCK));
         g.button(x + b1 + 10.0 * s, by, 14.0 * s, "Cancel", MUTED, Event::Tab(T_CANCEL));
     }
 
@@ -714,11 +782,9 @@ impl DisksApp {
         }
         y = box_.y + box_.h + 10.0 * s;
         // the typed confirmation
-        let tail = disk.as_ref().map(|d| d.serial_tail()).unwrap_or_default();
-        let ask = match (&disk, tail.is_empty()) {
-            (Some(d), true) => format!("Type {} to confirm.", d.name),
-            (Some(d), false) => format!("Type {} or {tail} (the last 4 characters of the serial) to confirm.", d.name),
-            _ => "The drive is gone.".to_string(),
+        let ask = match &disk {
+            Some(d) => format!("Type one of these exactly to confirm: {}.", iyakki_agent::disks_part::accepted_names(d, &r.op).join(", ")),
+            None => "The drive is gone.".to_string(),
         };
         g.text(x, y, 13.0 * s, TEXT, &ask, Face::Bold);
         y += 20.0 * s;
@@ -730,8 +796,15 @@ impl DisksApp {
         }
         let by = p.y + p.h - 22.0 * s - 14.0 * s * 2.1;
         let ok = self.review_typed_ok();
+        if let Some(left) = self.countdown_left() {
+            // the cancel window: nothing has been written; Cancel (or Esc) stops it
+            let bw1 = g.button(x, by, 14.0 * s, "Cancel", ERR, Event::Tab(T_CANCEL));
+            g.rrect_outline(x - 3.0 * s, by - 3.0 * s, bw1 + 6.0 * s, 14.0 * s * 2.1 + 6.0 * s, 14.0 * s * 1.05 + 3.0 * s, 1.6 * s, TEXT);
+            g.text(x + bw1 + 16.0 * s, by + 6.0 * s, 15.0 * s, WARN, &format!("Starting in {left} s. Press Cancel or Esc to stop it."), Face::Bold);
+            return;
+        }
         let bw1 = g.button(x, by, 14.0 * s, "Cancel", MUTED, Event::Tab(T_CANCEL));
-        let (ax, label) = (x + bw1 + 12.0 * s, "Yes, change this drive");
+        let (ax, label) = (x + bw1 + 12.0 * s, "Change this drive");
         let aw = if ok { g.button(ax, by, 14.0 * s, label, ERR, Event::Tab(T_APPLY)) } else { g.button_off(ax, by, 14.0 * s, label) };
         let focus_r = match r.focus {
             1 => Some(R::new(x, by, bw1, 14.0 * s * 2.1)),

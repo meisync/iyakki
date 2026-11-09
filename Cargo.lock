@@ -2064,14 +2064,21 @@ dependencies = [
  "iyakki-link",
  "iyakki-mem",
  "iyakki-netscan",
+ "iyakki-pdf",
  "iyakki-proxy",
+ "iyakki-rtsp",
  "iyakki-schema",
  "iyakki-sec",
  "iyakki-stage1",
  "iyakki-storage",
+ "iyakki-tile-abi",
+ "iyakki-tile-example",
+ "iyakki-tile-host",
  "iyakki-usb",
  "iyakki-vfs",
+ "iyakki-volcrypt",
  "iyakki-vpn",
+ "iyakki-wake",
  "iyakki-wasm",
  "iyakki-web",
  "iyakki-webview",
@@ -2288,6 +2295,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "iyakki-pdf"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "iyakki-web",
+]
+
+[[package]]
 name = "iyakki-proxy"
 version = "0.1.0-alpha.1"
 dependencies = [
@@ -2337,10 +2351,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "iyakki-rtsp"
+version = "0.1.0-alpha.1"
+
+[[package]]
 name = "iyakki-schema"
 version = "0.1.0-alpha.1"
 dependencies = [
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "iyakki-sdk-emulator"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "iyakki-tile-abi",
+ "iyakki-tile-example",
+ "iyakki-tile-host",
  "serde_json",
 ]
 
@@ -2371,13 +2399,17 @@ dependencies = [
  "iyakki-js",
  "iyakki-ledger",
  "iyakki-netscan",
+ "iyakki-pdf",
  "iyakki-proxy",
  "iyakki-rfb",
+ "iyakki-rtsp",
  "iyakki-schema",
  "iyakki-sec",
  "iyakki-storage",
  "iyakki-tile-api",
  "iyakki-tile-calendar",
+ "iyakki-tile-cameras",
+ "iyakki-tile-remotefiles",
  "iyakki-tile-usage",
  "iyakki-uikit",
  "iyakki-usb",
@@ -2456,6 +2488,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "iyakki-tile-cameras"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "iyakki-tile-api",
+ "iyakki-uikit",
+ "tiny-skia",
+]
+
+[[package]]
 name = "iyakki-tile-example"
 version = "0.1.0-alpha.1"
 dependencies = [
@@ -2471,6 +2512,14 @@ dependencies = [
  "iyakki-tile-abi",
  "iyakki-vfs",
  "iyakki-wasm",
+]
+
+[[package]]
+name = "iyakki-tile-remotefiles"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "iyakki-tile-api",
+ "iyakki-uikit",
 ]
 
 [[package]]
@@ -2520,12 +2569,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "iyakki-volcrypt"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "aes",
+ "argon2",
+ "iyakki-sec",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+ "zeroize",
+]
+
+[[package]]
 name = "iyakki-vpn"
 version = "0.1.0-alpha.1"
 dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "iyakki-wake"
+version = "0.1.0-alpha.1"
 
 [[package]]
 name = "iyakki-wasm"

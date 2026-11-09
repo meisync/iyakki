@@ -6,6 +6,7 @@
 //! second, so a change acts at once. The idle clock, the logo and the panel are `saver.rs`, `shell_saver.rs` and `panel.rs`.
 
 use super::*;
+use iyakki_agent::lockscreen::{self, LockConfig};
 use iyakki_agent::screensaver::{self as ss, First, SaverConfig, Style};
 use iyakki_sec::policy::Role;
 
@@ -19,13 +20,17 @@ pub(super) enum SsRow {
     Dim,
     Battery,
     Preview,
+    /// Lock the screen by itself after idle minutes (the lock screen, `shell_lock.rs`).
+    AutoLock,
+    /// Lock the screen now.
+    LockNow,
     SiFirst,
     SiAfter,
     SiThen,
 }
 
-const PERSON_ROWS: [SsRow; 7] = [SsRow::First, SsRow::After, SsRow::Then, SsRow::Style, SsRow::Dim, SsRow::Battery, SsRow::Preview];
-const ADMIN_ROWS: [SsRow; 10] = [SsRow::First, SsRow::After, SsRow::Then, SsRow::Style, SsRow::Dim, SsRow::Battery, SsRow::Preview, SsRow::SiFirst, SsRow::SiAfter, SsRow::SiThen];
+const PERSON_ROWS: [SsRow; 9] = [SsRow::First, SsRow::After, SsRow::Then, SsRow::Style, SsRow::Dim, SsRow::Battery, SsRow::Preview, SsRow::AutoLock, SsRow::LockNow];
+const ADMIN_ROWS: [SsRow; 12] = [SsRow::First, SsRow::After, SsRow::Then, SsRow::Style, SsRow::Dim, SsRow::Battery, SsRow::Preview, SsRow::AutoLock, SsRow::LockNow, SsRow::SiFirst, SsRow::SiAfter, SsRow::SiThen];
 
 /// One placed card: where it is and where its buttons are.
 pub(super) struct SsBox {
@@ -76,7 +81,24 @@ impl SettingsApp {
             SsRow::Dim => (ss::DIM_CHOICES.iter().map(|p| if *p == 0 { "Do not dim".to_string() } else { format!("{p}%") }).collect(), pos(&ss::DIM_CHOICES, c.dim_pct)),
             SsRow::Battery => (vec!["On: half the time".to_string(), "Off".to_string()], Some(if c.battery_shorter { 0 } else { 1 })),
             SsRow::Preview => (vec!["Preview now".to_string()], None),
+            SsRow::AutoLock => (lockscreen::AUTO_CHOICES.iter().map(|m| minutes_label(*m, "Never")).collect(), None),
+            SsRow::LockNow => (vec!["Lock now".to_string()], None),
         }
+    }
+
+    /// The buttons of a card, with the choice that is saved for the cards that keep it elsewhere (the lock screen's).
+    pub(super) fn ss_chips_cx(row: SsRow, c: &SaverConfig, cx: &AppCx) -> (Vec<String>, Option<usize>) {
+        let (labels, chosen) = Self::ss_chips(row, c);
+        if row == SsRow::AutoLock {
+            let m = Self::lock_person(cx).auto_min;
+            return (labels, lockscreen::AUTO_CHOICES.iter().position(|x| *x == m));
+        }
+        (labels, chosen)
+    }
+
+    /// This person's automatic lock choice (a guest has none: no password).
+    fn lock_person(cx: &AppCx) -> LockConfig {
+        if Self::ss_guest(cx) { LockConfig::default() } else { LockConfig::load(Self::svc(cx).dir(), &cx.session.user) }
     }
 
     fn ss_text(row: SsRow) -> (&'static str, &'static str) {
@@ -88,6 +110,8 @@ impl SettingsApp {
             SsRow::Dim => ("Dim the screen first", "Laptops: lower the backlight to this level when the screen saver starts, or just before the screen goes off."),
             SsRow::Battery => ("Shorter on battery", "While running on the battery everything above happens after half the time."),
             SsRow::Preview => ("Try it now", "Shows the screen saver for 5 seconds, or until you press a key or move the mouse."),
+            SsRow::AutoLock => ("Lock the screen when idle", "Asks for your password after this long without a key, a click or a touch. You stay signed in, your apps and runs go on, your vault closes until you unlock. Music, video and a waiting approval hold it off. Never by default."),
+            SsRow::LockNow => ("Lock the screen now", "Same as Super+L or Lock on the Power menu. The screen also locks when the computer goes to sleep."),
             SsRow::SiFirst => ("Sign-in screen: when idle", "Before anyone has signed in (administrators). Starts as a screen saver after 5 minutes, off 10 minutes later."),
             SsRow::SiAfter => ("Sign-in screen: idle for", "How long the sign-in screen waits."),
             SsRow::SiThen => ("Sign-in screen: then turn off after", "More minutes after its screen saver started."),
@@ -98,6 +122,7 @@ impl SettingsApp {
     fn ss_enabled(row: SsRow, c: &SaverConfig, cx: &AppCx) -> bool {
         match row {
             SsRow::Preview => true,
+            SsRow::AutoLock | SsRow::LockNow => !Self::ss_guest(cx),
             SsRow::SiFirst | SsRow::SiAfter | SsRow::SiThen => cx.session.policy.manage_settings && (row != SsRow::SiThen || c.first == First::Saver),
             SsRow::Then => !Self::ss_guest(cx) && c.first == First::Saver,
             _ => !Self::ss_guest(cx),
@@ -117,7 +142,7 @@ impl SettingsApp {
         let mut chip_w: Vec<Vec<f32>> = Vec::new();
         for &row in rows {
             let c = Self::ss_cfg_for(row, cx);
-            let (labels, _) = Self::ss_chips(row, &c);
+            let (labels, _) = Self::ss_chips_cx(row, &c, cx);
             let ws: Vec<f32> = labels.iter().map(|l| g.text_width(size, l, Face::Bold) + 22.0 * s).collect();
             let (mut lines, mut x) = (1usize, 0.0f32);
             for w in &ws {
@@ -189,7 +214,7 @@ impl SettingsApp {
             for (n, l) in g.wrap(size, help, Face::Sans, text_w).iter().take(2).enumerate() {
                 g.text(b.card.x + 18.0 * s, b.card.y + 12.0 * s + 22.0 * s + n as f32 * 17.0 * s, size, DIM, l, Face::Sans);
             }
-            let (labels, chosen) = Self::ss_chips(row, &c);
+            let (labels, chosen) = Self::ss_chips_cx(row, &c, cx);
             for (i, r) in b.chips.iter().map(|(i, r)| (*i, r)) {
                 let on = chosen == Some(i);
                 let over = enabled && g.hovered(*r);
@@ -241,7 +266,7 @@ impl SettingsApp {
         let rows = Self::ss_rows(cx.session.policy.manage_settings);
         let Some(&r) = rows.get(row) else { return };
         let c = Self::ss_cfg_for(r, cx);
-        let (labels, chosen) = Self::ss_chips(r, &c);
+        let (labels, chosen) = Self::ss_chips_cx(r, &c, cx);
         let n = labels.len().max(1) as i32;
         let next = (chosen.map_or(-1, |i| i as i32) + delta).rem_euclid(n) as usize;
         self.ss_choose(r, next, cx);
@@ -250,6 +275,12 @@ impl SettingsApp {
     fn ss_choose(&mut self, row: SsRow, idx: usize, cx: &AppCx) {
         if row == SsRow::Preview {
             return self.ss_preview(cx);
+        }
+        if row == SsRow::LockNow {
+            return self.ss_lock_now(cx);
+        }
+        if row == SsRow::AutoLock {
+            return self.ss_auto_lock(idx, cx);
         }
         let mut c = Self::ss_cfg_for(row, cx);
         if !Self::ss_enabled(row, &c, cx) {
@@ -287,7 +318,7 @@ impl SettingsApp {
                 c.battery_shorter = idx == 0;
                 format!("shorter on battery: {}", if idx == 0 { "on" } else { "off" })
             }),
-            SsRow::Preview => None,
+            SsRow::Preview | SsRow::AutoLock | SsRow::LockNow => None,
         };
         let Some(what) = what else { return };
         let c = c.normalized();
@@ -300,6 +331,29 @@ impl SettingsApp {
         match saved {
             Ok(()) => {
                 cx.audit.record(&cx.session.user, if signin { "settings.screensaver.signin" } else { "settings.screensaver" }, &what);
+                self.ok("Saved.");
+            }
+            Err(e) => self.fail(e),
+        }
+    }
+
+    fn ss_lock_now(&mut self, cx: &AppCx) {
+        if Self::ss_guest(cx) {
+            return self.ok("Guests have no password to lock with.");
+        }
+        lockscreen::request(Self::svc(cx).dir(), &cx.session.user);
+        self.ok("Locking the screen.");
+    }
+
+    fn ss_auto_lock(&mut self, idx: usize, cx: &AppCx) {
+        if Self::ss_guest(cx) {
+            return self.ok("Guests have no password to lock with.");
+        }
+        let Some(&m) = lockscreen::AUTO_CHOICES.get(idx) else { return };
+        let c = LockConfig { auto_min: m };
+        match c.save(Self::svc(cx).dir(), &cx.session.user) {
+            Ok(()) => {
+                cx.audit.record(&cx.session.user, "settings.lockscreen", &format!("automatic lock: {}", c.describe()));
                 self.ok("Saved.");
             }
             Err(e) => self.fail(e),

@@ -1,6 +1,6 @@
 # Bluetooth tethering (use a phone's internet, share ours)
 
-Status: plan, 2026-11-05. Owner request: "also wifi and bluetooth tether".
+Status: plan, 2026-11-05; client side (use a phone's internet) built 2026-11-08, not yet tried with a real phone (see Status below). Owner request: "also wifi and bluetooth tether".
 
 ## Today
 
@@ -50,3 +50,58 @@ protocol (Ethernet frames over an L2CAP channel on PSM 0x000F with a short setup
 
 * Does the Mac mini's Bluetooth need the Apple firmware blob? (Firmware by button, the same way as for Wi-Fi.)
 * Do we accept phones that only offer NAP without a PIN, or always require the numeric confirmation? (Recommendation: always confirm.)
+
+## Status 2026-11-08: client side built (use a phone's internet), unverified on a real phone
+
+Owner decisions applied: BNEP in our own userspace code (no kernel `bnep`), the numeric confirmation is always asked for a phone, NAP (sharing ours)
+is **not** in this slice.
+
+### What is built
+
+* `iyakki-devctl::bnep`: pure BNEP codec (setup request and response with PANU 0x1115, NAP 0x1116, GN 0x1117 in the 2-, 4- and 16-byte forms, general and the
+  three compressed Ethernet forms, extension headers skipped, filter requests answered with success, unknown control messages answered with
+  "not understood", a setup request from the phone refused with code 4). Tests include every prefix of valid packets, every type/length byte pair and a
+  pseudo-random flood: no panic.
+* `iyakki-devctl::bt_pan`: the PANU session `run()` over the trait `PanLink` (fake phone in the tests: set-up, frames both ways, refusal, silence, hang-up,
+  hostile packets), the real link (the L2CAP socket of `bthid_sys::L2Sock`, asked for an MTU of 1691 before connecting, plus a TAP `iyakbt0` from
+  `/dev/net/tun`, one `poll` on both), the manager `tether()` (one connection, state Idle / Connecting / Connected / Failed(reason)), the DHCP client of
+  `Control::dhcp` on `iyakbt0` once the phone said yes, and the plain-language reasons (tethering off on the phone, the phone refused, the phone did not
+  answer, no controller, controller off, radio blocked by On/off, no valid address, low-energy-only controller).
+* Pairing a phone (`bthid_sys`): a scanned device of class phone is now pairable; the person always confirms (the number to compare, or "it shows no
+  number, pair anyway?" for a phone without display); the pairing is stored with kind `phone` and never starts an input-device session. Headphones and
+  speakers still say "not supported yet (no audio)".
+* Settings -> Bluetooth: a "<phone> · Tether" row for each paired phone (Enter connects or disconnects, `u` forgets, the failure reason on the row), a
+  **Tether** button, the **On/off**, **Power**, **Scan** and **Tether** buttons find their own row whatever is selected, a failed Power says why ("the radio is
+  blocked by On/off", "the controller gave no reason ..."), the stale "Pairing is not available yet" scan message is gone, and the scan asks the kernel to look
+  up the names of classic devices (the "confirm name" flag) and waits up to 6 s past its time for them, so the first scan shows names.
+* Settings -> Network -> Share internet -> Internet comes from: `iyakbt0` is listed as "Bluetooth (use a phone's tethering) iyakbt0 - has internet" like any
+  uplink once it has a default route; until then the "Bluetooth" entry says what is missing. The network set-up ignores `iyakbt0` like `iyakap0`
+  (`iyakki_devctl::BT_PAN_IFACE`, `iyakki-core::net::list_ifaces`), and sharing never offers it as the cable to share on.
+* Chat: `bluetooth_tether_status` (free), `bluetooth_tether_connect` and `bluetooth_tether_disconnect` (each asks; the card says the traffic counts against
+  the phone's data plan).
+
+### Not built
+
+NAP (phones using this computer), GN, the SDP record for NAP, automatic reconnect of the tether when the phone comes back, a status chip in the top bar.
+
+### Not verified (no real phone, no radio in the tests)
+
+The tests use a fake phone and a fake link. Nothing in this slice has been run against a real phone, a real `hci0`, `/dev/net/tun` or `udhcpc`. In particular
+unproven: that the L2CAP options call really gives MTU 1691 on the Lenovo's controller; that Android and iOS answer the PANU request with the NAP
+destination UUID as written (Android does in BlueZ's own client); the numeric comparison on the screen with a real phone; the name look-up of the scan on real
+controllers; the DHCP answer arriving through `iyakbt0`; the route of `iyakbt0` winning over other uplinks (it has no metric of its own; unplug the cable when
+testing).
+
+### Steps for the owner (Lenovo with a phone, as administrator on the machine)
+
+1. Update the Lenovo with this build. Settings -> Bluetooth: if the radio row says off, press **On/off**, then **Power**. Press **Scan (10 s)**; your phone should be
+   in the list **with its name** after the first scan (the phone must be on, unlocked, Bluetooth on, and "visible" in its Bluetooth screen).
+2. Select the phone and press Enter: "Does <phone> show NNNNNN?" appears; compare with the number on the phone, press Yes on both sides.
+3. Switch **Bluetooth tethering** on in the phone (Settings -> Network -> Hotspot and tethering).
+4. Settings -> Bluetooth: press **Tether** (or select "<phone> · Tether" and press Enter). The row goes connecting, then connected with an address
+   (`192.168.44.x` is what Android usually hands out). If it fails the row says why in plain words.
+5. Unplug the cable and the Wi-Fi to prove it: open Settings -> Network -> Share internet: "Internet comes from" lists `iyakbt0` as "has internet". Open a
+   web page; the phone's data counter moves.
+6. Chat: ask "connect to my phone's internet" (a card appears), "is the phone tethering on" (status), "disconnect the phone".
+7. If something fails, send the words the row shows plus `ls /sys/class/net`, `ip addr show iyakbt0` and `cat /run/udhcpc-iyakbt0.pid` (the session itself
+   writes no log line yet).

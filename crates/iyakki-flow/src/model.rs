@@ -597,10 +597,36 @@ pub enum TriggerKind {
     Event {
         name: String,
     },
-    /// Planned: needs an authenticated local endpoint.
+    /// An authenticated local HTTP endpoint that starts the flow (`/hooks/<path>/<token>` on the web service). `path` is the hook's
+    /// id (letters, digits, - and _); the secret token and the shared secret are never part of the flow (see `iyakki-agent::flows::webhook`).
     Webhook {
         path: String,
+        /// Allowed HTTP methods (empty: POST only).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        methods: Vec<String>,
+        /// Largest body taken, in bytes (0: the default of 16 KiB; never more than 64 KiB).
+        #[serde(default, skip_serializing_if = "is_zero_usize")]
+        max_body: usize,
+        /// Accepted content types: `json`, `form`, `text` (empty: json only).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        content_types: Vec<String>,
+        /// Calls a minute (0: the default of 30).
+        #[serde(default, skip_serializing_if = "is_zero_u32")]
+        rate_per_min: u32,
+        /// Requests must carry an HMAC-SHA256 signature of the body made with the hook's shared secret.
+        #[serde(default, skip_serializing_if = "is_false")]
+        signed: bool,
     },
+}
+
+fn is_zero_usize(n: &usize) -> bool {
+    *n == 0
+}
+fn is_zero_u32(n: &u32) -> bool {
+    *n == 0
+}
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 fn local_tz() -> String {
@@ -619,8 +645,12 @@ impl TriggerKind {
             TriggerKind::FileChange { .. } => "file change",
             TriggerKind::OnFailure { .. } => "on failure",
             TriggerKind::Event { .. } => "event",
-            TriggerKind::Webhook { .. } => "webhook (planned)",
+            TriggerKind::Webhook { .. } => "webhook",
         }
+    }
+    /// A webhook trigger with every setting at its default.
+    pub fn webhook(path: &str) -> TriggerKind {
+        TriggerKind::Webhook { path: path.into(), methods: vec![], max_body: 0, content_types: vec![], rate_per_min: 0, signed: false }
     }
     pub fn is_timed(&self) -> bool {
         matches!(self, TriggerKind::Cron { .. } | TriggerKind::Interval { .. } | TriggerKind::Once { .. })

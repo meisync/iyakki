@@ -57,7 +57,7 @@ pub enum LinkKind {
     Wifi,
     /// This computer as a Bluetooth network access point (phones connect to it). Not built yet.
     BluetoothNap,
-    /// This computer as a client of a paired phone's tethering (the uplink side). Not built yet.
+    /// This computer as a client of a paired phone's tethering (the uplink side): the interface `iyakbt0` of [`iyakki_devctl::bt_pan`].
     BluetoothPanu,
     Other,
 }

@@ -22,7 +22,7 @@ impl Shell {
     pub(super) fn handle_fn_event(&mut self, ev: &Event) -> bool {
         if let Event::Fn(key, down) = ev {
             // cloud mode: no Fn, volume, brightness or media key does anything (the power keys still do)
-            if self.cloud.fn_keys_off && !matches!(key, FnKey::Power | FnKey::Sleep) {
+            if self.cloud.fn_keys_off && !matches!(key, FnKey::Power | FnKey::Sleep | FnKey::Lock) {
                 return true;
             }
             // the power key again closes the card it opened
@@ -111,6 +111,7 @@ impl Shell {
                     self.start_shot();
                 }
             }
+            FnKey::Lock => self.lock_key(),
             FnKey::Calc => self.fn_notice("There is no calculator app yet"),
             FnKey::Homepage => {
                 let allowed = self.session.as_ref().is_some_and(|s| s.policy.allows_app(PApp::Browser));
@@ -222,17 +223,20 @@ impl Shell {
         self.stale = true;
     }
 
-    /// Lock: the shell has one lock, signing out (the screen asks for the password again and the vault is sealed).
+    /// Lock (`shell_lock.rs`): the screen asks for the password and the personal vault closes; the person stays signed in.
     pub(super) fn lock_now(&mut self, user: &str, detail: &str) {
         self.env.audit.record(user, "power.lock", detail);
-        self.sign_out();
+        // the screen locks and the person stays signed in; a guest has no password to lock with, so for them it signs out
+        if !self.lock_screen("power menu") {
+            self.sign_out();
+        }
         self.stale = true;
     }
 
-    /// Sleep: lock the session first (the shell has one lock, signing out, which also seals the vault), audit it, then suspend.
-    /// The call returns after the machine wakes, and the login screen is what is showing.
+    /// Sleep: lock the screen first (apps and runs go on; a guest, who has no password, is signed out), audit it, then suspend. The
+    /// call returns after the machine wakes, and the lock screen (or the sign-in screen) is what is showing.
     pub(super) fn sleep_now(&mut self, user: &str, detail: &str) {
-        if self.session.is_some() {
+        if self.session.is_some() && !self.lock_screen("sleep") {
             self.sign_out();
         }
         self.stale = true;

@@ -73,7 +73,7 @@ fn it_sleeps_once_at_the_chosen_time_and_the_wake_up_counts_as_input() {
     assert_eq!(slept(&host), 0, "not yet");
     run(&mut sh, &clock, 2 * MIN, 250);
     assert_eq!(slept(&host), 1, "after five minutes");
-    assert!(sh.session.is_none(), "the session was locked first (signed out)");
+    assert!(sh.session.is_some() && sh.is_locked(), "the screen was locked first (apps stay open)");
     run(&mut sh, &clock, 2 * MIN, 250);
     assert_eq!(slept(&host), 1, "the wake-up counted as input, so it does not fall asleep again at once");
 }

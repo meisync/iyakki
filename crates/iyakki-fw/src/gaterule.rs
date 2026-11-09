@@ -43,6 +43,12 @@ fn sources(reach: Reach, ipv6: bool) -> Vec<String> {
 /// The rule list with the gate rules as wanted for `ports` (TCP), and what changed as `(audit action, detail)`. Ports of 0 are ignored.
 /// Rules of the person stay untouched.
 pub fn plan(cfg: &Config, ports: &BTreeSet<u16>, reach: Reach, ipv6: bool) -> (Config, Vec<(String, String)>) {
+    plan_until(cfg, ports, reach, ipv6, 0)
+}
+
+/// [`plan`] with the rules ending at `expires` (Unix seconds; 0: they stay until the listener closes the port). The firewall engine
+/// stops enforcing a rule whose time has passed.
+pub fn plan_until(cfg: &Config, ports: &BTreeSet<u16>, reach: Reach, ipv6: bool, expires: i64) -> (Config, Vec<(String, String)>) {
     let mut out = cfg.clone();
     let mut changes = Vec::new();
     let mut kept: Vec<u32> = Vec::new();
@@ -51,12 +57,17 @@ pub fn plan(cfg: &Config, ports: &BTreeSet<u16>, reach: Reach, ipv6: bool) -> (C
         for v in sources(reach, ipv6) {
             if let Some(r) = out.rules.iter_mut().find(|r| is_gate(r) && r.value == v && r.proto == Proto::Tcp && r.ports == ps) {
                 r.enabled = true;
+                if r.expires != expires {
+                    r.expires = expires;
+                    changes.push(("cloudlisten.firewall.expiry".into(), format!("TCP {ps} from {v}: {}", if expires == 0 { "no end time".to_string() } else { format!("until {expires}") })));
+                }
                 kept.push(r.id);
             } else {
                 let mut r = Rule::new(Kind::Cidr, &v);
                 r.proto = Proto::Tcp;
                 r.ports = ps.clone();
                 r.comment = REASON_GATE.into();
+                r.expires = expires;
                 kept.push(out.add(r));
                 changes.push(("cloudlisten.firewall.allow".into(), format!("TCP {ps} from {v} ({REASON_GATE})")));
             }
@@ -82,11 +93,16 @@ pub fn render(base: &Config, ports: &BTreeSet<u16>, reach: Reach, ctx: &Ctx) -> 
 /// Apply [`plan`] to the engine without the 60-second question: it only opens TCP ports that a route the person configured needs, and
 /// it can never cut anybody off. Nothing is done while the person has a change waiting for Keep (`Err` says so, the caller can retry).
 pub fn sync(h: &Handle, ports: &BTreeSet<u16>, reach: Reach, who: &str) -> Result<Vec<(String, String)>, String> {
+    sync_until(h, ports, reach, who, 0)
+}
+
+/// [`sync`] with the opening ending at `expires` (Unix seconds; 0: no end time).
+pub fn sync_until(h: &Handle, ports: &BTreeSet<u16>, reach: Reach, who: &str, expires: i64) -> Result<Vec<(String, String)>, String> {
     let mut e = h.lock();
     if matches!(e.status(), Status::Pending { .. }) {
         return Err("a firewall change is waiting to be kept or undone; try again after that".into());
     }
-    let (new, changes) = plan(e.config(), ports, reach, e.ctx().ipv6);
+    let (new, changes) = plan_until(e.config(), ports, reach, e.ctx().ipv6, expires);
     if new == *e.config() {
         // nothing to change, but opening ports on a firewall that does not hold is still refused
         if !ports.is_empty() {
@@ -157,6 +173,17 @@ mod tests {
         assert!(!off.rules.iter().any(is_gate) && off.rules.iter().any(|r| r.comment == "mine"));
         assert!(!open(&off, "192.168.1.9", 9443));
         assert!(ch.len() == 6 && ch.iter().all(|c| c.0 == "cloudlisten.firewall.removed"));
+    }
+
+    #[test]
+    fn an_opening_can_end_at_a_time_and_the_end_time_is_updated_in_place() {
+        let (on, _) = plan_until(&Config::default(), &ports(&[8080]), Reach::LocalNetwork, true, 1_900_000_000);
+        assert!(on.rules.iter().filter(|r| is_gate(r)).all(|r| r.expires == 1_900_000_000));
+        let (same, ch) = plan_until(&on, &ports(&[8080]), Reach::LocalNetwork, true, 1_900_000_000);
+        assert!(ch.is_empty() && same == on);
+        let (longer, ch) = plan_until(&on, &ports(&[8080]), Reach::LocalNetwork, true, 0);
+        assert!(longer.rules.iter().filter(|r| is_gate(r)).all(|r| r.expires == 0) && ch.iter().all(|c| c.0 == "cloudlisten.firewall.expiry"), "{ch:?}");
+        assert_eq!(plan(&Config::default(), &ports(&[8080]), Reach::LocalNetwork, true).0.rules.iter().map(|r| r.expires).max(), Some(0), "plan keeps its old meaning");
     }
 
     #[test]

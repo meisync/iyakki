@@ -33,6 +33,11 @@ impl FirewallGate {
         FirewallGate::with_apply(reach, Box::new(|ports, reach| gaterule::sync(&Handle::Global, ports, reach, "cloud listen").map(|_| ())))
     }
 
+    /// The real firewall, the opening ending at `expires` (Unix seconds; 0: no end time). Used by the Domains page.
+    pub fn real_until(reach: Reach, expires: i64) -> FirewallGate {
+        FirewallGate::with_apply(reach, Box::new(move |ports, reach| gaterule::sync_until(&Handle::Global, ports, reach, "domains", expires).map(|_| ())))
+    }
+
     /// Drive a given engine (the firewall's own tests use a fake backend).
     pub fn on(handle: Handle, reach: Reach) -> FirewallGate {
         FirewallGate::with_apply(reach, Box::new(move |ports, reach| gaterule::sync(&handle, ports, reach, "cloud listen").map(|_| ())))

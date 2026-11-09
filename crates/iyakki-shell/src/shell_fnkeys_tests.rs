@@ -168,7 +168,7 @@ fn a_media_key_never_reaches_the_focused_app_or_the_web_page() {
         let (mut sh, _) = signed_in(tag);
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         sh.screen = Screen::App(Box::new(Rec(seen.clone())), pa);
-        for k in crate::fnkeys::KEYS.iter().map(|i| i.key).filter(|k| !matches!(k, FnKey::Power | FnKey::Sleep | FnKey::Print | FnKey::Homepage)) {
+        for k in crate::fnkeys::KEYS.iter().map(|i| i.key).filter(|k| !matches!(k, FnKey::Power | FnKey::Sleep | FnKey::Print | FnKey::Homepage | FnKey::Lock)) {
             press(&mut sh, k);
         }
         sh.handle(&Event::Key(Key::Char('v'))); // an ordinary key still arrives
@@ -209,7 +209,7 @@ fn the_fn_power_card_sleeps_on_s_only_when_possible() {
     press(&mut sh, FnKey::Power);
     sh.handle(&Event::Key(Key::Char('s')));
     assert_eq!(*host.slept.lock().unwrap(), 1);
-    assert!(sh.session.is_none(), "locked before sleeping");
+    assert!(sh.session.is_some() && sh.is_locked(), "locked (the apps stay open) before sleeping");
 }
 
 #[test]

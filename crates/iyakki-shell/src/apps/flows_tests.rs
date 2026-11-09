@@ -2204,3 +2204,60 @@ fn in_a_run_the_tooltip_says_the_state_the_time_and_the_error_and_the_corner_bad
     draw_m(&mut f, 1280, 720, (bx, by));
     assert!(f.app.tip.shown.as_deref().is_some_and(|t| t.contains("Call the site: Failed")), "{:?}", f.app.tip.shown);
 }
+
+#[test]
+fn the_webhook_panel_makes_a_hook_shows_its_address_once_and_switches_it_on_and_off() {
+    let mut f = fx("hook");
+    let id = open_flow(&mut f, two_steps());
+    click(&mut f, "Webhook (w)");
+    assert!(matches!(f.app.modal, Some(Modal::Webhook(_))));
+    let g = draw(&mut f);
+    assert!(has_hit(&g, "New (n)") && has_hit(&g, "Close (Esc)"));
+    // a signed hook keeps its secret in the vault: with the vault locked nothing is made and the panel says why
+    if !f.cx.services.user_vault_unlocked(&f.cx.session.user) {
+        key(&mut f, Key::Char('n'));
+        let Some(Modal::Webhook(p)) = &f.app.modal else { panic!("no panel") };
+        assert!(p.views.is_empty() && p.reveal.is_none() && p.note.contains("unlock your vault"), "{}", p.note);
+        assert!(f.env.store.get_draft(&id).unwrap().triggers.is_empty());
+    }
+    // a hook that is not signed: made off, with its address on screen for this panel only
+    key(&mut f, Key::Char('N'));
+    let Some(Modal::Webhook(p)) = &f.app.modal else { panic!("no panel") };
+    assert_eq!(p.views.len(), 1);
+    assert!(!p.views[0].enabled && !p.views[0].signed && p.note.contains("NOT signed"));
+    let rev = p.reveal.clone().expect("the address is shown");
+    assert!(rev.path.starts_with("/hooks/hk-") && rev.path.rsplit('/').next().unwrap().len() == 64);
+    let g = draw(&mut f);
+    assert!(has_hit(&g, "New address (r)") && has_hit(&g, "Switch on (o)"));
+    // switching on needs the flow published first
+    key(&mut f, Key::Char('o'));
+    let Some(Modal::Webhook(p)) = &f.app.modal else { panic!("no panel") };
+    assert!(!p.views[0].enabled && p.note.contains("publish the flow first"), "{}", p.note);
+    f.env.store.publish(&id, &PublishReq { by: "user:test", label: "", changelog: "x", approved_by: Some("user:test") }).unwrap();
+    key(&mut f, Key::Char('o'));
+    let Some(Modal::Webhook(p)) = &f.app.modal else { panic!("no panel") };
+    assert!(p.views[0].enabled);
+    // opening it to the public asks for y first, and anything else keeps it local
+    key(&mut f, Key::Char('p'));
+    let Some(Modal::Webhook(p)) = &f.app.modal else { panic!("no panel") };
+    assert!(p.ask_public && p.views[0].public_until == 0);
+    key(&mut f, Key::Char('x'));
+    key(&mut f, Key::Char('y'));
+    let Some(Modal::Webhook(p)) = &f.app.modal else { panic!("no panel") };
+    assert_eq!(p.views[0].public_until, 0, "y alone, without the question, does nothing");
+    key(&mut f, Key::Char('p'));
+    key(&mut f, Key::Char('y'));
+    let Some(Modal::Webhook(p)) = &f.app.modal else { panic!("no panel") };
+    assert!(p.views[0].public_until > 0);
+    key(&mut f, Key::Char('o'));
+    let Some(Modal::Webhook(p)) = &f.app.modal else { panic!("no panel") };
+    assert!(!p.views[0].enabled && p.views[0].public_until == 0, "off closes the public opening");
+    // closing forgets the address; reopening shows the hooks but not the token
+    key(&mut f, Key::Esc);
+    assert!(f.app.modal.is_none());
+    key(&mut f, Key::Char('w'));
+    let Some(Modal::Webhook(p)) = &f.app.modal else { panic!("no panel") };
+    assert!(p.reveal.is_none() && p.views.len() == 1);
+    let g = draw_at(&mut f, 800, 480);
+    assert!(has_hit(&g, "Close (Esc)"));
+}

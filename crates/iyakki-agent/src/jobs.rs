@@ -797,6 +797,13 @@ impl Jobs {
         out
     }
 
+    /// Whether the assistant was already told this job ended (a note at its turn, a wait or a stop). The pending-work ledger
+    /// uses it to wake the chat only for what the assistant has not seen.
+    pub fn agent_told(&self, owner: &str, id: &str) -> bool {
+        let _g = self.lock();
+        self.dir(owner, id).ok().and_then(|d| Self::read_meta(&d)).is_some_and(|m| m.announced_agent)
+    }
+
     /// The assistant already has this job's result (it waited for it or stopped it): no note is sent later.
     pub fn mark_announced(&self, owner: &str, id: &str, who: Channel) {
         let _g = self.lock();

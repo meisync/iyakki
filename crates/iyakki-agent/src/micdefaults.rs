@@ -261,6 +261,16 @@ pub fn run() {
     for l in step(Path::new("/proc"), Path::new("/var/lib/iyakki/sound-init"), &amixer).into_iter().chain(playback_step(Path::new("/proc"), Path::new("/var/lib/iyakki/sound-init"), &amixer)) {
         log::info!("{l}");
     }
+    // the capture formats, once per start: a card that offers S24_LE and S32_LE gets a capture PCM with the format named (micpcm.rs)
+    static FORMATS_LEARNED: std::sync::Once = std::sync::Once::new();
+    FORMATS_LEARNED.call_once(|| {
+        let prober = crate::soundprobe::Prober::capture_system();
+        let list = std::fs::read_to_string("/proc/asound/pcm").unwrap_or_default();
+        let probe = |c: u32, d: u32| prober.constraints(c, d).map(|k| k.formats);
+        for (c, d) in crate::micpcm::learn_cards(&list, &probe) {
+            log::info!("microphone: card {c} device {d}: recordings go through {} (its format is named)", crate::micpcm::pcm_name(c, d));
+        }
+    });
 }
 
 #[cfg(test)]

@@ -404,7 +404,7 @@ fn publish_rollback_apply_and_heal_policy_are_hard_ask_and_the_rest_ask_or_read(
     for n in ["flow_create", "flow_edit", "flow_run", "flow_cancel", "flow_publish", "flow_rollback", "flow_apply_to_runs", "flow_set_heal_policy", "flow_prune_history"] {
         assert_eq!(risk(n), Risk::Ask, "{n}");
     }
-    assert_eq!(d.len(), 17, "16 flow tools and flow_prune_history");
+    assert_eq!(d.len(), 23, "16 flow tools, flow_prune_history and the six webhook tools");
     assert!(d.iter().all(|x| is_flow_tool(&x.spec.name)));
     // no tools for an account without the app, and the wrapped chat never offers them without it
     let mut p = Role::User.template();
@@ -581,7 +581,7 @@ fn the_tools_are_wrapped_for_the_tile_chat_and_the_hard_ask_ones_are_never_appro
     }
     let open: SharedOpen = Arc::new(Mutex::new(Open::default()));
     let t = FlowTools::new(Arc::new(Inner), env.clone(), open.clone());
-    assert_eq!(t.defs().len(), 18, "17 flow tools and ask_form");
+    assert_eq!(t.defs().len(), 24, "23 flow tools (with the webhook tools) and ask_form");
     assert_eq!(t.call("something_else", &json!({})).unwrap(), "inner something_else");
     // with a flow open, `flow` may be left out
     call(&env, "flow_create", json!({"name": "Open one", "nodes": [{"id": "n", "kind": "notify", "config": {"title": "hi"}}]})).unwrap();

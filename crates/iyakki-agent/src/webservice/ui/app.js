@@ -155,8 +155,11 @@
       return stop;
     }
 
+    // run `fn` when the page is left (a page that holds a live connection or a listener on the window)
+    function onLeave(fn) { stoppers.push(fn); }
+
     function ctx() {
-      return { api, el, say, poll, me, doc, messageFor };
+      return { api, el, say, poll, onLeave, me, doc, messageFor };
     }
 
     function pagesAvailable() {

@@ -19,6 +19,7 @@ mod files;
 mod flowruns;
 mod gitread;
 mod handlers;
+pub mod hooks;
 mod schedules;
 pub mod openapi;
 pub mod real;
@@ -26,11 +27,14 @@ pub mod routes;
 pub mod runs;
 pub mod server;
 pub mod tenants;
+pub mod tiles;
 mod tenantcfg;
 pub mod tls;
 pub mod tools;
 pub mod ui;
 
+#[cfg(test)]
+mod hooks_tests;
 #[cfg(test)]
 mod tests;
 

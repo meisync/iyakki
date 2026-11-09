@@ -440,3 +440,234 @@ fn the_last_check_is_kept_for_settings_in_plain_words() {
     let _ = std::fs::remove_dir_all(&d);
     let _: BTreeMap<u8, u8> = BTreeMap::new();
 }
+
+// ------------------------------------------------------------------------------------------------ kernel and base, like boot
+
+/// A lean install: the running system image lives on the data volume under an id the original install gave it.
+const OLD_ROOT: &str = "0.1.0-alpha.0-aaaa1111";
+
+fn lean(r: &Rig) -> Vec<u8> {
+    let img = pseudo(2 << 20, 7);
+    put(&r.data, &format!("iyakki/root/{OLD_ROOT}/root.sfs"), &img);
+    std::fs::write(r.data.join("iyakki/root/current"), format!("{OLD_ROOT}\nsize={}\n", img.len())).unwrap();
+    img
+}
+
+fn root_dirs(r: &Rig) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(r.data.join("iyakki/root")).unwrap().flatten().filter(|e| e.path().is_dir()).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    v.sort();
+    v
+}
+
+fn current_ptr(r: &Rig) -> String {
+    std::fs::read_to_string(r.data.join("iyakki/root/current")).unwrap()
+}
+
+fn base_part(seed: u8) -> Part {
+    part("base", "1107.16", pseudo((2 << 20) + 4096, seed), "boot/root.sfs")
+}
+
+#[test]
+fn a_boot_only_update_reuses_the_running_system_image_instead_of_storing_it_again() {
+    // found on the Mac mini 2026-11-08: the same 419 MB image was stored a second time under a label-based id
+    let r = rig("reuse");
+    lean(&r);
+    let before = current_ptr(&r);
+    let p = prepared(&r, LABEL, vec![part("boot", "1107.15", pseudo(1 << 20, 21), "boot/initrd")]);
+    let done = apply_staged(&r.svc, &p, Some(&yes(&p))).unwrap();
+    assert!(done.text().contains("read back"), "{}", done.text());
+    assert_eq!(root_dirs(&r), vec![OLD_ROOT.to_string()], "no second copy of the image");
+    assert_eq!(current_ptr(&r), before, "the pointer stays");
+    assert_eq!(sha(&std::fs::read(r.boot.join("boot/initrd")).unwrap()), p.staged.items[0].step.sha256);
+    let rec = Installed::load(&r.data);
+    assert_eq!((rec.versions["boot"].as_str(), rec.how["boot"].as_str()), ("1107.15", "applied"));
+}
+
+#[test]
+fn a_base_goes_to_the_data_volume_through_the_same_engine_with_the_previous_root_kept() {
+    let r = rig("base");
+    let old = lean(&r);
+    let p = prepared(&r, "0.1.0-alpha.2", vec![base_part(33)]);
+    let seed = boot_hashes(&r);
+    let done = apply_staged(&r.svc, &p, Some(&yes(&p))).unwrap();
+    assert!(done.restart_machine && !done.restart_core);
+    assert!(done.text().contains("read back") && done.text().contains("Restart when you are ready"), "{}", done.text());
+    // the new image is a new root on the data volume, byte for byte the staged one; the old one is kept as the previous root
+    let dirs = root_dirs(&r);
+    assert_eq!(dirs.len(), 2, "{dirs:?}");
+    let new_id = dirs.iter().find(|d| *d != OLD_ROOT).unwrap().clone();
+    assert!(current_ptr(&r).starts_with(&new_id));
+    assert_eq!(sha(&std::fs::read(r.data.join("iyakki/root").join(&new_id).join("root.sfs")).unwrap()), p.staged.items[0].step.sha256);
+    assert!(std::fs::read_to_string(r.data.join("iyakki/root/previous")).unwrap().starts_with(OLD_ROOT));
+    assert_eq!(sha(&std::fs::read(r.data.join("iyakki/root").join(OLD_ROOT).join("root.sfs")).unwrap()), sha(&old));
+    // the boot partition's own files other than the label and the menu are as they were, and the menu keeps a way back that starts the previous root
+    assert!(!r.boot.join("boot/root.sfs").exists());
+    assert_eq!(boot_hashes(&r).iter().filter(|(p, _)| p == "boot/bzImage" || p == "boot/initrd").collect::<Vec<_>>(), seed.iter().filter(|(p, _)| p == "boot/bzImage" || p == "boot/initrd").collect::<Vec<_>>());
+    let cfg = std::fs::read_to_string(r.boot.join("boot/grub/grub.cfg")).unwrap();
+    assert!(cfg.contains(up::PREV_TITLE) && cfg.contains("iyakki.root=previous"));
+    let rec = Installed::load(&r.data);
+    assert_eq!((rec.versions["base"].as_str(), rec.how["base"].as_str(), rec.awaiting["base"].as_str()), ("1107.16", "applied", "boot-A"));
+}
+
+#[test]
+fn kernel_and_base_in_one_update_are_one_previous_version_and_both_recorded() {
+    let r = rig("both-boot");
+    lean(&r);
+    let p = prepared(&r, "0.1.0-alpha.2", vec![kernel_part(11), base_part(33)]);
+    let done = apply_staged(&r.svc, &p, Some(&yes(&p))).unwrap();
+    assert!(done.text().contains("kernel 6.12.5") && done.text().contains("base 1107.16"), "{}", done.text());
+    let rec = Installed::load(&r.data);
+    assert_eq!((rec.versions["kernel"].as_str(), rec.versions["base"].as_str()), ("6.12.5", "1107.16"));
+    assert_eq!(std::fs::read_dir(r.data.join("boot-prev")).unwrap().flatten().filter(|e| e.path().is_dir()).count(), 1, "one kept version for both");
+}
+
+#[test]
+fn a_base_that_reads_back_wrong_puts_the_previous_system_back_and_records_nothing() {
+    let mut r = rig("base-readback");
+    lean(&r);
+    let before = current_ptr(&r);
+    let p = prepared(&r, "0.1.0-alpha.2", vec![base_part(33)]);
+    let roots = r.data.join("iyakki/root");
+    r.svc.after_write = Some(Box::new(move || {
+        // a bit flips in the system image after the engine wrote it
+        for e in std::fs::read_dir(&roots).unwrap().flatten().filter(|e| e.path().is_dir() && e.file_name() != OLD_ROOT) {
+            let f = e.path().join("root.sfs");
+            let mut b = std::fs::read(&f).unwrap();
+            b[7000] ^= 1;
+            std::fs::write(&f, b).unwrap();
+        }
+    }));
+    let e = apply_staged(&r.svc, &p, Some(&yes(&p))).unwrap_err();
+    assert!(e.contains("reads back different") && e.contains("base") && e.contains("previous version was put back") && e.contains("Nothing is recorded"), "{e}");
+    assert_eq!(current_ptr(&r), before, "the old system image starts again");
+    assert!(!r.data.join(comps::INSTALLED_FILE).exists());
+    assert!(!r.boot.join(up::MARKER).exists());
+    // and the page can tell it is not a success
+    let res = classify("Lab store", "stable", &Err(e), false, 100);
+    assert_eq!(res.outcome, Outcome::RolledBack);
+}
+
+#[test]
+fn kernel_and_base_refusals_are_in_plain_words_and_write_nothing() {
+    // a base whose requires would break
+    let r = rig("base-requires");
+    lean(&r);
+    let mut p = prepared(&r, "0.1.0-alpha.2", vec![base_part(33)]);
+    p.plan.steps[0].requires.insert("kernel".into(), ">=7.0".into());
+    p.staged.items[0].step = p.plan.steps[0].clone();
+    let before = (boot_hashes(&r), tree(&r.data, &["component-work"]));
+    let e = apply_staged(&r.svc, &p, Some(&yes(&p))).unwrap_err();
+    assert_eq!(e, "not applied: base 1107.16 needs kernel >=7.0 but this device would have kernel 6.12.1: update kernel first");
+    assert_eq!((boot_hashes(&r), tree(&r.data, &["component-work"])), before);
+    // ... and the same base asks for the kernel that comes with it, which is fine
+    let mut ok = prepared(&r, "0.1.0-alpha.2", vec![kernel_part(11), base_part(33)]);
+    ok.plan.steps[1].requires.insert("kernel".into(), ">=6.12.5".into());
+    ok.staged.items[1].step = ok.plan.steps[1].clone();
+    assert!(apply_staged(&r.svc, &ok, Some(&yes(&ok))).is_ok());
+    // the data volume has no room for a system image: refused before anything is written
+    let mut r2 = rig("base-space");
+    lean(&r2);
+    r2.svc.centre = Centre::new(&r2.data, Box::new(DirBoot { root: r2.boot.clone(), capacity: 14 << 20, cluster: 4096 }), format!("VERSION={LABEL}\nVARIANT=pc\n"), false, None).with_data_free(2 << 20);
+    let p2 = prepared(&r2, "0.1.0-alpha.2", vec![base_part(33)]);
+    let before = (boot_hashes(&r2), root_dirs(&r2));
+    let e = apply_staged(&r2.svc, &p2, Some(&yes(&p2))).unwrap_err();
+    assert!(e.starts_with("not applied:") && e.contains("data partition"), "{e}");
+    assert_eq!((boot_hashes(&r2), root_dirs(&r2)), before);
+    // a part of another image variant than the one that runs
+    let r3 = rig("variant");
+    lean(&r3);
+    let mut v = prepared(&r3, LABEL, vec![kernel_part(11)]);
+    v.release.variant = "mac".into();
+    let before = boot_hashes(&r3);
+    let e = apply_staged(&r3.svc, &v, Some(&yes(&v))).unwrap_err();
+    assert!(e.starts_with("not applied:") && e.contains("mac") && e.contains("pc"), "{e}");
+    assert_eq!(boot_hashes(&r3), before);
+}
+
+// ------------------------------------------------------------------------------------------------ the result, the channel, the boot read
+
+#[test]
+fn an_apply_ends_as_applied_refused_or_failed_and_the_page_keeps_it_with_its_time() {
+    let ok: Result<Applied, String> = Ok(Applied { lines: vec!["Installed: kernel 6.12.5.".into()], restart_machine: true, restart_core: false, installed: Installed::default(), boot_message: None });
+    let a = classify("Lab", "stable", &ok, false, 1000);
+    assert_eq!((a.outcome, a.text.as_str()), (Outcome::Applied, "Installed: kernel 6.12.5."));
+    let r = classify("Lab", "beta", &Err("not applied: not enough room to prepare the update: 900 MB needed".into()), false, 1000);
+    assert_eq!((r.outcome, r.text.as_str()), (Outcome::Refused, "not enough room to prepare the update: 900 MB needed"));
+    let rb = classify("Lab", "stable", &Err("a check after writing failed (x); the previous version was put back: ok Nothing is recorded as installed.".into()), false, 1000);
+    assert_eq!(rb.outcome, Outcome::RolledBack);
+    let f = classify("Lab", "stable", &Err("the program patch failed (x); nothing is recorded as installed.".into()), false, 1000);
+    assert_eq!(f.outcome, Outcome::Failed);
+    let d = classify("Lab", "stable", &Err("the download of core failed: connection reset".into()), true, 1000);
+    assert!(d.outcome == Outcome::Failed && d.text.contains("Nothing was changed"), "{}", d.text);
+    // kept in the data folder until the next action
+    let dir = std::env::temp_dir().join(format!("iyakki-capply-{}-result", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(load_result(&dir).is_none());
+    save_result(&dir, &r);
+    assert_eq!(load_result(&dir), Some(r.clone()));
+    assert_eq!(result_headline(&r, 1000 + 125), "Last system component install (2 minutes ago): Refused, nothing was changed.");
+    assert_eq!(result_headline(&a, 1010), "Last system component install (just now): Installed.");
+    assert_eq!(ago_text(3 * 3600), "3 hours ago");
+    clear_result(&dir);
+    assert!(load_result(&dir).is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_result_is_one_inbox_notice_rewritten_by_the_next_install() {
+    let f = super::install::tests::fx("capply-notice");
+    let first = classify("Lab", "stable", &Err("not applied: an update to IYAKKI 1107 is already written and waits for a restart".into()), false, 100);
+    record_result(&f.svc, Some("alice"), &first);
+    let list = |f: &super::install::tests::Fx| f.svc.inbox.list("alice").into_iter().filter(|n| n.group == "keyed:component-apply").collect::<Vec<_>>();
+    let n = list(&f);
+    assert_eq!(n.len(), 1);
+    assert!(n[0].title.contains("refused") && n[0].body.contains("waits for a restart") && !n[0].read, "{:?}", n[0]);
+    assert_eq!(n[0].kind, crate::inbox::Kind::Warning);
+    assert_eq!(load_result(f.svc.dir()), Some(first), "the page reads the same result");
+    // the next install replaces it in place
+    let ok: Result<Applied, String> = Ok(Applied { lines: vec!["Installed: kernel 6.12.5.".into()], restart_machine: true, restart_core: false, installed: Installed::default(), boot_message: None });
+    record_result(&f.svc, Some("alice"), &classify("Lab", "stable", &ok, false, 200));
+    let n = list(&f);
+    assert_eq!(n.len(), 1, "never stacked");
+    assert!(n[0].title.contains("installed") && n[0].kind == crate::inbox::Kind::Info, "{:?}", n[0]);
+    // no signed-in person (a job without one): the page still has it, the inbox is untouched
+    record_result(&f.svc, None, &classify("Lab", "stable", &Err("boom".into()), false, 300));
+    assert_eq!(list(&f).len(), 1);
+    assert_eq!(load_result(f.svc.dir()).unwrap().outcome, Outcome::Failed);
+}
+
+#[test]
+fn the_boot_partition_is_read_at_boot_and_a_record_that_is_not_true_is_corrected() {
+    let r = rig("bootread");
+    // what the partition holds: the RAM disk of the rig, read-only
+    let hashes = boot_ramdisk_hashes(&r.svc.centre);
+    assert_eq!(hashes, vec![sha(&pseudo(2 << 20, 2))]);
+    let before = boot_hashes(&r);
+    // an earlier start has recorded the release label (as every start does)
+    correct_at_boot_with_disk(&r.data, &r.svc.facts, &r.svc.centre).unwrap();
+    // apply a boot part, restart (a new boot id), and the record agrees with the partition
+    let p = prepared(&r, LABEL, vec![part("boot", "1107.15", pseudo(1 << 20, 21), "boot/initrd")]);
+    apply_staged(&r.svc, &p, Some(&yes(&p))).unwrap();
+    let up_facts = Facts { boot_id: Some("boot-B".into()), ..r.svc.facts.clone() };
+    let n0 = correct_at_boot_with_disk(&r.data, &up_facts, &r.svc.centre).unwrap();
+    assert!(n0.is_empty(), "{n0:?}");
+    assert_eq!(Installed::load(&r.data).versions["boot"], "1107.15");
+    // the RAM disk on the partition is changed behind the record's back (a reinstall, a write that did not stick): the record follows
+    put(&r.boot, "boot/initrd", &pseudo(1 << 20, 99));
+    let notes = correct_at_boot_with_disk(&r.data, &up_facts, &r.svc.centre).unwrap();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    let rec = Installed::load(&r.data);
+    assert_eq!((rec.versions["boot"].as_str(), rec.how["boot"].as_str(), rec.shas.contains_key("boot")), (LABEL, "observed", false));
+    // a partition that is not this install's is not read, and nothing is judged
+    let mut r2 = rig("bootread2");
+    correct_at_boot_with_disk(&r2.data, &r2.svc.facts, &r2.svc.centre).unwrap();
+    let p2 = prepared(&r2, LABEL, vec![part("boot", "1107.15", pseudo(1 << 20, 21), "boot/initrd")]);
+    apply_staged(&r2.svc, &p2, Some(&yes(&p2))).unwrap();
+    r2.svc.centre = Centre::new(&r2.data, Box::new(NoBoot), format!("VERSION={LABEL}\nVARIANT=pc\n"), false, None);
+    assert!(boot_ramdisk_hashes(&r2.svc.centre).is_empty());
+    let up2 = Facts { boot_id: Some("boot-B".into()), ..r2.svc.facts.clone() };
+    assert!(correct_at_boot_with_disk(&r2.data, &up2, &r2.svc.centre).unwrap().is_empty());
+    assert_eq!(Installed::load(&r2.data).versions["boot"], "1107.15");
+    let _ = before;
+}

@@ -615,10 +615,9 @@ fn what_is_not_supported_says_so_and_changes_nothing() {
     let before = f.dev_bytes("sdc");
     let n = f.calls().len();
     for (op, needle) in [
-        (PartOp::Resize { number: 1, size_bytes: 1 << 20 }, "Resizing is not supported yet"),
-        (PartOp::Format { number: 1, fs: FormatFs::Exfat, label: "x".into() }, "exFAT is not supported yet"),
-        (PartOp::Format { number: 1, fs: FormatFs::Ntfs, label: "x".into() }, "NTFS is not supported yet"),
-        (PartOp::Add { size_bytes: None, fs: Some(FormatFs::Ntfs), label: "x".into() }, "NTFS is not supported yet"),
+        (PartOp::Resize { number: 1, size_bytes: 1 << 20 }, "cannot resize a FAT32 volume"),
+        (PartOp::Format { number: 1, fs: FormatFs::Exfat, label: "x".into() }, "which is not installed"),
+        (PartOp::Format { number: 1, fs: FormatFs::Ntfs, label: "x".into() }, "which is not installed"),
         (PartOp::Rename { number: 1, label: "waytoolonglabelname".into() }, "11 characters"),
         (PartOp::Rename { number: 1, label: "a.b".into() }, "letters, digits"),
         (PartOp::Delete { number: 7 }, "no partition 7"),
@@ -794,10 +793,9 @@ fn sign_out_closes_nothing_by_itself_and_says_a_drive_is_still_open_unless_the_s
 }
 
 #[test]
-fn encrypted_volumes_are_labelled_unsupported_and_the_person_is_told_what_to_use() {
+fn encrypted_volumes_never_mount_plainly_and_the_person_is_told_to_unlock_them() {
     for fs in [Fs::Luks, Fs::BitLocker] {
         let m = fs.never_mountable().expect("encrypted volumes never mount");
-        assert!(m.contains("Not supported in IYAKKI") && m.contains("unlock needs the key"), "{m}");
-        assert!(m.contains("tools"), "{m}");
+        assert!(m.contains("Unlock") && m.contains("unlock needs the key") && m.contains("read-only"), "{m}");
     }
 }

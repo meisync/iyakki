@@ -121,10 +121,26 @@ fn read_pointer(data: &Path, name: &str) -> Option<iyakki_stage1::Pointer> {
     iyakki_stage1::Pointer::parse(&std::fs::read_to_string(roots_dir(data).join(name)).ok()?)
 }
 
-/// Is this root already in place and the one that starts (an update repeated, or sent twice)?
+/// The root that already holds this system image, when there is one: the root `current` names, if its image is the payload's image (same
+/// id, or the same size and SHA-256 under another label). A boot-only update relabels the release but carries the same image, and the
+/// label is part of [`root_id`]; without this the same image would be stored a second time (419 MB) under a new id, and a patch layer made
+/// for the old id would stop matching.
+fn root_reusable(data: &Path, m: &Manifest) -> Option<String> {
+    let f = m.files.iter().find(|f| is_root_image(&f.path))?;
+    let cur = read_pointer(data, "current")?;
+    let img = roots_dir(data).join(&cur.id).join("root.sfs");
+    std::fs::metadata(&img).ok().filter(|md| md.is_file() && md.len() == f.size)?;
+    (root_id(m).as_deref() == Some(cur.id.as_str()) || files::sha256_file(&img).is_ok_and(|h| h == f.sha256)).then_some(cur.id)
+}
+
+/// The folder name the payload's system image lives under once installed: the existing root when it holds the same image, else the new id.
+pub fn root_target(data: &Path, m: &Manifest) -> Option<String> {
+    root_reusable(data, m).or_else(|| root_id(m))
+}
+
+/// Is this root already in place and the one that starts (an update repeated, or sent twice, or the same image under a new label)?
 fn root_in_place(data: &Path, m: &Manifest) -> bool {
-    let (Some(id), Some(f)) = (root_id(m), m.files.iter().find(|f| is_root_image(&f.path))) else { return false };
-    read_pointer(data, "current").is_some_and(|c| c.id == id) && std::fs::metadata(roots_dir(data).join(&id).join("root.sfs")).is_ok_and(|md| md.is_file() && md.len() == f.size)
+    root_reusable(data, m).is_some()
 }
 
 /// Write a small file so that a power cut leaves the old one or the new one: a temporary file, fsync, rename, fsync of the folder.

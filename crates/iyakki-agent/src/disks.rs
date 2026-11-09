@@ -200,8 +200,8 @@ impl Fs {
     /// Why a plain mount is not possible (encrypted, swap, nothing to mount), or `None`.
     pub fn never_mountable(self) -> Option<&'static str> {
         match self {
-            Fs::Luks => Some("Encrypted (LUKS): unlock needs the key. Not supported in IYAKKI: unlock it with the vendor or operating-system tools (for LUKS, cryptsetup on another Linux)."),
-            Fs::BitLocker => Some("Encrypted (BitLocker): unlock needs the key. Not supported in IYAKKI: unlock it in Windows with its own tools."),
+            Fs::Luks => Some("Encrypted (LUKS): unlock needs the key. Choose Unlock and type the password; it opens read-only first."),
+            Fs::BitLocker => Some("Encrypted (BitLocker): unlock needs the key. Choose Unlock and type the password or the 48-digit recovery key; it opens read-only first."),
             Fs::Apfs => Some("Mac APFS: shown, but Linux cannot read it safely. Use a Mac, or format it as exFAT there."),
             Fs::Swap => Some("Swap space: nothing to open."),
             Fs::Empty => Some("Empty: there is no file system on it."),
@@ -216,6 +216,8 @@ pub struct Probe {
     pub fs: Fs,
     pub label: String,
     pub uuid: String,
+    /// What the header of an encrypted container says (LUKS, BitLocker); `None` for everything else.
+    pub crypt: Option<crate::disks_crypt::CryptInfo>,
 }
 
 /// How many bytes from the start of a partition [`detect`] wants (Btrfs keeps its magic and label 64 KiB in).
@@ -242,13 +244,12 @@ fn le32(b: &[u8], off: usize) -> u32 {
 /// Read the file system of a partition from its first bytes (at least 4 KiB; more finds Btrfs). Pure.
 pub fn detect(b: &[u8]) -> Probe {
     let at = |off: usize, len: usize| b.get(off..off + len);
-    let p = |fs: Fs, label: String, uuid: String| Probe { fs, label, uuid };
+    let p = |fs: Fs, label: String, uuid: String| Probe { fs, label, uuid, crypt: None };
     // encrypted containers first: their header is not a file system
-    if at(0, 6) == Some(b"LUKS\xba\xbe") {
-        return p(Fs::Luks, String::new(), text(b, 168, 40));
-    }
-    if at(3, 8) == Some(b"-FVE-FS-") {
-        return p(Fs::BitLocker, String::new(), String::new());
+    if let Some(c) = crate::disks_crypt::parse(b) {
+        let fs = if c.kind == crate::disks_crypt::CryptKind::BitLocker { Fs::BitLocker } else { Fs::Luks };
+        let (label, uuid) = (c.label.clone(), c.uuid.clone());
+        return Probe { fs, label, uuid, crypt: Some(c) };
     }
     if at(32, 4) == Some(b"NXSB") {
         return p(Fs::Apfs, String::new(), hex_uuid(at(72, 16).unwrap_or(&[])));
@@ -378,6 +379,10 @@ pub struct Part {
     pub system: bool,
     /// What the partition table calls it ("Microsoft basic data", "EFI System").
     pub type_name: String,
+    /// The header of an encrypted container (LUKS, BitLocker), when that is what this is.
+    pub crypt: Option<crate::disks_crypt::CryptInfo>,
+    /// An encrypted container that is unlocked right now: its opened device `/dev/mapper/iyakki-<name>` exists.
+    pub unlocked: bool,
 }
 
 impl Part {
@@ -548,6 +553,12 @@ pub struct Mounted {
 pub struct Disks {
     pub env: Arc<dyn DiskEnv>,
     cache: Mutex<HashMap<String, (Instant, Probe)>>,
+    /// Wrong keys for encrypted volumes (`disks_unlock.rs`).
+    pub(crate) limiter: Mutex<crate::disks_crypt::Limiter>,
+    /// Tests: the clock of the wrong-key wait stands still at this many seconds (`u64::MAX` = the real clock).
+    pub(crate) held_clock: std::sync::atomic::AtomicU64,
+    /// The person-installed file system programs (exFAT, NTFS, resizing); none until [`Disks::set_tools`].
+    tools: Mutex<Arc<dyn crate::disks_fmt::FsTools>>,
 }
 
 const SKIP: [&str; 8] = ["loop", "ram", "zram", "dm-", "md", "fd", "nbd", "sr"];
@@ -637,7 +648,18 @@ pub fn dev_reader<'a>(env: &'a dyn DiskEnv, dev: &'a str, len: u64) -> impl Read
 
 impl Disks {
     pub fn new(env: Arc<dyn DiskEnv>) -> Disks {
-        Disks { env, cache: Mutex::new(HashMap::new()) }
+        Disks { env, cache: Mutex::new(HashMap::new()), limiter: Mutex::new(crate::disks_crypt::Limiter::default()), held_clock: std::sync::atomic::AtomicU64::new(u64::MAX), tools: Mutex::new(Arc::new(crate::disks_fmt::NoTools)) }
+    }
+
+    /// Where the exFAT, NTFS and resize programs come from.
+    pub fn set_tools(&self, t: Arc<dyn crate::disks_fmt::FsTools>) {
+        if let Ok(mut g) = self.tools.lock() {
+            *g = t;
+        }
+    }
+
+    pub fn tools(&self) -> Arc<dyn crate::disks_fmt::FsTools> {
+        self.tools.lock().map(|g| g.clone()).unwrap_or_else(|_| Arc::new(crate::disks_fmt::NoTools))
     }
 
     /// The engine on this machine.
@@ -678,7 +700,7 @@ impl Disks {
         let want = PROBE_BYTES.min(size as usize);
         let p = match self.env.dev_read(&format!("/dev/{dev_name}"), 0, want) {
             Ok(b) => detect(&b),
-            Err(_) => Probe { fs: Fs::Unknown, label: String::new(), uuid: String::new() },
+            Err(_) => Probe { fs: Fs::Unknown, label: String::new(), uuid: String::new(), crypt: None },
         };
         if let Ok(mut c) = self.cache.lock() {
             c.insert(key, (Instant::now(), p.clone()));
@@ -705,7 +727,7 @@ impl Disks {
                 }
             }
         }
-        let mount_of = |name: &str| -> Vec<&MountEnt> { mounts.iter().filter(|m| majmin.get(&m.majmin).is_some_and(|n| n == name) || (m.source.starts_with("/dev/") && base(&m.source) == name)).collect() };
+        let mount_of = |name: &str| -> Vec<&MountEnt> { mounts.iter().filter(|m| majmin.get(&m.majmin).is_some_and(|n| n == name) || (m.source.starts_with("/dev/") && (base(&m.source) == name || base(&m.source) == crate::disks_crypt::mapper_name(name)))).collect() };
         let swap_of = |name: &str| swaps.lines().skip(1).any(|l| l.split_whitespace().next().is_some_and(|d| base(d) == name));
         let mut disks = Vec::new();
         for n in names {
@@ -810,7 +832,8 @@ impl Disks {
         let space = mountpoints.first().and_then(|m| self.env.space(m));
         let mounted_ro = mounts.first().is_some_and(|m| m.opts.split(',').any(|o| o == "ro"));
         let system = mountpoints.iter().any(|m| is_system_mount(m)) || is_system_label(&probe.label) || swap;
-        Part { name: name.to_string(), path: format!("/dev/{name}"), number, start_bytes: start, size_bytes: size, fs: probe.fs, label: probe.label, uuid: probe.uuid, mountpoints, space, mounted_ro, swap_in_use: swap, system, type_name: type_name.unwrap_or_default() }
+        let unlocked = probe.crypt.is_some() && self.env.canonical(&crate::disks_crypt::mapper_path(name)).is_some();
+        Part { name: name.to_string(), path: format!("/dev/{name}"), number, start_bytes: start, size_bytes: size, fs: probe.fs, label: probe.label, uuid: probe.uuid, mountpoints, space, mounted_ro, swap_in_use: swap, system, type_name: type_name.unwrap_or_default(), crypt: probe.crypt, unlocked }
     }
 
     /// Which file systems this kernel can open: `/proc/filesystems`, or a module of that name in `modules.dep`.
@@ -861,6 +884,17 @@ impl Disks {
     /// What mounting `part` would do, or why it cannot be done. Pure: nothing is changed.
     pub fn plan_mount(&self, snap: &Snapshot, who: &Actor, part: &str, opts: &MountOpts) -> Result<MountPlan, String> {
         let (d, p) = snap.part(part).ok_or_else(|| format!("{part}: there is no such partition (the drive may have been unplugged)."))?;
+        // an unlocked container that is not open yet is planned as the file system inside it
+        if p.unlocked && !p.mounted() {
+            if let Some(inner) = self.inner_part(p) {
+                return self.plan_for(snap, who, d, &inner, opts);
+            }
+        }
+        self.plan_for(snap, who, d, p, opts)
+    }
+
+    /// [`plan_mount`](Self::plan_mount) for a partition already looked up (an unlocked volume is planned as the file system inside it).
+    pub(crate) fn plan_for(&self, snap: &Snapshot, who: &Actor, d: &Disk, p: &Part, opts: &MountOpts) -> Result<MountPlan, String> {
         may_use(who, d)?;
         if p.system {
             return Err(format!("{} is part of the running system and stays as it is.", p.name));
@@ -920,6 +954,11 @@ impl Disks {
         let snap = self.scan();
         let plan = self.plan_mount(&snap, who, part, opts).inspect_err(|e| audit("disks.mount.refused", &format!("part={part} why={e}")))?;
         let (d, p) = snap.part(part).ok_or("The drive is gone.")?;
+        self.run_mount(who, d, p, plan, audit)
+    }
+
+    /// The steps of a mount once it is planned (shared with unlocked volumes).
+    pub(crate) fn run_mount(&self, who: &Actor, d: &Disk, p: &Part, plan: MountPlan, audit: AuditFn) -> Result<Mounted, String> {
         let (fs, ident) = (p.fs, format!("{} part={} fs={} ro={} exec={}", d.audit_id(), p.name, p.fs.name(), plan.flags.rdonly, !plan.flags.noexec));
         self.env.make_dir(&plan.target).map_err(|e| format!("Could not create the folder {}: {e}", plan.target))?;
         if who.uid != 0 {
@@ -1001,7 +1040,7 @@ impl Disks {
     // -----------------------------------------------------------------------------------------------------------------
 
     /// A person with the User role closes only what is open in their own `media` folder.
-    fn own_mounts_only(who: &Actor, p: &Part) -> Result<(), String> {
+    pub(crate) fn own_mounts_only(who: &Actor, p: &Part) -> Result<(), String> {
         let mine = media_dir(&who.home) + "/";
         if who.role == Role::User && p.mountpoints.iter().any(|m| is_media_mount(m) && !m.starts_with(&mine)) {
             return Err(format!("{} is open in another person's folder. Only that person or an administrator can close it.", p.name));
@@ -1037,7 +1076,7 @@ impl Disks {
         if failed.is_empty() { None } else { Some(format!("Some drives could not be closed at sign-out and stay open: {}", failed.join(" "))) }
     }
 
-    fn unmount_part(&self, d: &Disk, p: &Part, audit: AuditFn) -> Result<(), String> {
+    pub(crate) fn unmount_part(&self, d: &Disk, p: &Part, audit: AuditFn) -> Result<(), String> {
         for mp in &p.mountpoints {
             if is_system_mount(mp) {
                 return Err(format!("{mp} is part of the running system and stays mounted."));
@@ -1088,6 +1127,11 @@ impl Disks {
         if d.system {
             let m = format!("{} {}: it cannot be ejected.", d.name, d.system_why);
             audit("disks.eject.refused", &format!("{} why=system disk", d.audit_id()));
+            return Err(m);
+        }
+        if let Some(p) = d.parts.iter().find(|p| p.unlocked) {
+            let m = format!("{} is unlocked. Lock it first (the Lock button), then eject the drive.", p.title());
+            audit("disks.eject.refused", &format!("{} why=unlocked volume {}", d.audit_id(), p.name));
             return Err(m);
         }
         for p in d.parts.iter().filter(|p| p.mounted()) {

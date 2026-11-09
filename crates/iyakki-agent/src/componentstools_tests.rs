@@ -64,7 +64,7 @@ fn it_is_a_safe_read_only_tool_that_asks_nobody_and_installs_nothing() {
     let d = defs.iter().find(|d| d.spec.name == "components_status").unwrap();
     assert_eq!(d.risk, Risk::Safe);
     assert!(d.spec.description.contains("never downloads or installs"));
-    assert_eq!(defs.len(), 2, "the status and the apply");
+    assert_eq!(defs.len(), 3, "the status, the apply and the channel choice");
     assert!(t.preview("components_status", &serde_json::json!({})).is_none() && t.refusal("components_status", &serde_json::json!({})).is_none());
     assert!(t.approved_always("components_status") && !t.pre_approved("components_status"));
     assert!(PROMPT_RULE.contains("never downloads or installs"));
@@ -172,4 +172,37 @@ fn an_older_list_than_the_one_seen_before_is_refused() {
     let t = ComponentsTools::new(Arc::new(crate::assign::tests_support::NoTools), f);
     let out = t.call("components_status", &serde_json::json!({})).unwrap();
     assert!(out.contains("sent an older component list"), "{out}");
+}
+
+#[test]
+fn the_channel_is_the_computers_not_always_stable_and_choosing_it_asks() {
+    let (t, _) = rig(true);
+    let defs = t.defs();
+    let d = defs.iter().find(|d| d.spec.name == "components_channel_set").unwrap();
+    assert_eq!(d.risk, Risk::Ask);
+    assert!(!t.approved_always("components_channel_set") && !t.pre_approved("components_channel_set"));
+    assert!(t.refusal("components_channel_set", &serde_json::json!({"channel": "weekly"})).unwrap().contains("stable, beta or nightly"));
+    assert!(t.refusal("components_channel_set", &serde_json::json!({"channel": "beta"})).is_none());
+    // the fake cannot keep a choice: said plainly, nothing pretended
+    assert!(t.call("components_channel_set", &serde_json::json!({"channel": "beta"})).unwrap_err().contains("not available"));
+    // the status names the channel it looked at
+    assert!(t.call("components_status", &serde_json::json!({})).unwrap().contains("Channel on this computer: stable."));
+}
+
+#[test]
+fn the_real_backend_keeps_the_channel_and_asks_for_it_when_no_channel_is_named() {
+    use crate::store::compapply::{channel, channel_sentence, next_channel, set_channel};
+    let d = std::env::temp_dir().join(format!("iyakki-comp-channel-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    assert_eq!(channel(&d), "stable");
+    set_channel(&d, "nightly").unwrap();
+    assert_eq!(channel(&d), "nightly", "persisted");
+    assert!(set_channel(&d, "weekly").unwrap_err().contains("stable, beta or nightly"));
+    assert_eq!(channel(&d), "nightly", "a refused choice changes nothing");
+    std::fs::write(d.join(crate::store::compapply::CHANNEL_FILE), "Bad Channel\n").unwrap();
+    assert_eq!(channel(&d), "stable", "a damaged file reads as the default");
+    assert_eq!((next_channel("stable"), next_channel("beta"), next_channel("nightly"), next_channel("x")), ("beta", "nightly", "stable", "stable"));
+    assert!(channel_sentence("beta").contains("beta") && channel_sentence("nightly").contains("newest"));
+    let _ = std::fs::remove_dir_all(&d);
 }

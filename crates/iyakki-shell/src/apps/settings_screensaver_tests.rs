@@ -139,7 +139,7 @@ fn the_keyboard_walks_the_cards_and_takes_the_next_or_previous_choice() {
     for _ in 0..20 {
         press(&mut a, &cx, Key::Down);
     }
-    assert_eq!(a.sel(), 6, "the last card of a person's page (Preview)");
+    assert_eq!(a.sel(), 8, "the last card of a person's page (Lock the screen now)");
     press(&mut a, &cx, Key::Home);
     assert_eq!(a.sel(), 0);
     press(&mut a, &cx, Key::Up);
@@ -195,21 +195,21 @@ fn a_guest_uses_the_standard_choices_and_changes_nothing() {
 fn only_an_administrator_sees_and_changes_the_sign_in_screen() {
     let user = as_role(admin("ss-si-user"), "amy", Role::User);
     let mut ua = page(&user);
-    assert_eq!(SettingsApp::ss_len(&user), 7);
+    assert_eq!(SettingsApp::ss_len(&user), 9);
     let g = draw(&mut ua, &user, 1920, 1080);
-    assert!(!g.hits.iter().any(|h| matches!(h.ev, Event::Sub(r, _) if r >= 7)));
-    ua.handle(&Event::Sub(7, Key::Char('b')), &user); // a stray event for a card that is not there
+    assert!(!g.hits.iter().any(|h| matches!(h.ev, Event::Sub(r, _) if r >= 9)));
+    ua.handle(&Event::Sub(9, Key::Char('b')), &user); // a stray event for a card that is not there
     assert_eq!(SettingsApp::ss_signin(&user), SaverConfig::signin_default());
 
     let cx = admin("ss-si-admin");
     let mut a = page(&cx);
-    assert_eq!(SettingsApp::ss_len(&cx), 10);
+    assert_eq!(SettingsApp::ss_len(&cx), 12);
     assert_eq!(SettingsApp::ss_signin(&cx), SaverConfig::signin_default(), "5 minutes, then off 10 minutes later");
-    click(&mut a, &cx, 8, 1); // sign-in screen: idle for 1 min
+    click(&mut a, &cx, 10, 1); // sign-in screen: idle for 1 min
     assert_eq!(SettingsApp::ss_signin(&cx).after_min, 1);
-    click(&mut a, &cx, 9, 2); // then off after 5 min
+    click(&mut a, &cx, 11, 2); // then off after 5 min
     assert_eq!(SettingsApp::ss_signin(&cx).then_off_min, 5);
-    click(&mut a, &cx, 7, 2); // sign-in screen goes off at once
+    click(&mut a, &cx, 9, 2); // sign-in screen goes off at once
     assert_eq!(SettingsApp::ss_signin(&cx).first, First::Off);
     assert_eq!(mine(&cx), SaverConfig::default(), "the administrator's own choices are separate");
     // the machine's settings file holds it
@@ -325,4 +325,39 @@ fn pictures() {
         a.render(&mut g, R::new(0.0, 0.0, w as f32, h as f32), s, &cx, 0);
         g.save_png(&dir.join(format!("settings-screensaver-{w}x{h}.png"))).expect("png");
     }
+}
+
+#[test]
+fn the_lock_cards_keep_the_automatic_lock_per_person_and_ask_the_shell_to_lock_now() {
+    use iyakki_agent::lockscreen::{self, LockConfig};
+    let cx = admin("ss-lock");
+    let (dir, user) = (cx.services.dir().to_path_buf(), cx.session.user.clone());
+    let mut a = page(&cx);
+    assert_eq!(LockConfig::load(&dir, &user).auto_min, 0, "never by itself until chosen");
+    click(&mut a, &cx, 7, 3); // 15 min
+    assert_eq!(LockConfig::load(&dir, &user).auto_min, 15);
+    assert_eq!(SettingsApp::ss_chips_cx(SsRow::AutoLock, &SaverConfig::default(), &cx).1, Some(3), "the saved choice is the marked one");
+    click(&mut a, &cx, 7, 0); // never
+    assert_eq!(LockConfig::load(&dir, &user).auto_min, 0);
+    assert_eq!(mine(&cx), SaverConfig::default(), "the screen saver's own choices are untouched");
+    assert!(!lockscreen::take_request(&dir, &user));
+    click(&mut a, &cx, 8, 0); // lock now
+    assert!(lockscreen::take_request(&dir, &user), "the shell of this person is asked to lock");
+    // the keyboard works too: Down to the card, Enter for the next choice
+    a.sel[a.tab] = 7;
+    press(&mut a, &cx, Key::Enter);
+    assert_eq!(LockConfig::load(&dir, &user).auto_min, 5);
+}
+
+#[test]
+fn a_guest_has_no_password_so_the_lock_cards_do_nothing() {
+    use iyakki_agent::lockscreen::{self, LockConfig};
+    let cx = as_role(admin("ss-lock-guest"), "gus", Role::Guest);
+    let mut a = page(&cx);
+    let g = draw(&mut a, &cx, 1920, 1080);
+    assert!(!g.hits.iter().any(|h| matches!(h.ev, Event::Sub(r, _) if r == 7 || r == 8)), "no live buttons on the lock cards");
+    a.handle(&Event::Sub(7, Key::Char('d')), &cx);
+    a.handle(&Event::Sub(8, Key::Char('a')), &cx);
+    assert_eq!(LockConfig::load(cx.services.dir(), "gus").auto_min, 0);
+    assert!(!lockscreen::take_request(cx.services.dir(), "gus"));
 }

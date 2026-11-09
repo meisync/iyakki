@@ -536,3 +536,50 @@ fn the_announcer_runs_on_a_test_port_and_stops_with_goodbyes() {
     an.stop();
     assert!(!an.status().running);
 }
+
+// ------------------------------------------------------------------------------------------------------------- extra names
+
+#[test]
+fn an_extra_local_name_is_answered_with_the_device_address_and_goodbyes_follow_its_removal() {
+    let (mut r, t) = running("iyakki-0a1b2c");
+    // only well-formed `.local` names other than the device's own are kept
+    assert!(r.set_extra_names(vec!["Store.local".into(), "iyakki-0a1b2c.local".into(), "example.org".into(), "*.local".into(), "bad..local".into(), ".local".into()], t));
+    assert_eq!(r.extra_names(), ["store.local"]);
+    assert!(!r.set_extra_names(vec!["store.local".into()], t), "the same list is no change");
+    // it is announced (twice, a second apart) with the device's address
+    let mut announced = Vec::new();
+    let mut now = t;
+    for _ in 0..60 {
+        for o in r.poll(now) {
+            announced.push(decode_out(&o));
+        }
+        now += 50;
+    }
+    assert!(announced.iter().any(|m| m.answers.iter().any(|x| x.name == "store.local" && x.data == Data::A(a(66)))), "{announced:?}");
+    // a question for it is answered, by the A record, with the device address
+    let outs = r.on_packet(&query(vec![q("store.local", wire::TYPE_A)]), from(a(5), 5353), now + 5000);
+    assert_eq!(outs.len(), 1);
+    let m = decode_out(&outs[0]);
+    assert_eq!(m.answers.len(), 1);
+    assert_eq!((m.answers[0].name.as_str(), &m.answers[0].data), ("store.local", &Data::A(a(66))));
+    // a name that is not ours is still ignored in silence
+    assert!(r.on_packet(&query(vec![q("other.local", wire::TYPE_A)]), from(a(5), 5353), now + 6000).is_empty());
+    // removing the name sends a goodbye (time to live 0) for it
+    assert!(r.set_extra_names(vec![], now + 7000));
+    let mut bye = Vec::new();
+    for k in 0..4 {
+        for o in r.poll(now + 7000 + k * 50) {
+            bye.push(decode_out(&o));
+        }
+    }
+    assert!(bye.iter().any(|m| m.answers.iter().any(|x| x.name == "store.local" && x.ttl == 0)), "{bye:?}");
+    assert!(r.on_packet(&query(vec![q("store.local", wire::TYPE_A)]), from(a(6), 5353), now + 20_000).is_empty(), "no longer answered");
+}
+
+#[test]
+fn stopping_gives_a_goodbye_for_the_extra_names_too() {
+    let (mut r, t) = running("iyakki-0a1b2c");
+    r.set_extra_names(vec!["store.local".into()], t);
+    let bye: Vec<Message> = r.stop().iter().map(decode_out).collect();
+    assert!(bye.iter().flat_map(|m| &m.answers).any(|x| x.name == "store.local" && x.ttl == 0));
+}

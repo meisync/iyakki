@@ -17,6 +17,9 @@ use std::sync::Arc;
 
 /// The link kind from what the kernel says about the interface.
 pub fn kind_of(name: &str, driver: &str, wireless: bool) -> LinkKind {
+    if name == iyakki_devctl::BT_PAN_IFACE {
+        return LinkKind::BluetoothPanu;
+    }
     match classify(name, driver, wireless) {
         Kind::Ethernet => LinkKind::Ethernet,
         Kind::Wifi => LinkKind::Wifi,

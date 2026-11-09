@@ -436,3 +436,64 @@ fn review_and_apply_shows_the_components_line_and_the_review_and_installs_nothin
     assert_eq!(a.upd.ask, UpdAsk::None);
     assert!(!cx.services.dir().join("components-installed.json").exists() && !cx.services.dir().join("component-work").exists());
 }
+
+#[test]
+fn the_last_component_install_result_stays_on_the_page_with_its_time_until_the_next_action() {
+    use iyakki_agent::store::compapply::{classify, save_result};
+    let r = rig("comp-result");
+    let cx = cx_with_admin_store("upd-comp-result");
+    let mut a = app(&r, &cx);
+    let now = iyakki_agent::clock::now_unix();
+    assert!(!a.upd_check_lines(&cx).iter().any(|l| l.0.starts_with("Last system component install")));
+    // a refusal is on the page, with the reason, and says nothing was changed
+    save_result(cx.services.dir(), &classify("Lab store", "stable", &Err("not applied: not enough room to prepare the update: 900 MB needed in the work folder, 100 MB free".into()), false, now - 125));
+    a.upd.comp_result = None;
+    let lines = a.upd_check_lines(&cx);
+    let head = lines.iter().position(|l| l.0.starts_with("Last system component install (2 minutes ago): Refused, nothing was changed.")).expect("the headline");
+    assert!(lines[head + 1].0.contains("not enough room to prepare the update"), "{:?}", lines[head + 1]);
+    assert_eq!(lines[head].1, crate::fx::AMBER);
+    // it is still there on a later look (not a message that fades), and a failure that was rolled back is in the error colour
+    a.upd.comp_result = None;
+    assert!(a.upd_check_lines(&cx).iter().any(|l| l.0.contains("Refused, nothing was changed")));
+    save_result(cx.services.dir(), &classify("Lab store", "stable", &Err("a check after writing failed (x); the previous version was put back: ok Nothing is recorded as installed.".into()), false, now));
+    a.upd.comp_result = None;
+    let lines = a.upd_check_lines(&cx);
+    let head = lines.iter().find(|l| l.0.starts_with("Last system component install (just now): Failed and rolled back")).expect("rolled back");
+    assert_eq!(head.1, ERR);
+    // success is shown as installed
+    save_result(cx.services.dir(), &classify("Lab store", "stable", &Ok(iyakki_agent::store::compapply::Applied { lines: vec!["Installed: kernel 6.12.5.".into()], restart_machine: true, restart_core: false, installed: Default::default(), boot_message: None }), false, now));
+    a.upd.comp_result = None;
+    let lines = a.upd_check_lines(&cx);
+    assert!(lines.iter().any(|l| l.0.contains("Installed.")) && lines.iter().any(|l| l.0 == "Installed: kernel 6.12.5."));
+}
+
+#[test]
+fn the_channel_button_cycles_stable_beta_nightly_is_kept_and_clears_a_review_of_the_other_channel() {
+    use crate::apps::settings::updates_page::UpdAsk;
+    let r = rig("comp-channel");
+    let cx = cx_with_admin_store("upd-comp-channel");
+    let mut a = app(&r, &cx);
+    assert!(a.updates_buttons().iter().any(|b| b.0 == "Channel"));
+    assert!(a.upd_check_lines(&cx).iter().any(|l| l.0.starts_with("Component channel on this computer: stable")));
+    let plan = iyakki_agent::store::components::Plan { store: "Lab store".into(), channel: "stable".into(), ..Default::default() };
+    let store = iyakki_agent::store::components::PinnedStore { name: "Lab store".into(), base: "http://192.0.2.7:30580".into(), pin: "ab".repeat(32) };
+    *a.upd.comp_review.lock().unwrap() = Some((store, "stable".into(), iyakki_agent::store::compapply::review(&plan, None)));
+    a.upd.ask = UpdAsk::Components;
+    press(&mut a, &cx, 'g');
+    assert_eq!(iyakki_agent::store::compapply::channel(cx.services.dir()), "beta");
+    assert_eq!(a.upd.ask, UpdAsk::None);
+    assert!(a.upd.comp_review.lock().unwrap().is_none(), "a review made for stable is not approved for beta");
+    assert!(a.upd_check_lines(&cx).iter().any(|l| l.0.starts_with("Component channel on this computer: beta")));
+    press(&mut a, &cx, 'g');
+    assert_eq!(iyakki_agent::store::compapply::channel(cx.services.dir()), "nightly");
+    press(&mut a, &cx, 'g');
+    assert_eq!(iyakki_agent::store::compapply::channel(cx.services.dir()), "stable");
+    // a person who is not an administrator cannot change it
+    let mut ucx = cx_with_admin_store("upd-comp-channel-user");
+    ucx.session.user = "amy".into();
+    ucx.session.role = iyakki_sec::policy::Role::User;
+    ucx.session.policy = iyakki_sec::policy::Role::User.template();
+    let mut b = app(&r, &ucx);
+    press(&mut b, &ucx, 'g');
+    assert_eq!(iyakki_agent::store::compapply::channel(ucx.services.dir()), "stable");
+}

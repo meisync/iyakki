@@ -93,6 +93,35 @@ screenshots looked at; the original image's SHA-256 was checked unchanged afterw
 The owner's key was not used in any of these. Still only the Mac can show: the firmware picker, T2 security levels, real Microsoft-signed shim on that
 firmware, MokManager's key screen with the loader, boot time against GRUB, the T2 keyboard in the loader menu.
 
+## 2b. Real-kernel proof in QEMU (2026-11-08, queue item Q16)
+
+The loader's own QEMU tests (`iyakki-boot/tools/qemu-test.sh`) use a stand-in kernel. These use the REAL kernel, initramfs and system image of a
+lean image, started by the loader that image carries (shim's second stage `grubx64.efi`, Secure Boot off, QEMU q35 + OVMF, KVM, 2 GB):
+
+```
+iyakki-boot/tools/qemu-real-test.sh --image ~/iyakki-work/images/pc-lean-1107r/iyakki-lean-x86_64.img \
+    --prev-image ~/iyakki-work/images/pc-lean-1107q/iyakki-lean-x86_64.img [--only 1,2,3]
+iyakki-boot/tools/qemu-secureboot-test.sh --kernel BZIMAGE --boot-efi iyakki-boot/target-test/x86_64-unknown-uefi/release/boot-uefi.efi
+```
+
+`qemu_real_base.py` copies the image's boot volume onto a 700 MB GPT disk (partitions named IYAKKI-BOOT and IYAKKI-DATA, the second one 1 MiB:
+the installer only accepts a source with a data partition; the lean image is MBR) so that a previous copy fits beside the 420 MB system image
+(the lean image's own volume has about 40 MB free, which the update must share between the new kernel and RAM disk and the copy, about 17 MB each: tight, see "what remains"). The image is only read; the tests boot
+snapshots or throwaway copies under `~/iyakki-work/boot-qemu/real/`. Logs and screenshots: `run-start/`, `run-fallback/`, `run-install/`
+there; the full result of the last run is `final-run.log`; the Secure Boot run is in `boot-sbtest-*` (removed after a pass unless `--keep`).
+
+| Test | What it does | Result |
+| --- | --- | --- |
+| 1 start | boots the image's disk; checks the loader's lines (`boot: loader started`, `decide: start iyakki (default)`, `start: iyakki kernel=/boot/bzImage`), the real first stage (`stage1: switching root`), `IYAKKI-BOOT supervisor up`, no GRUB text; then `system_reset` twice with the same variable store | PASS: supervisor up 10 s after power on; after each confirmed start the loader showed `tries_left=8` again (9 refilled, this start takes one), so IYAKKI's `BootConfirm` (F-LDR-06) reaches the loader through the real efivarfs of a UEFI VM |
+| 2 fallback | writes `EFI/iyakki-boot/prev/{bzImage,initrd}` from the older lean image 1107q and the marker `set-plain` (`version ..`, `stamp 1`) exactly as `devmode/update.rs keep_for_loader` does (files first, marker last); breaks the newest set (first 4 KiB of `/boot/initrd-lean` zeroed: the kernel panics with no init) and sets `panic=02` on the default row only, so each failed start takes 3 s instead of 20 | PASS: 9 starts of the newest set (`tries_left` 8 to 0), then `state: the current version was not confirmed good; prev-plain starts instead` and `start: prev-plain kernel=/EFI/iyakki-boot/prev/bzImage` by itself, with no menu; the old kernel and its initramfs reached `supervisor up`, confirmed, and the next start showed `tree=previous tries_left=8` (refilled) and started prev-plain again (the broken newest set is not retried until an update brings a new stamp, as designed) |
+| 3 install | boots install media (the lean image carries `install-media`) with a second blank 8 GB file as a virtio disk; opens the menu with Esc, Down, Enter on "Install to a disk" | PASS: `menu: chosen install`, `start: install ... iyakki.install=1`, real first stage, and the installer's first page ("step 1 of 6: choose the drive", source `/dev/vda`, the blank `/dev/vdb` as the only target, `run-install/t3-installer.png`). Nothing was written to any disk: the test stops at the drive page |
+| 4 Secure Boot | `qemu-secureboot-test.sh` with the real bzImage of 1107r (throwaway keys; the test's own tiny initramfs) | PASS 10 of 10: signed loader with SBAT and MOK-signed real kernel boot ("Secure boot enabled"); unsigned or wrong-key loader, wrong-key or unsigned kernel, nothing enrolled, no `.sbat` all refused. NOT run: the real initramfs and system image under Secure Boot (the 2026-11-04 run of the loader-default layout covers that with an older image; the owner's modules do not load under a throwaway key) |
+
+Findings on the way (no loader fault found): the installer refuses a source disk without a second (data) partition, so the test disk has one;
+`install` mode prints no `supervisor up` (the installer owns the console), so test 3 judges the screen and the serial lines before it. The
+loader in the 1107r image (`loader.efi` sha256 `68f9142f...`) is not the loader built from the tree today (`a5cf54ec...`): the tests prove the
+loader that image carries; re-run after the next image.
+
 ## 3. Rollback and recovery
 
 *What remains before GRUB can be dropped (step 3), 2026-11-07:* (a) one release on the owner's machines with the loader-default image: the
@@ -102,6 +131,8 @@ previous-version row started from the boot volume copy by a real kernel (Mac min
 module signing unchanged; (e) the full-RAM-disk install (no room for a copy) decided: shrink, or accept no loader row; (f) GRUB-only features that
 are not carried (Compatible USB mode variable, lean-failed fallback, the `iyakki_trial` counter, which the loader's tries replace) accepted;
 (g) the update's `boot/grub/*` handling made optional when GRUB is gone. BIOS (step 4) is separate.
+
+*After the real-kernel run of 2026-11-08 (section 2b):* in QEMU (c) is proven as far as the installer's first page and (a) as far as a real kernel started from the boot volume copy plus the automatic fallback; (d) is proven with the real kernel and a tiny initramfs only. Still open: all of it on real machines (Mac mini T2, HP, Lenovo, a Secure Boot PC), `BootConfirm` written by IYAKKI on real hardware (QEMU proves the chain, not the firmware's variable store on a Mac), a whole install through the loader's row onto a throwaway disk, `set-oldroot` (old system image) with a real older root, the real initramfs under Secure Boot, and the full-RAM-disk case: the lean image's boot volume has only about 40 MB free and the previous copy needs about 17 MB beside the update's own new kernel and RAM disk, so on an image of that size the update may leave no previous row (not measured; the test disk was enlarged to 700 MB).
 
 
 Layers, from the cheapest to the last resort:

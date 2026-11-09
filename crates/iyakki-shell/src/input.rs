@@ -340,6 +340,11 @@ impl InputState {
                         out.push(Event::Layout(k));
                     }
                 }
+                // Super+L locks the screen (a PC keyboard; the Mac profile keeps Command+L for the browser's address bar)
+                38 if self.meta && r.value == 1 && crate::inputprofile::resolved() != iyakki_agent::inputprofile::Resolved::Mac => {
+                    out.push(Event::Fn(crate::fnkeys::FnKey::Lock, true));
+                    out.push(Event::Fn(crate::fnkeys::FnKey::Lock, false));
+                }
                 // the input profile: Command shortcuts and Option word jumps of the Mac profile, and the live "last key" row
                 c if (r.value == 1 || r.value == 2) && self.profile_key(c, r.value == 1, &mut out) => {}
                 c if r.value == 1 || r.value == 2 => {
@@ -1507,6 +1512,23 @@ mod profile_tests {
         profile("pc", None, true);
         hold(&mut st, 125, true);
         assert_eq!(press(&mut st, 46), vec![Event::Key(Key::Char('c'))], "the Windows key does nothing in the PC profile");
+    }
+
+    #[test]
+    fn super_plus_l_locks_the_screen_on_a_pc_keyboard_and_command_l_stays_the_browsers() {
+        let lock = vec![Event::Fn(crate::fnkeys::FnKey::Lock, true), Event::Fn(crate::fnkeys::FnKey::Lock, false)];
+        let mut st = InputState::new(100, 100);
+        profile("pc", None, false);
+        assert_eq!(press(&mut st, 38), vec![Event::Key(Key::Char('l'))], "a plain l is a letter");
+        hold(&mut st, 125, true);
+        assert_eq!(press(&mut st, 38), lock, "Super+L");
+        hold(&mut st, 125, false);
+        assert_eq!(press(&mut st, 38), vec![Event::Key(Key::Char('l'))], "and only while Super is held");
+        profile("mac", None, true);
+        hold(&mut st, 125, true);
+        assert_ne!(press(&mut st, 38), lock, "Command+L is the browser's address bar in the Mac profile");
+        hold(&mut st, 125, false);
+        profile("pc", None, false);
     }
 
     #[test]

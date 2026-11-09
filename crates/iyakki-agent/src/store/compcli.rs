@@ -25,6 +25,9 @@ pub const USAGE: &str = "iyakki store component <command>
                                    files are downloaded and checked and an update payload or patch pack is made, labelled with the release the store's
                                    signed list names (--version/--variant override it). Nothing is applied.
   yank --server URL --token-env NAME --component C [--version V] [--channel CH] [--reason TEXT]
+  promote --server URL --token-env NAME --component C --version V --from nightly --to stable
+                                   copy a published version to another channel; nothing is rebuilt or uploaded, the copy names the same file and
+                                   keeps the same delta references; versions still only go up in the target channel
   retention --server URL --token-env NAME [--keep 3] [--apply]
                                    what a cleanup would remove (newest N per component and channel, and the deltas between them); --apply does it";
 
@@ -129,6 +132,10 @@ pub fn run(args: &[String]) -> Result<String, String> {
             let r = call(&up, "DELETE", &format!("{path}?{}", q.join("&")), &tok, &[], &[])?;
             Ok(format!("withdrawn {} version(s); the list is now serial {}", r["yanked"], r["serial"]))
         }
+        "promote" => {
+            let (base, tok) = (base_of(&a)?, token(&a)?);
+            promote_component(&up, &base, &tok, a.need("component")?, a.need("version")?, a.need("from")?, a.need("to")?)
+        }
         "retention" => {
             let (base, tok) = (base_of(&a)?, token(&a)?);
             let apply = a.one("apply").is_some();
@@ -137,6 +144,13 @@ pub fn run(args: &[String]) -> Result<String, String> {
         }
         other => Err(format!("unknown command {other:?}\n{USAGE}")),
     }
+}
+
+/// Ask the store to copy `component` `version` from channel `from` to channel `to` (the store checks every rule).
+pub fn promote_component(up: &dyn iyakki_proxy::Upstream, base: &str, tok: &str, component: &str, version: &str, from: &str, to: &str) -> Result<String, String> {
+    let url = format!("{base}/v1/components/promote?component={}&version={}&from={}&to={}", enc(component), enc(version), enc(from), enc(to));
+    let r = call(up, "POST", &url, tok, &[], &[])?;
+    Ok(format!("promoted {component} {version} from {from} to {to} (the same file, {} delta reference(s) kept; list serial {})", r["deltas"], r["serial"]))
 }
 
 pub fn retention_text(r: &Value) -> String {

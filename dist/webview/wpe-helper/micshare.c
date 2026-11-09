@@ -22,6 +22,7 @@
 #define PACKAGE "iyakki"
 #endif
 #define IYAKKI_MIC_WITH_ALSA 1
+#include <string.h>
 #include <gst/gst.h>
 #include <gst/app/gstappsink.h>
 #include <gst/app/gstappsrc.h>
@@ -240,7 +241,22 @@ static gboolean hub_start(Hub *h) {
     g_clear_error(&err);
     if (!h->fake) {
         GstElement *mic = gst_bin_get_by_name(GST_BIN(pipe), "mic");
-        g_object_set(mic, "device", h->key, "buffer-time", (gint64)100000, "latency-time", (gint64)20000, NULL);
+        /* IYAKKI_WEBVIEW_MIC_PCMS="plughw:0,0=iyakkimic0d0;...": a card whose capture offers S24_LE and S32_LE records through a PCM
+           with the format named (the agent's micpcm.rs; plughw picked the wrong 24 bits on the MacBookPro14,1, 2026-11-08) */
+        const char *dev = h->key;
+        gchar *named = NULL;
+        const char *map = g_getenv("IYAKKI_WEBVIEW_MIC_PCMS");
+        if (map && *map) {
+            gchar **items = g_strsplit(map, ";", -1);
+            for (gchar **it = items; *it; it++) {
+                const char *eq = strchr(*it, '=');
+                if (eq && (size_t)(eq - *it) == strlen(h->key) && !strncmp(*it, h->key, eq - *it) && eq[1]) { named = g_strdup(eq + 1); break; }
+            }
+            g_strfreev(items);
+        }
+        if (named) { dev = named; say("%s: capture through %s (the format is named)", h->key, named); }
+        g_object_set(mic, "device", dev, "buffer-time", (gint64)100000, "latency-time", (gint64)20000, NULL);
+        g_free(named);
         gst_object_unref(mic);
     }
     GstElement *sink = gst_bin_get_by_name(GST_BIN(pipe), "out");

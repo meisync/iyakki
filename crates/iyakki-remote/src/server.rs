@@ -298,6 +298,12 @@ fn route(req: &Request, peer: SocketAddr, sh: &Shared) -> Response {
             let r = iyakki_agent::webservice::ui::serve(req).unwrap_or_else(|| Response::error(404, "not found"));
             if secure { r.header("Strict-Transport-Security", "max-age=31536000") } else { r }
         }
+        // webhooks: a program's request to start a flow; the secret address (and its signature) is the proof, not a session (agent crate, hooks.rs)
+        (_, p) if iyakki_agent::webservice::embed::owns_hook(p) => {
+            let Some(api) = sh.gate.api() else { return Response::error(404, "not found") };
+            let r = api.handle(req, peer.ip(), None);
+            if secure { r.header("Strict-Transport-Security", "max-age=31536000") } else { r }
+        }
         // the web service's API for that page, behind the same sign-in: its own login, or this server's session (embed.rs)
         (_, p) if iyakki_agent::webservice::embed::owns(p) => {
             let Some(api) = sh.gate.api() else { return Response::error(404, "not found") };

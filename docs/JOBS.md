@@ -94,6 +94,12 @@ return is marked as untrusted data.
 succeeded after 3m 12s. Last output: …`) and the chat shows it as a step. Each job is announced once to the assistant; one it
 already saw through `job_wait` or `job_stop` is not announced again.
 
+**A chat that is idle is woken.** A job that ends while no run is going no longer waits for the person's next message: the pending-work
+ledger (`crates/iyakki-agent/src/pending.rs`, plan in `docs/development/AGENT-WAIT-PLAN.md`) mirrors every job, and the chat starts a
+turn with the result (`[IYAKKI] Work you were waiting for has ended ...`), also for a job that ended while the chat was closed. An
+answer that promises "I'll report back" with nothing pending is nudged once and then marked. `wait_for`, `pending_list`,
+`pending_cancel`, `pending_check` and `pending_settings` are the chat tools (the last three ask).
+
 **Autopilot waits.** An Autopilot step that ends while a job of the workspace is running does not count as a stall: the run
 waits for the job (a note says what it waits for about once a minute), the time spent waiting is not charged to Autopilot's
 time budget, and the step is counted neither as "no progress" nor as an attempt at the row. Stop and Pause still work at once; the

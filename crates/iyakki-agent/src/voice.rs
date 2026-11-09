@@ -123,6 +123,15 @@ pub struct VoiceSettings {
     pub fix_wording: bool,
     /// The Assistant pane beside the Voice tile's transcript is open (`revise`). On by default; the person can collapse it.
     pub assistant_open: bool,
+    /// "My IYAKKI", the personal voice assistant (push to talk), is on. Off by default: nothing listens until the person turns it on.
+    pub my_on: bool,
+    /// The assistant's microphone is muted (kept across restarts until the person unmutes).
+    pub my_muted: bool,
+    /// The follow-up window after an answer, in milliseconds (0 turns it off, up to 20000).
+    pub my_follow_ms: u32,
+    /// The local wake phrase "My IYAKKI" (`iyakki-wake`) may listen: opt-in, off by default, a second choice after `my_on`. Nothing listens
+    /// continuously until the person turns this on; `my_muted` stops it at once.
+    pub my_wake: bool,
 }
 
 /// What is highlighted while text is read aloud (TALES, chat).
@@ -160,7 +169,7 @@ impl Highlight {
 
 impl Default for VoiceSettings {
     fn default() -> Self {
-        Self { stt: None, tts: None, record_cmd: DEFAULT_RECORD_CMD.into(), play_cmd: DEFAULT_PLAY_CMD.into(), auto_send: false, speak_replies: false, speed_pct: 100, highlight: Highlight::default(), align_words: true, remote_ok: Vec::new(), mic: String::new(), auto_stop: true, pause_ms: 1500, keep_listening: false, fix_wording: false, assistant_open: true }
+        Self { stt: None, tts: None, record_cmd: DEFAULT_RECORD_CMD.into(), play_cmd: DEFAULT_PLAY_CMD.into(), auto_send: false, speak_replies: false, speed_pct: 100, highlight: Highlight::default(), align_words: true, remote_ok: Vec::new(), mic: String::new(), auto_stop: true, pause_ms: 1500, keep_listening: false, fix_wording: false, assistant_open: true, my_on: false, my_muted: false, my_follow_ms: 8000, my_wake: false }
     }
 }
 
@@ -180,6 +189,9 @@ impl VoiceSettings {
         }
         if !(500..=4000).contains(&self.pause_ms) {
             return Err("the pause that ends a dictation must be between 0.5 and 4 seconds".into());
+        }
+        if self.my_follow_ms > 20_000 {
+            return Err("the follow-up window must be between 0 and 20 seconds".into());
         }
         if self.mic.len() > 30 || !self.mic.chars().all(|c| c.is_ascii_alphanumeric() || ":,_-".contains(c)) {
             return Err("microphone: not a sound device name".into());

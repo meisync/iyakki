@@ -454,13 +454,29 @@ pub fn sb_luks() -> Vec<u8> {
     let mut b = blank();
     put(&mut b, 0, b"LUKS\xba\xbe");
     put(&mut b, 6, &[0, 2]);
+    put(&mut b, 8, &16384u64.to_be_bytes());
+    put(&mut b, 72, b"sha256");
     put(&mut b, 168, b"0a1b2c3d-0000-4000-8000-000000000001");
+    b
+}
+
+/// A LUKS1 header (aes-xts-plain64, sha256, 512-bit key).
+pub fn sb_luks1() -> Vec<u8> {
+    let mut b = blank();
+    put(&mut b, 0, b"LUKS\xba\xbe");
+    put(&mut b, 6, &[0, 1]);
+    put(&mut b, 8, b"aes");
+    put(&mut b, 40, b"xts-plain64");
+    put(&mut b, 72, b"sha256");
+    put(&mut b, 108, &64u32.to_be_bytes());
+    put(&mut b, 168, b"0a1b2c3d-0000-4000-8000-000000000002");
     b
 }
 
 pub fn sb_bitlocker() -> Vec<u8> {
     let mut b = blank();
     put(&mut b, 3, b"-FVE-FS-");
+    put(&mut b, 11, &512u16.to_le_bytes());
     b
 }
 

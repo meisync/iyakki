@@ -53,6 +53,7 @@ pub fn rules(label: &str, mode: Mode) -> String {
     if mode == Mode::Bridged {
         s.push_str("- IYAKKI's tools are the `mcp__iyakki__*` tools. Use mcp__iyakki__k8s_*, mcp__iyakki__deploy_* and mcp__iyakki__run_command for the cluster, containers and other commands; kubectl, k3s, kubeadm, docker rm and sudo are refused in the raw shell. Each action may wait for the person to approve it; if one is denied, do not retry it.\n");
         s.push_str(&format!("- {}\n", crate::jobtools::EXTERNAL_RULE));
+        s.push_str(&format!("- {}\n", crate::pendingtools::EXTERNAL_RULE));
         s.push_str("- To make and publish an IYAKKI app: tile_scaffold, edit the web files, tile_test, then tile_ship (one step: check, pack, sign, publish; the person sees one approval card). Tile apps are plain HTML, CSS and JavaScript, never Rust, Python, Docker or k3s. Keys and tokens are kept by IYAKKI: never ask the person for them. tile_pack, store_validate, store_publish and tile_install_dev exist for single steps.\n");
         if label.contains("Copilot") {
             // Copilot names an MCP server's tools `<server>-<tool>`

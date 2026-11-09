@@ -21,9 +21,10 @@ pub const PROMPT_RULE: &str = "\nSYSTEM COMPONENTS: components_status shows what
 
 pub const TOOL: &str = "components_status";
 pub const APPLY_TOOL: &str = "components_apply";
+pub const CHANNEL_TOOL: &str = "components_channel_set";
 
 pub fn is_components_tool(n: &str) -> bool {
-    n == TOOL || n == APPLY_TOOL
+    n == TOOL || n == APPLY_TOOL || n == CHANNEL_TOOL
 }
 
 /// What the tool needs from the machine (a fake in tests).
@@ -52,6 +53,14 @@ pub trait Backend: Send + Sync {
     fn apply_approved(&self, _store: &PinnedStore, _channel: &str, _approval: &Approval) -> Result<Applied, String> {
         Err("applying system components is not available here".into())
     }
+    /// The channel this computer takes components from (stable until the person chooses another).
+    fn channel(&self) -> String {
+        "stable".into()
+    }
+    /// Choose the channel of this computer (stable, beta or nightly), kept for the next start.
+    fn set_channel(&self, _channel: &str) -> Result<(), String> {
+        Err("choosing a component channel is not available here".into())
+    }
     /// Who approved (for the audit trail).
     fn approver(&self) -> String {
         "chat".into()
@@ -72,7 +81,7 @@ impl ComponentsTools {
 
     /// Which store and channel a call means: the named store, else the only one.
     fn pick(&self, args: &Value) -> Result<(PinnedStore, String), String> {
-        let channel = args.get("channel").and_then(Value::as_str).map(str::trim).filter(|c| !c.is_empty()).unwrap_or("stable").to_string();
+        let channel = args.get("channel").and_then(Value::as_str).map(str::trim).filter(|c| !c.is_empty()).map_or_else(|| self.backend.channel(), str::to_string);
         if !cm::valid_channel(&channel) {
             return Err(format!("`{channel}` is not a channel name (for example stable, beta, nightly)"));
         }
@@ -108,8 +117,15 @@ impl ComponentsTools {
         Ok(done.text())
     }
 
+    fn set_channel(&self, args: &Value) -> Result<String, String> {
+        let ch = args.get("channel").and_then(Value::as_str).map(str::trim).unwrap_or("");
+        self.backend.set_channel(ch)?;
+        Ok(format!("{} The next check, review and install use it.", compapply::channel_sentence(ch)))
+    }
+
     fn status(&self, args: &Value) -> Result<String, String> {
-        let channel = args.get("channel").and_then(Value::as_str).map(str::trim).filter(|c| !c.is_empty()).unwrap_or("stable");
+        let own = self.backend.channel();
+        let channel = args.get("channel").and_then(Value::as_str).map(str::trim).filter(|c| !c.is_empty()).unwrap_or(own.as_str());
         if !cm::valid_channel(channel) {
             return Err(format!("`{channel}` is not a channel name (for example stable, beta, nightly)"));
         }
@@ -118,7 +134,7 @@ impl ComponentsTools {
             return Ok("No private store with a pinned key is added, so there is nothing to ask for system components. The person adds one in STORE, Settings, Catalogs (confirming its key fingerprint).".into());
         }
         let inst = self.backend.installed();
-        let mut out = vec![if inst.versions.is_empty() { "Installed components: none on record yet (this device has not recorded component versions).".to_string() } else { format!("Installed components: {}.", inst.versions.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(", ")) }];
+        let mut out = vec![format!("Channel on this computer: {own}."), if inst.versions.is_empty() { "Installed components: none on record yet (this device has not recorded component versions).".to_string() } else { format!("Installed components: {}.", inst.versions.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(", ")) }];
         for s in &stores {
             match self.backend.fetch(s) {
                 Err(e) => out.push(format!("{}: {e}", s.name)),
@@ -141,6 +157,7 @@ impl Tools for ComponentsTools {
         let mut v = self.inner.defs();
         v.retain(|d| !is_components_tool(&d.spec.name));
         v.push(ToolDef { spec: ToolSpec { name: APPLY_TOOL.into(), description: "Install the system components (kernel, boot, base, core, kernel layer) a pinned private store offers, as components_status planned them. Always asks: the card shows what changes, sizes, whether a restart is needed and what is kept to go back to. Downloads, checks every file against the store's signed list, installs through the update machinery (the previous version stays in the boot menu), and never restarts the computer by itself. Slow for a large part.".into(), schema: json!({"type": "object", "properties": {"store": {"type": "string", "description": "the store's name (needed only when several are added)"}, "channel": {"type": "string", "description": "stable (default), beta or nightly"}}}) }, risk: Risk::Ask, untrusted: false });
+        v.push(ToolDef { spec: ToolSpec { name: CHANNEL_TOOL.into(), description: "Choose which channel this computer takes system components from: stable (tested builds, the default), beta or nightly (the newest builds). Always asks. It changes what components_status shows and components_apply installs; nothing is downloaded or installed by choosing.".into(), schema: json!({"type": "object", "properties": {"channel": {"type": "string", "description": "stable, beta or nightly"}}, "required": ["channel"]}) }, risk: Risk::Ask, untrusted: false });
         v.push(ToolDef { spec: ToolSpec { name: TOOL.into(), description: "Show what the person's pinned private stores offer for the system components (kernel, boot, base, core, kernel layer) against what is installed, with the plan in plain words: sizes, difference or whole file, restart needed or not, and anything that must be updated first. Reads the stores' signed lists only; never downloads or installs.".into(), schema: json!({"type": "object", "properties": {"channel": {"type": "string", "description": "stable (default), beta or nightly"}}}) }, risk: Risk::Safe, untrusted: false });
         v
     }
@@ -149,6 +166,7 @@ impl Tools for ComponentsTools {
         match name {
             TOOL => self.status(args),
             APPLY_TOOL => self.apply(args),
+            CHANNEL_TOOL => self.set_channel(args),
             _ => self.inner.call(name, args),
         }
     }
@@ -156,6 +174,7 @@ impl Tools for ComponentsTools {
     fn describe(&self, name: &str, args: &Value) -> String {
         match name {
             TOOL => "Show the system component status".into(),
+            CHANNEL_TOOL => format!("Follow the {} channel for system components", args.get("channel").and_then(Value::as_str).unwrap_or("chosen")),
             APPLY_TOOL => match self.pick(args) {
                 Ok((s, c)) => format!("Install the system components from {} (channel {c}); a restart is needed to use them", s.name),
                 Err(_) => "Install system components from a store".into(),
@@ -166,7 +185,7 @@ impl Tools for ComponentsTools {
 
     fn preview(&self, name: &str, args: &Value) -> Option<String> {
         match name {
-            TOOL => None,
+            TOOL | CHANNEL_TOOL => None,
             APPLY_TOOL => Some(self.card(args).unwrap_or_else(|e| format!("Cannot install: {e}"))),
             _ => self.inner.preview(name, args),
         }
@@ -175,6 +194,7 @@ impl Tools for ComponentsTools {
     fn refusal(&self, name: &str, args: &Value) -> Option<String> {
         match name {
             TOOL => None,
+            CHANNEL_TOOL => compapply::CHANNELS.iter().all(|c| args.get("channel").and_then(Value::as_str).map(str::trim) != Some(c)).then(|| "choose stable, beta or nightly".to_string()),
             APPLY_TOOL => self.pick(args).err(),
             _ => self.inner.refusal(name, args),
         }
@@ -185,7 +205,7 @@ impl Tools for ComponentsTools {
     }
 
     fn approved_always(&self, name: &str) -> bool {
-        name == TOOL || (name != APPLY_TOOL && self.inner.approved_always(name))
+        name == TOOL || (name != APPLY_TOOL && name != CHANNEL_TOOL && self.inner.approved_always(name))
     }
 
     fn grant_blocker(&self, name: &str, args: &Value) -> Option<String> {
@@ -220,6 +240,8 @@ impl Tools for ComponentsTools {
 /// The real backend: the stores the person pinned, the recorded versions and the system's egress.
 pub struct RealBackend {
     pub svc: Arc<crate::services::Services>,
+    /// Whose inbox gets the notice of an install's result (the person signed in; none: no notice, the page still shows the result).
+    pub user: Option<String>,
 }
 
 impl Backend for RealBackend {
@@ -235,11 +257,27 @@ impl Backend for RealBackend {
     }
     fn apply_approved(&self, store: &PinnedStore, channel: &str, approval: &Approval) -> Result<Applied, String> {
         let svc = compapply::Svc::real(self.svc.dir());
-        let doc = self.fetch(store)?;
-        let plan = comps::plan(&doc, &store.name, channel, &svc.installed(), self.last_serial(store))?;
-        let st = iyakki_proxy::https::download_streamer();
-        let prep = compapply::prepare(&svc, &plan, &store.base, st.as_ref(), None, &mut |_, _, _| {}, &|| false)?;
-        compapply::apply_staged(&svc, &prep, Some(approval))
+        // the previous result is no longer the latest word once the next action starts
+        compapply::clear_result(self.svc.dir());
+        let prepared = (|| {
+            let doc = self.fetch(store)?;
+            let plan = comps::plan(&doc, &store.name, channel, &svc.installed(), self.last_serial(store))?;
+            let st = iyakki_proxy::https::download_streamer();
+            compapply::prepare(&svc, &plan, &store.base, st.as_ref(), None, &mut |_, _, _| {}, &|| false)
+        })();
+        let (r, before) = match prepared {
+            Ok(prep) => (compapply::apply_staged(&svc, &prep, Some(approval)), false),
+            Err(e) => (Err(e), true),
+        };
+        let res = compapply::classify(&store.name, channel, &r, before, crate::clock::now_unix());
+        compapply::record_result(&self.svc, self.user.as_deref(), &res);
+        r
+    }
+    fn channel(&self) -> String {
+        compapply::channel(self.svc.dir())
+    }
+    fn set_channel(&self, channel: &str) -> Result<(), String> {
+        compapply::set_channel(self.svc.dir(), channel)
     }
     fn approver(&self) -> String {
         "assistant".into()

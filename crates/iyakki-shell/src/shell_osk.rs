@@ -21,8 +21,12 @@ impl Shell {
         if !self.osk.update(focus) {
             return 0.0;
         }
-        let (Screen::Login(f) | Screen::Setup(f)) = &self.screen else { return 0.0 };
-        let field = auth_field_rect(w, h, s, f.focus, f.fields.len());
+        let (focus, n) = match &self.screen {
+            _ if self.lockui.active => (0, 1),
+            Screen::Login(f) | Screen::Setup(f) => (f.focus, f.fields.len()),
+            _ => return 0.0,
+        };
+        let field = auth_field_rect(w, h, s, focus, n);
         let kb = Osk::area(w as f32, h as f32, s);
         (field.y + field.h + 14.0 * s - kb.y).max(0.0)
     }

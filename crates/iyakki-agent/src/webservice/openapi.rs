@@ -52,6 +52,10 @@ pub fn schemas() -> Map<String, Value> {
     put("NsMembers", obj(json!({"name": s, "role": s, "members": any_arr}), &["name", "role", "members"]));
     put("NsMemberChange", obj(json!({"name": s, "role": {"type": "string", "enum": ["viewer", "editor", "admin", "remove"]}}), &["name", "role"]));
 
+    put("TileList", obj(json!({"tiles": any_arr}), &["tiles"]));
+    put("TileEvents", obj(json!({"width": i, "height": i, "scale_pct": i, "dark": b, "reset": b, "events": any_arr}), &[]));
+    put("TileFrame", obj(json!({"id": s, "redraw": b, "frame": {"type": "object"}, "stats": {"type": "object"}}), &["id", "redraw", "frame"]));
+
     put("WebAccess", obj(json!({"on": b, "port": i, "listening": b, "boot": b, "error": s, "status": s, "urls": strs, "fingerprint": {"type": ["string", "null"]}, "exposes": s, "has_admin_password": b}), &["on", "port", "listening", "status", "urls", "exposes"]));
     put("WebAccessChange", obj(json!({"on": b, "port": i}), &[]));
 

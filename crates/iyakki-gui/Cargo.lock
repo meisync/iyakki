@@ -2622,7 +2622,9 @@ dependencies = [
  "iyakki-link",
  "iyakki-mem",
  "iyakki-netscan",
+ "iyakki-pdf",
  "iyakki-proxy",
+ "iyakki-rtsp",
  "iyakki-schema",
  "iyakki-sec",
  "iyakki-stage1",
@@ -2749,6 +2751,7 @@ dependencies = [
  "iyakki-core",
  "iyakki-data",
  "iyakki-proxy",
+ "iyakki-sdk-emulator",
  "iyakki-shell",
  "iyakki-storage",
  "iyakki-ui",
@@ -2819,6 +2822,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "iyakki-pdf"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "iyakki-web",
+]
+
+[[package]]
 name = "iyakki-proxy"
 version = "0.1.0-alpha.1"
 dependencies = [
@@ -2837,10 +2847,23 @@ name = "iyakki-rfb"
 version = "0.1.0-alpha.1"
 
 [[package]]
+name = "iyakki-rtsp"
+version = "0.1.0-alpha.1"
+
+[[package]]
 name = "iyakki-schema"
 version = "0.1.0-alpha.1"
 dependencies = [
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "iyakki-sdk-emulator"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "iyakki-tile-abi",
+ "iyakki-tile-host",
  "serde_json",
 ]
 
@@ -2875,6 +2898,11 @@ dependencies = [
  "iyakki-schema",
  "iyakki-sec",
  "iyakki-storage",
+ "iyakki-tile-api",
+ "iyakki-tile-calendar",
+ "iyakki-tile-cameras",
+ "iyakki-tile-remotefiles",
+ "iyakki-tile-usage",
  "iyakki-uikit",
  "iyakki-usb",
  "iyakki-vpn",
@@ -2903,6 +2931,60 @@ name = "iyakki-storage"
 version = "0.1.0-alpha.1"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "iyakki-tile-abi"
+version = "0.1.0-alpha.1"
+
+[[package]]
+name = "iyakki-tile-api"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "iyakki-uikit",
+]
+
+[[package]]
+name = "iyakki-tile-calendar"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "iyakki-tile-api",
+ "iyakki-uikit",
+]
+
+[[package]]
+name = "iyakki-tile-cameras"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "iyakki-tile-api",
+ "iyakki-uikit",
+ "tiny-skia",
+]
+
+[[package]]
+name = "iyakki-tile-host"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "iyakki-sec",
+ "iyakki-tile-abi",
+ "iyakki-vfs",
+ "iyakki-wasm",
+]
+
+[[package]]
+name = "iyakki-tile-remotefiles"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "iyakki-tile-api",
+ "iyakki-uikit",
+]
+
+[[package]]
+name = "iyakki-tile-usage"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "iyakki-tile-api",
+ "iyakki-uikit",
 ]
 
 [[package]]

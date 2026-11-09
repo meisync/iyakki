@@ -38,6 +38,11 @@ pub fn owns(path: &str) -> bool {
     path == "/api/v1" || path.starts_with("/api/v1/")
 }
 
+/// Is this path a webhook's (`/hooks/<id>/<token>`)? Those need no sign-in; the hook's own address and signature are the proof.
+pub fn owns_hook(path: &str) -> bool {
+    super::hooks::is_hook_path(path)
+}
+
 impl Embedded {
     pub fn new(deps: Arc<Deps>) -> Result<Embedded, String> {
         Ok(Embedded { shared: Shared::embedded(Profile::AgentApi, ServiceConfig::default(), deps)?, bridge: Mutex::new(HashMap::new()) })

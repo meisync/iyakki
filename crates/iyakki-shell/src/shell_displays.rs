@@ -445,6 +445,9 @@ impl Shell {
         if self.saver_render(g) {
             return; // the saver (or black) on every display
         }
+        if self.lock_render(g) {
+            return; // so is the lock
+        }
         if self.panes.d.multi && self.session.is_some() && self.panes.ws.is_none() {
             let saved = match self.current_user() {
                 Some(u) => crate::display::outputs::load(&self.display_dir(), &u),

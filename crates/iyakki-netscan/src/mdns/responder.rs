@@ -75,6 +75,9 @@ pub struct Responder {
     v4: Vec<Ipv4Addr>,
     v6: Vec<Ipv6Addr>,
     svcs: Vec<Svc>,
+    /// Extra `.local` names for this device's addresses (domain routes such as `store.local`). Announced and answered like the host
+    /// name, but not probed: nobody checks that another machine does not already use one.
+    extra: Vec<String>,
     state: State,
     probes: u8,
     announces: u8,
@@ -94,7 +97,7 @@ impl Responder {
     /// `base` is the label of the host name without `.local` (`iyakki-a1b2c3`).
     pub fn new(base: &str, now: u64) -> Responder {
         let seed = base.bytes().fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619));
-        let mut r = Responder { base: base.to_ascii_lowercase(), suffix: 0, v4: vec![], v6: vec![], svcs: vec![], state: State::Probing, probes: 0, announces: 0, next_at: 0, renames: 0, seed, goodbyes: vec![], lim: Limits::default(), last_defence: 0, dropped: 0, rate_limited: 0, answered: 0 };
+        let mut r = Responder { base: base.to_ascii_lowercase(), suffix: 0, v4: vec![], v6: vec![], svcs: vec![], extra: vec![], state: State::Probing, probes: 0, announces: 0, next_at: 0, renames: 0, seed, goodbyes: vec![], lim: Limits::default(), last_defence: 0, dropped: 0, rate_limited: 0, answered: 0 };
         r.next_at = now + r.jitter(now);
         r
     }
@@ -133,9 +136,22 @@ impl Responder {
     }
 
     fn addr_records(&self, ttl: Option<u32>) -> Vec<Record> {
-        let host = self.host();
+        self.addr_records_for(&self.host(), ttl)
+    }
+
+    fn addr_records_for(&self, host: &str, ttl: Option<u32>) -> Vec<Record> {
         let ttl = |t: u32| ttl.map_or(t, |x| x.min(t));
-        self.v4.iter().map(|a| Record { name: host.clone(), rtype: wire::TYPE_A, flush: true, ttl: ttl(TTL_HOST), data: Data::A(*a) }).chain(self.v6.iter().map(|a| Record { name: host.clone(), rtype: wire::TYPE_AAAA, flush: true, ttl: ttl(TTL_HOST), data: Data::Aaaa(*a) })).collect()
+        self.v4.iter().map(|a| Record { name: host.to_string(), rtype: wire::TYPE_A, flush: true, ttl: ttl(TTL_HOST), data: Data::A(*a) }).chain(self.v6.iter().map(|a| Record { name: host.to_string(), rtype: wire::TYPE_AAAA, flush: true, ttl: ttl(TTL_HOST), data: Data::Aaaa(*a) })).collect()
+    }
+
+    /// The address records of the extra names.
+    fn extra_records(&self, ttl: Option<u32>) -> Vec<Record> {
+        self.extra.iter().flat_map(|n| self.addr_records_for(n, ttl)).collect()
+    }
+
+    /// The extra names now announced.
+    pub fn extra_names(&self) -> &[String] {
+        &self.extra
     }
 
     fn svc_records(&self, s: &Svc, ttl: Option<u32>) -> (Record, Record, Record) {
@@ -152,6 +168,7 @@ impl Responder {
     /// Every record of the device (for announcements and goodbyes).
     fn all_records(&self, ttl: Option<u32>) -> Vec<Record> {
         let mut v = self.addr_records(ttl);
+        v.extend(self.extra_records(ttl));
         for s in &self.svcs {
             let (p, srv, t) = self.svc_records(s, ttl);
             v.extend([p, srv, t]);
@@ -209,6 +226,35 @@ impl Responder {
             }
         }
         self.svcs = svcs;
+        if matches!(self.state, State::Announcing | State::Running) {
+            self.state = State::Announcing;
+            self.announces = 0;
+            self.next_at = now;
+        }
+        true
+    }
+
+    /// The extra `.local` names changed. Only well-formed names ending in `.local` other than the device's own are kept (the rest are
+    /// dropped without a word: the caller validated them). Announced again at once; removed ones get a goodbye. Returns whether anything
+    /// changed.
+    pub fn set_extra_names(&mut self, names: Vec<String>, now: u64) -> bool {
+        let own = self.host();
+        let mut names: Vec<String> = names.into_iter().map(|n| n.trim().trim_end_matches('.').to_ascii_lowercase()).filter(|n| n.ends_with(".local") && n.len() > ".local".len() && n.len() <= 253 && *n != own && !n.contains("..") && !n.starts_with('.') && !n.starts_with('*')).collect();
+        names.sort();
+        names.dedup();
+        if names == self.extra {
+            return false;
+        }
+        if self.state != State::Probing && self.state != State::Stopped {
+            let gone: Vec<String> = self.extra.iter().filter(|n| !names.contains(n)).cloned().collect();
+            for n in gone {
+                self.goodbyes.extend(self.addr_records_for(&n, Some(0)).into_iter().map(|mut r| {
+                    r.ttl = 0;
+                    r
+                }));
+            }
+        }
+        self.extra = names;
         if matches!(self.state, State::Announcing | State::Running) {
             self.state = State::Announcing;
             self.announces = 0;
@@ -421,6 +467,8 @@ impl Responder {
             let wants = |t: u16| q.qtype == t || q.qtype == wire::TYPE_ANY;
             if qn == host {
                 answers.extend(addrs.iter().filter(|r| wants(r.rtype)).cloned());
+            } else if self.extra.iter().any(|n| n == qn) {
+                answers.extend(self.addr_records_for(qn, None).into_iter().filter(|r| wants(r.rtype)));
             } else if qn == "_services._dns-sd._udp.local" {
                 if wants(wire::TYPE_PTR) {
                     for s in &self.svcs {

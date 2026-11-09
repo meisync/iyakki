@@ -184,3 +184,29 @@ fn an_applied_boot_or_base_version_survives_the_restart_while_the_release_label_
     assert_eq!(m.versions["boot"], "0.1.0-alpha.4");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn the_boot_ram_disk_on_the_boot_partition_corrects_a_record_that_cannot_be_true() {
+    let d = dir("readback");
+    let mut i = Installed::load(&d);
+    correct(&mut i, &facts(), false);
+    i.save(&d).unwrap();
+    let a = Applied1 { component: "boot".into(), version: "1107.15".into(), sha256: "b".repeat(64), file: None, needs_restart: false };
+    record_applied(&d, &[a], "boot-A").unwrap();
+    // the partition holds the recorded RAM disk (the other one may differ): nothing changes
+    let ok = ["a".repeat(64), "b".repeat(64)];
+    assert!(correct_at_boot_with(&d, &facts(), &ok).unwrap().is_empty());
+    assert_eq!(Installed::load(&d).versions["boot"], "1107.15");
+    // the partition could not be read: nothing is judged
+    assert!(correct_at_boot_with(&d, &facts(), &[]).unwrap().is_empty());
+    assert_eq!(Installed::load(&d).how["boot"], "applied");
+    // the partition holds another RAM disk: the record follows the system and loses the hash
+    let notes = correct_at_boot_with(&d, &facts(), &["c".repeat(64)]).unwrap();
+    assert_eq!(notes.len(), 1);
+    assert!(notes[0].contains("boot RAM disk") && notes[0].contains("1107.15"), "{notes:?}");
+    let j = Installed::load(&d);
+    assert_eq!((j.versions["boot"].as_str(), j.how["boot"].as_str(), j.shas.contains_key("boot")), ("0.1.0-alpha.3", "observed", false));
+    // a record without a hash is not judged (nothing to compare)
+    assert!(correct_at_boot_with(&d, &facts(), &["d".repeat(64)]).unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&d);
+}

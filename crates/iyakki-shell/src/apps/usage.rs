@@ -60,7 +60,7 @@ impl UsageApp {
 
     fn with<T>(cx: &AppCx, f: impl FnOnce(&TileCx) -> T) -> T {
         let usage = ShellUsage(&cx.services);
-        f(&TileCx { user: cx.session.user.as_str(), manage_settings: cx.session.policy.manage_settings, usage: &usage, calendar: &iyakki_tile_api::calendar::NoCalendar, audit: &iyakki_tile_api::NoAudit })
+        f(&TileCx { user: cx.session.user.as_str(), manage_settings: cx.session.policy.manage_settings, usage: &usage, calendar: &iyakki_tile_api::calendar::NoCalendar, audit: &iyakki_tile_api::NoAudit, remote: &iyakki_tile_api::remote::NoRemote, cameras: &iyakki_tile_api::cameras::NoCameras })
     }
 }
 

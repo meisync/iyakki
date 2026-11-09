@@ -1215,3 +1215,6 @@ fn with_keep_listening_empty_results_listen_again_quietly_and_five_in_a_row_stop
     assert!(!a.is_recording());
     assert!(status(&a).starts_with("I only heard silence"), "{}", status(&a));
 }
+
+#[path = "voice_mine_tests.rs"]
+mod mine_tests;

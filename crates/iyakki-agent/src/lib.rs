@@ -127,7 +127,12 @@ pub mod audiosink;
 pub mod battery;
 pub mod power;
 pub mod screensaver;
+pub mod lockscreen;
+pub mod lockscreentools;
+#[cfg(test)]
+mod lockscreentools_tests;
 pub mod micdefaults;
+pub mod micpcm;
 pub mod mixer;
 pub mod softvol;
 pub mod quiet;
@@ -153,6 +158,12 @@ pub mod speechtime;
 pub mod syssounds;
 pub mod browserdev;
 pub mod voicedesk;
+pub mod voiceassist;
+pub mod voiceassist_ports;
+pub mod voiceassisttools;
+#[cfg(test)]
+#[path = "voiceassist_tests.rs"]
+mod voiceassist_tests;
 pub mod recordings;
 pub mod voicepack;
 pub mod scene;
@@ -180,6 +191,23 @@ mod avaddon_tests;
 mod avaddon_install_tests;
 pub mod exec;
 pub mod ssh;
+pub mod ssh_server;
+pub mod sftp;
+pub mod sftp_fs;
+pub mod sftp_proto;
+pub mod sftp_session;
+pub mod sftptools;
+pub mod remotefiles;
+pub mod remotefilestools;
+pub mod cameras;
+pub mod camerastools;
+pub mod camrec;
+pub mod camrec_format;
+pub mod rf_ftp;
+pub mod rf_sftp;
+pub mod rf_ssh;
+#[cfg(test)]
+mod sftp_tests;
 pub mod sshkey;
 pub mod sshtunnel;
 pub mod sshtunnel_mgr;
@@ -188,6 +216,10 @@ pub mod sshtunneltools;
 pub mod objectstoragetools;
 pub mod updatestools;
 pub mod componentstools;
+pub mod pdftools;
+pub mod tilestools;
+#[cfg(test)]
+mod pdftools_tests;
 #[cfg(test)]
 mod componentstools_tests;
 pub mod sharetools;
@@ -248,8 +280,7 @@ pub mod meteredlink;
 pub mod quietio;
 pub mod wifi_ap;
 pub mod wifi_ap_host;
-pub mod bnep;
-pub mod bt_pan;
+pub use iyakki_devctl::{bnep, bt_pan};
 pub mod msg;
 pub mod gitjobs;
 pub mod clock;
@@ -328,10 +359,24 @@ pub mod extagent;
 pub mod k8s;
 pub mod disks;
 pub mod disks_part;
+pub mod disks_fmt;
 pub mod disks_sys;
 pub mod disks_fake;
+pub mod disks_crypt;
+pub mod disks_helper;
+pub mod disks_unlock;
+pub mod disksunlocktools;
+pub mod disksformattools;
+#[cfg(test)]
+mod disks_unlock_tests;
+#[cfg(test)]
+mod disksunlocktools_tests;
+#[cfg(test)]
+mod disksformattools_tests;
 #[cfg(test)]
 mod disks_tests;
+#[cfg(test)]
+mod disks_fmt_tests;
 pub mod k8sexp;
 pub mod devcluster;
 pub mod deploylint;
@@ -360,6 +405,8 @@ pub mod cloudflows;
 pub mod cloudsnapshot;
 pub mod cloudlaunch;
 pub mod cloudlisten;
+pub mod domains;
+pub mod domainstools;
 pub mod cloudroles;
 pub mod cloudroute;
 pub mod cloudstorage;
@@ -396,6 +443,10 @@ pub mod tasks;
 pub mod tasktools;
 pub mod jobs;
 pub mod jobtools;
+pub mod pending;
+pub mod pendingtools;
+#[cfg(test)]
+mod pending_tests;
 #[cfg(test)]
 mod jobtools_tests;
 #[cfg(test)]

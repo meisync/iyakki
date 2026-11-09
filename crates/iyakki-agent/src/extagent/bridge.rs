@@ -133,7 +133,7 @@ pub struct Gate {
 }
 
 const NEVER_OFFERED: [&str; 6] = ["vault_request", "screen_capture", "ask_user", "more_tools", "write_file", "assistant_check"];
-const OFFERED_PREFIXES: [&str; 14] = ["tile_", "app_", "board_", "bug_report", "deploy_", "k8s_", "history_search", "ide_browser_", "data_", "registry_", "run_command", "feature_", "web_", "job_"];
+const OFFERED_PREFIXES: [&str; 15] = ["tile_", "app_", "board_", "bug_report", "deploy_", "k8s_", "history_search", "ide_browser_", "data_", "registry_", "run_command", "feature_", "web_", "job_", "pending_"];
 
 /// The authoring and publishing tools of the store (an IYAKKI app made and published to the private store end to end); each Ask one
 /// still goes through the approval card. Installing, updating and removing apps stay the person's.

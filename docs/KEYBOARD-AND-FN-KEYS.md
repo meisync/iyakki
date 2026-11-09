@@ -25,6 +25,7 @@ that. Rows `F-KBD-01` to `F-KBD-09` in `FEATURES.md` say what is partial and wha
 | WiFi, Bluetooth, Airplane (238, 237, 247) | Switches those radios and says what it did ("WiFi off", "Airplane mode on"). If the kernel switches by itself first, IYAKKI only reports it; it never switches twice. A hardware switch is reported, not overridden. |
 | Switch video mode (227) | A notice. |
 | Print (210) | Starts the screenshot (the same as F12). |
+| Screen lock (152), and Super+L on a PC keyboard | Locks the screen: a password prompt covers the desktop, the apps keep running ([the lock screen](SCREEN-SAVER.md#the-lock-screen)). |
 | Calculator (140) | A notice: there is no calculator app. |
 | Home page (172) | From the launcher: opens the browser. |
 

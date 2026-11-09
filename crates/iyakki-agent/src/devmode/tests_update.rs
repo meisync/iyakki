@@ -487,6 +487,35 @@ fn a_lean_update_that_is_already_in_place_changes_nothing() {
 }
 
 #[test]
+fn the_same_system_image_under_a_new_release_label_reuses_the_root_and_stores_nothing_again() {
+    // found on the Mac mini: a boot-only update relabelled the release, the root id carries the label, and the same 419 MB image was stored twice
+    let r = rig("lean-same-image");
+    put(&r.boot.root, "boot/root.sfs", &pseudo(3 << 20, 90));
+    let free = || 500u64 << 20;
+    let (d1, m1) = lean_payload(&r, "0.1.0-alpha.2", 91);
+    let e = Env { dm: &r.dm, boot: &r.boot, release: r.release.clone(), volatile: false, data_free: &free, fault_after: None };
+    let p = plan(&e, &m1, false).unwrap();
+    stage_all(&e, &d1, &m1, &p.needs);
+    apply(&e, &m1, false, "laptop").unwrap();
+    let id1 = root_id(&m1).unwrap();
+    // the next release carries the very same image
+    let (d2, m2) = lean_payload(&r, "0.1.0-alpha.3", 91);
+    assert_ne!(root_id(&m2).unwrap(), id1, "the label is part of the id");
+    assert_eq!(root_target(r.dm.data_dir(), &m2).unwrap(), id1, "the root that holds the same image is reused");
+    let e = Env { dm: &r.dm, boot: &r.boot, release: r.release.clone(), volatile: false, data_free: &free, fault_after: None };
+    let p = plan(&e, &m2, false).unwrap();
+    assert!(!p.needs.iter().any(|n| n == "boot/root.sfs"), "no copy of the image is planned: {:?}", p.needs);
+    stage_all(&e, &d2, &m2, &p.needs);
+    apply(&e, &m2, false, "laptop").unwrap();
+    let dirs: Vec<String> = std::fs::read_dir(r.dm.data_dir().join("iyakki/root")).unwrap().flatten().filter(|e| e.path().is_dir()).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    assert_eq!(dirs, vec![id1.clone()], "one stored image");
+    assert_eq!(pointer(&r, "current").unwrap(), format!("{id1}\nsize={}\n", 3 << 20));
+    // a different image is still a new root
+    let (_, m3) = lean_payload(&r, "0.1.0-alpha.4", 92);
+    assert_eq!(root_target(r.dm.data_dir(), &m3).unwrap(), root_id(&m3).unwrap());
+}
+
+#[test]
 fn an_image_equal_to_the_installed_seed_is_not_sent_again_on_a_fresh_install() {
     let r = rig("lean4");
     let (_, m) = lean_payload(&r, "0.1.0-alpha.2", 91);

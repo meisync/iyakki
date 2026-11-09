@@ -108,7 +108,10 @@ pub enum Plan {
     Soft { card: u32, device: u32 },
     /// [`Plan::Soft`] for a device with more than two channels (the MacBookPro's four-channel codec): the stereo signal is copied to every
     /// channel before it reaches the device, as the shared mixer does, so each speaker plays at full level and not only the front pair.
-    SoftFan { card: u32, device: u32, channels: u32 },
+    /// `format`: the device's format when it was learned from the device (`S32_LE` on the MacBookPro14,1's codec): named for the
+    /// slave, because that codec also offers `S24_LE` and ALSA's `plug` picks it for 16-bit players; its 24 bits then sit in the low
+    /// bits of the 32-bit word while the hardware reads the top ones, 48 dB too quiet (measured 2026-11-08: "ear at the speaker").
+    SoftFan { card: u32, device: u32, channels: u32, format: Option<&'static str> },
     /// [`Plan::Soft`] for a device with fixed periods (the T2 Mac's `aaudio`), plus the engine's own PCM ([`WEB_PCM`]): `plug > softvol >
     /// plughw` plays the players' S16 stereo, but the engine's WebAudio output could not be installed on it (the page then froze on its
     /// synchronous start of the output), so the engine gets `plug > softvol > hw` (measured on a MacBookPro16,2: no freeze, a media
@@ -140,7 +143,7 @@ impl Plan {
     fn exclusive_of(&self) -> Plan {
         match self {
             Plan::Mix { card, device, mix } if !mix.sized => Plan::Direct { card: *card, device: *device, channels: mix.channels },
-            Plan::Mix { card, device, mix } if mix.fans_out() => Plan::SoftFan { card: *card, device: *device, channels: mix.channels },
+            Plan::Mix { card, device, mix } if mix.fans_out() => Plan::SoftFan { card: *card, device: *device, channels: mix.channels, format: mix.probed.then_some(mix.format) },
             p => Plan::Soft { card: p.card(), device: p.device() },
         }
     }
@@ -250,14 +253,19 @@ pub fn config_text_boost(plan: &Plan, boost_db: u32) -> String {
              {}",
             softvol_block(*card, &format!("plughw:{card},{device}"), boost_db, false)
         ),
-        Plan::SoftFan { card, device, channels } => {
-            let mut route = format!("pcm.iyakkifan {{\n    type route\n    slave {{\n        pcm \"plughw:{card},{device}\"\n        channels {channels}\n    }}\n    ttable {{\n");
+        Plan::SoftFan { card, device, channels, format } => {
+            // the device's own format, named: plug then converts to it instead of choosing one (see the variant's doc)
+            let fmt_line = format.map(|f| format!("        format {f}\n")).unwrap_or_default();
+            let mut route = format!("pcm.iyakkifan {{\n    type route\n    slave {{\n        pcm \"plughw:{card},{device}\"\n        channels {channels}\n{fmt_line}    }}\n    ttable {{\n");
             for dst in 0..*channels {
                 route.push_str(&format!("        {}.{dst} 1.0\n", dst % 2));
             }
             route.push_str("    }\n}\n");
-            // the speaker tests play every channel apart through this one
-            route.push_str(&format!("pcm.iyakkichan {{\n    type plug\n    slave.pcm \"plughw:{card},{device}\"\n}}\n"));
+            // the speaker tests play every channel apart through this one (the same format, or the test is quiet too)
+            match format {
+                Some(f) => route.push_str(&format!("pcm.iyakkichan {{\n    type plug\n    slave {{\n        pcm \"plughw:{card},{device}\"\n        format {f}\n    }}\n}}\n")),
+                None => route.push_str(&format!("pcm.iyakkichan {{\n    type plug\n    slave.pcm \"plughw:{card},{device}\"\n}}\n")),
+            }
             format!(
                 "{MARKER}\n\
                  # The output has no hardware volume: {SOFTVOL_PCM} is a software volume (control '{CONTROL}' on card {card}); one program at a time.\n\
@@ -618,7 +626,8 @@ impl Softvol {
     /// Make the file say `plan` (a fresh start for the control when it changes).
     fn write_plan(&self, st: &mut St, plan: &Plan) -> Result<(), String> {
         let existing = std::fs::read_to_string(&self.path).ok();
-        let text = config_text_boost(plan, self.boost.load(std::sync::atomic::Ordering::SeqCst));
+        // the capture PCMs with a named format ride along (micpcm.rs); learned after the first write, they land on the next sync
+        let text = config_text_boost(plan, self.boost.load(std::sync::atomic::Ordering::SeqCst)) + &crate::micpcm::sections();
         if existing.as_deref() != Some(text.as_str()) {
             if let Err(e) = write_atomic(&self.path, &text) {
                 st.reset();
@@ -1147,10 +1156,17 @@ mod tests {
         // copy the stereo signal to all four channels, or only the front pair plays and the speakers are quiet
         let plan = Plan::Mix { card: 0, device: 0, mix: Mix { format: "S32_LE", channels: 4, sized: true, rate: 44_100, probed: true } };
         let fallback = plan.exclusive_of();
-        assert_eq!(fallback, Plan::SoftFan { card: 0, device: 0, channels: 4 });
+        assert_eq!(fallback, Plan::SoftFan { card: 0, device: 0, channels: 4, format: Some("S32_LE") });
         let t = config_text(&fallback);
         assert!(t.contains("slave.pcm \"iyakkifan\""), "{t}");
         assert!(t.contains("pcm \"plughw:0,0\"") && t.contains("channels 4"), "{t}");
+        // the learned format is named for the slave and for the speaker-test PCM: without it plug picked S24_LE on this codec and the
+        // sound was 48 dB too quiet (2026-11-08, MacBookPro14,1, stream hw_params showed S24_LE)
+        assert_eq!(t.matches("format S32_LE").count(), 2, "{t}");
+        assert!(t.contains("        channels 4\n        format S32_LE\n    }"), "the format sits in the route's slave block: {t}");
+        // a fan-out whose format was never learned keeps the old text (plug chooses)
+        let unlearned = Plan::SoftFan { card: 0, device: 0, channels: 4, format: None };
+        assert!(!config_text(&unlearned).contains("format "), "{}", config_text(&unlearned));
         for (src, dst) in [(0, 0), (1, 1), (0, 2), (1, 3)] {
             assert!(t.contains(&format!("{src}.{dst} 1.0")), "{src}.{dst} missing in {t}");
         }

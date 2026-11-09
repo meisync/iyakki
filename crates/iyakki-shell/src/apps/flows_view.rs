@@ -258,6 +258,7 @@ impl FlowsApp {
                 btn(g, &mut fl2, "Run (r)", OK, id::RUN, true);
                 btn(g, &mut fl2, "Publish (p)", ACCENT, id::PUBLISH, true);
                 btn(g, &mut fl2, "History (h)", MUTED, id::HISTORY, true);
+                btn(g, &mut fl2, "Webhook (w)", MUTED, id::HOOKS, true);
                 btn(g, &mut fl2, "Export", MUTED, id::EXPORT, true);
                 btn(g, &mut fl2, "Import", MUTED, id::IMPORT, true);
             }
@@ -589,6 +590,13 @@ impl FlowsApp {
             self.draw_suggestions(g, area, s);
             return;
         }
+        if let Some(Modal::Webhook(_)) = &self.modal {
+            if let Some(Modal::Webhook(p)) = self.modal.take() {
+                self.draw_hooks(&p, g, area, s);
+                self.modal = Some(Modal::Webhook(p));
+            }
+            return;
+        }
         let Some(m) = self.modal.as_mut() else { return };
         match m {
             Modal::Name(form, _) | Modal::Import(form) | Modal::RunInputs(form, _, _) => form.render(g, area, s, ACCENT, blink),
@@ -631,6 +639,7 @@ impl FlowsApp {
                 g.button(x + 110.0 * s, by, 12.5 * s, "Cancel", MUTED, Event::Key(crate::ui::Key::Esc));
             }
             Modal::Suggestions(_) => {}
+            Modal::Webhook(_) => {}
             Modal::History(h) => {
                 let p = fx::modal(g, area, s, 760.0 * s, 520.0 * s, ACCENT, false);
                 let y0 = fx::modal_title(g, p, s, "Versions", ACCENT);

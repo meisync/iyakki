@@ -6,6 +6,8 @@
 
 use std::path::{Path, PathBuf};
 
+pub mod bnep;
+pub mod bt_pan;
 pub mod bthid;
 pub mod bthid_sys;
 pub mod btmgmt;
@@ -96,6 +98,10 @@ pub struct Link {
 /// treat it as a client or an adapter: bringing it up as a client stops the access point.
 pub const HOTSPOT_IFACE: &str = "iyakap0";
 
+/// The interface of Bluetooth tethering (a TAP made by [`bt_pan`]): the phone's internet. It gets its address from the DHCP client of
+/// [`bt_pan`] itself, so the network set-up never treats it as a cable or an adapter (like [`HOTSPOT_IFACE`]).
+pub const BT_PAN_IFACE: &str = "iyakbt0";
+
 /// What the kernel says about one network interface by name, software interfaces included: its driver (empty when it has none) and whether
 /// it is wireless. The one place that reads this for everybody else (the metered-link check, the firmware tools); a name that is not a
 /// plain interface name gives nothing.
@@ -118,7 +124,7 @@ pub fn links(r: &Roots) -> Vec<Link> {
     let mut out = Vec::new();
     for d in dirs(&r.sys.join("class/net")) {
         let name = name_of(&d);
-        if name == "lo" || name == HOTSPOT_IFACE || !d.join("device").exists() {
+        if name == "lo" || name == HOTSPOT_IFACE || name == BT_PAN_IFACE || !d.join("device").exists() {
             continue; // software interfaces have no device behind them; the hotspot's access point is not an adapter to configure
         }
         let wifi = d.join("wireless").exists() || d.join("phy80211").exists();
@@ -754,6 +760,17 @@ pub trait Control: Send + Sync {
     fn bt_pair_answer(&self, _yes: bool) -> bool {
         false
     }
+    /// The phone-as-uplink connection ([`bt_pan`]): the state and, when it failed, the plain reason.
+    fn bt_tether_view(&self) -> bt_pan::TetherView {
+        bt_pan::TetherView::idle()
+    }
+    /// Starts connecting a paired phone's tethering in the background (`bt_tether_view` shows the progress).
+    fn bt_tether_connect(&self, _address: &str) -> Result<(), String> {
+        Err("not available here".into())
+    }
+    fn bt_tether_disconnect(&self) -> Result<(), String> {
+        Err("not available here".into())
+    }
 }
 
 static BT_LOADER: std::sync::OnceLock<(fn() -> bool, fn() -> Result<String, String>)> = std::sync::OnceLock::new();
@@ -806,6 +823,15 @@ impl Control for System {
     }
     fn bt_pair_answer(&self, yes: bool) -> bool {
         bthid_sys::hub().pair_answer(yes)
+    }
+    fn bt_tether_view(&self) -> bt_pan::TetherView {
+        bt_pan::Tether::view(&*bt_pan::tether())
+    }
+    fn bt_tether_connect(&self, address: &str) -> Result<(), String> {
+        bt_pan::Tether::connect(&*bt_pan::tether(), address)
+    }
+    fn bt_tether_disconnect(&self) -> Result<(), String> {
+        bt_pan::Tether::disconnect(&*bt_pan::tether())
     }
     fn set_link(&self, name: &str, up: bool) -> Result<(), String> {
         set_link(name, up)

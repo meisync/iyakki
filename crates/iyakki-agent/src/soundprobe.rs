@@ -190,6 +190,11 @@ impl Prober {
         Prober::new(aplay_dump)
     }
 
+    /// The real `arecord`: the capture side of a device (`micpcm.rs`).
+    pub fn capture_system() -> Prober {
+        Prober::new(arecord_dump)
+    }
+
     /// How soon a failed look is repeated (tests).
     pub fn with_retry(mut self, d: Duration) -> Prober {
         self.retry = d;
@@ -236,14 +241,23 @@ impl Prober {
 
 /// `aplay -D hw:C,D --dump-hw-params /dev/zero`: the report goes to stderr; both streams are returned. Ends after 3 s.
 pub fn aplay_dump(card: u32, device: u32) -> Result<String, String> {
+    dump("aplay", &["-D", &format!("hw:{card},{device}"), "--dump-hw-params", "/dev/zero"])
+}
+
+/// `arecord -D hw:C,D --dump-hw-params -d 1 /dev/null`: the same report for the capture side (one second of capture is thrown away).
+pub fn arecord_dump(card: u32, device: u32) -> Result<String, String> {
+    dump("arecord", &["-D", &format!("hw:{card},{device}"), "--dump-hw-params", "-d", "1", "/dev/null"])
+}
+
+fn dump(program: &str, args: &[&str]) -> Result<String, String> {
     use std::io::Read;
-    let mut child = std::process::Command::new("aplay")
-        .args(["-D", &format!("hw:{card},{device}"), "--dump-hw-params", "/dev/zero"])
+    let mut child = std::process::Command::new(program)
+        .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .map_err(|e| format!("aplay: {e}"))?;
+        .map_err(|e| format!("{program}: {e}"))?;
     let (so, se) = (child.stdout.take(), child.stderr.take());
     let end = Instant::now() + Duration::from_secs(3);
     let status = loop {
@@ -253,7 +267,7 @@ pub fn aplay_dump(card: u32, device: u32) -> Result<String, String> {
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err("aplay did not finish".into());
+                return Err(format!("{program} did not finish"));
             }
         }
     };

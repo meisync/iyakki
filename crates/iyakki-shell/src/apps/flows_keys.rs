@@ -206,6 +206,7 @@ impl FlowsApp {
             id::RUN_DRAFT => self.run_flow(true),
             id::PUBLISH => self.open_publish(),
             id::HISTORY => self.open_history(),
+            id::HOOKS => self.open_hooks(),
             id::APPLY_SCHEDULED => self.apply_update(ApplyScope::Scheduled),
             id::APPLY_RUNNING => self.apply_update(ApplyScope::Running),
             id::LEAVE_UPDATE => {
@@ -478,6 +479,7 @@ impl FlowsApp {
             Key::Char('r') => self.run_flow(false),
             Key::Char('p') => self.open_publish(),
             Key::Char('h') => self.open_history(),
+            Key::Char('w') => self.open_hooks(),
             Key::Char('T') => self.test_selected(),
             Key::Char('e') => {
                 if self.sel.len() == 1 {
@@ -727,6 +729,11 @@ impl FlowsApp {
                 self.modal = Some(Modal::Publish(f));
             }
             Some(Modal::Suggestions(v)) => self.suggestions_event(v, ev),
+            Some(Modal::Webhook(mut p)) => {
+                if self.hook_event(&mut p, ev) {
+                    self.modal = Some(Modal::Webhook(p));
+                }
+            }
             Some(Modal::History(mut h)) => {
                 let mut keep = true;
                 match ev {

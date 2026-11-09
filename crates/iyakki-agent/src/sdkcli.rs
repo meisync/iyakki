@@ -15,6 +15,8 @@ pub const USAGE: &str = "usage: iyakki sdk <command>
                                       CLAUDE.md and AGENTS.md for coding agents, iyakki.d.ts and .gitignore; refuses a folder that has files
   doctor                              what is ready on this computer (program, paired device, does it answer) and the next step
   docs [topic]                        the guides, offline: with a topic, its path and what it covers
+  check|test|shot|emulate TILE ...    the tile emulator on this computer, no device (docs/SDK-EMULATOR.md): check = install-card text, test =
+                                      scripted runs with golden pictures, shot = one PNG, emulate = the window
   (emulator start|stop|status is specified in dist/sdk/EMULATOR.md and not built yet)
 options: --home DIR (developer mode folder for doctor; default ~/.config/iyakki/dev or $IYAKKI_DEV_HOME)";
 
@@ -83,10 +85,24 @@ pub fn run(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
             out(&doctor(&home, &|d: &Device| DevClient::new(&home, d.clone())?.whoami()));
         }
         Some("docs") => out(&docs(pos.get(1).copied())?),
+        Some("check" | "test" | "shot" | "emulate") => return emulator_cmd(a, out),
         Some("emulator") => return Err("iyakki sdk emulator is not built yet: the target is specified in dist/sdk/EMULATOR.md".into()),
         Some(other) => return Err(format!("unknown command {other:?}\n{USAGE}")),
     }
     Ok(())
+}
+
+/// `iyakki sdk check|test|shot|emulate`: the tile emulator is its own small program (`iyakki-sdk-emulator`, no device and no OS build needed);
+/// it is looked for next to this program, then on PATH.
+fn emulator_cmd(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
+    let beside = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("iyakki-sdk-emulator"))).filter(|p| p.is_file());
+    let prog = beside.unwrap_or_else(|| PathBuf::from("iyakki-sdk-emulator"));
+    let o = std::process::Command::new(&prog).args(a).output().map_err(|_| "the program iyakki-sdk-emulator was not found next to iyakki or on PATH; build it with: cargo build --release -p iyakki-sdk-emulator".to_string())?;
+    let text = String::from_utf8_lossy(&o.stdout).trim_end().to_string();
+    if !text.is_empty() {
+        out(&text);
+    }
+    if o.status.success() { Ok(()) } else { Err(format!("iyakki-sdk-emulator {} failed", a.first().map(String::as_str).unwrap_or(""))) }
 }
 
 /// Keep the sections of a template for `kind` (`<!-- kind:K -->` ... `<!-- /kind -->`), drop the others, fill the names.

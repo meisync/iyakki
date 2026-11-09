@@ -17,11 +17,16 @@ name = "iyakki-desktop"
 path = "src/desktop.rs"
 
 [[bin]]
+name = "iyakki-sdk-emulate-window"
+path = "src/sdk_emulate.rs"
+
+[[bin]]
 name = "iyakki-installer"
 path = "src/installer.rs"
 
 [dependencies]
 iyakki-usb = { path = "../iyakki-usb" }
+iyakki-sdk-emulator = { path = "../iyakki-sdk-emulator" }
 iyakki-proxy = { path = "../iyakki-proxy" }
 iyakki-ui = { path = "../iyakki-ui" }
 iyakki-shell = { path = "../iyakki-shell" }

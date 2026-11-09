@@ -20,6 +20,11 @@ iyakki-ledger.workspace = true
 iyakki-netscan.workspace = true
 iyakki-proxy = { path = "../iyakki-proxy" }
 iyakki-web.workspace = true
+iyakki-pdf.workspace = true
+iyakki-wake.workspace = true
+iyakki-rtsp.workspace = true
+# camera recordings: the AES-256-XTS and HMAC primitives of the data-volume crate (camrec_format.rs)
+iyakki-volcrypt.workspace = true
 iyakki-webview.workspace = true
 iyakki-data.workspace = true
 iyakki-drivers.workspace = true
@@ -42,6 +47,10 @@ iyakki-schema.workspace = true
 # the desktop connector's client, WebSocket framing and picture codec live in the small crate the connector program shares (re-exported here)
 iyakki-link.workspace = true
 iyakki-js.workspace = true
+# WASM tiles served to a browser (webservice/tiles.rs): the sandbox host, the ABI types and the example tile
+iyakki-tile-host = { path = "../iyakki-tile-host" }
+iyakki-tile-abi = { path = "../iyakki-tile-abi" }
+iyakki-tile-example = { path = "../iyakki-tile-example" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror.workspace = true

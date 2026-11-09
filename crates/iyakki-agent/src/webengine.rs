@@ -392,6 +392,11 @@ pub fn helper_env(profile: &Path) -> Option<Vec<(String, String)>> {
     } else {
         v.extend(mixed);
     }
+    // capture PCMs with the format named (micpcm.rs): the helper's microphone plugin opens them instead of plughw
+    let mic_pcms = crate::micpcm::helper_env_of(&crate::micpcm::known());
+    if !mic_pcms.is_empty() {
+        v.push(("IYAKKI_WEBVIEW_MIC_PCMS".to_string(), mic_pcms));
+    }
     // the audio and video add-on (H.264 / AAC), only when the person has installed it: avaddon.rs
     if let Some(data) = crate::avaddon::data_of_profile(profile) {
         let lib = crate::avaddon::lib_dir(data);

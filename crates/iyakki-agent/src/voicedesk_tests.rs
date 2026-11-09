@@ -289,3 +289,18 @@ fn a_room_that_is_loud_all_the_time_still_ends_after_talking_stops() {
     }
     assert!(ended, "the fan alone is a pause");
 }
+
+/// MacBookPro14,1 (2026-11-08): its codec offers S24_LE and S32_LE for capture; through plughw the recorder got full-scale noise. The
+/// learned card gets a capture PCM with the format named, and the record command is aimed at it instead of plughw.
+#[test]
+fn a_card_whose_capture_format_was_learned_records_through_its_named_pcm() {
+    let args: Vec<String> = ["arecord", "-q", "-f", "S16_LE", "-r", "16000", "-c", "1", "-t", "raw"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(record_cmd_for_device(&args, "iyakkimic0d0"), "arecord -D iyakkimic0d0 -q -f S16_LE -r 16000 -c 1 -t raw");
+    assert_eq!(record_cmd_for_device(&args, "plughw:2,0"), "arecord -D plughw:2,0 -q -f S16_LE -r 16000 -c 1 -t raw");
+    // the real path: a learned card 7 (a number no other test uses) maps its plughw id; an unlearned card keeps plughw
+    assert!(crate::micpcm::learn(7, 0, &["S24_LE".to_string(), "S32_LE".to_string()]));
+    let learned = Mic { id: "plughw:7,0".into(), label: "x".into(), usb: false };
+    let other = Mic { id: "plughw:8,0".into(), label: "y".into(), usb: true };
+    assert_eq!(record_cmd_for("arecord -q -t raw", Some(&learned)), "arecord -D iyakkimic7d0 -q -t raw");
+    assert_eq!(record_cmd_for("arecord -q -t raw", Some(&other)), "arecord -D plughw:8,0 -q -t raw");
+}

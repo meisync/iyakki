@@ -103,7 +103,7 @@ pub fn app_class(app: App) -> Class {
         App::Voice => Hardware(Need::Audio),
         // mounting and partitioning the drives of this computer: pointless over a remote desktop, so hidden in cloud mode
         App::Disks => Hardware(Need::Disks),
-        App::Chat | App::Rag | App::Mcp | App::Cli | App::Users | App::Settings | App::Runs | App::Edit | App::Browser | App::Mesh | App::Scan | App::Skills | App::Usage | App::Calendar | App::System | App::SrePilot | App::Inbox | App::Ide | App::Data | App::Store | App::Dash | App::Flows | App::K8s | App::LinuxWin | App::Lab | App::Git | App::Doctor | App::Checkup | App::Learn | App::DevTools | App::Auth => Remote,
+        App::Chat | App::Rag | App::Mcp | App::Cli | App::Users | App::Settings | App::Runs | App::Edit | App::Browser | App::Mesh | App::Scan | App::Skills | App::Usage | App::Calendar | App::System | App::SrePilot | App::Inbox | App::Ide | App::Data | App::Store | App::Dash | App::Flows | App::K8s | App::LinuxWin | App::Lab | App::Git | App::Doctor | App::Checkup | App::Learn | App::DevTools | App::Auth | App::Remote | App::Cameras => Remote,
     }
 }
 

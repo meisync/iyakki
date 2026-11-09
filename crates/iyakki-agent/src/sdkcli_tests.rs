@@ -177,3 +177,13 @@ fn run_dispatches_and_the_emulator_says_it_is_not_built() {
     assert!(run(&["nope".into()], &mut |_| {}).is_err());
     assert_eq!(positional(&["init".into(), "a".into(), "--kind".into(), "mcp".into(), "--dir".into(), "d".into()]), ["init", "a"]);
 }
+
+#[test]
+fn the_emulator_commands_go_to_the_emulator_program() {
+    // without a tile folder the program (or, when it is not built here, the message that names it) answers
+    for c in ["check", "test", "shot", "emulate"] {
+        let e = run(&[c.into()], &mut |_| {}).unwrap_err();
+        assert!(e.contains("iyakki-sdk-emulator"), "{c}: {e}");
+    }
+    assert!(USAGE.contains("check|test|shot|emulate TILE"));
+}

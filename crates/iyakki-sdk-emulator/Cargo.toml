@@ -1,0 +1,20 @@
+[package]
+name = "iyakki-sdk-emulator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SDK emulator core (F-SDK-02): runs a WASM tile on the developer's computer against fake bridge services; scripts, golden pictures, hot reload, permission checks. Headless library plus the `iyakki-sdk-emulator` command; the window is crates/iyakki-gui/src/sdk_emulate.rs."
+
+# Depends on the tile ABI and its host only (no agent, no shell, no hardware crates), so it compiles alone and a tile developer never builds the OS.
+
+[dependencies]
+iyakki-tile-abi = { path = "../iyakki-tile-abi" }
+iyakki-tile-host = { path = "../iyakki-tile-host" }
+serde_json = "1"
+
+[dev-dependencies]
+iyakki-tile-example = { path = "../iyakki-tile-example" }
+
+[[bin]]
+name = "iyakki-sdk-emulator"
+path = "src/main.rs"

@@ -43,6 +43,8 @@ pub fn choices(ifs: &[IfaceInfo], wifi_ap: bool) -> Choices {
             // a Wi-Fi interface is a client; the hotspot is one entry of its own below
             LinkKind::Wifi => {}
             LinkKind::Other => {}
+            // the phone's tethering is only ever a source of internet, never a cable to give it to
+            LinkKind::BluetoothPanu => {}
             _ => {
                 let r = free_for_sharing(i);
                 let label = format!("{} {} - {}", i.kind.label(), i.name, if r.is_err() { "in use".to_string() } else { state(i).to_string() });
@@ -58,8 +60,12 @@ pub fn choices(ifs: &[IfaceInfo], wifi_ap: bool) -> Choices {
     if wifi_ap {
         c.downs.push(Choice { name: crate::wifi_ap::AP_IFACE.into(), label: "Wi-Fi hotspot - this computer's Wi-Fi card makes its own network".into(), usable: true, why: String::new() });
     }
-    // Bluetooth is modelled but not built: listed with the reason, never selectable
+    // Bluetooth: a connected phone is an uplink above; this entry says what is missing, and sharing ours (NAP) is not built yet
+    let phone_is_up = ifs.iter().any(|i| i.kind == LinkKind::BluetoothPanu && i.default_route && i.up);
     for (kind, name, up) in [(LinkKind::BluetoothPanu, "bluetooth-panu", true), (LinkKind::BluetoothNap, "bluetooth-nap", false)] {
+        if phone_is_up && kind == LinkKind::BluetoothPanu {
+            continue; // the connected phone is listed above like any uplink
+        }
         let ch = Choice { name: name.into(), label: kind.label().into(), usable: false, why: bluetooth_why(kind) };
         if up {
             c.uplinks.push(ch);
@@ -86,7 +92,10 @@ pub fn warnings(isolate: bool, idle_hours: u8) -> Vec<String> {
 fn bluetooth_why(kind: LinkKind) -> String {
     match kind {
         // the phone side: a controller with an address is all it needs (the phone is chosen in Settings -> Bluetooth)
-        LinkKind::BluetoothPanu => crate::bt_pan::controller_state(std::path::Path::new("/sys")).err().unwrap_or_default(),
+        LinkKind::BluetoothPanu => match crate::bt_pan::controller_state(&iyakki_devctl::Roots::real()) {
+            Err(why) => why,
+            Ok(_) => "Not connected yet: Settings -> Bluetooth, choose the paired phone and press Connect under Tether.".into(),
+        },
         _ => "Letting phones connect to this computer is not built yet (use the Wi-Fi hotspot).".into(),
     }
 }

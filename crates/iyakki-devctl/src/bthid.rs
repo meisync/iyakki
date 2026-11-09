@@ -778,6 +778,11 @@ pub fn is_hid_kind(k: btmgmt::Kind) -> bool {
     matches!(k, btmgmt::Kind::Keyboard | btmgmt::Kind::Mouse | btmgmt::Kind::Gamepad)
 }
 
+/// Devices this version can pair: keyboards, mice and game pads (to use them) and phones (for their Bluetooth tethering, [`crate::bt_pan`]).
+pub fn is_pairable_kind(k: btmgmt::Kind) -> bool {
+    is_hid_kind(k) || k == btmgmt::Kind::Phone
+}
+
 // ------------------------------------------------------------------------------------------------ the list the pages and tools use
 
 /// Where a device is in its connection.
@@ -851,6 +856,8 @@ pub enum PairState {
     Running(String),
     /// Compare this number with the one on the device and confirm.
     Confirm(String, u32),
+    /// A phone that shows no number ("just works"): the person still has to say that they want this phone paired.
+    ConfirmNoNumber(String),
     /// Type this passkey on the keyboard, then Enter.
     ShowPasskey(String, u32),
     /// Type this PIN on the keyboard, then Enter.

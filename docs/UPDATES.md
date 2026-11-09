@@ -108,6 +108,24 @@ A private store the person added with its key confirmed can offer separate syste
   replaced by the fact, so a rollback or a fall-back start cannot leave it lying.
 * **The label:** the store signs the IYAKKI version and image variant its parts belong to into the list (`release`); the payload uses it. A
   partial update (say only a kernel) must carry the label of the install it goes onto.
+* **The channel:** each computer follows one channel, `stable` until the person chooses another. Settings -> System update has a **Channel** button
+  that cycles stable, beta, nightly (kept in the data folder as `components-channel`); Check for updates, Review and apply and the assistant's
+  `components_status` / `components_apply` use it (an explicit `channel` in a tool call wins), and `components_channel_set` (asks first) changes it. A review
+  made for one channel is dropped when the channel changes. A store moves a build from nightly to beta to stable with `iyakki store component promote`
+  (docs/STORE.md section 13); nothing is rebuilt.
+* **The last result stays:** the page shows "Last system component install (2 minutes ago): Installed / Refused, nothing was changed / Failed /
+  Failed and rolled back" with the reason, until the next install starts (`components-last-apply.json`), and the same text is ONE notice in the
+  person's inbox (replaced in place by the next install). A refusal is told apart from a success; a download or check that failed says nothing was
+  changed.
+* **Same system image, no second copy:** a boot-only update carries the image that runs now. When its size and SHA-256 equal the image the
+  `current` root pointer names, that root is reused under its own id (no 419 MB copy, the pointers and any patch layer for that root stay valid),
+  even when the release label in the folder name differs.
+* **After a failed check, the root is put back too:** when a base part was written and the read-back fails (or a program patch fails after it), the
+  earlier system image becomes the root again and the new image is removed. The Update centre's own **Roll back** restores the kernel, the small RAM
+  disk and the menu and leaves the root pointer where an update moved it; that manual case is not changed.
+* **The boot partition is read at boot:** the record cannot tell by itself which boot RAM disk is in place, so at every start the boot RAM disk(s) on the boot
+  partition are read (read-only, through the Update centre's boot volume reader, at most 1 GiB each) and a recorded boot hash that none of them has makes the
+  record follow the system. When the partition cannot be read nothing is judged.
 * The computer never restarts by itself.
 
 Not proven: any of this on a real boot partition, a real 400 MB base image, the real mount, a real store, or a restart into the result (see

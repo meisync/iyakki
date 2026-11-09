@@ -148,13 +148,41 @@ pub fn current(data: &Path, facts: &Facts) -> Installed {
 
 /// At boot: read, correct (reading the running program's SHA-256 when it is not on record), and save when something changed.
 pub fn correct_at_boot(data: &Path, facts: &Facts) -> Result<Vec<String>, String> {
+    correct_at_boot_with(data, facts, &[])
+}
+
+/// [`correct_at_boot`] with what the boot partition really holds: the SHA-256 of each boot RAM disk found there (empty: could not be read,
+/// the record is then left alone for the boot part).
+pub fn correct_at_boot_with(data: &Path, facts: &Facts, boot_disks: &[String]) -> Result<Vec<String>, String> {
     let before = Installed::load(data);
     let mut i = before.clone();
-    let notes = correct(&mut i, facts, true);
+    let mut notes = correct(&mut i, facts, true);
+    notes.extend(readback_boot(&mut i, facts, boot_disks));
     if i != before || !data.join(INSTALLED_FILE).exists() {
         i.save(data)?;
     }
     Ok(notes)
+}
+
+/// The record says a boot part was written (and read back) by this device, with the SHA-256 of the boot RAM disk; the boot partition is read
+/// again. When none of the RAM disks there has that hash, the record cannot be true (a write that did not stick, a rollback that put an
+/// earlier set back, a partition rewritten by a reinstall): it follows the system, with the hash dropped. `disks` empty means the
+/// partition could not be read, and nothing is judged.
+pub fn readback_boot(inst: &mut Installed, f: &Facts, disks: &[String]) -> Vec<String> {
+    let Some(rec) = inst.shas.get("boot").cloned() else { return vec![] };
+    if disks.is_empty() || disks.iter().any(|d| *d == rec) {
+        return vec![];
+    }
+    let was = inst.versions.get("boot").cloned().unwrap_or_default();
+    match &f.release_version {
+        Some(v) => inst.versions.insert("boot".into(), v.clone()),
+        None => inst.versions.remove("boot"),
+    };
+    inst.shas.remove("boot");
+    inst.files.remove("boot");
+    inst.awaiting.remove("boot");
+    inst.how.insert("boot".into(), "observed".into());
+    vec![format!("boot: the record said {was} was in place, but the boot RAM disk on the boot partition is not the one recorded; the record now follows the system.")]
 }
 
 /// One component written by a verified apply.

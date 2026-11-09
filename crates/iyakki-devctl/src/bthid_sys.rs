@@ -26,6 +26,8 @@ const BTPROTO_L2CAP: i32 = 0;
 const SOL_BLUETOOTH: i32 = 274;
 const BT_SECURITY: i32 = 4;
 const BT_SECURITY_MEDIUM: u8 = 2;
+const SOL_L2CAP: i32 = 6;
+const L2CAP_OPTIONS: i32 = 1;
 const CONNECT_SECS: u64 = 12;
 const SDP_SECS: u64 = 8;
 /// Where the pairings and keys are kept (one file, mode 0600).
@@ -73,7 +75,25 @@ pub struct L2Sock {
 impl L2Sock {
     /// Connects to `addr` (kernel byte order) on `psm`.
     pub fn connect(addr: [u8; 6], psm: u16, secs: u64) -> Result<L2Sock, HidError> {
+        L2Sock::connect_mtu(addr, psm, secs, None)
+    }
+
+    /// [`connect`](Self::connect) with a larger L2CAP message size asked for before the connection is made (BNEP needs 1691; the kernel's
+    /// default of 672 would cut Ethernet frames).
+    pub fn connect_mtu(addr: [u8; 6], psm: u16, secs: u64, mtu: Option<u16>) -> Result<L2Sock, HidError> {
         let fd = new_l2cap().map_err(|e| HidError::Connect(e.raw_os_error().unwrap_or(libc::ENODEV)))?;
+        if let Some(m) = mtu {
+            let mut o = [0u8; 16];
+            let mut len = o.len() as u32;
+            // SAFETY: o is valid for len bytes; the kernel fills in its current options, of which only the two message sizes change
+            let got = unsafe { libc::getsockopt(fd.as_raw_fd(), SOL_L2CAP, L2CAP_OPTIONS, o.as_mut_ptr() as *mut libc::c_void, &mut len) };
+            if got == 0 && len >= 4 {
+                o[0..2].copy_from_slice(&m.to_le_bytes());
+                o[2..4].copy_from_slice(&m.to_le_bytes());
+                // SAFETY: same buffer and length the kernel gave
+                unsafe { libc::setsockopt(fd.as_raw_fd(), SOL_L2CAP, L2CAP_OPTIONS, o.as_ptr() as *const libc::c_void, len) };
+            }
+        }
         let sa = sockaddr_l2(addr, psm);
         // SAFETY: sa is 14 readable bytes and the length says so
         let r = unsafe { libc::connect(fd.as_raw_fd(), sa.as_ptr() as *const libc::sockaddr, sa.len() as u32) };
@@ -93,7 +113,7 @@ impl L2Sock {
         Ok(L2Sock { fd })
     }
 
-    fn raw(&self) -> RawFd {
+    pub fn raw(&self) -> RawFd {
         self.fd.as_raw_fd()
     }
 }
@@ -398,7 +418,8 @@ impl Hub {
         let stop = Arc::new(AtomicBool::new(false));
         {
             let mut g = self.lock();
-            if g.store.device(&key).is_none() || g.live.contains_key(&key) {
+            // a phone is used for its tethering ([`crate::bt_pan`]), never as an input device
+            if g.store.device(&key).is_none_or(|k| k.kind == "phone") || g.live.contains_key(&key) {
                 return;
             }
             g.live.insert(key.clone(), stop.clone());
@@ -500,6 +521,14 @@ impl Hub {
         if let Some(s) = stop {
             s.store(true, Ordering::SeqCst);
         }
+        // a phone that is forgotten stops sharing its internet at once
+        {
+            use crate::bt_pan::Tether;
+            let t = crate::bt_pan::tether();
+            if t.view().address.eq_ignore_ascii_case(&key) {
+                let _ = t.disconnect();
+            }
+        }
         if let (Some(k), Some(i), Ok(sock)) = (k.as_ref(), self.first_controller(), ControlSocket::open()) {
             let _ = Mgmt::new(sock).unpair(i, &k.address, k.addr_type);
         }
@@ -531,8 +560,8 @@ impl Hub {
         if f.addr_type != ADDR_BREDR {
             return Err("this is a low-energy device. Low-energy keyboards and mice need HID over GATT, which is not written yet; classic (BR/EDR) devices work".into());
         }
-        if !is_hid_kind(f.kind) {
-            return Err(format!("only keyboards, mice and game pads can be used in this version (this looks like: {}); audio (A2DP) is not available yet", kind_label(f.kind)));
+        if !is_pairable_kind(f.kind) {
+            return Err(format!("only keyboards, mice, game pads and phones (for their Bluetooth tethering) can be paired in this version (this looks like: {}); audio (A2DP) is not available yet", kind_label(f.kind)));
         }
         {
             let g = self.lock();
@@ -556,7 +585,7 @@ impl Hub {
             g.answer = None;
             g.pair = PairState::Done(r.clone());
             drop(g);
-            if r.is_ok() {
+            if r.is_ok() && is_hid_kind(f.kind) {
                 // a keyboard usually connects to us by itself right after pairing; if not, we connect to it
                 std::thread::sleep(Duration::from_secs(3));
                 h.start_session(&f.address, None, true);
@@ -574,13 +603,15 @@ impl Hub {
         m.prepare(index).map_err(|e| e.to_string())?;
         let set = |s: PairState| self.lock().pair = s;
         let nm = name.to_string();
+        let phone = f.kind == btmgmt::Kind::Phone;
         let mut ask = |p: &Prompt| -> Answer {
             match p {
                 Prompt::Confirm { value, hint } => {
-                    if *hint {
-                        return Answer::Yes; // "just works": nothing to compare
+                    if *hint && !phone {
+                        return Answer::Yes; // "just works" keyboard: nothing to compare
                     }
-                    set(PairState::Confirm(nm.clone(), *value));
+                    // a phone always asks the person, with the number to compare when it shows one
+                    set(if *hint { PairState::ConfirmNoNumber(nm.clone()) } else { PairState::Confirm(nm.clone(), *value) });
                     match rx.recv_timeout(Duration::from_secs(60)) {
                         Ok(true) => Answer::Yes,
                         Ok(false) | Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => Answer::No,
@@ -603,7 +634,7 @@ impl Hub {
         let _ = m.set_bondable(index, false);
         r.map_err(|e| format!("pairing failed: {e}"))?;
         let mut g = self.lock();
-        g.store.upsert(Known { address: f.address.to_ascii_uppercase(), addr_type: f.addr_type, name: f.name.clone(), kind: kind_label(f.kind).into(), descriptor: String::new(), vendor: 0, product: 0, auto: true });
+        g.store.upsert(Known { address: f.address.to_ascii_uppercase(), addr_type: f.addr_type, name: f.name.clone(), kind: kind_label(f.kind).into(), descriptor: String::new(), vendor: 0, product: 0, auto: is_hid_kind(f.kind) });
         let s = g.store.clone();
         drop(g);
         self.save(&s);
@@ -638,8 +669,10 @@ impl Hub {
         let key = address.to_ascii_uppercase();
         {
             let g = self.lock();
-            if g.store.device(&key).is_none() {
-                return Err("that device is not paired".into());
+            match g.store.device(&key) {
+                None => return Err("that device is not paired".into()),
+                Some(k) if k.kind == "phone" => return Err("a phone is used for its internet, not as an input device: use Tether (Settings -> Bluetooth) or bluetooth_tether_connect".into()),
+                Some(_) => {}
             }
             if g.live.contains_key(&key) {
                 return Err(match g.states.get(&key) {

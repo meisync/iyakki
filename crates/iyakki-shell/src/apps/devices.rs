@@ -7,7 +7,7 @@
 use crate::safeclamp::SafeClamp;
 use std::sync::Arc;
 
-use iyakki_devctl::{bthid, btmgmt, Control, LinkKind, Roots};
+use iyakki_devctl::{bt_pan::{TetherState, TetherView}, bthid, btmgmt, rfkill_list, Control, LinkKind, Roots, BT_PAN_IFACE};
 
 use crate::gfx::rgb;
 use crate::ui::{Key, DIM, OK};
@@ -112,8 +112,10 @@ pub enum Target {
     BtScan(u16),
     /// A paired keyboard, mouse or game pad (by address): Enter connects or disconnects it, `u` forgets it.
     BtDevice(String),
-    /// A keyboard, mouse or game pad the scan found (by address): Enter pairs with it.
+    /// A keyboard, mouse, game pad or phone the scan found (by address): Enter pairs with it.
     BtPair(String),
+    /// A paired phone (by address): Enter connects or disconnects its Bluetooth tethering (its internet), `u` forgets it.
+    BtTether(String),
     /// The answer to "does the device show this number?" while pairing.
     BtPairAnswer(bool),
     /// "Load the Bluetooth driver anyway" (the drivers are set aside on a T2 Mac without firmware).
@@ -346,11 +348,11 @@ impl DevicesPane {
         let mic_choice = self.mic_choice.clone();
         let advanced = self.advanced;
         let scan = self.scan.lock().map(|g| g.clone()).unwrap_or_default();
-        let (devs, pair) = if tab == DevTab::Bluetooth { (self.env.ctl.bt_devices(), self.env.ctl.bt_pair_state()) } else { Default::default() };
+        let (devs, pair, tether) = if tab == DevTab::Bluetooth { (self.env.ctl.bt_devices(), self.env.ctl.bt_pair_state(), self.env.ctl.bt_tether_view()) } else { (Default::default(), Default::default(), TetherView::idle()) };
         let s = self.snap(tick);
         match tab {
             DevTab::Network => network_rows(s, host),
-            DevTab::Bluetooth => bluetooth_rows(s, &scan, &devs, &pair),
+            DevTab::Bluetooth => bluetooth_rows(s, &scan, &devs, &pair, &tether),
             DevTab::Display => display_rows(s),
             DevTab::Sound => sound_rows(s, &sound, advanced, &mic_choice),
         }
@@ -373,6 +375,8 @@ impl DevicesPane {
             (Target::BtDevice(a), _) if toggle => Some(self.bt_device_toggle(a)),
             (Target::BtDevice(a), _) if matches!(key, Key::Char('u')) => Some(self.bt_device_forget(a)),
             (Target::BtPair(a), _) if toggle => Some(self.bt_pair(a)),
+            (Target::BtTether(a), _) if toggle => Some(self.bt_tether_toggle(a)),
+            (Target::BtTether(a), _) if matches!(key, Key::Char('u')) => Some(self.bt_device_forget(a)),
             (Target::BtPairAnswer(yes), _) if toggle => Some(Done {
                 result: if self.env.ctl.bt_pair_answer(*yes) { Ok(if *yes { "Confirmed." } else { "Pairing cancelled." }.into()) } else { Err("Nothing is waiting for an answer.".into()) },
                 audit: format!("bluetooth pairing answer {}", if *yes { "yes" } else { "no" }),
@@ -482,8 +486,40 @@ impl DevicesPane {
     fn bt_power(&mut self, index: u16, on: bool) -> Done {
         match self.env.ctl.bt_power(index, on) {
             Ok(()) => Done { result: Ok(format!("Bluetooth controller hci{index} powered {}.", if on { "on" } else { "off" })), audit: format!("bluetooth hci{index} power {}", if on { "on" } else { "off" }) },
+            Err(e) => {
+                let blocked = rfkill_list(&self.env.roots).into_iter().filter(|k| k.kind == "bluetooth").fold((false, false), |a, k| (a.0 || k.soft, a.1 || k.hard));
+                Done { result: Err(power_failure(&e, on, blocked)), audit: String::new() }
+            }
+        }
+    }
+
+    /// Connects or disconnects the Bluetooth tethering of a paired phone. The refusal that is known at once (no controller, the radio is
+    /// off, not a phone) comes back as the message; what happens later is on the phone's row.
+    fn bt_tether_toggle(&mut self, address: &str) -> Done {
+        let v = self.env.ctl.bt_tether_view();
+        let active = v.address.eq_ignore_ascii_case(address) && matches!(v.state, TetherState::Connecting | TetherState::Connected);
+        if active {
+            return match self.env.ctl.bt_tether_disconnect() {
+                Ok(()) => Done { result: Ok("Disconnecting the phone's internet.".into()), audit: format!("bluetooth tether {address} disconnect") },
+                Err(e) => Done { result: Err(e), audit: String::new() },
+            };
+        }
+        match self.env.ctl.bt_tether_connect(address) {
+            Ok(()) => Done { result: Ok("Connecting to the phone's internet ... the row shows the result in a few seconds. Bluetooth tethering must be on in the phone.".into()), audit: format!("bluetooth tether {address} connect") },
             Err(e) => Done { result: Err(e), audit: String::new() },
         }
+    }
+
+    /// The Tether button: the selected phone, else the only (or first) paired phone.
+    pub fn bt_tether_target(&mut self, selected: Option<&Target>) -> Option<String> {
+        if let Some(Target::BtTether(a)) = selected {
+            return Some(a.clone());
+        }
+        self.env.ctl.bt_devices().into_iter().find(|d| d.kind == "phone").map(|d| d.address)
+    }
+
+    pub fn bt_held(&self) -> bool {
+        self.snap.as_ref().is_some_and(|s| s.bt_held)
     }
 
     fn bt_device_toggle(&mut self, address: &str) -> Done {
@@ -529,7 +565,7 @@ impl DevicesPane {
             let r = ctl.bt_scan(index, SCAN_SECS);
             *out.lock().unwrap_or_else(|e| e.into_inner()) = Scan::Done(r);
         });
-        Done { result: Ok(format!("Scanning for {SCAN_SECS} seconds with hci{index}. Pairing is not available yet.")), audit: format!("bluetooth hci{index} scan") }
+        Done { result: Ok(format!("Scanning for {SCAN_SECS} seconds with hci{index}. Names can take a few seconds longer. Enter on a keyboard, mouse, game pad or phone in the list pairs it.")), audit: format!("bluetooth hci{index} scan") }
     }
 
     /// The controller is listed but needs firmware (as of the last look): Settings shows the "Get firmware" button first.
@@ -637,7 +673,7 @@ fn needs_bt_firmware(product: &str, btc: &Result<Vec<iyakki_devctl::btview::Cont
     }
 }
 
-fn bluetooth_rows(s: &Snapshot, scan: &Scan, devs: &[bthid::DeviceView], pair: &bthid::PairState) -> Vec<DevRow> {
+fn bluetooth_rows(s: &Snapshot, scan: &Scan, devs: &[bthid::DeviceView], pair: &bthid::PairState, tether: &TetherView) -> Vec<DevRow> {
     use iyakki_devctl::btview;
     let mut rows = Vec::new();
     // the kernel's management interface lists the controller even when sysfs has no address file
@@ -698,7 +734,9 @@ fn bluetooth_rows(s: &Snapshot, scan: &Scan, devs: &[bthid::DeviceView], pair: &
                     if paired {
                         continue; // listed below with its connection
                     }
-                    rows.push(if bthid::is_hid_kind(d.kind) && d.addr_type == btmgmt::ADDR_BREDR {
+                    rows.push(if d.kind == btmgmt::Kind::Phone && d.addr_type == btmgmt::ADDR_BREDR {
+                        DevRow::new(title, format!("{sub} · phone · Enter pairs it, to use its Bluetooth tethering (audio is not supported)"), Target::BtPair(d.address.clone())).chip("pair", OK)
+                    } else if bthid::is_hid_kind(d.kind) && d.addr_type == btmgmt::ADDR_BREDR {
                         DevRow::new(title, format!("{sub} · {} · Enter pairs", bthid::kind_label(d.kind)), Target::BtPair(d.address.clone())).chip("pair", OK)
                     } else if bthid::is_hid_kind(d.kind) {
                         DevRow::new(title, format!("{sub} · {} · low energy: not supported yet", bthid::kind_label(d.kind)), Target::Nothing).chip("seen", DIM)
@@ -710,7 +748,7 @@ fn bluetooth_rows(s: &Snapshot, scan: &Scan, devs: &[bthid::DeviceView], pair: &
                 }
             }
         }
-        rows.extend(paired_rows(devs, pair));
+        rows.extend(paired_rows(devs, pair, tether, &s.ips));
     } else if rows.is_empty() && s.bt.usb_present {
         rows.push(DevRow::new("Bluetooth adapter (USB)", "found, but no driver has taken it yet", Target::Nothing).chip("no driver", WARN));
     }
@@ -724,7 +762,7 @@ fn bluetooth_rows(s: &Snapshot, scan: &Scan, devs: &[bthid::DeviceView], pair: &
 }
 
 /// Pairing in progress and the paired devices, each with its connection and the plain reason when it failed.
-fn paired_rows(devs: &[bthid::DeviceView], pair: &bthid::PairState) -> Vec<DevRow> {
+fn paired_rows(devs: &[bthid::DeviceView], pair: &bthid::PairState, tether: &TetherView, ips: &[(String, String)]) -> Vec<DevRow> {
     use bthid::{LinkState, PairState};
     let mut rows = Vec::new();
     match pair {
@@ -735,12 +773,21 @@ fn paired_rows(devs: &[bthid::DeviceView], pair: &bthid::PairState) -> Vec<DevRo
             rows.push(DevRow::new(format!("Yes, {n} shows {v:06}"), "pair", Target::BtPairAnswer(true)));
             rows.push(DevRow::new("No, the numbers differ", "cancel pairing", Target::BtPairAnswer(false)));
         }
+        PairState::ConfirmNoNumber(n) => {
+            rows.push(DevRow::new(format!("{n} wants to pair with this computer"), "it shows no number to compare; only say yes if you started this just now", Target::Nothing).chip("confirm", WARN));
+            rows.push(DevRow::new(format!("Yes, pair with {n}"), "pair", Target::BtPairAnswer(true)));
+            rows.push(DevRow::new("No, cancel", "cancel pairing", Target::BtPairAnswer(false)));
+        }
         PairState::ShowPasskey(n, k) => rows.push(DevRow::new(format!("Type {k:06} on {n}, then press Enter there"), "pairing continues when you do", Target::Nothing).chip("type it", WARN)),
         PairState::ShowPin(n, p) => rows.push(DevRow::new(format!("Type {p} on {n}, then press Enter there"), "pairing continues when you do", Target::Nothing).chip("type it", WARN)),
         PairState::Done(Ok(m)) => rows.push(DevRow::new(m.clone(), "it connects in a moment", Target::Nothing).chip("paired", OK)),
         PairState::Done(Err(e)) => rows.push(DevRow::new("Pairing did not work", e.clone(), Target::Nothing).chip("failed", WARN)),
     }
     for d in devs {
+        if d.kind == "phone" {
+            rows.push(tether_row(d, tether, ips));
+            continue;
+        }
         let (chip, col) = match &d.state {
             LinkState::Connected => ("connected", OK),
             LinkState::Connecting => ("connecting", OK),
@@ -751,6 +798,35 @@ fn paired_rows(devs: &[bthid::DeviceView], pair: &bthid::PairState) -> Vec<DevRo
         rows.push(DevRow::new(d.title(), format!("{} · {hint}", d.line()), Target::BtDevice(d.address.clone())).chip(chip, col));
     }
     rows
+}
+
+/// A paired phone: its tethering, the address the phone gave and, when it failed, the plain reason.
+fn tether_row(d: &bthid::DeviceView, t: &TetherView, ips: &[(String, String)]) -> DevRow {
+    let mine = t.address.eq_ignore_ascii_case(&d.address);
+    let (chip, col, text) = match (&t.state, mine) {
+        (TetherState::Connected, true) => match ips.iter().find(|(n, _)| n == BT_PAN_IFACE) {
+            Some((_, ip)) => ("connected", OK, format!("internet from this phone, address {ip} · Enter disconnects · u forgets")),
+            None => ("connected", OK, "linked; waiting for the phone to give an address ... · Enter disconnects".to_string()),
+        },
+        (TetherState::Connecting, true) => ("connecting", OK, "asking the phone for its network ... · Enter cancels".to_string()),
+        (TetherState::Failed(why), true) => ("failed", WARN, format!("{why} · Enter tries again · u forgets")),
+        _ => ("not connected", DIM, "paired phone · switch Bluetooth tethering on in the phone, then Enter connects its internet · u forgets".to_string()),
+    };
+    DevRow::new(format!("{} · Tether", d.title()), text, Target::BtTether(d.address.clone())).chip(chip, col)
+}
+
+/// Why powering the controller failed, in words the person can act on. `blocked` is (soft, hard): the radio switches.
+fn power_failure(error: &str, on: bool, blocked: (bool, bool)) -> String {
+    if on && blocked.1 {
+        return "The radio is blocked by a key or switch on the machine. Switch Bluetooth on there first.".into();
+    }
+    if on && blocked.0 {
+        return "The radio is blocked by On/off: switch Bluetooth on with the On/off row (or the On/off button) first, then press Power.".into();
+    }
+    if error.ends_with("failed") || error.ends_with("unknown error") {
+        return format!("{error}. The controller gave no reason: check that the radio is on (On/off), that its firmware is there (Store -> Setup) and press Look again.");
+    }
+    error.to_string()
 }
 
 /// The explanation under the Bluetooth page (the reason the controller is limited, what is held, what is not available yet).

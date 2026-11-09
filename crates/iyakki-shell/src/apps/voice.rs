@@ -16,6 +16,7 @@ use iyakki_agent::voice::SpeakOpts;
 use iyakki_agent::voicedesk::{self as vd, Capture, Dest, Mic, ReadVoice, Recorders, MAX_RECORD_SECS, MAX_TEXT_CHARS};
 
 use super::multiline::MultiLine;
+use super::voice_mine::{Mine, T_TAB_MINE};
 use super::voice_rec::{Rec, T_TAB_REC};
 use super::{App, AppCx, Flow};
 use crate::gfx::Icon;
@@ -68,6 +69,8 @@ pub enum Area {
     Dictate,
     /// The voice recorder: Record / Stop saves a WAV; the list plays, renames and deletes.
     Record,
+    /// My IYAKKI, the push-to-talk voice assistant (F5).
+    Mine,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -193,6 +196,8 @@ pub struct VoiceApp {
     pub(super) assist: assist::Assist,
     /// The recorder (Record mode).
     pub(super) rec: Rec,
+    /// My IYAKKI (the Assistant tab).
+    pub(super) mine: Mine,
     pub(super) request: Option<(String, String)>,
     pub(super) ticks: u64,
     pub(super) dirty: bool,
@@ -251,6 +256,7 @@ impl VoiceApp {
             fix_declined: false,
             assist: assist::Assist::new(),
             rec: Rec::new(),
+            mine: Mine::new(),
             request: None,
             ticks: 0,
             dirty: true,
@@ -590,6 +596,7 @@ impl VoiceApp {
 
     fn on_tick(&mut self, cx: &AppCx) {
         self.ticks += 1;
+        self.mine_tick(cx);
         if self.ticks - self.looked >= 60 && self.cap.is_none() && self.rec.cap.is_none() && !self.reader.is_active() && self.modal.is_none() {
             self.look(cx);
             self.dirty = true;
@@ -678,7 +685,7 @@ impl VoiceApp {
     }
 
     pub(super) fn animating(&self) -> bool {
-        self.cap.is_some() || self.transcribing || self.pending_fixes() > 0 || self.assist.working || self.reader.is_active() || self.level > 0.01 || self.rec_animating()
+        self.cap.is_some() || self.transcribing || self.pending_fixes() > 0 || self.assist.working || self.reader.is_active() || self.level > 0.01 || self.rec_animating() || self.mine_active()
     }
 
     // ------------------------------------------------------------------------------------------------ files
@@ -723,6 +730,8 @@ impl VoiceApp {
             T_TAB_READ => self.switch(Area::Read, cx),
             T_TAB_DICT => self.switch(Area::Dictate, cx),
             T_TAB_REC => self.switch(Area::Record, cx),
+            T_TAB_MINE => self.switch(Area::Mine, cx),
+            70..=78 => self.mine_click(n, cx),
             T_PLAY => self.play(cx, false),
             T_PAUSE => self.pause_toggle(),
             T_STOP => self.stop_reading(),
@@ -945,11 +954,15 @@ impl VoiceApp {
                 self.switch(Area::Record, cx);
                 return Flow::Stay;
             }
+            Key::F(5) => {
+                self.switch(Area::Mine, cx);
+                return Flow::Stay;
+            }
             Key::Ctrl('\n' | '\r') | Key::Ctrl('p' | 'P') => {
                 match (self.area, self.cap.is_some()) {
                     (Area::Dictate, true) => self.stop_record(cx, true),
                     (Area::Dictate, false) => self.start_record(cx),
-                    (Area::Record, _) => {}
+                    (Area::Record | Area::Mine, _) => {}
                     (Area::Read, _) if self.reader.is_active() => self.pause_toggle(),
                     (Area::Read, _) => self.play(cx, false),
                 }
@@ -1070,6 +1083,7 @@ impl App for VoiceApp {
         match self.area {
             Area::Read => "F2 Read aloud · F3 Dictate · F4 Record · Ctrl+Enter play or pause · Ctrl+O open a file · Esc stop or back".into(),
             Area::Dictate => "F2 Read aloud · F3 Dictate · F4 Record · Ctrl+Enter record or stop · Esc cancel the recording or go back".into(),
+            Area::Mine => "F2 Read aloud · F3 Dictate · F4 Record · F5 Assistant · Space talk · S or Esc stop · M mute · Y/N answer a card".into(),
             Area::Record => "F2 Read aloud · F3 Dictate · F4 Record · Space record or stop · Up/Down choose · Enter play · n rename · Delete delete · Esc stop or back".into(),
         }
     }
@@ -1084,6 +1098,7 @@ impl App for VoiceApp {
             "Dictate, Assistant pane: press a button (Shorter, Formal, Translate...) or type an instruction and press Enter; it shows a proposal and changes nothing until Apply; Undo or Ctrl+Z in the pane steps back; select part of the transcript to change only that part",
             "Dictate: c copy the transcript · x copy and clear · b read it back · m choose the microphone",
             "F4: Record. Space or Ctrl+Enter starts and stops (never without your press); the recording is saved as a WAV in your Recordings folder",
+            "F5: Assistant (My IYAKKI, push to talk): Space or Enter talks and ends your request, S or Esc stops, M mutes, Y or N answers an approval card or a did-you-say question; risky tools can only be approved by a tap or key, never by voice",
             "Record: Up/Down choose a recording · Enter or p plays and stops it · n renames (Enter saves) · Delete or x deletes after you say y · m microphone · Esc stops",
         ]
         .iter()
@@ -1115,6 +1130,13 @@ impl App for VoiceApp {
         if self.area == Area::Record {
             if let Some(f) = self.rec_handle(ev, cx) {
                 return f;
+            }
+        }
+        if self.area == Area::Mine {
+            if let Event::Key(k) = ev {
+                if let Some(f) = self.mine_key(k, cx) {
+                    return f;
+                }
             }
         }
         match ev {

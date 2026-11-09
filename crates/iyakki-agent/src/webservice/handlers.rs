@@ -137,6 +137,7 @@ pub fn dispatch(id: &str, c: &Ctx) -> Out {
         "ns_manage" => ns_manage(c),
         "ns_members_list" => ns_members_list(c),
         "ns_member" => ns_member(c),
+        id if id.starts_with("tile_") => super::tiles::handle(c, id),
         id if id.starts_with("notif_") => super::notifyapi::handle(c, id),
         "events" => Err(Fail::new(426, "invalid_input", "this is a WebSocket: connect with an Upgrade request")),
         id if id.starts_with("tcfg_") || id.starts_with("tapprovals_") || id.starts_with("tteam_") => super::tenantcfg::handle(c, id),

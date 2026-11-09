@@ -140,6 +140,10 @@ impl SettingsApp {
                 None => lines.push(("(the certificate is being made: look again in a moment)".into(), 13.0, DIM, Face::Sans)),
             }
         }
+        lines.push(("SFTP file server".into(), 14.0, TEXT, Face::Bold));
+        for (i, l) in iyakki_agent::sftp::status_lines(svc.dir()).into_iter().enumerate() {
+            lines.push((l, 13.0, if i == 0 { TEXT } else { MUTED }, Face::Sans));
+        }
         lines.push(("What this exposes".into(), 14.0, TEXT, Face::Bold));
         lines.push((wa::EXPOSES.into(), 13.0, rgb(255, 196, 94), Face::Sans));
         lines.push(("Turn it off when you are done. The firewall port is opened for the local networks only while it is on, and closed when it is off.".into(), 12.0, DIM, Face::Sans));

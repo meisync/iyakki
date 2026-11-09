@@ -26,6 +26,8 @@ pub enum FnKey {
     Print,
     Calc,
     Homepage,
+    /// KEY_SCREENLOCK, and Super+L on a PC keyboard: lock the screen.
+    Lock,
 }
 
 impl FnKey {

@@ -100,6 +100,21 @@ impl Default for SaverUi {
 }
 
 impl Shell {
+    /// The saver's clock in milliseconds, and the seconds without input (the lock screen counts its idle minutes from these).
+    pub(super) fn saver_now_ms(&self) -> u64 {
+        self.saver.clock.now_ms()
+    }
+
+    pub(super) fn saver_idle_secs(&self, now: u64) -> u64 {
+        self.saver.m.idle_secs(now)
+    }
+
+    /// The time for the lock screen, looked up about once a second.
+    pub(super) fn saver_clock_line(&mut self) -> String {
+        let now = self.saver.clock.now_ms();
+        self.saver_clock_text(now)
+    }
+
     /// The stage the screen is in now.
     pub fn screen_stage(&self) -> Stage {
         self.saver.m.stage()
@@ -291,6 +306,7 @@ impl Shell {
             log::info!("screen: {:?} -> {:?}{}", from, to, if self.saver.last_reason.is_empty() { String::new() } else { format!(" (kept on by {})", self.saver.last_reason) });
             self.saver_apply(to);
         }
+        self.lock_tick(now);
         if self.power_idle(now, self.saver.m.idle_secs(now)) {
             // the wake-up counts as input
             self.saver.m.activity(now);

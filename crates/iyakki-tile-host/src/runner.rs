@@ -31,6 +31,9 @@ impl TileManifest {
 /// the real services; the capability check happens before it is called.
 pub trait ServiceBackend: Send + Sync {
     fn call(&self, domain: &str, method: &str, json: &str) -> Result<String, String>;
+    /// The tile asked for a call its manifest does not allow (it was refused with `DENIED`, `call` was not reached). The device
+    /// ignores it; the SDK emulator records it so the developer sees the missing permission.
+    fn denied(&self, _domain: &str, _method: &str, _json: &str) {}
 }
 
 struct NoServices;
@@ -177,6 +180,7 @@ impl TileRunner {
                 return iyakki_wasm::errno::BUF_TOO_SMALL;
             }
             if !m2.allows(&dom, &meth) {
+                backend.denied(&dom, &meth, &json);
                 return iyakki_wasm::errno::DENIED;
             }
             let Ok(out) = backend.call(&dom, &meth, &json) else { return iyakki_wasm::errno::IO };

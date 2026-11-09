@@ -224,6 +224,8 @@ pub struct ChatApp {
     ext_choice: Option<Option<String>>,
     /// The workspace's parallel tasks (the IDE gives it): the lead assistant may start them with `task_spawn`.
     tasks: Option<iyakki_agent::tasks::Manager>,
+    /// The waker of pending work (F-AI-16): starts a turn when something the assistant waits for ends. Keyed by workspace name.
+    waker: Option<(String, iyakki_agent::pending::Waker)>,
     /// The model chosen for the agent in this chat (`""` = the CLI chooses); `None`: the agent's own setting.
     ext_model: Option<String>,
     /// Where an Autopilot run stands ("step 3 · row 2 of 7"), from the harness's notes, for the footer.
@@ -372,6 +374,7 @@ impl ChatApp {
             models: None,
             ext_choice: None,
             tasks: None,
+            waker: None,
             ext_model: None,
             ap_step: String::new(),
             cred: None,
@@ -933,13 +936,29 @@ impl ChatApp {
                 system.push_str(iyakki_agent::ragtools::PROMPT_RULE);
             }
             system.push_str(iyakki_agent::updatestools::PROMPT_RULE);
+            system.push_str(iyakki_agent::lockscreentools::PROMPT_RULE);
+            if cx.session.role != iyakki_sec::policy::Role::Guest {
+                system.push_str(iyakki_agent::disksunlocktools::PROMPT_RULE);
+                if cx.session.role == iyakki_sec::policy::Role::Admin {
+                    system.push_str(iyakki_agent::disksformattools::PROMPT_RULE);
+                }
+            }
             if cx.session.policy.manage_settings {
                 system.push_str(iyakki_agent::componentstools::PROMPT_RULE);
             }
+            system.push_str(iyakki_agent::pdftools::PROMPT_RULE);
+            system.push_str(iyakki_agent::tilestools::PROMPT_RULE);
             system.push_str(iyakki_agent::dictfixtools::PROMPT_RULE);
+            system.push_str(iyakki_agent::voiceassisttools::PROMPT_RULE);
             system.push_str(iyakki_agent::sharetools::PROMPT_RULE);
+            system.push_str(iyakki_agent::remotefilestools::PROMPT_RULE);
+            if cx.session.policy.allows_app(iyakki_sec::policy::App::Cameras) {
+                system.push_str(iyakki_agent::camerastools::PROMPT_RULE);
+            }
             if cx.session.policy.manage_settings {
                 system.push_str(iyakki_agent::sshtunneltools::PROMPT_RULE);
+                system.push_str(iyakki_agent::domainstools::PROMPT_RULE);
+                system.push_str(iyakki_agent::sftptools::PROMPT_RULE);
                 system.push_str(iyakki_agent::webgraphicstools::PROMPT_RULE);
                 system.push_str(iyakki_agent::objectstoragetools::PROMPT_RULE);
                 system.push_str(iyakki_agent::ollamatools::PROMPT_RULE);
@@ -959,6 +978,7 @@ impl ChatApp {
         if iyakki_agent::jobtools::JobTools::offered(&cx.session.policy) {
             system.push_str(iyakki_agent::jobtools::PROMPT_RULE);
         }
+        system.push_str(iyakki_agent::pendingtools::PROMPT_RULE);
         // the DASH tile: the rules for working on the open dashboard and a compact picture of it, rebuilt for every message
         if let Some(d) = &self.dash {
             system.push_str(iyakki_agent::dash::tools::PROMPT_RULES);
@@ -1009,6 +1029,7 @@ impl ChatApp {
         }
         let ide_policy = policy.clone();
         let job_policy = policy.clone();
+        let pend_policy = policy.clone();
         let mut tools = UserTools::new(&cx.session.user, policy, cx.services.clone(), cx.host.clone(), cx.mcp_servers.clone()).with_request(text.trim());
         if let Some(d) = &workdir {
             tools = tools.with_cwd(d);
@@ -1056,10 +1077,46 @@ impl ChatApp {
         } else {
             tools_arc
         };
+        // domain names: the list is free, every change asks every time (administrators only: they decide who can reach this device's services)
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.manage_settings {
+            let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+            Arc::new(iyakki_agent::domainstools::DomainTools::new(tools_arc, iyakki_agent::domains::Manager::shared(&cx.services, &cx.session.user, Arc::new(move |a, d| audit.record(&user, a, d)))))
+        } else {
+            tools_arc
+        };
         // the browser's graphics mode: reading is free, changing asks every time (administrators only: it is a device setting)
         let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.manage_settings {
             let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
             Arc::new(iyakki_agent::webgraphicstools::GraphicsTools::new(tools_arc, Arc::new(iyakki_agent::webgraphicstools::RealBackend { data: cx.services.dir().to_path_buf(), audit: Arc::new(move |a, d| audit.record(&user, a, d)) })))
+        } else {
+            tools_arc
+        };
+        // the SFTP server: the status is free, every change asks (administrators only: it is a device setting; the accounts are the shell's own store)
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.manage_settings {
+            let (audit, me) = (cx.audit.clone(), cx.session.user.clone());
+            let (s1, s2) = (cx.store.clone(), cx.store.clone());
+            let auth = iyakki_agent::sftp::FnAuth::new(
+                Arc::new(move |n, p| s1.lock().unwrap_or_else(|e| e.into_inner()).authenticate(n, p).map(|s| s.policy).map_err(|e| e.to_string())),
+                Arc::new(move |n| {
+                    let mut s = s2.lock().unwrap_or_else(|e| e.into_inner());
+                    s.refresh();
+                    s.get(n).map(|u| u.policy())
+                }),
+            );
+            let sftp = iyakki_agent::sftp::Sftp::shared(cx.services.dir(), Arc::new(auth), Arc::new(move |e, d| audit.record("sftp", e, d)));
+            Arc::new(iyakki_agent::sftptools::SftpTools::new(tools_arc, sftp, &me))
+        } else {
+            tools_arc
+        };
+        // remote files (SFTP / FTPS): listing is free, connecting, moving and changing ask; the person's own manager, shared with the REMOTE FILES tile
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.allows_app(iyakki_sec::policy::App::Remote) {
+            Arc::new(iyakki_agent::remotefilestools::RemoteTools::new(tools_arc, crate::apps::remotefiles::manager_for(cx)))
+        } else {
+            tools_arc
+        };
+        // live cameras: listing is free, a snapshot, adding, removing and sharing ask; the password goes through a masked form to the vault
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.allows_app(iyakki_sec::policy::App::Cameras) {
+            crate::apps::cameras::tools_for(cx, tools_arc)
         } else {
             tools_arc
         };
@@ -1078,12 +1135,49 @@ impl ChatApp {
             let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
             Arc::new(iyakki_agent::updatestools::UpdatesTools::new(tools_arc, Arc::new(iyakki_agent::updatestools::RealBackend { svc: cx.services.clone(), policy: cx.session.policy.clone(), user: cx.session.user.clone(), audit: Arc::new(move |a, d| audit.record(&user, a, d)) })))
         };
-        // system components of the pinned private stores: the status (free) and the apply (a hard ask whose card is the plan), administrators only
-        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.manage_settings {
-            Arc::new(iyakki_agent::componentstools::ComponentsTools::new(tools_arc, Arc::new(iyakki_agent::componentstools::RealBackend { svc: cx.services.clone() })))
+        // the lock screen: lock_screen asks nothing (it only protects the person), changing the automatic lock asks
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {
+            let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+            let guest = cx.session.role == iyakki_sec::policy::Role::Guest;
+            Arc::new(iyakki_agent::lockscreentools::LockTools::new(tools_arc, Arc::new(iyakki_agent::lockscreentools::RealBackend { dir: cx.services.dir().to_path_buf(), user: cx.session.user.clone(), guest, audit: Arc::new(move |a, d| audit.record(&user, a, d)) })))
+        };
+        // encrypted drives: the status is free, unlock (the password is typed in the DISKS tile, never given to the model) and lock ask every time
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.role != iyakki_sec::policy::Role::Guest {
+            let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+            let home = iyakki_agent::scope::home_root(&user, std::path::Path::new("/var/lib/iyakki")).display().to_string();
+            let (uid, gid) = iyakki_agent::disks::account_owner(&user, "/etc/passwd").unwrap_or((0, 0));
+            let who = iyakki_agent::disks::Actor { user: user.clone(), role: cx.session.role, uid, gid, home };
+            let engine = Arc::new(iyakki_agent::disks::Disks::real());
+            let runner = Arc::new(iyakki_agent::disks_helper::ProcRunner::real(&cx.services.clis.bin_dir()));
+            Arc::new(iyakki_agent::disksunlocktools::DisksCryptTools::new(tools_arc, Arc::new(iyakki_agent::disksunlocktools::RealBackend { engine, runner, who, dir: cx.services.dir().to_path_buf(), audit: Arc::new(move |a, d| audit.record(&user, a, d)) })))
         } else {
             tools_arc
         };
+        // format and resize a partition: the plan is free; format and resize are hard asks, the typed confirmation is on the DISKS tile only
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.role == iyakki_sec::policy::Role::Admin {
+            let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+            let home = iyakki_agent::scope::home_root(&user, std::path::Path::new("/var/lib/iyakki")).display().to_string();
+            let (uid, gid) = iyakki_agent::disks::account_owner(&user, "/etc/passwd").unwrap_or((0, 0));
+            let who = iyakki_agent::disks::Actor { user: user.clone(), role: cx.session.role, uid, gid, home };
+            let engine = Arc::new(iyakki_agent::disks::Disks::real());
+            engine.set_tools(Arc::new(iyakki_agent::disks_fmt::ProcTools::real(&cx.services.clis.bin_dir())));
+            Arc::new(iyakki_agent::disksformattools::DisksFormatTools::new(tools_arc, Arc::new(iyakki_agent::disksformattools::RealBackend { engine, who, dir: cx.services.dir().to_path_buf(), audit: Arc::new(move |a, d| audit.record(&user, a, d)) })))
+        } else {
+            tools_arc
+        };
+        // system components of the pinned private stores: the status (free) and the apply (a hard ask whose card is the plan), administrators only
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.manage_settings {
+            Arc::new(iyakki_agent::componentstools::ComponentsTools::new(tools_arc, Arc::new(iyakki_agent::componentstools::RealBackend { svc: cx.services.clone(), user: Some(cx.session.user.clone()) })))
+        } else {
+            tools_arc
+        };
+        // PDF files (docs/PDF.md): pdf_info and pdf_text are free (the person's file rules apply, the text is marked untrusted), page_save_pdf asks
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {
+            let downloads = super::browser::BrowserApp::downloads_dir(&cx).unwrap_or_else(|_| cx.services.dir().join("downloads"));
+            Arc::new(iyakki_agent::pdftools::PdfTools::new(tools_arc, Arc::new(iyakki_agent::pdftools::RealBackend { policy: cx.session.policy.clone(), user: cx.session.user.clone(), web: cx.web.clone(), downloads })))
+        };
+        // WASM tiles in a browser (docs/development/TILE-ABI.md): tiles_list is free
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = Arc::new(iyakki_agent::tilestools::TilesTools::new(tools_arc, iyakki_agent::tilestools::TilesTools::builtin_catalog()));
         // object storage (SeaweedFS, RustFS): status is free, install and remove ask (administrators only: they change the cluster)
         let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.manage_settings {
             Arc::new(iyakki_agent::objectstoragetools::ObjectStorageTools::new(tools_arc, Arc::new(iyakki_agent::objectstoragetools::RealBackend { svc: cx.services.clone(), user: cx.session.user.clone() })))
@@ -1134,6 +1228,11 @@ impl ChatApp {
             let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
             Arc::new(iyakki_agent::dictfixtools::DictationWordingTools::new(tools_arc, Arc::new(iyakki_agent::dictfixtools::RealBackend { svc: cx.services.clone(), audit: Arc::new(move |a, d| audit.record(&user, a, d)), can_change: cx.session.policy.manage_settings })))
         };
+        // My IYAKKI (the push-to-talk voice assistant): status is free, changing it asks every time (hard-ask: a spoken yes never approves it)
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {
+            let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+            Arc::new(iyakki_agent::voiceassisttools::VoiceAssistantTools::new(tools_arc, Arc::new(iyakki_agent::voiceassisttools::RealBackend { svc: cx.services.clone(), audit: Arc::new(move |a, d| audit.record(&user, a, d)), can_change: cx.session.policy.manage_settings })))
+        };
         // messaging: the assistant can list the person's accounts and send to a saved room; every send asks (only once an account exists)
         let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {
             let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
@@ -1176,6 +1275,14 @@ impl ChatApp {
             Arc::new(iyakki_agent::jobtools::JobTools::new(tools_arc, cx.services.jobs.clone(), &cx.session.user, job_policy, &cwd, ws))
         } else {
             tools_arc
+        };
+        // pending work (F-AI-16): wait_for, pending_list and the ledger the end-of-run gate and Autopilot read; outermost
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {
+            let (ledger, feed) = self.pending_feed(cx);
+            let cwd = workdir.clone().unwrap_or_else(|| std::path::PathBuf::from(format!("/home/{}", cx.session.user)));
+            let cwd = if cwd.is_dir() { cwd } else { std::path::PathBuf::from("/") };
+            let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+            Arc::new(iyakki_agent::pendingtools::PendingTools::new(tools_arc, ledger, feed, pend_policy, &cwd).with_audit(Arc::new(move |k, d| audit.record(&user, k, d))))
         };
         cx.audit.record(&cx.session.user, "agent.start", &format!("{} chars", text.len()));
         let browser = match cx.session.policy.browser_agent {
@@ -1269,6 +1376,53 @@ impl ChatApp {
             run = run.in_session(&s.id);
         }
         self.run = Some(run);
+    }
+
+    /// This chat's view of the person's pending work: the ledger (kept on the data volume) and where the jobs and tasks are read.
+    fn pending_feed(&self, cx: &AppCx) -> (iyakki_agent::pending::Ledger, iyakki_agent::pending::Feed) {
+        let ws = self.project.as_ref().map(|p| p.name.clone()).unwrap_or_default();
+        let ledger = iyakki_agent::pending::Ledger::open(&cx.services.dir().join("pending"), &cx.session.user);
+        let mut feed = iyakki_agent::pending::Feed::new(&cx.session.user, &ws);
+        feed.jobs = Some(cx.services.jobs.clone());
+        if let Some(m) = self.tasks.clone() {
+            feed.tasks = Some(Arc::new(move || m.list()));
+        }
+        (ledger, feed)
+    }
+
+    /// The waker: when work the assistant waited for has ended and no run is going, a synthetic turn starts with the result
+    /// (also after a restart: the ledger is on disk). Never while Autopilot runs (it waits by itself) or a question is open.
+    fn poll_waker(&mut self, cx: &AppCx) {
+        if !self.agent || !cx.session.policy.agent {
+            self.waker = None;
+            return;
+        }
+        let ws = self.project.as_ref().map(|p| p.name.clone()).unwrap_or_default();
+        if self.waker.as_ref().is_none_or(|(k, _)| *k != ws) {
+            let (ledger, feed) = self.pending_feed(cx);
+            self.waker = Some((ws, iyakki_agent::pending::Waker::start(ledger, feed)));
+        }
+        if self.run.is_some() || self.autopilot || self.ask.is_some() || self.askform_call.is_some() {
+            return;
+        }
+        let Some((_, w)) = &self.waker else { return };
+        if !w.ready() {
+            return;
+        }
+        match w.take() {
+            Some(iyakki_agent::pending::Wake::Turn { text, ids }) => {
+                cx.audit.record(&cx.session.user, "pending.wake", &ids.join(","));
+                self.start_run(cx, text);
+            }
+            Some(iyakki_agent::pending::Wake::Limit { text }) => {
+                cx.audit.record(&cx.session.user, "pending.timeout", "wake limit");
+                self.note_n += 1;
+                let call = ToolCall { id: format!("wake_{}_{}", now_ms(), self.note_n), name: "assistant_check".into(), args: serde_json::Value::Null };
+                self.msgs.push(Message::assistant_calls("", vec![call.clone()]));
+                self.msgs.push(Message::tool_result(&call, text));
+            }
+            None => {}
+        }
     }
 
     /// The Jobs strip reads the engine about once a second; a job that finished becomes a step in the transcript.
@@ -2864,6 +3018,7 @@ impl ChatApp {
             Event::Tick => {
                 self.poll(cx);
                 self.poll_jobs(cx);
+                self.poll_waker(cx);
                 // a drag held past the top or bottom edge keeps scrolling
                 if self.view.autoscroll(&mut self.scroll_px, self.max_off) {
                     self.maybe_load_older();

@@ -51,6 +51,11 @@ pub trait Extras: Send + Sync {
     fn schedule_pause(&self, _p: &Principal, _flow: &str, _paused: bool) -> ApiResult<Value> {
         Err(ApiError::Unsupported("this machine does not run schedules".into()))
     }
+    /// A webhook request (`/hooks/<id>/<token>`): the gate decides and starts the run as the hook's owner. `None`: this machine has no
+    /// webhooks (the endpoint then does not exist: 404).
+    fn hook_serve(&self, _auth: &dyn Authenticator, _audit: &dyn AuditSink, _rq: &crate::flows::webhook::HookRequest) -> Option<crate::flows::webhook::Answer> {
+        None
+    }
     /// One data tool inside the person's own jail (`data_open`, `data_describe`, `data_query`).
     fn data_call(&self, p: &Principal, tool: &str, args: &Value) -> ApiResult<String>;
     /// The signed-in person's session moved from one tenant to another (`from` and `to` are tenant ids). Lock whatever the machine kept

@@ -306,6 +306,8 @@ const TILES: &[Tile] = &[
     Tile { app: PApp::Doctor, icon: Icon::Doctor, label: "DOCTOR", sub: "Find and fix", accent: crate::apps::doctor::ACCENT, group: Some(Group::System) },
     Tile { app: PApp::Learn, icon: Icon::Learn, label: "LEARN", sub: "Study and quiz", accent: crate::apps::learn::ACCENT, group: Some(Group::Home) },
     Tile { app: PApp::DevTools, icon: Icon::Edit, label: "DEV TOOLS", sub: "JSON, JWT, QR code", accent: crate::apps::devtools::ACCENT, group: Some(Group::Work) },
+    Tile { app: PApp::Remote, icon: Icon::Data, label: "REMOTE FILES", sub: "SFTP, FTPS", accent: crate::apps::remotefiles::ACCENT, group: Some(Group::System) },
+    Tile { app: PApp::Cameras, icon: Icon::Camera, label: "CAMERAS", sub: "Live view, snapshots", accent: crate::apps::cameras::ACCENT, group: Some(Group::WebMedia) },
     Tile { app: PApp::Auth, icon: Icon::Lock, label: "AUTH", sub: "One-time codes", accent: crate::apps::auth::ACCENT, group: Some(Group::System) },
     Tile { app: PApp::Checkup, icon: Icon::Checkup, label: "CHECK-UP", sub: "Test the hardware", accent: crate::apps::checkup::ACCENT, group: Some(Group::System) },
 ];
@@ -471,6 +473,8 @@ pub struct Shell {
     panes: panes_impl::PanesUi,
     /// The screen saver and screen off (`shell_saver.rs`, `saver.rs`).
     saver: saver_impl::SaverUi,
+    /// The lock screen (`shell_lock.rs`).
+    lockui: lock_impl::LockUi,
     /// The part of a wheel notch left over when pixel scrolling is turned into whole notches (`shell_scroll.rs`), and when.
     scroll_rem: f32,
     scroll_rem_at: u64,
@@ -571,7 +575,7 @@ impl Shell {
         };
         // tests run as a desktop unless one asks for cloud mode (`set_cloud_for_test`)
         let cloud = if cfg!(test) { iyakki_agent::cloudmode::CloudMode::desktop() } else { iyakki_agent::cloudmode::detect(env.services.cloud_setting()) };
-        let mut sh = Shell { env, hits: Vec::new(), clip: None, hostdlg: None, permpop: None, login: None, clipscan: None, scan_src: None, drag_over: false, ctx: None, fields: Vec::new(), last_click: None, press: None, click_run: (0, 0, 0, 0), screen, custom: Vec::new(), custom_at: 0, custom_open: None, session: None, sel: 0, group: Group::Home, cgroup: None, layout: Default::default(), lay: Default::default(), mouse: (0, 0), tick: 0, toast: None, size: (1280, 720), probes: Vec::new(), stale: true, live: false, live_paint: false, live_rects: Vec::new(), live_every_ms: 100, live_until: 0, want_host_paste: false, host_sync_until: 0, clip_note: ClipNote::None, help: false, shot: Shot::Off, ring: None, last_alarm_check: 0, snoozed: Vec::new(), stash: None, badge: Badge::default(), update_count: 0, cues: Default::default(), clock: Default::default(), clock_tip: None, clock_text: String::new(), clock_ready: false, devpop: Default::default(), devprobe: None, brand: Default::default(), installs: Default::default(), battery: Default::default(), loss: Default::default(), quick_launch: None, dev_sign: None, devask: Default::default(), tzask: Default::default(), camera: if wants_system_camera(cfg!(test), &cloud) { crate::camera::Presence::system() } else { crate::camera::Presence::none() }, cam_sign: false, fnk: Default::default(), vol: Default::default(), startup: startup_impl::StartupUi::new(), tbar: Default::default(), osk: Default::default(), tenants: Default::default(), lbar: Default::default(), cloud: cloud.clone(), panes: Default::default(), saver: Default::default(), scroll_rem: 0.0, scroll_rem_at: 0 };
+        let mut sh = Shell { env, hits: Vec::new(), clip: None, hostdlg: None, permpop: None, login: None, clipscan: None, scan_src: None, drag_over: false, ctx: None, fields: Vec::new(), last_click: None, press: None, click_run: (0, 0, 0, 0), screen, custom: Vec::new(), custom_at: 0, custom_open: None, session: None, sel: 0, group: Group::Home, cgroup: None, layout: Default::default(), lay: Default::default(), mouse: (0, 0), tick: 0, toast: None, size: (1280, 720), probes: Vec::new(), stale: true, live: false, live_paint: false, live_rects: Vec::new(), live_every_ms: 100, live_until: 0, want_host_paste: false, host_sync_until: 0, clip_note: ClipNote::None, help: false, shot: Shot::Off, ring: None, last_alarm_check: 0, snoozed: Vec::new(), stash: None, badge: Badge::default(), update_count: 0, cues: Default::default(), clock: Default::default(), clock_tip: None, clock_text: String::new(), clock_ready: false, devpop: Default::default(), devprobe: None, brand: Default::default(), installs: Default::default(), battery: Default::default(), loss: Default::default(), quick_launch: None, dev_sign: None, devask: Default::default(), tzask: Default::default(), camera: if wants_system_camera(cfg!(test), &cloud) { crate::camera::Presence::system() } else { crate::camera::Presence::none() }, cam_sign: false, fnk: Default::default(), vol: Default::default(), startup: startup_impl::StartupUi::new(), tbar: Default::default(), osk: Default::default(), tenants: Default::default(), lbar: Default::default(), cloud: cloud.clone(), panes: Default::default(), saver: Default::default(), lockui: Default::default(), scroll_rem: 0.0, scroll_rem_at: 0 };
         if cloud.on {
             sh.apply_cloud(cloud);
         }
@@ -579,6 +583,9 @@ impl Shell {
     }
 
     pub fn screen_name(&self) -> String {
+        if self.lockui.active {
+            return "locked".into();
+        }
         match &self.screen {
             Screen::HwCheck(_) => "hwcheck".into(),
             Screen::Setup(_) => "setup".into(),
@@ -948,6 +955,10 @@ impl Shell {
                 iyakki_agent::flows::FlowEnv::start_for_login(&svc, &user, &policy);
             });
         }
+        // recordings the person switched on start again now that their vault (which holds the keys) is open
+        if !cfg!(test) {
+            crate::apps::cameras::resume_recording(&self.env.services, &self.env.audit, &self.env.store);
+        }
         // kubeconfigs held in this person's vaults can be used by cluster commands while they are signed in; the dev cluster's
         // background events (restarts, exits) are audited
         iyakki_agent::kubeprofiles::set_resolver(Some(iyakki_agent::kubeprofiles::resolver_for(&self.env.services, &s.user)));
@@ -972,6 +983,11 @@ impl Shell {
         {
             let (audit, user) = (self.env.audit.clone(), s.user.clone());
             iyakki_agent::vpn_mgr::start_for_login(&self.env.services, &s.user, Arc::new(move |a, d| audit.record(&user, a, d)));
+        }
+        // domain names the person left on are served again (the certificates are in the vault that was just opened); administrators only
+        if s.policy.manage_settings {
+            let (audit, user) = (self.env.audit.clone(), s.user.clone());
+            iyakki_agent::domains::start_for_login(&self.env.services, &s.user, Arc::new(move |a, d| audit.record(&user, a, d)));
         }
         match &report.browser_data {
             iyakki_agent::profilestore::SignIn::Off => {}
@@ -1029,6 +1045,8 @@ impl Shell {
     }
 
     fn sign_out(&mut self) {
+        // a lock does not outlive the session it protects (a sign-out from elsewhere, a browser session ending)
+        self.lock_clear();
         // the sign-out sound starts first and plays while the rest is done; the screen changes when it is over, or after
         // `LOGOUT_WAIT` at the latest (a slow or stuck output never holds sign-out back)
         let cue = self.session.is_some().then(|| crate::cues::start(&self.env.services, &self.cloud, iyakki_agent::syssounds::Cue::Logout));
@@ -1056,6 +1074,7 @@ impl Shell {
             iyakki_agent::sharedfolder::on_logout(&s.user);
             iyakki_agent::sshtunnel_mgr::on_logout(&self.env.services, &s.user);
             iyakki_agent::vpn_mgr::on_logout(&self.env.services, &s.user);
+            iyakki_agent::domains::on_logout(&self.env.services, &s.user);
             self.env.services.on_logout(&s.user, s.policy.manage_settings);
             iyakki_agent::kubeprofiles::set_resolver(None);
             // the assistant's browser tab goes with the session (jobs still running are answered)
@@ -1152,6 +1171,8 @@ impl Shell {
             PApp::Learn => Box::new(crate::apps::learn::LearnApp::new(&cx)),
             PApp::DevTools => Box::new(crate::apps::devtools::DevToolsApp::new(&cx)),
             PApp::Auth => Box::new(crate::apps::auth::AuthApp::new(&cx)),
+            PApp::Remote => Box::new(crate::apps::remotefiles::RemoteFilesApp::new(&cx)),
+            PApp::Cameras => Box::new(crate::apps::cameras::CamerasApp::new(&cx)),
             PApp::Inbox => Box::new(crate::apps::inbox::InboxApp::new(&cx)),
         };
         self.env.audit.record(&cx.session.user, "app.open", app.id());
@@ -1878,6 +1899,10 @@ impl Shell {
         if self.osk_intercept(ev) {
             return;
         }
+        // locked: the password prompt takes every key and click, no app sees one
+        if self.lock_intercept(ev) {
+            return;
+        }
         let (prev_mouse, prev_sel) = (self.mouse, self.sel);
         if !matches!(ev, Event::Tick | Event::MouseMove(..)) {
             crate::filepicker::clear_path_field_note(); // drawn again with the next frame if a path field is still there
@@ -1888,6 +1913,14 @@ impl Shell {
         // the click on the red sign "a page is using your camera / microphone / screen" stops it (the browser obeys at its next beat)
         if matches!(ev, Event::Tab(913)) {
             crate::apps::browser_media::ask_stop();
+            self.stale = true;
+            return;
+        }
+        // the click on the red REC sign switches off every recording of the signed-in person's cameras (and audits it)
+        if matches!(ev, Event::Tab(915)) {
+            if let Some(s) = &self.session {
+                iyakki_agent::camrec::stop_all_for(self.env.services.dir(), &s.user);
+            }
             self.stale = true;
             return;
         }
@@ -2179,6 +2212,10 @@ impl Shell {
                         self.stale = true;
                     }
                 }
+                // the red REC sign of a camera that records comes and goes on every screen
+                if self.tick % 15 == 0 && crate::apps::cameras::rec_sign_changed(self.env.services.dir()) {
+                    self.stale = true;
+                }
                 if matches!(self.screen, Screen::App(_, PApp::Radio)) && self.env.services.radio.is_active() {
                     self.stale = true;
                 }
@@ -2186,8 +2223,12 @@ impl Shell {
                 if matches!(self.screen, Screen::App(_, PApp::Cli)) && self.tick % 6 == 0 && (self.env.services.clis.running() || self.env.services.cluster.state() == iyakki_agent::cluster::ClusterState::Starting) {
                     self.stale = true;
                 }
+                // live camera pictures arrive about ten times a second
+                if matches!(self.screen, Screen::App(_, PApp::Cameras)) && self.tick % 3 == 0 {
+                    self.stale = true;
+                }
                 // the clock moves every second
-                if matches!(self.screen, Screen::App(_, PApp::Calendar | PApp::Media)) && self.tick % 10 == 0 {
+                if matches!(self.screen, Screen::App(_, PApp::Calendar | PApp::Media | PApp::Remote)) && self.tick % 10 == 0 {
                     self.stale = true;
                 }
                 // the level display and the pulse of the MEDIA player move ten times a second, only while something plays
@@ -3270,6 +3311,9 @@ impl Shell {
         if self.saver_render(g) {
             return;
         }
+        if self.lock_render(g) {
+            return;
+        }
         // developer mode's `iyakki dev state`: this frame is kept as text when a computer is asking
         let dev_state = self.dev_state_begin(g);
         self.size = (g.width(), g.height());
@@ -3514,6 +3558,15 @@ impl Shell {
         if cap != 0 && !in_browser {
             let r = draw_capture_sign(g, h, s, cap, self.cam_sign);
             g.hit(r, Event::Tab(913), "Stop what the page is capturing");
+        }
+        // a camera records (F-CAM-03): a red REC sign on every screen while the signed-in person's recording runs, a click stops it
+        if self.session.is_some() {
+            let names = iyakki_agent::camrec::active_names(self.env.services.dir());
+            if !names.is_empty() {
+                let below = usize::from(self.cam_sign) + usize::from(cap != 0 && !in_browser);
+                let r = draw_rec_sign(g, h, s, &names, below);
+                g.hit(r, Event::Tab(915), "Stop recording");
+            }
         }
         // the person's own browser has its microphone or camera on for this session: a sign on every screen, drawn over every app
         // (a tile cannot hide it), bottom right, a click stops it
@@ -5968,7 +6021,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_power_menu_is_a_dropdown_at_the_top_right_and_lock_signs_out_without_powering_off() {
+    fn the_power_menu_is_a_dropdown_at_the_top_right_and_lock_locks_without_powering_off() {
         let (mut sh, host) = shell_with_users("pwr-lock");
         let mut g = Gfx::new(1280, 720);
         click_field(&mut sh, &mut g, 0);
@@ -5981,9 +6034,10 @@ pub(crate) mod tests {
         let lock = sh.hits().iter().find(|h| h.label == "Lock").map(|h| h.rect).expect("a Lock button for a signed-in person");
         assert!(lock.x > 1280.0 / 2.0 && lock.y < 360.0, "the menu hangs under the top bar's right end, not in the middle: {lock:?}");
         sh.handle(&Event::Key(Key::Char('l')));
-        assert!(sh.session.is_none() && sh.screen_name() == "login", "Lock signs out (and seals the vault)");
+        assert!(sh.session.is_some() && sh.screen_name() == "locked", "Lock locks the screen (and seals the vault); the person stays signed in");
         assert!(host.powered_off.lock().unwrap().is_none() && *host.slept.lock().unwrap() == 0, "it never powers off or sleeps");
         // on the login screen the menu has no Lock
+        sh.sign_out();
         sh.screen = Screen::PowerMenu;
         sh.render(&mut g);
         assert!(!sh.hits().iter().any(|h| h.label == "Lock"));
@@ -6021,8 +6075,8 @@ pub(crate) mod tests {
         sh.screen = Screen::PowerMenu;
         sh.handle(&Event::Key(Key::Char('s')));
         assert_eq!(*host.slept.lock().unwrap(), 1);
-        assert!(sh.session.is_none(), "the session is locked (signed out) before the machine sleeps");
-        assert_eq!(sh.screen_name(), "login");
+        assert!(sh.session.is_some(), "the screen is locked (the person stays signed in) before the machine sleeps");
+        assert_eq!(sh.screen_name(), "locked");
         assert!(host.powered_off.lock().unwrap().is_none());
         // clicking the button does the same
         let (mut sh, host, mut g) = sign_in("sl3", true);
@@ -6030,7 +6084,7 @@ pub(crate) mod tests {
         sh.render(&mut g);
         click(&mut sh, &mut g, "Sleep");
         assert_eq!(*host.slept.lock().unwrap(), 1);
-        assert!(sh.session.is_none());
+        assert!(sh.is_locked());
     }
 
     #[test]
@@ -6690,6 +6744,8 @@ mod osk_tests;
 mod battery_impl;
 #[path = "shell_saver.rs"]
 mod saver_impl;
+#[path = "shell_lock.rs"]
+mod lock_impl;
 #[path = "shell_power.rs"]
 mod power_impl;
 #[cfg(test)]
@@ -6773,6 +6829,10 @@ mod saver_tests;
 #[path = "shell_loginbar_tests.rs"]
 mod loginbar_tests;
 
+#[cfg(test)]
+#[path = "shell_lock_tests.rs"]
+mod lock_tests;
+
 /// The red "Camera in use by the assistant" sign, bottom left of every screen.
 pub(crate) fn draw_camera_sign(g: &mut Gfx, h: u32, s: f32, what: &str) -> R {
     let text = format!("Camera in use by the assistant: {what}");
@@ -6783,6 +6843,22 @@ pub(crate) fn draw_camera_sign(g: &mut Gfx, h: u32, s: f32, what: &str) -> R {
     g.rrect_outline(r.x, r.y, r.w, r.h, r.h / 2.0, 1.5 * s, rgb(255, 90, 100));
     g.circle(r.x + 17.0 * s, r.y + r.h / 2.0, 6.0 * s, rgb(255, 60, 70));
     g.text(r.x + 30.0 * s, r.y + 7.0 * s, 14.0 * s, TEXT, &text, Face::Bold);
+    r
+}
+
+/// The red "REC" sign of cameras that record, bottom left of every screen above the other camera signs (`rows_below` of them).
+/// Returns its rectangle (the click target).
+pub(crate) fn draw_rec_sign(g: &mut Gfx, h: u32, s: f32, names: &[String], rows_below: usize) -> R {
+    let list = names.join(", ");
+    let text = format!("REC: {list}. Click to stop.");
+    let tw = g.text_width(15.0 * s, &text, Face::Bold) + 48.0 * s;
+    let y = h as f32 - 64.0 * s - rows_below as f32 * 44.0 * s;
+    let r = R::new(16.0 * s, y, tw, 34.0 * s);
+    g.rrect_glow(r.x, r.y, r.w, r.h, r.h / 2.0, 8.0 * s, [255, 40, 50, 130]);
+    g.rrect(r.x, r.y, r.w, r.h, r.h / 2.0, rgb(110, 12, 22));
+    g.rrect_outline(r.x, r.y, r.w, r.h, r.h / 2.0, 2.0 * s, rgb(255, 90, 100));
+    g.circle(r.x + 18.0 * s, r.y + r.h / 2.0, 7.0 * s, rgb(255, 60, 70));
+    g.text(r.x + 34.0 * s, r.y + 8.0 * s, 15.0 * s, TEXT, &text, Face::Bold);
     r
 }
 
@@ -6821,3 +6897,7 @@ mod overlap_tests;
 #[cfg(test)]
 #[path = "shell_remote_sign_tests.rs"]
 mod remote_sign_tests;
+
+#[cfg(test)]
+#[path = "shell_cameras_tests.rs"]
+mod cameras_tests;

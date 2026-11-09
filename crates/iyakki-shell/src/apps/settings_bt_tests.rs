@@ -358,12 +358,16 @@ struct Pads {
     calls: Mutex<Vec<String>>,
     pair: Mutex<PairState>,
     connect_error: Option<String>,
+    tether: Mutex<iyakki_devctl::bt_pan::TetherView>,
+    /// what the state turns into when Connect is pressed on a phone
+    tether_next: iyakki_devctl::bt_pan::TetherState,
+    tether_refusal: Option<String>,
 }
 
 impl Pads {
     fn new() -> Arc<Pads> {
         let kbd = DeviceView { address: "AA:BB:CC:DD:EE:01".into(), addr_type: 0, name: "K380".into(), kind: "keyboard".into(), state: LinkState::Disconnected };
-        Arc::new(Pads { devs: Mutex::new(vec![kbd]), calls: Mutex::new(vec![]), pair: Mutex::new(PairState::Idle), connect_error: None })
+        Arc::new(Pads { devs: Mutex::new(vec![kbd]), calls: Mutex::new(vec![]), pair: Mutex::new(PairState::Idle), connect_error: None, tether: Mutex::new(iyakki_devctl::bt_pan::TetherView::idle()), tether_next: iyakki_devctl::bt_pan::TetherState::Connected, tether_refusal: None })
     }
 }
 
@@ -394,7 +398,8 @@ impl iyakki_devctl::Control for Pads {
         let buds = Found { address: "AA:BB:CC:DD:EE:03".into(), addr_type: 0, rssi: -50, name: "Buds".into(), class: None, appearance: None, services: vec![], kind: Kind::Headphones };
         let le = Found { address: "AA:BB:CC:DD:EE:04".into(), addr_type: 1, rssi: -60, name: "LE pad".into(), class: None, appearance: None, services: vec![], kind: Kind::Gamepad };
         let kbd = Found { address: "AA:BB:CC:DD:EE:01".into(), addr_type: 0, rssi: -30, name: "K380".into(), class: None, appearance: None, services: vec![], kind: Kind::Keyboard };
-        Ok(vec![kbd, mouse, buds, le])
+        let phone = Found { address: "AA:BB:CC:DD:FF:01".into(), addr_type: 0, rssi: -35, name: "Pixel".into(), class: None, appearance: None, services: vec![], kind: Kind::Phone };
+        Ok(vec![kbd, mouse, buds, le, phone])
     }
     fn bt_devices(&self) -> Vec<DeviceView> {
         self.devs.lock().unwrap().clone()
@@ -428,6 +433,22 @@ impl iyakki_devctl::Control for Pads {
     fn bt_pair_answer(&self, yes: bool) -> bool {
         self.calls.lock().unwrap().push(format!("answer {yes}"));
         true
+    }
+    fn bt_tether_view(&self) -> iyakki_devctl::bt_pan::TetherView {
+        self.tether.lock().unwrap().clone()
+    }
+    fn bt_tether_connect(&self, a: &str) -> Result<(), String> {
+        self.calls.lock().unwrap().push(format!("tether {a}"));
+        if let Some(e) = &self.tether_refusal {
+            return Err(e.clone());
+        }
+        *self.tether.lock().unwrap() = iyakki_devctl::bt_pan::TetherView { address: a.into(), name: "Pixel".into(), state: self.tether_next.clone() };
+        Ok(())
+    }
+    fn bt_tether_disconnect(&self) -> Result<(), String> {
+        self.calls.lock().unwrap().push("tether off".into());
+        self.tether.lock().unwrap().state = iyakki_devctl::bt_pan::TetherState::Idle;
+        Ok(())
     }
 }
 
@@ -523,4 +544,120 @@ fn a_keyboard_that_wants_a_pin_shows_it_and_a_failed_pairing_says_why() {
     a.hw.invalidate();
     let f = rows(&mut a).into_iter().find(|x| x.title == "Pairing did not work").unwrap();
     assert!(f.sub.contains("authentication failed"));
+}
+
+// ---------------------------------------------------------------------------------------------- phones: tethering
+
+use iyakki_devctl::bt_pan::TetherState;
+
+fn phone_view() -> DeviceView {
+    DeviceView { address: "AA:BB:CC:DD:FF:01".into(), addr_type: 0, name: "Pixel".into(), kind: "phone".into(), state: LinkState::Disconnected }
+}
+
+#[test]
+fn a_phone_in_the_scan_can_be_paired_for_tethering_and_audio_stays_unsupported() {
+    let ctl = Pads::new();
+    let (mut a, cx) = pads_app("ph1", ctl.clone());
+    key(&mut a, &cx, Key::Char('s'));
+    let r = wait_scan(&mut a, &cx);
+    let p = r.iter().find(|x| x.title == "Pixel").unwrap();
+    assert_eq!(p.target, Target::BtPair("AA:BB:CC:DD:FF:01".into()));
+    assert!(p.sub.contains("phone") && p.sub.contains("tethering") && p.sub.contains("audio is not supported"), "{}", p.sub);
+    assert!(r.iter().find(|x| x.title == "Buds").unwrap().sub.contains("not supported yet (no audio)"), "headphones are still not supported");
+    select(&mut a, "Pixel");
+    key(&mut a, &cx, Key::Enter);
+    assert_eq!(ctl.calls.lock().unwrap().clone(), vec!["pair AA:BB:CC:DD:FF:01"]);
+    // the number is compared by the person, as for every pairing
+    assert!(rows(&mut a).iter().any(|x| x.title == "Does Pixel show 123456?"));
+    // a phone that shows no number is still asked
+    *ctl.pair.lock().unwrap() = PairState::ConfirmNoNumber("Pixel".into());
+    a.hw.invalidate();
+    let r = rows(&mut a);
+    assert!(r.iter().any(|x| x.title == "Pixel wants to pair with this computer" && x.sub.contains("no number")));
+    assert!(r.iter().any(|x| x.target == Target::BtPairAnswer(true)) && r.iter().any(|x| x.target == Target::BtPairAnswer(false)));
+}
+
+#[test]
+fn a_paired_phone_has_a_tether_row_and_enter_connects_then_disconnects() {
+    let ctl = Pads::new();
+    ctl.devs.lock().unwrap().push(phone_view());
+    let (mut a, cx) = pads_app("ph2", ctl.clone());
+    let r = rows(&mut a);
+    let t = r.iter().find(|x| x.title == "Pixel · Tether").expect("the phone has a Tether row");
+    assert_eq!(t.target, Target::BtTether("AA:BB:CC:DD:FF:01".into()));
+    assert!(t.sub.contains("switch Bluetooth tethering on in the phone") && t.chips.iter().any(|c| c.0 == "not connected"), "{t:?}");
+    select(&mut a, "Pixel · Tether");
+    key(&mut a, &cx, Key::Enter);
+    assert_eq!(ctl.calls.lock().unwrap().last().unwrap(), "tether AA:BB:CC:DD:FF:01");
+    a.hw.invalidate();
+    let t = rows(&mut a).into_iter().find(|x| x.title == "Pixel · Tether").unwrap();
+    assert!(t.chips.iter().any(|c| c.0 == "connected") && t.sub.contains("Enter disconnects"), "{t:?}");
+    key(&mut a, &cx, Key::Enter);
+    assert_eq!(ctl.calls.lock().unwrap().last().unwrap(), "tether off", "the same key disconnects");
+}
+
+#[test]
+fn the_tether_button_finds_the_phone_whatever_row_is_selected_and_failures_say_why() {
+    let ctl = Arc::new(Pads { tether_next: TetherState::Failed("The phone refused the network connection. Switch on Bluetooth tethering in the phone's settings (Hotspot and tethering), then press Connect again.".into()), ..Arc::try_unwrap(Pads::new()).ok().unwrap() });
+    ctl.devs.lock().unwrap().push(phone_view());
+    let (mut a, cx) = pads_app("ph3", ctl.clone());
+    a.sel[a.tab] = 0; // the controller row is selected, not the phone
+    key(&mut a, &cx, Key::Char('t'));
+    assert_eq!(ctl.calls.lock().unwrap().last().unwrap(), "tether AA:BB:CC:DD:FF:01");
+    a.hw.invalidate();
+    let t = rows(&mut a).into_iter().find(|x| x.title == "Pixel · Tether").unwrap();
+    assert!(t.chips.iter().any(|c| c.0 == "failed") && t.sub.contains("Switch on Bluetooth tethering in the phone"), "{t:?}");
+    // a refusal found at once is the message
+    let off = Arc::new(Pads { tether_refusal: Some("The Bluetooth controller is off. Press Power in Settings -> Bluetooth.".into()), ..Arc::try_unwrap(Pads::new()).ok().unwrap() });
+    off.devs.lock().unwrap().push(phone_view());
+    let (mut b, cxb) = pads_app("ph3b", off);
+    key(&mut b, &cxb, Key::Char('t'));
+    assert!(status(&b).contains("controller is off"), "{}", status(&b));
+    // without a paired phone the button says what to do
+    let (mut c, cxc) = pads_app("ph3c", Pads::new());
+    key(&mut c, &cxc, Key::Char('t'));
+    assert!(status(&c).contains("No phone is paired"), "{}", status(&c));
+}
+
+#[test]
+fn the_bluetooth_buttons_act_on_their_own_row_not_on_the_selected_one() {
+    let cx = admin("btn1");
+    let ctl = Arc::new(Mini { fw_file: true, held: Mutex::new(false), ..Arc::try_unwrap(Mini::new()).ok().unwrap() });
+    let env = mac_mini("btn1", ctl.clone());
+    let sys = env.roots.sys.clone();
+    let mut a = SettingsApp::new(&cx).with_hardware(env);
+    goto(&mut a, &cx, Tab::Bluetooth);
+    let r = rows(&mut a);
+    let scan = r.iter().position(|x| matches!(x.target, Target::BtScan(_))).unwrap();
+    a.sel[a.tab] = scan; // the scan row is selected ...
+    key(&mut a, &cx, Key::Char('e')); // ... and On/off still finds the radio switch
+    assert!(status(&a).contains("Bluetooth"), "{}", status(&a));
+    assert!(!status(&a).contains("nothing to switch"), "{}", status(&a));
+    let soft = std::fs::read_to_string(sys.join("class/rfkill/rfkill1/soft")).unwrap();
+    assert_eq!(soft.trim(), "1", "the switch row was pressed");
+}
+
+#[test]
+fn a_failed_power_says_why_for_a_blocked_radio_and_a_silent_kernel_and_the_scan_message_is_not_stale() {
+    let cx = admin("btn2");
+    let ctl = Arc::new(Mini { power_error: Some("could not switch the controller on: failed".into()), ..Arc::try_unwrap(Mini::new()).ok().unwrap() });
+    let env = mac_mini("btn2", ctl.clone());
+    let sys = env.roots.sys.clone();
+    let mut a = SettingsApp::new(&cx).with_hardware(env);
+    goto(&mut a, &cx, Tab::Bluetooth);
+    key(&mut a, &cx, Key::Char('p'));
+    assert!(status(&a).contains("no reason") && status(&a).contains("On/off"), "{}", status(&a));
+    put(&sys, "class/rfkill/rfkill1/soft", "1\n");
+    a.hw.invalidate();
+    key(&mut a, &cx, Key::Char('p'));
+    assert!(status(&a).contains("blocked by On/off"), "{}", status(&a));
+    put(&sys, "class/rfkill/rfkill1/soft", "0\n");
+    a.hw.invalidate();
+    let ok = Mini::new();
+    let mut b = SettingsApp::new(&cx).with_hardware(mac_mini("btn2b", ok));
+    goto(&mut b, &cx, Tab::Bluetooth);
+    key(&mut b, &cx, Key::Char('p'));
+    key(&mut b, &cx, Key::Char('s'));
+    assert!(!status(&b).contains("Pairing is not available yet"), "{}", status(&b));
+    assert!(status(&b).contains("Scanning"), "{}", status(&b));
 }

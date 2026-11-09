@@ -79,6 +79,16 @@ refused, not run. The same layer serves the flows `cli` and `browser` nodes; the
 default, `sandbox.policy.browser`) is the third tier. Plan, threat model and what is not tried: `docs/development/CLOUD-SANDBOX-PLAN.md`.
 Verified only with fakes and golden manifests: no cluster, no runtime class (gVisor, Kata) and no namespace-tier pod was used.
 
+## Tiles in a browser
+
+A WASM tile (the small apps of `docs/development/TILE-ABI.md`) can run on the cloud side and be drawn in the person's browser: the web
+service runs the tile in the tile sandbox (fuel, time and memory budgets) and answers the page's input events with the new picture, so the OS and
+the tile's state stay in the cloud and the tile looks the same as on the device (same integer renderer, same text metrics). The page is
+"Tiles" in the web UI, the routes are `GET /api/v1/tiles` and `POST /api/v1/tiles/<id>/events` (section 12 of the ABI document). A browser
+session has the person's own permissions and nothing more: the tile can reach only the person's tools that the profile lists and that do not
+ask first; one person never reaches another's tile state; each person's tiles are kept per tenant volume. Not measured: latency over a real
+network.
+
 ## What is not tested
 
 Everything is tested with made-up `/sys` trees and the shell's own render; no real server or cloud VM was booted. How a given cloud

@@ -1,6 +1,6 @@
 # Waiting that actually waits: the agent loop's pending-work ledger (plan, not built)
 
-Status: plan written 2026-11-07 after the owner saw an assistant say "I'll wait and report back" and then not report. Nothing here is implemented. Related: [`../JOBS.md`](../JOBS.md), [`../PARALLEL-TASKS.md`](../PARALLEL-TASKS.md), [`FLOW-AUTOPILOT-PLAN.md`](FLOW-AUTOPILOT-PLAN.md), `crates/iyakki-agent/src/{agent,assistrun,autopilot,jobtools,jobs,tasks}.rs`.
+Status: plan written 2026-11-07 after the owner saw an assistant say "I'll wait and report back" and then not report. First slice built 2026-11-08 (see "Built so far" at the end); the rest is still plan. Related: [`../JOBS.md`](../JOBS.md), [`../PARALLEL-TASKS.md`](../PARALLEL-TASKS.md), [`FLOW-AUTOPILOT-PLAN.md`](FLOW-AUTOPILOT-PLAN.md), `crates/iyakki-agent/src/{agent,assistrun,autopilot,jobtools,jobs,tasks}.rs`.
 
 ## The problem, stated exactly
 
@@ -97,3 +97,13 @@ The existing Jobs strip becomes the **Waiting strip**: one row per ticket (spinn
 1. **Auto-continue default:** on (recommended: it is the whole point) or ask first the first time a session would wake itself.
 2. **Check probes:** command and HTTP only at first (recommended), or also a model-judged check ("does this log say the server is ready").
 3. **Window of a wake:** continue in the same chat (recommended) or open a separate "follow-up" thread so a long chat is not interrupted mid-conversation.
+
+## Built so far (first slice, 2026-11-08)
+
+Code: `crates/iyakki-agent/src/pending.rs` (ledger, waker, phrase test), `pendingtools.rs` (the chat tools), the gate in `assistrun.rs`, `Jobs::agent_told` in `jobs.rs`, the chat wiring in `crates/iyakki-shell/src/apps/chat.rs`. Tests: `pending_tests.rs`.
+
+* **Ledger.** `<data>/pending/<person>.json`, written atomically, per person; tickets for jobs and parallel tasks are opened by mirroring (no producer needed), so Quick install and every other `Jobs` user is covered. `Ledger::report` is the entry for producers without a store (install, pull, flow, rollout): the first report opens the ticket. After a restart a running ticket nobody can vouch for becomes `lost` and is told once; jobs (their own store), tasks and probes carry on.
+* **Tools.** `wait_for` (a job, a file in the read scope, a port on this machine; Safe; `block_seconds` is the long-poll for agents that cannot be woken), `pending_list` (Safe), `pending_cancel`, `pending_check` (an acceptance command, only reads, runs in the job's folder when the job exits 0), `pending_settings` (all three ask). Through the bridge for external agents; their instructions say never to end a turn with "I'll wait".
+* **Waker.** A thread per chat session syncs the ledger every 2 s; when something ended that the assistant was not told about and no run is going, the chat starts a synthetic turn (`[IYAKKI] ...`) with the batched results, once per ticket, within a daily chain limit (default 20), auto-continue switchable. A job the run already reported is not woken for.
+* **Gate.** An answer that promises to wait or report back: with something pending it stands and the chat shows "Waiting for: ..." (and the stall nudge does not push the model to act); with nothing pending one nudge asks the model to register or finish; an answer that still promises gets a plain notice appended. `jobs_running` now reads every source, so Autopilot waits for tasks and waits too.
+* **Not built yet.** The Waiting strip and Settings rows (the Jobs strip still shows jobs only), HTTP probes and model-judged checks, adapters that call `Ledger::report` for installs outside the job engine, pulls, flows, rollouts, git and browser jobs, the per-session "follow-up thread" option, and the real device run (step 5).

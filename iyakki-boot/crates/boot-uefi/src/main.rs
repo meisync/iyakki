@@ -249,16 +249,19 @@ fn run() -> Status {
         (None, false) => say!("config: {CONFIG_PATH} read\n"),
     }
     let mut cfg = loaded.config;
-    // what this machine is and what its firmware exposes, then the first write of the log: a start that stops in the splash, the
-    // scan or the menu still leaves the machine's description on the volume
-    hwlog::summary();
-    save_log(&vol, "devices listed");
     // entries that cannot work here are left out: a `requires` file that is not on the volume, firmware setup the firmware cannot do
     let dropped = cfg.drop_unavailable(|p| vol.exists(p), vars::firmware_setup_supported());
     if dropped > 0 {
         say!("config: {dropped} entries left out (their file or firmware feature is missing)\n");
     }
+    // the logo first: the person sees the loader is alive before anything else is tried
     splash::show(&cfg, &vol);
+    // the first write of the log, then what this machine is and what its firmware exposes, the log written after every section: a
+    // start that stops in one of those walks, the scan or the menu still leaves the machine's description (as far as it got) on the
+    // volume, and its last line names where it stopped
+    save_log(&vol, "config read; next: the hardware listing");
+    hwlog::summary(&|where_| save_log(&vol, where_));
+    save_log(&vol, "devices listed");
 
     // other systems
     let found = if cfg.scan { scan::scan(dev, &own) } else { Vec::new() };
@@ -313,6 +316,11 @@ fn run() -> Status {
     // listen for the whole time the logo is up (at least KEY_WINDOW_MS): keys pressed a moment after power-on, or by a slow keyboard
     // (a Mac's), still open the menu. The time counts toward the splash time, so a start is not slower.
     let window = KEY_WINDOW_MS.max(c.cfg.splash_ms as usize);
+    // keys left in the firmware's buffer by its own menus (the Enter of a Mac's startup picker) are not a request for ours
+    let stale = ui::drain_keys();
+    if stale > 0 {
+        say!("input: {stale} key(s) were already in the firmware's buffer when the loader started: ignored\n");
+    }
     let keys = poll_keys(window);
     splash::spent(window as u32);
     let params = Params {

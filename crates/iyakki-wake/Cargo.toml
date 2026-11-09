@@ -1,0 +1,8 @@
+[package]
+name = "iyakki-wake"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The My IYAKKI wake phrase spotter, all in-house: log-mel features, a tiny depthwise-separable CNN with its own training code, a formant speech stub for synthetic data, a streaming detector (memory only, mute and indicator rules) and an evaluation tool. No dependencies."
+
+[dependencies]

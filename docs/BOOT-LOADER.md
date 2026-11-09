@@ -88,7 +88,7 @@ shim path (the image is signed: IYAKKI_SB_KEY / IYAKKI_SB_CERT set)        plain
    already starts shim today (Full Security with the Microsoft CA allowed, or Medium); the loader needs no other level. If the Mac boots the
    volume without shim (No Security, volume without shim), the plain path applies: `BOOTX64.EFI` is the loader. MokManager enrolment: nothing
    new for a key that is enrolled; a different key asks for the blue screen once (`EFI/IYAKKI/iyakki-mok.cer`, "Enroll key from disk").
-4. Check: the logo appears, any key opens the menu, "More options" lists "Recovery (GRUB menu)", the sign-in screen appears and the next start
+4. Check: the logo appears, any key opens the menu (keys already in the firmware's buffer when the loader starts, such as the Enter that chose the disk in a Mac's startup picker, are discarded first; the log says "input: N key(s) were already in the firmware's buffer", added 2026-11-08 after the MacBook Pro stopped in the menu), and on Apple firmware the hardware listing counts the USB interfaces without asking them (the USB I/O descriptor call never returned on a MacBookPro14,1: logo shown, log ending at "next: USB", 2026-11-08; the log is now written after every section of the listing, so a stop names its section), verified the same day: the MacBookPro14,1 boots with that loader, "More options" lists "Recovery (GRUB menu)", the sign-in screen appears and the next start
    shows no failure message (the start is confirmed by IYAKKI).
 
 Rollback, one step at a time: (a) at the loader, "Previous version of this boot loader" if there was an earlier loader; (b) "Recovery (GRUB

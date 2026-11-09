@@ -1223,6 +1223,9 @@ mod schedules_tests;
 
 #[path = "notifyapi_tests.rs"]
 mod notifyapi_tests;
+#[cfg(test)]
+#[path = "tiles_tests.rs"]
+mod tiles_tests;
 
 // ------------------------------------------------------------------------------------------------ tenant configuration
 

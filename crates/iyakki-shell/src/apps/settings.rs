@@ -64,6 +64,8 @@ pub enum Tab {
     Firewall,
     /// Settings -> Network -> SSH tunnels: see a web page behind a front-facing SSH host (docs/SSH-TUNNELS.md).
     SshTunnels,
+    /// Settings -> Network -> Domains: names for services (docs/DOMAINS.md).
+    Domains,
     /// Settings -> Network -> VPN: import, enable and configure WireGuard / OpenVPN profiles (docs/development/VPN-CONNECTOR-PLAN.md).
     Vpn,
     /// Settings -> Remote access: serve this desktop to browsers on the network (docs/ADMIN-GUIDE.md).
@@ -106,7 +108,7 @@ impl Tab {
             Tab::Overview => CATEGORIES[0],
             Tab::Account | Tab::Vault | Tab::SecretProviders | Tab::Notifications | Tab::Backup => CATEGORIES[1],
             Tab::Models | Tab::Agents | Tab::Skills | Tab::Rag | Tab::Voice | Tab::Browser | Tab::HostAccess => CATEGORIES[2],
-            Tab::Network | Tab::SshTunnels | Tab::Vpn | Tab::Remote | Tab::Firewall | Tab::Shares => CATEGORIES[3],
+            Tab::Network | Tab::SshTunnels | Tab::Vpn | Tab::Remote | Tab::Domains | Tab::Firewall | Tab::Shares => CATEGORIES[3],
             Tab::Display | Tab::Displays | Tab::ScreenSaver | Tab::HomeLayout | Tab::Sound | Tab::SystemSounds => CATEGORIES[4],
             Tab::Bluetooth | Tab::Keyboard => CATEGORIES[5],
             Tab::Time | Tab::Battery | Tab::Power | Tab::Computer | Tab::HostName | Tab::SessionLog | Tab::Startup | Tab::Memory | Tab::Storage | Tab::Install | Tab::Updates | Tab::Cloud | Tab::CloudRoles => CATEGORIES[6],
@@ -115,11 +117,11 @@ impl Tab {
     }
 
     /// Where the page sits in the left list: category first, then this order.
-    pub(crate) const ORDER: [Tab; 43] = [
+    pub(crate) const ORDER: [Tab; 44] = [
         Tab::Overview,
         Tab::Account, Tab::Notifications, Tab::Vault, Tab::Backup, Tab::SecretProviders,
         Tab::Models, Tab::Agents, Tab::Skills, Tab::Rag, Tab::Voice, Tab::Browser, Tab::HostAccess,
-        Tab::Network, Tab::SshTunnels, Tab::Vpn, Tab::Remote, Tab::Firewall, Tab::Shares,
+        Tab::Network, Tab::SshTunnels, Tab::Vpn, Tab::Remote, Tab::Domains, Tab::Firewall, Tab::Shares,
         Tab::Display, Tab::Displays, Tab::ScreenSaver, Tab::HomeLayout, Tab::Sound, Tab::SystemSounds,
         Tab::Bluetooth, Tab::Keyboard,
         Tab::Time, Tab::Battery, Tab::Power, Tab::Computer, Tab::HostName, Tab::SessionLog, Tab::Startup, Tab::Memory, Tab::Storage, Tab::Install, Tab::Updates, Tab::Cloud, Tab::CloudRoles,
@@ -135,7 +137,7 @@ impl Tab {
             Tab::Keyboard => Some("keyboard"),
             Tab::Computer => Some("display"),
             Tab::Bluetooth => Some("bluetooth"),
-            Tab::Overview | Tab::Models | Tab::Agents | Tab::Rag | Tab::Vault | Tab::Skills | Tab::Network | Tab::Browser | Tab::DevCluster | Tab::Storage | Tab::Memory | Tab::Firewall | Tab::SshTunnels | Tab::Vpn | Tab::Remote | Tab::Time | Tab::Battery | Tab::Power | Tab::HostName | Tab::SessionLog | Tab::Startup | Tab::Install | Tab::Updates | Tab::Voice | Tab::SecretProviders | Tab::HostAccess | Tab::Developer | Tab::GitKeys | Tab::Shares | Tab::Account | Tab::HomeLayout | Tab::Cloud | Tab::CloudRoles | Tab::Notifications | Tab::Backup => None,
+            Tab::Overview | Tab::Models | Tab::Agents | Tab::Rag | Tab::Vault | Tab::Skills | Tab::Network | Tab::Browser | Tab::DevCluster | Tab::Storage | Tab::Memory | Tab::Firewall | Tab::SshTunnels | Tab::Domains | Tab::Vpn | Tab::Remote | Tab::Time | Tab::Battery | Tab::Power | Tab::HostName | Tab::SessionLog | Tab::Startup | Tab::Install | Tab::Updates | Tab::Voice | Tab::SecretProviders | Tab::HostAccess | Tab::Developer | Tab::GitKeys | Tab::Shares | Tab::Account | Tab::HomeLayout | Tab::Cloud | Tab::CloudRoles | Tab::Notifications | Tab::Backup => None,
         }
     }
 
@@ -165,6 +167,7 @@ impl Tab {
             Tab::Firewall => "firewall block incoming connections allow dns hostname ip range cidr port ssh ping nftables nft netfilter lockout revert keep blocked security network",
             Tab::SshTunnels => "ssh tunnel tunnels bastion jump host port forward socks proxy intranet internal web page behind vpn local forward remote site corp enable disable key fingerprint",
             Tab::Vpn => "vpn wireguard openvpn tunnel private network profile import conf ovpn kill switch full hybrid filter domain url split tunnel fail closed provider server endpoint",
+            Tab::Domains => "domain domains name names dns hostname host local mdns store.local route routes reverse proxy listener port nodeport service k3s certificate https websocket firewall wildcard",
             Tab::Remote => "remote access web service serve browser https port fingerprint certificate address tablet phone another computer pixel stream share desktop sign in vnc rdp",
             Tab::Time => "clock time date timezone time zone utc 12 24 hour am pm seconds ntp sntp network time server sync 1970 battery wrong",
             Tab::Computer => "this computer computers hardware profile several multiple switch disk usb stick ssd move another mac laptop legion hp sound output display keyboard microphone gpu per computer shared copy reset forget",
@@ -213,6 +216,7 @@ impl Tab {
             Tab::Memory => "RAM, compressed swap in memory (zram) and an optional swap file.",
             Tab::Firewall => "Decide what other computers on the network can reach on this one. Everything is blocked unless you allow it.",
             Tab::SshTunnels => "Open a web page that sits behind an SSH host: each tunnel listens on this device only and can be enabled, disabled, edited or deleted.",
+            Tab::Domains => "Give services a name such as store.local: a route table, the listener, the firewall opening and the certificates in your vault.",
             Tab::Remote => "Open this desktop in a browser on another computer on your network. Off by default; encrypted; signs in with this machine's accounts.",
             Tab::Vpn => "Import a WireGuard or OpenVPN profile you already have, and choose whether all traffic or only what your filters match goes through it.",
             Tab::Time => "The clock in the top bar: time zone, 12 or 24 hours, and setting the time from the network.",
@@ -262,6 +266,7 @@ impl Tab {
             Tab::Firewall => "Firewall",
             Tab::SshTunnels => "SSH tunnels",
             Tab::Vpn => "VPN",
+            Tab::Domains => "Domains",
             Tab::Remote => "Remote access",
             Tab::Time => "Time",
             Tab::Battery => "Battery",
@@ -306,6 +311,8 @@ mod firewall_page;
 mod sshtun_page;
 #[path = "settings_vpn.rs"]
 mod vpn_page;
+#[path = "settings_domains.rs"]
+mod dom_page;
 #[path = "settings_remote.rs"]
 mod remote_page;
 #[path = "settings_share.rs"]
@@ -453,6 +460,7 @@ enum FormKind {
     Fw(firewall_page::FwForm),
     /// Settings -> Network -> SSH tunnels.
     SshTun(sshtun_page::TunForm),
+    Domains(dom_page::DomForm),
     Vpn(vpn_page::VpnForm),
     /// Settings -> Browser -> Custom headers: add or edit a rule.
     BrowserHeader(bh_page::BhForm),
@@ -539,6 +547,8 @@ enum ConfirmKind {
     Fw(FwAct),
     /// Settings -> Network -> SSH tunnels: delete this tunnel (its own key and trusted host go with it).
     SshTunnelDelete(String),
+    /// Settings -> Network -> Domains: remove this route (host and path).
+    DomainDelete(String, String),
     /// Settings -> Network -> VPN: delete this profile (its keys leave the vault).
     VpnDelete(String),
     /// Settings -> Browser -> Custom headers: delete this rule (its value goes from the vault too).
@@ -721,6 +731,7 @@ pub struct SettingsApp {
     fw: firewall_page::FwPanel,
     /// Settings -> Network -> SSH tunnels.
     tun: sshtun_page::TunPanel,
+    dom: dom_page::DomPanel,
     vpn: vpn_page::VpnPanel,
     remote: remote_page::RemotePanel,
     share: share_page::SharePanel,
@@ -772,6 +783,7 @@ impl SettingsApp {
             tabs.push(Tab::Memory);
             tabs.push(Tab::Firewall);
             tabs.push(Tab::SshTunnels);
+            tabs.push(Tab::Domains);
             tabs.push(Tab::Vpn);
             tabs.push(Tab::Remote);
             tabs.push(Tab::HostName);
@@ -811,7 +823,7 @@ impl SettingsApp {
         tabs.push(Tab::Account);
         tabs.push(Tab::Backup);
         tabs.sort_by_key(|t| Tab::ORDER.iter().position(|o| o == t).unwrap_or(usize::MAX));
-        let mut app = SettingsApp { tabs, tab: 0, sel: [0; 48], win: [ListWindow::default(); 48], hw: DevicesPane::new(DeviceEnv::real()), ticks: 0, tip: Default::default(), test_record_ms: 2000, vo_lang: 0, vo_scroll: 0.0, vo_max: 0.0, lem_scroll: 0.0, lem_max: 0.0, lem_view_h: 0.0, lem_rect: R::new(0.0, 0.0, 0.0, 0.0), lem_s: 1.0, lem_focus: false, lem_query: TextField::new("Search models", false), lem_search: false, lem_texts: Vec::new(), section: if admin { 0 } else { 1 }, share_skills: cx.session.policy.manage_skills, nav_query: TextField::new("Search settings", false), nav_focus: false, nav_scroll: 0.0, narrow: false, show_list: false, nav_seen: usize::MAX, mouse: (0, 0), nav_rect: R::new(0.0, 0.0, 0.0, 0.0), nav_s: 1.0, slider_w: Vec::new(), storage: StorageEnv::real(), wifi: WifiEnv::real(), wifi_items: Vec::new(), devices: vec![], modal: None, job: None, host: Default::default(), crash: Default::default(), backup: Default::default(), upd: Default::default(), status: None, dc: Default::default(), mem: Default::default(), disp: Default::default(), fw: Default::default(), tun: Default::default(), vpn: Default::default(), remote: Default::default(), share: Default::default(), bh: Default::default(), time: Default::default(), hn: Default::default(), inst: Default::default(), devel: Default::default(), git: Default::default(), matrix: Default::default(), shares: Default::default(), mh: Default::default(), kbd: Default::default(), bat: Default::default(), pw: Default::default(), cloud: iyakki_agent::cloudmode::CloudMode::desktop(), roles: Default::default() };
+        let mut app = SettingsApp { tabs, tab: 0, sel: [0; 48], win: [ListWindow::default(); 48], hw: DevicesPane::new(DeviceEnv::real()), ticks: 0, tip: Default::default(), test_record_ms: 2000, vo_lang: 0, vo_scroll: 0.0, vo_max: 0.0, lem_scroll: 0.0, lem_max: 0.0, lem_view_h: 0.0, lem_rect: R::new(0.0, 0.0, 0.0, 0.0), lem_s: 1.0, lem_focus: false, lem_query: TextField::new("Search models", false), lem_search: false, lem_texts: Vec::new(), section: if admin { 0 } else { 1 }, share_skills: cx.session.policy.manage_skills, nav_query: TextField::new("Search settings", false), nav_focus: false, nav_scroll: 0.0, narrow: false, show_list: false, nav_seen: usize::MAX, mouse: (0, 0), nav_rect: R::new(0.0, 0.0, 0.0, 0.0), nav_s: 1.0, slider_w: Vec::new(), storage: StorageEnv::real(), wifi: WifiEnv::real(), wifi_items: Vec::new(), devices: vec![], modal: None, job: None, host: Default::default(), crash: Default::default(), backup: Default::default(), upd: Default::default(), status: None, dc: Default::default(), mem: Default::default(), disp: Default::default(), fw: Default::default(), tun: Default::default(), dom: Default::default(), vpn: Default::default(), remote: Default::default(), share: Default::default(), bh: Default::default(), time: Default::default(), hn: Default::default(), inst: Default::default(), devel: Default::default(), git: Default::default(), matrix: Default::default(), shares: Default::default(), mh: Default::default(), kbd: Default::default(), bat: Default::default(), pw: Default::default(), cloud: iyakki_agent::cloudmode::CloudMode::desktop(), roles: Default::default() };
         app.bat_sync_tab();
         app.refresh_devices();
         app
@@ -985,7 +997,7 @@ impl SettingsApp {
 
     /// The pages whose rows are windowed by a [`ListWindow`].
     fn scrolls_window(&self) -> bool {
-        matches!(self.tab(), Tab::Network | Tab::SshTunnels | Tab::Vpn | Tab::Bluetooth | Tab::Display | Tab::Sound | Tab::SystemSounds | Tab::ScreenSaver)
+        matches!(self.tab(), Tab::Network | Tab::SshTunnels | Tab::Domains | Tab::Vpn | Tab::Bluetooth | Tab::Display | Tab::Sound | Tab::SystemSounds | Tab::ScreenSaver)
     }
 
     /// The row a pointer event chose (a click on a row, on a button or switch of one, or on a slider's track), if this page windows its rows.
@@ -1502,6 +1514,7 @@ impl SettingsApp {
             FormKind::Mem(f) => self.mem_submit(*f, form),
             FormKind::Fw(k) => self.fw_submit(cx, &k, form),
             FormKind::SshTun(k) => self.tun_submit(cx, &k, form),
+            FormKind::Domains(k) => self.dom_submit(cx, &k, form),
             FormKind::Vpn(k) => self.vpn_submit(cx, &k, form),
             FormKind::BrowserHeader(k) => self.bh_submit(cx, &k, form),
             FormKind::TimeServer => self.time_submit(cx, form),
@@ -1751,6 +1764,9 @@ impl SettingsApp {
         }
         if let ConfirmKind::VpnDelete(id) = kind {
             return self.vpn_delete(cx, &id);
+        }
+        if let ConfirmKind::DomainDelete(h, p) = &kind {
+            return self.dom_delete(cx, h, p);
         }
         if let ConfirmKind::SshTunnelDelete(id) = kind {
             return self.tun_delete(cx, &id);
@@ -2367,6 +2383,7 @@ impl SettingsApp {
             Tab::Shares => Self::shares_len(cx),
             Tab::Firewall => self.fw_len(),
             Tab::SshTunnels => self.tun_len(cx),
+            Tab::Domains => self.dom_len(cx),
             Tab::Vpn => self.vpn_len(cx),
             Tab::DevCluster => self.dc_len(),
             Tab::Install => self.inst_len(),
@@ -2765,7 +2782,7 @@ impl SettingsApp {
             Key::Char('a') if tab == DevTab::Network => self.ask_mac_apply(cx),
             Key::Char('n') if tab == DevTab::Network => self.toggle_announce(cx),
             Key::Enter | Key::Char(' ') if tab == DevTab::Network && matches!(self.selected_target(), Some(Target::Mac(..))) => self.choose_mac_mode(cx),
-            Key::Char(c @ ('p' | 's' | 'l' | 'f')) if tab == DevTab::Bluetooth => self.bt_shortcut(*c, cx),
+            Key::Char(c @ ('p' | 's' | 'l' | 'f' | 'e' | 't')) if tab == DevTab::Bluetooth => self.bt_shortcut(*c, cx),
             Key::Char('u') if tab == DevTab::Display => self.change_ui_size(true, cx),
             Key::Char('U') if tab == DevTab::Display => self.change_ui_size(false, cx),
             Key::Char(c @ ('t' | 'T' | '1' | '2' | '3')) if tab == DevTab::Display => self.change_theme(*c, cx),
@@ -2800,13 +2817,23 @@ impl SettingsApp {
         }
     }
 
-    /// Settings -> Bluetooth: `p` powers the controller, `s` scans, `l` loads the held driver: select that row and press Enter on it.
+    /// Settings -> Bluetooth: the buttons find their own row whatever is selected: `e` the radio switch, `p` powers the controller, `s`
+    /// scans, `t` the phone's tethering (the selected phone, else the first paired one), `l` loads the held driver: select that row and
+    /// press Enter on it.
     fn bt_shortcut(&mut self, c: char, cx: &AppCx) {
         let rows = self.dev_rows();
+        let phone = if c == 't' {
+            let sel = self.selected_target();
+            self.hw.bt_tether_target(sel.as_ref())
+        } else {
+            None
+        };
         let want = |t: &Target| match c {
             'p' => matches!(t, Target::BtPower(..)),
             's' => matches!(t, Target::BtScan(_)),
             'f' => matches!(t, Target::BtFirmware),
+            'e' => matches!(t, Target::Radio(_)),
+            't' => matches!(t, Target::BtTether(a) if phone.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(a))),
             _ => matches!(t, Target::BtLoad),
         };
         match rows.iter().position(|r| want(&r.target)) {
@@ -2818,6 +2845,8 @@ impl SettingsApp {
                 'p' => "There is no Bluetooth controller to power on (or it is not set up).",
                 's' => "There is no Bluetooth controller to scan with (or it is not set up).",
                 'f' => "Bluetooth does not need firmware on this machine.",
+                'e' => "There is no Bluetooth on/off switch to press here (the controller may need firmware first, or a key on the machine switches it).",
+                't' => "No phone is paired yet. Scan, then press Enter on your phone in the list to pair it (Bluetooth must be on in the phone); then Tether connects its internet.",
                 _ => "No Bluetooth driver is set aside on this machine: nothing to load.",
             }),
         }
@@ -2830,7 +2859,7 @@ impl SettingsApp {
         let announce = if self.tab() == Tab::Network { self.announce_line(cx) } else { String::new() };
         let note = match self.tab() {
             Tab::Network => announce.as_str(),
-            Tab::Bluetooth => "No Bluetooth audio yet. p powers the controller · s scans (10 s) · Enter pairs, connects or disconnects the selected device · u forgets it · l loads a held driver.",
+            Tab::Bluetooth => "No audio yet. e radio · p power · s scan · t phone internet · Enter pairs or connects · u forgets · l driver.",
             Tab::Display => "The desktop uses the screen's best mode. Resolution, arrangement and mirroring of several displays are in Settings, Displays.",
             _ => "o chooses the output (Automatic follows what is connected) · t plays a test chime · the IYAKKI volume is the one master volume: the volume keys, the Devices popover and the radio follow it · A advanced · M mixes sounds from several apps (experimental).",
         };
@@ -3554,6 +3583,7 @@ impl App for SettingsApp {
             Tab::Firewall => "A simple view · a add rule · e edit · x allow on/off · d delete · p presets · y apply (then k keep or v revert within 60 s) · o firewall on/off · u discard changes · r look names up · c copy rules · i import · b clear log · z disable now",
             Tab::Remote => "e or Enter serve/stop · p change the port · Up/Down scroll",
             Tab::Vpn => "i import a file · p import the clipboard · x or Enter enable/disable · m mode and filters · d delete · r retry · Up/Down choose",
+            Tab::Domains => "a add route · e edit · d delete · x listener on/off · p ports · f firewall opening · t trial certificate · i import certificate · r look at the cluster again · Up/Down choose",
             Tab::SshTunnels => "a add · e edit · x enable/disable · d delete · T test · r retry · c copy the address · k copy the public key · Up/Down choose",
             Tab::Shares => "n new share · s start/stop · c copy the link · q QR code · e edit · t new secret for the link · d delete · x stop all sharing · Up/Down choose",
             Tab::Account => "p change password · u bigger text · U smaller text",
@@ -3712,6 +3742,7 @@ impl App for SettingsApp {
             }
             self.git_tick(cx);
             self.tun_tick(cx);
+            self.dom_tick(cx);
             self.vpn_tick(cx);
             self.matrix_tick();
             self.git_wizard_event(ev, cx);
@@ -3885,6 +3916,7 @@ impl App for SettingsApp {
                 Tab::Shares => self.handle_shares(other, cx),
                 Tab::Firewall => self.handle_firewall(other, cx),
                 Tab::SshTunnels => self.handle_tun(other, cx),
+                Tab::Domains => self.handle_dom(other, cx),
                 Tab::Vpn => self.handle_vpn(other, cx),
                 Tab::Remote => self.handle_remote(other, cx),
                 Tab::Install => self.handle_install(other, cx),
@@ -3992,6 +4024,7 @@ impl App for SettingsApp {
             Tab::Shares => self.render_shares(g, body, s, cx),
             Tab::Firewall => self.render_firewall(g, body, s, cx),
             Tab::SshTunnels => self.render_tun(g, body, s, cx),
+            Tab::Domains => self.render_dom(g, body, s, cx),
             Tab::Vpn => self.render_vpn(g, body, s, cx),
             Tab::Remote => self.render_remote(g, body, s, cx),
             Tab::Install => self.render_install(g, body, s),
@@ -4093,9 +4126,13 @@ impl SettingsApp {
             (Tab::Network, _) if self.share.open => self.share_buttons(),
             (Tab::Network, _) => vec![("Share internet", mut_, 'i'), ("Turn on/off", acc, 'e'), ("Join WiFi", acc, 'w'), ("Private MAC", mut_, 'm'), ("Apply MAC now", mut_, 'a'), ("Device name", mut_, 'n'), ("Look again", mut_, 'r')],
             (Tab::Bluetooth, _) => {
-                let mut v = vec![("On/off", acc, 'e'), ("Power", acc, 'p'), ("Scan (10 s)", acc, 's'), ("Load driver", mut_, 'l'), ("Look again", mut_, 'r')];
+                let mut v = vec![("On/off", acc, 'e'), ("Power", acc, 'p'), ("Scan (10 s)", acc, 's'), ("Tether", acc, 't'), ("Load driver", mut_, 'l'), ("Look again", mut_, 'r')];
+                if !self.hw.bt_held() {
+                    v.retain(|b| b.2 != 'l'); // the driver button only when a driver is set aside (five fit a phone)
+                }
                 if self.hw.bt_needs_firmware() {
                     v[0] = ("Firmware", acc, 'f'); // first: it is the fix; the on/off switch row is hidden in this state, so its button makes way (five fit a phone)
+                    v.retain(|b| b.2 != 't'); // and no phone can be used before the controller works
                 }
                 v
             }
@@ -4139,6 +4176,7 @@ impl SettingsApp {
             (Tab::Backup, _) => self.backup_buttons(),
             (Tab::Firewall, _) => self.fw_buttons(),
             (Tab::SshTunnels, _) => self.tun_buttons(),
+            (Tab::Domains, _) => self.dom_buttons(),
             (Tab::Vpn, _) => self.vpn_buttons(),
             (Tab::Remote, _) => self.remote_buttons(),
             (Tab::Install, _) => self.install_buttons(),
@@ -6730,3 +6768,6 @@ mod ia_tests;
 #[cfg(test)]
 #[path = "settings_aihw_tests.rs"]
 mod aihw_tests;
+#[cfg(test)]
+#[path = "settings_domains_tests.rs"]
+mod dom_tests;

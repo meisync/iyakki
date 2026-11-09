@@ -8,12 +8,17 @@ pub mod browser;
 pub mod camera;
 pub mod channel_switch;
 pub mod failfix;
+pub mod hookenv;
+pub mod hookstore;
 pub mod host;
 pub mod permission;
 pub mod notify_matrix;
 pub mod programs;
 pub mod tools;
 pub mod webhook;
+
+#[cfg(test)]
+mod hookenv_tests;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -28,6 +33,11 @@ use serde_json::{json, Value};
 
 use crate::services::Services;
 use host::AgentHost;
+
+/// A webhook's id: letters, digits, - and _ (at most 48).
+pub fn hook_id_ok(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 48 && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+}
 
 pub const AGENT: &str = "agent:assistant";
 
@@ -347,7 +357,17 @@ pub fn trigger_from_value(v: &Value) -> Result<Trigger, String> {
         "file_change" => TriggerKind::FileChange { path: s(v, "path").to_string() },
         "on_failure" => TriggerKind::OnFailure { flow: s(v, "flow").to_string() },
         "event" => TriggerKind::Event { name: s(v, "name").to_string() },
-        "webhook" => TriggerKind::Webhook { path: s(v, "path").to_string() },
+        "webhook" => {
+            let list = |k: &str| v.get(k).and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(|x| x.to_string()).collect::<Vec<_>>()).unwrap_or_default();
+            TriggerKind::Webhook {
+                path: s(v, "path").to_string(),
+                methods: list("methods").into_iter().map(|m| m.to_ascii_uppercase()).collect(),
+                max_body: v.get("max_body").and_then(Value::as_u64).unwrap_or(0) as usize,
+                content_types: list("content_types"),
+                rate_per_min: v.get("rate_per_min").and_then(Value::as_u64).unwrap_or(0).min(100_000) as u32,
+                signed: v.get("signed").and_then(Value::as_bool).unwrap_or(false),
+            }
+        }
         other => return Err(format!("`{other}` is not a trigger kind (manual, chat, cron, interval, once, calendar, file_change, on_failure, event, webhook)")),
     };
     let mut t = Trigger::new(&id, k);
@@ -695,7 +715,7 @@ pub fn trigger_text(k: &TriggerKind) -> String {
         TriggerKind::FileChange { path } => format!("when {path} changes"),
         TriggerKind::OnFailure { flow } => format!("when {flow} fails"),
         TriggerKind::Event { name } => format!("on event {name}"),
-        TriggerKind::Webhook { path } => format!("webhook {path} (planned)"),
+        TriggerKind::Webhook { path, signed, .. } => format!("webhook {path}{}", if *signed { " (signed)" } else { "" }),
         other => other.label().to_string(),
     }
 }

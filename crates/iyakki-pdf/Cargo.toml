@@ -1,0 +1,9 @@
+[package]
+name = "iyakki-pdf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "An in-house PDF reader and writer for untrusted files: structure (xref tables and streams, object streams, repair), page tree, text extraction and search, a simple page renderer, and a small multi-page PDF writer. Not a full PDF engine; no encryption."
+
+[dependencies]
+iyakki-web.workspace = true

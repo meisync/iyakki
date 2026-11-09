@@ -46,6 +46,7 @@ pub const OP_USER_PASSKEY_REPLY: u16 = 0x001e;
 pub const OP_USER_PASSKEY_NEG_REPLY: u16 = 0x001f;
 pub const OP_START_DISCOVERY: u16 = 0x0023;
 pub const OP_STOP_DISCOVERY: u16 = 0x0024;
+pub const OP_CONFIRM_NAME: u16 = 0x0025;
 pub const OP_SET_BREDR: u16 = 0x002a;
 
 // Events
@@ -73,6 +74,9 @@ pub const SET_BONDABLE: u32 = 1 << 4;
 pub const SET_SSP: u32 = 1 << 6;
 pub const SET_BREDR: u32 = 1 << 7;
 pub const SET_LE: u32 = 1 << 9;
+
+/// Device Found flag: the kernel asks whether the name is known (the answer "no" makes it look the name up).
+pub const DEV_FOUND_CONFIRM_NAME: u32 = 0x02;
 
 /// Address types: BR/EDR (classic), LE public, LE random.
 pub const ADDR_BREDR: u8 = 0;
@@ -570,8 +574,14 @@ impl<T: Transport> Mgmt<T> {
         self.command(OP_START_DISCOVERY, index, &[types])?;
         let mut found: Vec<Found> = Vec::new();
         let deadline = Instant::now() + dur;
+        // Classic devices usually answer an inquiry without their name. The kernel asks ("confirm name" flag) whether we know it; saying no
+        // makes it look the name up, which takes a moment after the inquiry. Without this the first scan lists bare addresses. The scan
+        // waits a little past its time for the names it asked for.
+        let name_grace = deadline + Duration::from_secs(6);
+        let mut pending: Vec<String> = Vec::new();
         loop {
-            let left = deadline.saturating_duration_since(Instant::now());
+            let end = if pending.is_empty() { deadline } else { name_grace };
+            let left = end.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 break;
             }
@@ -579,6 +589,17 @@ impl<T: Transport> Mgmt<T> {
             match ev.code {
                 EV_DEVICE_FOUND if ev.index == index => {
                     if let Some(f) = parse_found(&ev.params) {
+                        let flags = u32::from_le_bytes([ev.params[8], ev.params[9], ev.params[10], ev.params[11]]);
+                        if f.name.is_empty() && flags & DEV_FOUND_CONFIRM_NAME != 0 && f.addr_type == ADDR_BREDR && !pending.contains(&f.address) && pending.len() < 16 {
+                            let mut p = ev.params[..7].to_vec();
+                            p.push(0); // name not known: look it up
+                            if self.command(OP_CONFIRM_NAME, index, &p).is_ok() {
+                                pending.push(f.address.clone());
+                            }
+                        }
+                        if !f.name.is_empty() {
+                            pending.retain(|a| a != &f.address);
+                        }
                         match found.iter_mut().find(|x| x.address == f.address) {
                             Some(x) => {
                                 x.rssi = f.rssi;
@@ -856,6 +877,32 @@ mod tests {
         assert_eq!((f[0].address.as_str(), f[0].name.as_str(), f[0].kind), ("BB:00:00:00:00:02", "Boom!", Kind::Speaker));
         assert_eq!((f[1].address.as_str(), f[1].name.as_str(), f[1].rssi), ("AA:00:00:00:00:01", "Keyboard", -60));
         assert_eq!(m.t.sent.last().unwrap()[0..2], OP_STOP_DISCOVERY.to_le_bytes(), "scan always stops discovery");
+    }
+
+    #[test]
+    fn a_classic_device_without_a_name_gets_its_name_looked_up_so_the_first_scan_shows_it() {
+        let ph = [0x05, 0x00, 0x00, 0x00, 0x00, 0xcc];
+        let with_flags = |name: &[u8], flags: u32| {
+            let mut p = ph.to_vec();
+            p.extend_from_slice(&[ADDR_BREDR, (-50i8) as u8]);
+            p.extend_from_slice(&flags.to_le_bytes());
+            p.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            p.extend_from_slice(name);
+            encode(EV_DEVICE_FOUND, 0, &p)
+        };
+        let mut name = vec![6, 0x09];
+        name.extend_from_slice(b"Phone");
+        let mut cmd = ph.to_vec();
+        cmd.push(ADDR_BREDR);
+        let mut m = fake(vec![
+            (OP_START_DISCOVERY, vec![complete(OP_START_DISCOVERY, 0, 0, &[7]), with_flags(&[], DEV_FOUND_CONFIRM_NAME)]),
+            (OP_CONFIRM_NAME, vec![complete(OP_CONFIRM_NAME, 0, 0, &cmd), with_flags(&name, 0), encode(EV_DISCOVERING, 0, &[7, 0])]),
+        ]);
+        let f = m.scan(0, Duration::from_secs(1)).unwrap();
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].name, "Phone", "the name that arrived after the look-up is kept");
+        let ask = m.t.sent.iter().find(|p| p[0..2] == OP_CONFIRM_NAME.to_le_bytes()).expect("the kernel was asked to look the name up");
+        assert_eq!(&ask[6..], &[&ph[..], &[ADDR_BREDR, 0]].concat()[..], "address, type, name not known");
     }
 
     #[test]

@@ -46,6 +46,8 @@ pub(super) struct UpdPanel {
     pub(super) comp_review: Arc<std::sync::Mutex<Option<CompReview>>>,
     /// "Components from <store>: N newer" lines from the last check, re-read every two seconds.
     pub(super) comp_lines: Option<(std::time::Instant, Vec<String>)>,
+    /// The last component install's result as read from the data folder (re-read every two seconds).
+    pub(super) comp_result: Option<(std::time::Instant, Option<iyakki_agent::store::compapply::ApplyResult>)>,
 }
 
 /// Where USB sticks and other drives appear when they are mounted.
@@ -155,6 +157,11 @@ impl SettingsApp {
                 self.open_form(FormKind::UpdateFolder, f);
             }
             Key::Char('c') | Key::Char('m') | Key::Char('u') | Key::Char('t') => self.upd_check_key(k, cx),
+            Key::Char('g') => {
+                if self.admin(cx) {
+                    self.upd_channel_next(cx);
+                }
+            }
             Key::Char('v') => {
                 if self.admin(cx) {
                     self.upd_components_review(cx);
@@ -225,7 +232,12 @@ impl SettingsApp {
                 // pressing y is the approval of exactly this review
                 let approval = iyakki_agent::store::compapply::Approval::given(&rev, &user);
                 let svc = cx.services.clone();
-                self.start("Installing system components", move || JobOut::Msg(iyakki_agent::componentstools::RealBackend { svc }.apply_approved(&store, &channel, &approval).map(|a| a.text())));
+                self.upd.comp_result = None;
+                self.start("Installing system components", move || {
+                    // the result (applied, refused with the reason, or failed and rolled back) is kept on the page and in the inbox, not only in this message
+                    let r = iyakki_agent::componentstools::RealBackend { svc, user: Some(user) }.apply_approved(&store, &channel, &approval);
+                    JobOut::Msg(r.map(|a| a.text()))
+                });
             }
             (Key::Char('y'), UpdAsk::None) => self.fail("There is nothing to confirm. Press i to install or r to roll back."),
             _ => {}
@@ -233,7 +245,7 @@ impl SettingsApp {
     }
 
     pub(super) fn updates_buttons(&self) -> Vec<Btn> {
-        let mut v = vec![("Install", ACCENT, 'i'), ("Roll back", TEXT, 'r'), ("Choose folder", TEXT, 'f'), ("Look again", TEXT, 's'), ("Check for updates", TEXT, 'c'), ("How often", TEXT, 'm'), ("Update list address", TEXT, 'u'), ("Use a store", TEXT, 't'), ("Review and apply", TEXT, 'v')];
+        let mut v = vec![("Install", ACCENT, 'i'), ("Roll back", TEXT, 'r'), ("Choose folder", TEXT, 'f'), ("Look again", TEXT, 's'), ("Check for updates", TEXT, 'c'), ("How often", TEXT, 'm'), ("Update list address", TEXT, 'u'), ("Use a store", TEXT, 't'), ("Review and apply", TEXT, 'v'), ("Channel", TEXT, 'g')];
         if self.upd.ask != UpdAsk::None {
             v.insert(0, ("Yes, do it", ERR, 'y'));
             v.insert(1, ("No", TEXT, 'n'));
@@ -359,18 +371,19 @@ impl SettingsApp {
         self.upd.ask = UpdAsk::Components;
         *self.upd.comp_review.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let (svc, slot) = (cx.services.clone(), self.upd.comp_review.clone());
+        let channel = iyakki_agent::store::compapply::channel(svc.dir());
         self.start("Reading the component list", move || {
-            let be = iyakki_agent::componentstools::RealBackend { svc };
+            let be = iyakki_agent::componentstools::RealBackend { svc, user: None };
             let stores = be.stores();
             if stores.is_empty() {
                 return JobOut::Msg(Err("No store with a checked key is added yet. Add your private store in the STORE (Settings) first.".into()));
             }
             let mut said = vec![];
             for s in stores {
-                match be.review_for(&s, "stable") {
+                match be.review_for(&s, &channel) {
                     Ok((_plan, rev)) => {
                         let first = rev.text.lines().next().unwrap_or("").to_string();
-                        *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some((s, "stable".to_string(), rev));
+                        *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some((s, channel.clone(), rev));
                         return JobOut::Msg(Ok(format!("{first} Press y to install it, n to cancel.")));
                     }
                     Err(e) => said.push(format!("{}: {e}", s.name)),
@@ -378,6 +391,24 @@ impl SettingsApp {
             }
             JobOut::Msg(Err(said.join(" ")))
         });
+    }
+
+    /// `g`: the next channel (stable, beta, nightly), kept for this computer; check, review and install use it.
+    fn upd_channel_next(&mut self, cx: &AppCx) {
+        use iyakki_agent::store::compapply as ca;
+        let dir = Self::svc(cx).dir().to_path_buf();
+        let next = ca::next_channel(&ca::channel(&dir));
+        match ca::set_channel(&dir, next) {
+            Ok(()) => {
+                cx.audit.record(&cx.session.user, "settings.components_channel", next);
+                // what was reviewed or counted belonged to the other channel
+                self.upd.ask = UpdAsk::None;
+                *self.upd.comp_review.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                self.upd.comp_lines = None;
+                self.ok(format!("{} Press Check for updates to look again.", ca::channel_sentence(next)));
+            }
+            Err(e) => self.fail(e),
+        }
     }
 
     /// (name, announcement address) of every enabled store that was added with its key checked.
@@ -429,7 +460,8 @@ impl SettingsApp {
                     let fetch = iyakki_agent::store::catalog::HttpFetch(svc.quick_upstream());
                     let rep = chk::run_and_keep(&store, &svc, &policy, &user, &fetch, &cur, &v.running, &v.variant);
                     // the same look at the pinned stores' system components (reads signed lists only), kept for the page's line
-                    iyakki_agent::componentstools::RealBackend { svc: svc.clone() }.check_all("stable");
+                    let channel = iyakki_agent::store::compapply::channel(svc.dir());
+                    iyakki_agent::componentstools::RealBackend { svc: svc.clone(), user: None }.check_all(&channel);
                     JobOut::Msg(Ok(match (rep.count(), rep.errors.len()) {
                         (0, 0) => "Everything is up to date.".to_string(),
                         (0, e) => format!("Nothing new found, but {e} source(s) could not be reached."),
@@ -463,6 +495,26 @@ impl SettingsApp {
         if cfg.mode == chk::Mode::Daily {
             out.push(("This computer cannot tell a metered connection yet, so a daily check also runs on one.".into(), MUTED, Face::Sans));
         }
+        out.push((iyakki_agent::store::compapply::channel_sentence(&iyakki_agent::store::compapply::channel(Self::svc(cx).dir())), MUTED, Face::Sans));
+        // the last install's result stays until the next action
+        let res = match &self.upd.comp_result {
+            Some((at, r)) if at.elapsed() < std::time::Duration::from_secs(2) => r.clone(),
+            _ => {
+                let r = iyakki_agent::store::compapply::load_result(Self::svc(cx).dir());
+                self.upd.comp_result = Some((std::time::Instant::now(), r.clone()));
+                r
+            }
+        };
+        if let Some(r) = res {
+            use iyakki_agent::store::compapply::{result_headline, Outcome};
+            let col = match r.outcome {
+                Outcome::Applied => OK,
+                Outcome::Refused => crate::fx::AMBER,
+                Outcome::Failed | Outcome::RolledBack => ERR,
+            };
+            out.push((result_headline(&r, iyakki_agent::clock::now_unix()), col, Face::Bold));
+            out.extend(r.text.lines().take(6).map(|l| (l.to_string(), col, Face::Sans)));
+        }
         let cached = self.upd.comp_lines.as_ref().filter(|(at, _)| at.elapsed() < std::time::Duration::from_secs(2)).map(|(_, l)| l.clone());
         let comp = cached.unwrap_or_else(|| {
             let l: Vec<String> = iyakki_agent::store::compapply::load_check(Self::svc(cx).dir()).iter().map(iyakki_agent::store::compapply::check_sentence).collect();
@@ -482,13 +534,7 @@ impl SettingsApp {
         match self.upd_report(cx) {
             None => out.push(("Not checked yet. Press Check for updates.".into(), MUTED, Face::Sans)),
             Some(r) => {
-                let ago = iyakki_agent::clock::now_unix().saturating_sub(r.checked_at);
-                let when = match ago {
-                    0..=89 => "just now".to_string(),
-                    90..=5399 => format!("{} minutes ago", ago / 60),
-                    5400..=129_599 => format!("{} hours ago", (ago + 1800) / 3600),
-                    _ => format!("{} days ago", ago / 86_400),
-                };
+                let when = iyakki_agent::store::compapply::ago_text(iyakki_agent::clock::now_unix().saturating_sub(r.checked_at));
                 out.push((format!("Last checked {when}. {}", match r.count() { 0 => "Everything is up to date.".to_string(), n => format!("{n} update(s) available. Nothing is downloaded or installed until you do it yourself.") }), if r.count() > 0 { crate::fx::AMBER } else { OK }, Face::Sans));
                 for u in r.updates.iter().take(6) {
                     let what = match u.kind {

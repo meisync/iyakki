@@ -275,6 +275,57 @@ fn active_root_image(data: &Path) -> Option<PathBuf> {
     f.is_file().then_some(f)
 }
 
+/// The pointers to the system images on the data volume as they were before a base part was written. The Update centre's rollback puts the
+/// kernel, the small RAM disk and the menu back but leaves the root pointer where the update moved it, so after a failed check the apply
+/// puts the pointers back itself (found by the base read-back test): the new image is removed and the earlier root is the root again.
+struct RootsSnapshot {
+    current: Option<String>,
+    previous: Option<String>,
+    dirs: Vec<String>,
+}
+
+impl RootsSnapshot {
+    fn take(data: &Path) -> RootsSnapshot {
+        let roots = data.join(iyakki_stage1::ROOTS_DIR);
+        let dirs = std::fs::read_dir(&roots).into_iter().flatten().flatten().filter(|e| e.path().is_dir()).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        RootsSnapshot { current: std::fs::read_to_string(roots.join("current")).ok(), previous: std::fs::read_to_string(roots.join("previous")).ok(), dirs }
+    }
+
+    /// Put the pointers back; true when something had to change.
+    fn restore(&self, data: &Path) -> bool {
+        let roots = data.join(iyakki_stage1::ROOTS_DIR);
+        let mut changed = false;
+        for (name, before) in [("current", &self.current), ("previous", &self.previous)] {
+            let now = std::fs::read_to_string(roots.join(name)).ok();
+            // a pointer whose root the update removed (it keeps only the two newest) cannot be put back
+            let before = before.as_ref().filter(|t| iyakki_stage1::Pointer::parse(t).is_some_and(|p| roots.join(&p.id).is_dir()));
+            if now.as_ref() == before {
+                continue;
+            }
+            changed = true;
+            match before {
+                Some(t) => {
+                    let tmp = roots.join(format!("{name}.restore"));
+                    if std::fs::write(&tmp, t).and_then(|_| std::fs::rename(&tmp, roots.join(name))).is_err() {
+                        let _ = std::fs::remove_file(&tmp);
+                    }
+                }
+                None => {
+                    let _ = std::fs::remove_file(roots.join(name));
+                }
+            }
+        }
+        for e in std::fs::read_dir(&roots).into_iter().flatten().flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if e.path().is_dir() && !self.dirs.contains(&name) {
+                let _ = std::fs::remove_dir_all(e.path());
+                changed = true;
+            }
+        }
+        changed
+    }
+}
+
 /// Read back what the boot-partition parts wrote, against the SHA-256 of the signed list.
 fn verify_boot(svc: &Svc, items: &[&comps::StagedItem], m: &up::Manifest) -> Result<(), String> {
     let vol = svc.centre.boot_read()?;
@@ -282,7 +333,7 @@ fn verify_boot(svc: &Svc, items: &[&comps::StagedItem], m: &up::Manifest) -> Res
         let path = &i.step.install_path;
         let got = if is_root_image(path) {
             // a lean install's system image goes to the data volume
-            let id = up::root_id(m).ok_or("the system image has no usable id")?;
+            let id = up::root_target(svc.data(), m).ok_or("the system image has no usable id")?;
             files::sha256_file(&svc.data().join(iyakki_stage1::ROOTS_DIR).join(id).join("root.sfs"))?
         } else if path.eq_ignore_ascii_case("boot/grub/grub.cfg") {
             // the boot menu is rewritten with the previous-version entry; the engine reads it back as written
@@ -332,6 +383,7 @@ pub fn apply_staged(svc: &Svc, prep: &Prepared, approval: Option<&Approval>) -> 
     let mut lines = vec![];
     let mut boot_message = None;
     let mut rollback_boot = false;
+    let roots_before = RootsSnapshot::take(svc.data());
     // 3. the boot partition's parts, through the Update centre's engine
     if !boot.is_empty() {
         // the root image carries /etc/iyakki-release: a label that is not the running one needs the base in this update, or the first
@@ -372,8 +424,9 @@ pub fn apply_staged(svc: &Svc, prep: &Prepared, approval: Option<&Approval>) -> 
         }
         if let Err(why) = verify_boot(svc, &boot, &found.manifest) {
             let back = svc.centre.rollback(&by);
+            let root = if roots_before.restore(svc.data()) { " The system image written a moment ago was removed and the earlier one is the system image again." } else { "" };
             return Err(match back {
-                Ok(m) => format!("a check after writing failed ({why}); the previous version was put back: {m} Nothing is recorded as installed."),
+                Ok(m) => format!("a check after writing failed ({why}); the previous version was put back: {m}{root} Nothing is recorded as installed."),
                 Err(e) => format!("a check after writing failed ({why}) and the previous version could not be put back automatically ({e}); choose \"{}\" in the boot menu. Nothing is recorded as installed.", up::PREV_TITLE),
             });
         }
@@ -387,8 +440,9 @@ pub fn apply_staged(svc: &Svc, prep: &Prepared, approval: Option<&Approval>) -> 
             Ok(l) => lines.extend(l),
             Err(e) => {
                 let undone = if rollback_boot {
+                    let root = if roots_before.restore(svc.data()) { " The system image written a moment ago was removed." } else { "" };
                     match svc.centre.rollback(&by) {
-                        Ok(_) => " The boot parts written a moment ago were put back.".to_string(),
+                        Ok(_) => format!(" The boot parts written a moment ago were put back.{root}"),
                         Err(e2) => format!(" The boot parts written a moment ago could not be put back automatically ({e2}); choose \"{}\" in the boot menu.", up::PREV_TITLE),
                     }
                 } else {
@@ -477,4 +531,167 @@ pub fn check_sentence(l: &StoreLine) -> String {
     } else {
         format!("Components from {}: {} newer.", l.store, l.newer)
     }
+}
+
+// ------------------------------------------------------------------------------------------------ the last result, kept for the page and the inbox
+
+/// How an apply ended, in the three words the person needs to tell a refusal from a success.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Outcome {
+    /// Everything was written and read back; a restart is needed to run it.
+    Applied,
+    /// Refused before anything was written (no approval, not enough room, a part must go first, an update is pending, ...).
+    Refused,
+    /// Something went wrong after work had started and the earlier version was put back, or nothing was changed.
+    Failed,
+    /// A check after writing failed and the previous version was put back (or could not be, which the text says).
+    RolledBack,
+}
+
+impl Outcome {
+    pub fn label(self) -> &'static str {
+        match self {
+            Outcome::Applied => "Installed",
+            Outcome::Refused => "Refused, nothing was changed",
+            Outcome::Failed => "Failed",
+            Outcome::RolledBack => "Failed and rolled back",
+        }
+    }
+}
+
+/// The last component install, as the page and the inbox show it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ApplyResult {
+    pub at: i64,
+    pub outcome: Outcome,
+    pub store: String,
+    pub channel: String,
+    /// The full plain-words text (what was installed, or the reason).
+    pub text: String,
+}
+
+pub const LAST_APPLY_FILE: &str = "components-last-apply.json";
+
+/// Sort an apply's answer into an [`ApplyResult`]. `before_apply` is true for an error from the download and check step (nothing was
+/// written then).
+pub fn classify(store: &str, channel: &str, r: &Result<Applied, String>, before_apply: bool, now: i64) -> ApplyResult {
+    let (outcome, text) = match r {
+        Ok(a) => (Outcome::Applied, a.text()),
+        Err(e) if before_apply => (Outcome::Failed, format!("{e} Nothing was changed on this computer.")),
+        Err(e) => match e.strip_prefix("not applied:") {
+            Some(why) => (Outcome::Refused, why.trim().to_string()),
+            None if e.contains("put back") || e.contains("Put back") => (Outcome::RolledBack, e.clone()),
+            None => (Outcome::Failed, e.clone()),
+        },
+    };
+    ApplyResult { at: now, outcome, store: store.to_string(), channel: channel.to_string(), text }
+}
+
+pub fn save_result(data: &Path, r: &ApplyResult) {
+    let p = data.join(LAST_APPLY_FILE);
+    let tmp = p.with_extension("tmp");
+    if std::fs::write(&tmp, serde_json::to_vec_pretty(r).unwrap_or_default()).is_ok() {
+        let _ = std::fs::rename(&tmp, &p);
+    }
+}
+
+pub fn load_result(data: &Path) -> Option<ApplyResult> {
+    std::fs::read(data.join(LAST_APPLY_FILE)).ok().and_then(|b| serde_json::from_slice(&b).ok())
+}
+
+/// The next action starts: the old result is no longer the latest word.
+pub fn clear_result(data: &Path) {
+    let _ = std::fs::remove_file(data.join(LAST_APPLY_FILE));
+}
+
+/// How long ago, in words.
+pub fn ago_text(secs: i64) -> String {
+    match secs.max(0) {
+        0..=89 => "just now".to_string(),
+        90..=5399 => format!("{} minutes ago", secs / 60),
+        5400..=129_599 => format!("{} hours ago", (secs + 1800) / 3600),
+        s => format!("{} days ago", s / 86_400),
+    }
+}
+
+/// The sentence the page shows first: what happened and when.
+pub fn result_headline(r: &ApplyResult, now: i64) -> String {
+    format!("Last system component install ({}): {}.", ago_text(now - r.at), r.outcome.label())
+}
+
+/// Keep the result and put ONE notice in the person's inbox (the same entry is rewritten by the next install).
+pub fn record_result(svc: &crate::services::Services, user: Option<&str>, res: &ApplyResult) {
+    save_result(svc.dir(), res);
+    let Some(user) = user.filter(|u| !u.is_empty()) else { return };
+    use crate::inbox::{Kind, Link};
+    let kind = match res.outcome {
+        Outcome::Applied => Kind::Info,
+        Outcome::Refused => Kind::Warning,
+        Outcome::Failed | Outcome::RolledBack => Kind::Error,
+    };
+    let title = format!("System components from {}: {}", res.store, res.outcome.label().to_lowercase());
+    let _ = svc.inbox.upsert_keyed(user, "component-apply", kind, &title, &res.text, "store", Some(Link::new("settings", "tab:updates")), true, res.at);
+}
+
+// ------------------------------------------------------------------------------------------------ the channel of this computer
+
+pub const CHANNEL_FILE: &str = "components-channel";
+pub const CHANNELS: [&str; 3] = ["stable", "beta", "nightly"];
+
+/// The channel this computer takes system components from (`stable` until the person chooses another).
+pub fn channel(data: &Path) -> String {
+    std::fs::read_to_string(data.join(CHANNEL_FILE)).ok().map(|t| t.trim().to_string()).filter(|c| cm::valid_channel(c)).unwrap_or_else(|| "stable".to_string())
+}
+
+pub fn set_channel(data: &Path, ch: &str) -> Result<(), String> {
+    let ch = ch.trim();
+    if !CHANNELS.contains(&ch) {
+        return Err(format!("`{ch}` is not a channel this computer can follow (stable, beta or nightly)"));
+    }
+    let p = data.join(CHANNEL_FILE);
+    let tmp = p.with_extension("tmp");
+    std::fs::write(&tmp, format!("{ch}\n")).and_then(|_| std::fs::rename(&tmp, &p)).map_err(|e| format!("{}: {e}", p.display()))
+}
+
+/// The next channel in the order stable, beta, nightly (the Settings button).
+pub fn next_channel(cur: &str) -> &'static str {
+    CHANNELS[(CHANNELS.iter().position(|c| *c == cur).map_or(0, |i| i + 1)) % CHANNELS.len()]
+}
+
+pub fn channel_sentence(ch: &str) -> String {
+    let what = match ch {
+        "stable" => "tested builds only",
+        "beta" => "builds that are being tried before they become stable",
+        "nightly" => "the newest builds, not yet tried widely",
+        _ => "a channel you chose",
+    };
+    format!("Component channel on this computer: {ch} ({what}).")
+}
+
+// ------------------------------------------------------------------------------------------------ the boot partition, read at boot
+
+/// The most the boot RAM disk read-back reads (bounded: the file is a few hundred MB at most).
+const MAX_RAMDISK: u64 = 1 << 30;
+
+/// SHA-256 of every boot RAM disk on the boot partition (`boot/initrd`, `boot/initrd-lean`), read-only through the Update centre's boot
+/// volume reader. Empty when the volume cannot be reached (not this install's, no persistent data volume) or holds none of them.
+pub fn boot_ramdisk_hashes(centre: &Centre) -> Vec<String> {
+    let Ok(vol) = centre.boot_read() else { return vec![] };
+    ["boot/initrd", "boot/initrd-lean"]
+        .iter()
+        .filter_map(|rel| up::find_ci(&vol.root, rel))
+        .filter(|p| std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.len() <= MAX_RAMDISK))
+        .filter_map(|p| files::sha256_file(&p).ok())
+        .collect()
+}
+
+/// At boot: correct the installed record from the facts and from what the boot partition really holds.
+pub fn correct_at_boot_with_disk(data: &Path, facts: &Facts, centre: &Centre) -> Result<Vec<String>, String> {
+    ci::correct_at_boot_with(data, facts, &boot_ramdisk_hashes(centre))
+}
+
+/// [`correct_at_boot_with_disk`] on the running system.
+pub fn correct_at_boot_real(data: &Path) -> Result<Vec<String>, String> {
+    correct_at_boot_with_disk(data, &Facts::real(), &Centre::real(data))
 }

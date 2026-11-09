@@ -400,8 +400,7 @@ Triggers of a flow: `manual`, `cron` (five fields, lists, ranges, steps, month a
 OR as in cron) with a time zone (`local`, `UTC`, `+05:30` or an IANA name read from the system's zone files), `interval` (`every_s`,
 `anchor`), `once` (`at`), `calendar` (fires when a CALENDAR event whose title contains `match` starts; uses the calendar store),
 `file_change` (a path polled every 10 s by size and modified time), `on_failure` (another flow's run failed), `event` (an INBOX or named event),
-`chat` ("run it" through the assistant), `webhook` (**planned**: an authenticated local HTTP endpoint needs the server's token
-scheme and is not routed; the request gate in `flows/webhook.rs` is built and tested (header `X-Iyakki-Timestamp` unix seconds, `X-Iyakki-Signature: sha256=` HMAC-SHA256 of `<timestamp>.<body>` with a vault secret, 5-minute window, replays refused with 409, 30 calls a minute per path, the signature is the run's idempotency key) but no HTTP route calls it yet; the trigger can be declared and shows "planned"; `flow_run` and the idempotency key are the manual substitute).
+`chat` ("run it" through the assistant), `webhook` (an authenticated local HTTP endpoint that starts the flow; see "Webhook trigger" below).
 Each timed trigger has `missed` (`skip`, `run_once`, `catch_up(n)`: what to do for the ticks that passed while IYAKKI was off or the
 schedule was paused), `overlap` (`skip`, `queue`, `allow`: when the previous run is still going), `jitter_s`, `enabled`. Pausing a flow's
 schedules is one switch; the next five fire times are listed in the SCHEDULE view. The scheduler state (last fire, next fire, paused) is
@@ -414,6 +413,49 @@ shows "flows scheduler running" on the load card. Signed out means not running: 
 `max_concurrent_runs` defaults to 1 (a flow that sends, pays or deletes must not overlap itself) and, like `max_parallel`, the default
 time limit, the overlap policy of the timed triggers, the default heal mode and the sandbox namespace and image, is edited in the
 **flow settings** panel that DESIGN shows when no step is selected.
+
+## Webhook trigger (`flows/webhook.rs`, `flows/hookstore.rs`, `flows/hookenv.rs`, `webservice/hooks.rs`)
+
+A webhook is a trigger of the flow (`kind: webhook`, `path` = the hook's id, and optional `methods`, `max_body`, `content_types`,
+`rate_per_min`, `signed`; they are versioned with the flow, so a hook fires only what the owner published) plus a record in
+`<data>/hooks.json` (owner, flow, on or off, the SHA-256 of the secret address, the end of a public opening, the last 20 deliveries).
+
+* **Address.** `https://<this computer>:<web port>/hooks/<id>/<token>`, on the web service (the desktop's browser server and
+  `iyakki serve --profile agent-api`; a cloud tenant pod answers 404). The token is 256 random bits, shown **once** (when the hook is made or
+  its address is made again) and stored only as a hash; the flow file never holds it. No bearer token or session is used: the secret address,
+  and for a signed hook the signature, are the sender's proof.
+* **Off by default, owner's rights.** A new hook is off. `hook_enable` needs the right to use FLOWS, a published version that carries the
+  trigger, and (for a signed hook) its shared secret. Only the owner can switch, renew or open a hook; another account gets "no such webhook".
+  Every call is checked again for the owner's account and the published trigger. The run starts as the owner, through the owner's own engine and policy,
+  with no extra grants, trigger kind `webhook` (so a camera step or browser trust that need a person present do not get one).
+* **Checks, in order**: shape of the address and a per-sender limit on wrong tries (20 a minute, then 429), the token in constant time (an
+  unknown hook is compared with a dummy; the same 404 for every wrong part), on or off, local network or a public opening that has not ended,
+  the owner still allowed, trigger still published, method (default POST), body size (default 16 KiB, at most 64 KiB; 413), calls a minute
+  for this hook (default 30; 429 with Retry-After), content type (`json` default, `form`, `text`; 415), then for a signed hook
+  `X-Iyakki-Timestamp` (unix seconds, within 5 minutes) and `X-Iyakki-Signature: sha256=<hex>` = HMAC-SHA256 of `"<timestamp>.<body>"` with the
+  shared secret, compared in constant time (401), and a signature already taken is a replay (409). An `Idempotency-Key` header (or the signature)
+  makes a retry return the same run.
+* **The payload is data.** It reaches the run as the input `webhook`: `{method, content_type, body (parsed JSON, a form as an object, or text), bytes,
+  received_at, signed, untrusted: true}`, next to the inputs the owner fixed on the trigger (the payload can never replace them). The engine never runs it
+  and never evaluates it as a template; a command step still gets it only as a single argument if the flow puts `{{ inputs.webhook.body.x }}` there.
+  Treat every field as untrusted: check it in a condition before a step acts on it.
+* **Answers**: 202 `{"run": "...", "existing": false}`; 400 bad body; 401 signature or clock; 403 outside the network or the owner may not run flows;
+  404 anything else that is not there (also off); 405; 409 replay; 413; 415; 429; 503 when a signed hook's secret cannot be read (the owner's vault is locked).
+* **Local network by default.** The endpoint takes senders on loopback, private, link-local and unique-local addresses only. The owner can open
+  one hook to the public for up to 7 days (`webhook_public`, hard-ask; in the screen it needs a `y`); it ends by itself and switching the hook off closes it.
+  The port itself is the web access port: the firewall rule of Settings, Remote access lets in the local networks only, so a public sender also needs the
+  port opened in Settings, Firewall (the rule has its own reason and 60-second question); this feature does not open the firewall by itself.
+* **Records.** Each call to a known hook adds a delivery line (time, outcome, status, sender address, size; never the token, the signature or the body)
+  to its last 20. The audit log gets `hook.fire` (hook, flow, run, sender) and, for a signature, replay, clock or network refusal, `hook.refused`;
+  `hook.create`, `hook.regenerate`, `hook.enable`, `hook.disable`, `hook.public` by id and who.
+* **Screen.** Open the flow, key `w` or the Webhook button: the hooks of the flow, on or off, signed, the public opening, the last 20 deliveries; `n` makes
+  one (signed), `r` makes the address new, `o` switches on or off, `p` opens or closes it to the public (asks `y`). The address and the shared secret are shown in
+  this panel once and forgotten when it closes.
+* **Assistant.** `webhook_list` (safe), `webhook_create`, `webhook_regenerate`, `webhook_disable` (ask), `webhook_enable` and `webhook_public` (always ask). The
+  model never receives an address or a secret: a made or renewed address is left for the screen (and an INBOX note says to press `w`), the tool text says so.
+* **Not verified**: a real sender (a git host, a payment service, `curl` from another computer) and the Mac mini; the signed path against a real unlocked
+  vault in an integration test (the signature, replay and vault-locked cases are tested with a fake secret); the screen in a real window; the firewall
+  interplay of a public opening; cloud tenant pods (no hooks there); a reverse proxy in front (the sender address would be the proxy's).
 
 ## Security model
 
@@ -560,6 +602,6 @@ Rows `F-FLOW-01` to `F-FLOW-26` in `FEATURES.md` carry the status and the tests.
 * **Built and tested with a real page engine**: the Browser (QA) nodes, the QA report with HTML and JSON export, the baseline comparison, the three QA templates (see `FLOWS-QA.md`; the real-WebKit test is `live_login_form_screenshots_console_and_downloads_with_real_webkit`, ignored by default, run here with python3-gi and Xvfb).
 * **Partial**: the sandbox Job runner (tested with a fake kubectl), the older `browser` node (tested with a fake host), the WPE helper of the image (the QA nodes were run against the WebKitGTK helper only), agent steps (configured model only, no tools),
   healing by the built-in model only, the Store's screen for flow templates, the tile (never looked at in a real window).
-* **Planned, not faked**: Thrift (the node can be placed, refuses to run), webhook triggers, the remote runner, tools and external agents inside an agent
+* **Planned, not faked**: Thrift (the node can be placed, refuses to run), the remote runner, tools and external agents inside an agent
   step, command stdin, YAML text view, a middle-button pan.
 * **Not verified**: how the closing, the result banner and the failure card look and feel on the Mac mini and with a real model's diagnosis; a real model's patches, a real cluster, a real browser page, a real grpcurl run, the screens in a real window and on the Mac mini.

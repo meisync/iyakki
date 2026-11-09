@@ -253,6 +253,8 @@ pub(crate) fn run_loop(backend: Arc<dyn ChatBackend>, tools: Arc<dyn Tools>, mut
 
     let (mut steps, mut guard_tries, mut empty_retries, mut nudges) = (0usize, 0usize, 0usize, 0usize);
     let mut board_nudged = false;
+    // the wait gate: one nudge when the answer promises to report back and nothing is registered to wake the run
+    let mut wait_nudged = false;
     let (mut watchdog_tries, mut shorten) = (0usize, false);
     let (mut tokens, mut tool_rounds) = (0u64, 0usize);
     let (mut last_in, mut last_gen) = (0u64, 0u64);
@@ -472,8 +474,28 @@ pub(crate) fn run_loop(backend: Arc<dyn ChatBackend>, tools: Arc<dyn Tools>, mut
                 }
             }
         }
+        // the wait gate (F-AI-16): an answer that promises to wait or report back must have something registered that will wake
+        // the run. With pending work the answer stands and the chat shows "Waiting for: ..."; with none, one retry asks the model to
+        // register it or finish, and an answer that still promises is corrected so the person is not left waiting for nothing.
+        let mut waiting = false;
+        if turn.calls.is_empty() && assist.guard && !thinking_only && !st.force_answer && crate::pending::promises_to_report(&turn.text) {
+            let pending = tools.jobs_running();
+            if !pending.is_empty() {
+                waiting = true;
+                (env.emit)(RunEvent::Note { text: crate::pending::waiting_note(&pending) });
+            } else if !wait_nudged {
+                wait_nudged = true;
+                emit(RunEvent::Model { text: turn.text.clone(), calls: vec![] });
+                history.push(Message::assistant(turn.text.clone()));
+                (env.emit)(RunEvent::Note { text: "nothing is pending, so nothing will wake me: checking…".into() });
+                extras = vec![Message::user(crate::pending::NUDGE_NOTHING_PENDING)];
+                continue;
+            } else {
+                turn.text.push_str(crate::pending::NO_REPORT_NOTICE);
+            }
+        }
         // the stall guard: the model said it would act (or stopped right after a failed tool) and made no call
-        if turn.calls.is_empty() && assist.guard && !thinking_only && nudges < guard::MAX_NUDGES && !st.force_answer {
+        if turn.calls.is_empty() && assist.guard && !thinking_only && !waiting && nudges < guard::MAX_NUDGES && !st.force_answer {
             // only this run's tool results: after the person's latest message
             let from = history.iter().rposition(|m| m.role == Role::User).map_or(0, |i| i + 1);
             let run_results: Vec<&str> = history[from..].iter().filter(|m| m.role == Role::Tool).map(|m| m.content.as_str()).collect();

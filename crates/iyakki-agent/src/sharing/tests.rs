@@ -820,3 +820,22 @@ fn a_huge_routed_range_leaves_the_networks_outside_it() {
     let p = make_plan(&ifs, &start_req(1), false, &[]).unwrap();
     assert_eq!(p.net.net, cidr("192.168.43.0/24"));
 }
+
+#[test]
+fn a_connected_phone_is_an_uplink_like_a_cable_and_never_a_cable_to_share_on() {
+    assert_eq!(super::real::kind_of("iyakbt0", "", false), LinkKind::BluetoothPanu);
+    let mut ifs = machine();
+    let mut bt = IfaceInfo::new("iyakbt0", LinkKind::BluetoothPanu);
+    bt.default_route = true;
+    ifs.push(bt);
+    let c = super::view::choices(&ifs, false);
+    let up: Vec<_> = c.uplinks.iter().map(|u| (u.name.as_str(), u.usable)).collect();
+    assert!(up.contains(&("iyakbt0", true)), "{up:?}");
+    assert!(!up.iter().any(|u| u.0 == "bluetooth-panu"), "the placeholder makes way for the real link: {up:?}");
+    assert!(c.uplinks.iter().any(|u| u.name == "iyakbt0" && u.label.contains("use a phone's tethering") && u.label.contains("has internet")));
+    assert!(!c.downs.iter().any(|d| d.name == "iyakbt0"), "the phone's link is a source, never the cable that is shared");
+    // without the link the entry stays and says what to do
+    let c = super::view::choices(&machine(), false);
+    let p = c.uplinks.iter().find(|u| u.name == "bluetooth-panu").unwrap();
+    assert!(!p.usable && !p.why.is_empty());
+}

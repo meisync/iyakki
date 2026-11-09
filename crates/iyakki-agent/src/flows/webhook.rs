@@ -1,245 +1,404 @@
-//! The webhook trigger's gate (F-FLOW-15): the checks that stand between a request from the network and `start_run`. Pure
-//! code, no socket: the caller (the web service, once it routes `POST /api/v1/hooks/{path}`, see KNOWN-ISSUES KI-047) hands in
-//! the path, the two headers and the body, and a closure that starts the run.
+//! The webhook trigger (F-FLOW-15): the checks that stand between a request from the network and a flow run. Pure code, no socket:
+//! the web service (`webservice/hooks.rs`) hands in the request and a [`HookWorld`] that answers the questions only the machine can
+//! (who is the owner, what does the published flow say, what is the shared secret, start the run).
 //!
-//! The scheme: the sender signs `"<unix seconds>.<body>"` with HMAC-SHA256 over a secret that only the flow's owner and the
-//! sender know (kept in the vault, never in the flow file) and sends `X-Iyakki-Timestamp` and `X-Iyakki-Signature: sha256=<hex>`.
-//! A request is refused when the timestamp is more than five minutes off, when the signature does not match (compared in
-//! constant time), when the same signature was already accepted (a replay), or when the path got too many calls in the last
-//! minute. The accepted signature becomes the run's idempotency key, so a retry that slips through still starts one run.
+//! The address is `/hooks/<id>/<token>`: `id` names the hook, `token` is 256 random bits shown once and kept only as a SHA-256 hash.
+//! The checks, in this order, and what each costs the sender:
+//!
+//! 1. the address has the right shape, the sender is not hammering (per sender address); wrong shape or unknown hook: 404;
+//! 2. the token matches (compared in constant time; an unknown hook is compared against a dummy so the time does not tell);
+//! 3. the hook is switched on, the sender is on the local network (or the owner opened it to the public until a time), the owner still
+//!    may use FLOWS, and the owner's published flow still has the trigger;
+//! 4. the method, the body size, the rate (calls a minute for this hook) and the content type;
+//! 5. when the hook is signed: `X-Iyakki-Timestamp` (unix seconds, within five minutes) and `X-Iyakki-Signature: sha256=<hex>`, the
+//!    HMAC-SHA256 of `"<timestamp>.<body>"` made with the shared secret, compared in constant time; the same signature twice is a replay;
+//! 6. the body becomes **data**: JSON, a form or text, under the run's input `webhook` together with the method and content type. It is
+//!    never run, never put in a command line by the engine and never evaluated as a template (inserted values are not re-evaluated).
+//!
+//! The answer is `202 {"run": "..."}`. Every outcome of a known hook is noted in its last 20 deliveries and, when it matters, in the
+//! audit log: the hook, the flow, the outcome, the sender's address; never the token, the secret, the signature or the body.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
+use std::net::IpAddr;
+use std::sync::{Arc, Mutex};
 
-use iyakki_flow::{Flow, StartOutcome, StartRequest, TriggerKind};
-use serde_json::{json, Value};
+use iyakki_flow::{Trigger, TriggerKind};
+use serde_json::{json, Map, Value};
 
+use super::hookstore::{is_local, same, token_hash, Delivery, HookRec, HookStore};
 use crate::devmode::auth::{hex, hmac_sha256};
 
 /// How far the sender's clock may be from ours.
 pub const WINDOW_S: i64 = 300;
-/// Calls per path per minute (valid or not).
-pub const PER_MINUTE: usize = 30;
-/// The largest body taken.
-pub const MAX_BODY: usize = 64 * 1024;
+pub const DEFAULT_PER_MIN: u32 = 30;
+pub const DEFAULT_MAX_BODY: usize = 16 * 1024;
+/// The largest body any webhook takes.
+pub const HARD_MAX_BODY: usize = 64 * 1024;
+/// Failed address or token tries per sender address per minute before it is told to wait.
+pub const BAD_PER_MIN: usize = 20;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Refusal {
-    /// No enabled webhook trigger has this path (or it has no secret): the same answer for both, so paths cannot be probed.
-    NotFound,
-    /// Missing or malformed header, body too large.
-    BadRequest(&'static str),
-    /// Wrong signature or a timestamp out of the window.
-    Unauthorized,
-    /// This exact signed request was already accepted.
-    Replay,
-    /// Too many calls for this path in the last minute.
-    TooMany,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Content {
+    Json,
+    Form,
+    Text,
 }
 
-impl Refusal {
-    /// The HTTP status the web service answers with.
-    pub fn status(&self) -> u16 {
+impl Content {
+    fn label(self) -> &'static str {
         match self {
-            Refusal::NotFound => 404,
-            Refusal::BadRequest(_) => 400,
-            Refusal::Unauthorized => 401,
-            Refusal::Replay => 409,
-            Refusal::TooMany => 429,
+            Content::Json => "json",
+            Content::Form => "form",
+            Content::Text => "text",
         }
     }
 }
 
-#[derive(Default)]
-pub struct WebhookGate {
-    /// `(accepted at, signature)`, oldest first.
-    seen: Mutex<VecDeque<(i64, String)>>,
-    hits: Mutex<HashMap<String, VecDeque<i64>>>,
+/// What the published flow's webhook trigger says (its settings with the defaults filled in).
+#[derive(Clone, Debug, PartialEq)]
+pub struct HookCfg {
+    pub trigger: String,
+    pub methods: Vec<String>,
+    pub max_body: usize,
+    pub content: Vec<Content>,
+    pub rate_per_min: u32,
+    pub signed: bool,
+    /// The owner's fixed inputs for the run.
+    pub inputs: Value,
 }
 
-/// The sender's signature for `ts` and `body` (what the verifier expects in `X-Iyakki-Signature`).
+impl HookCfg {
+    /// The settings of a webhook trigger (`None`: not a webhook, or switched off in the flow).
+    pub fn from_trigger(t: &Trigger) -> Option<HookCfg> {
+        let TriggerKind::Webhook { methods, max_body, content_types, rate_per_min, signed, .. } = &t.kind else { return None };
+        if !t.enabled {
+            return None;
+        }
+        let content: Vec<Content> = content_types.iter().filter_map(|c| match c.as_str() {
+            "json" => Some(Content::Json),
+            "form" => Some(Content::Form),
+            "text" => Some(Content::Text),
+            _ => None,
+        }).collect();
+        Some(HookCfg {
+            trigger: t.id.clone(),
+            methods: if methods.is_empty() { vec!["POST".into()] } else { methods.clone() },
+            max_body: if *max_body == 0 { DEFAULT_MAX_BODY } else { (*max_body).min(HARD_MAX_BODY) },
+            content: if content.is_empty() { vec![Content::Json] } else { content },
+            rate_per_min: if *rate_per_min == 0 { DEFAULT_PER_MIN } else { *rate_per_min },
+            signed: *signed,
+            inputs: t.inputs.clone(),
+        })
+    }
+}
+
+/// What the machine answers for the gate.
+pub trait HookWorld {
+    /// May the owner still use FLOWS (the account exists and has the permission)?
+    fn owner_allowed(&self, owner: &str) -> bool;
+    /// The settings in the owner's published flow, `None` when the flow, its published version or the trigger is gone or off.
+    fn config(&self, rec: &HookRec) -> Option<HookCfg>;
+    /// The shared secret from the owner's vault; `Err` says the vault is locked or the secret missing.
+    fn secret(&self, rec: &HookRec) -> Result<Vec<u8>, String>;
+    /// Start the run as the owner. `Ok((run id, already existed))`.
+    fn start(&self, rec: &HookRec, cfg: &HookCfg, inputs: Value, key: Option<String>) -> Result<(String, bool), String>;
+    fn audit(&self, owner: &str, event: &str, detail: &str);
+    fn now(&self) -> i64;
+}
+
+pub struct HookRequest<'a> {
+    pub method: &'a str,
+    pub id: &'a str,
+    pub token: &'a str,
+    pub content_type: Option<&'a str>,
+    pub timestamp: Option<&'a str>,
+    pub signature: Option<&'a str>,
+    pub idempotency_key: Option<&'a str>,
+    pub body: &'a [u8],
+    pub peer: IpAddr,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Answer {
+    pub status: u16,
+    pub body: Value,
+    pub retry_after: Option<u64>,
+}
+
+impl Answer {
+    fn err(status: u16, code: &str, msg: &str) -> Answer {
+        Answer { status, body: json!({"error": {"code": code, "message": msg}}), retry_after: None }
+    }
+}
+
+/// The signature the sender puts in `X-Iyakki-Signature` for `ts` and `body`.
 pub fn sign(secret: &[u8], ts: i64, body: &[u8]) -> String {
     let mut msg = format!("{ts}.").into_bytes();
     msg.extend_from_slice(body);
     format!("sha256={}", hex(&hmac_sha256(secret, &msg)))
 }
 
-fn same(a: &str, b: &str) -> bool {
-    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
+#[derive(Default)]
+struct Gate {
+    /// `(time, hook, signature)` of accepted signed requests, oldest first.
+    seen: VecDeque<(i64, String, String)>,
+    hits: HashMap<String, VecDeque<i64>>,
+    bad: HashMap<String, VecDeque<i64>>,
 }
 
-/// The enabled webhook trigger of `flow` on `path`, if any: `(trigger id, inputs given to the run)`.
-pub fn find_trigger<'a>(flows: &'a [Flow], path: &str) -> Option<(&'a Flow, &'a str, &'a Value)> {
-    flows.iter().find_map(|f| f.triggers.iter().find(|t| t.enabled && matches!(&t.kind, TriggerKind::Webhook { path: p } if p == path)).map(|t| (f, t.id.as_str(), &t.inputs)))
+/// The registry of hooks and the memory of the gate (rates and replays).
+pub struct Hooks {
+    pub store: Arc<HookStore>,
+    gate: Mutex<Gate>,
 }
 
-impl WebhookGate {
-    pub fn new() -> WebhookGate {
-        WebhookGate::default()
+static HOOKS: std::sync::OnceLock<Mutex<HashMap<std::path::PathBuf, Arc<Hooks>>>> = std::sync::OnceLock::new();
+
+fn window(q: &mut VecDeque<i64>, now: i64) {
+    while q.front().is_some_and(|t| now - t >= 60) {
+        q.pop_front();
+    }
+}
+
+impl Hooks {
+    pub fn new(store: Arc<HookStore>) -> Hooks {
+        Hooks { store, gate: Mutex::new(Gate::default()) }
     }
 
-    fn rate(&self, path: &str, now: i64) -> bool {
-        let mut h = self.hits.lock().unwrap_or_else(|e| e.into_inner());
-        if h.len() > 1024 {
-            h.retain(|_, q| q.back().is_some_and(|t| now - t < 60));
+    /// The one gate of this data directory.
+    pub fn shared(dir: &std::path::Path) -> Arc<Hooks> {
+        let m = HOOKS.get_or_init(|| Mutex::new(HashMap::new()));
+        m.lock().unwrap_or_else(|e| e.into_inner()).entry(dir.join("hooks.json")).or_insert_with(|| Arc::new(Hooks::new(HookStore::shared(dir)))).clone()
+    }
+
+    fn gate(&self) -> std::sync::MutexGuard<'_, Gate> {
+        self.gate.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// May this sender try again (wrong tries count; `false`: tell it to wait)?
+    fn sender_ok(&self, peer: &str, now: i64) -> bool {
+        let mut g = self.gate();
+        if g.bad.len() > 2048 {
+            g.bad.retain(|_, q| q.back().is_some_and(|t| now - t < 60));
         }
-        let q = h.entry(path.to_string()).or_default();
-        while q.front().is_some_and(|t| now - t >= 60) {
-            q.pop_front();
+        let q = g.bad.entry(peer.to_string()).or_default();
+        window(q, now);
+        q.len() < BAD_PER_MIN
+    }
+
+    fn note_bad(&self, peer: &str, now: i64) {
+        self.gate().bad.entry(peer.to_string()).or_default().push_back(now);
+    }
+
+    fn rate_ok(&self, id: &str, limit: u32, now: i64) -> bool {
+        let mut g = self.gate();
+        if g.hits.len() > 1024 {
+            g.hits.retain(|_, q| q.back().is_some_and(|t| now - t < 60));
         }
-        if q.len() >= PER_MINUTE {
+        let q = g.hits.entry(id.to_string()).or_default();
+        window(q, now);
+        if q.len() >= limit as usize {
             return false;
         }
         q.push_back(now);
         true
     }
 
-    /// Check one request. `Ok` is the accepted signature (the run's idempotency key is derived from it).
-    pub fn check(&self, secret: &[u8], path: &str, now: i64, ts_header: &str, sig_header: &str, body: &[u8]) -> Result<String, Refusal> {
-        if body.len() > MAX_BODY {
-            return Err(Refusal::BadRequest("the body is too large"));
+    /// Is this signature new for the hook? (Remembers it when it is.)
+    fn first_use(&self, id: &str, sig: &str, now: i64) -> bool {
+        let mut g = self.gate();
+        while g.seen.front().is_some_and(|(t, ..)| now - t > 2 * WINDOW_S) {
+            g.seen.pop_front();
         }
-        if !self.rate(path, now) {
-            return Err(Refusal::TooMany);
+        if g.seen.iter().any(|(_, h, s)| h == id && same(s, sig)) {
+            return false;
         }
-        let ts: i64 = ts_header.trim().parse().map_err(|_| Refusal::BadRequest("X-Iyakki-Timestamp must be unix seconds"))?;
-        if !sig_header.trim().starts_with("sha256=") {
-            return Err(Refusal::BadRequest("X-Iyakki-Signature must look like sha256=<hex>"));
-        }
-        if (now - ts).abs() > WINDOW_S || !same(&sign(secret, ts, body), sig_header.trim().to_ascii_lowercase().as_str()) {
-            return Err(Refusal::Unauthorized);
-        }
-        let sig = sig_header.trim().to_ascii_lowercase();
-        let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
-        while seen.front().is_some_and(|(t, _)| now - t > 2 * WINDOW_S) {
-            seen.pop_front();
-        }
-        if seen.iter().any(|(_, s)| same(s, &sig)) {
-            return Err(Refusal::Replay);
-        }
-        seen.push_back((now, sig.clone()));
-        Ok(sig)
+        g.seen.push_back((now, id.to_string(), sig.to_string()));
+        true
     }
 
-    /// The whole step: find the trigger, fetch its secret, check the request, start the run. `secret_for` answers the vault
-    /// lookup for a path; `start` is `Engine::start_run`. The answer is the JSON the endpoint returns.
-    #[allow(clippy::too_many_arguments)]
-    pub fn handle(&self, flows: &[Flow], secret_for: &dyn Fn(&str) -> Option<Vec<u8>>, path: &str, now: i64, ts_header: &str, sig_header: &str, body: &[u8], start: &mut dyn FnMut(StartRequest) -> Result<StartOutcome, String>) -> Result<Value, Refusal> {
-        let (flow, trigger, base) = find_trigger(flows, path).ok_or(Refusal::NotFound)?;
-        let secret = secret_for(path).filter(|s| !s.is_empty()).ok_or(Refusal::NotFound)?;
-        let sig = self.check(&secret, path, now, ts_header, sig_header, body)?;
-        let mut inputs = if base.is_object() { base.clone() } else { json!({}) };
-        if let Ok(Value::Object(m)) = serde_json::from_slice::<Value>(body) {
-            for (k, v) in m {
-                inputs[k] = v;
-            }
+    /// The whole step for one request. Never panics on hostile input; always answers.
+    pub fn serve(&self, w: &dyn HookWorld, rq: &HookRequest) -> Answer {
+        let now = w.now();
+        let peer = rq.peer.to_string();
+        let not_found = || Answer::err(404, "not_found", "not found");
+        // 1. shape and sender
+        if !crate::flows::hook_id_ok(rq.id) || rq.token.len() != 64 || !rq.token.bytes().all(|c| c.is_ascii_hexdigit()) {
+            self.note_bad(&peer, now);
+            return not_found();
         }
-        let req = StartRequest::new(&flow.id).trigger("webhook", trigger).inputs(inputs).key(&format!("hook-{sig}"));
-        let out = start(req).map_err(|_| Refusal::BadRequest("the flow could not be started"))?;
-        Ok(json!({"run": out.run_id, "existing": out.existing}))
+        if !self.sender_ok(&peer, now) {
+            return Answer { retry_after: Some(30), ..Answer::err(429, "rate_limited", "too many tries from this address") };
+        }
+        // 2. the token, in constant time (an unknown hook is compared with a dummy)
+        let rec = self.store.get(rq.id);
+        let want = rec.as_ref().map_or_else(|| token_hash("no such hook"), |r| r.token_hash.clone());
+        let ok = same(&token_hash(&rq.token.to_ascii_lowercase()), &want);
+        let Some(rec) = rec.filter(|_| ok) else {
+            self.note_bad(&peer, now);
+            return not_found();
+        };
+        let done = |a: Answer, outcome: &str, run: &str| -> Answer {
+            self.store.record(&rec.id, Delivery { at: now, outcome: outcome.into(), http: a.status, run: run.into(), bytes: rq.body.len(), from: peer.clone() });
+            if outcome != "accepted" && matches!(outcome, "bad_signature" | "stale" | "replay" | "owner_not_allowed" | "outside_network") {
+                w.audit(&rec.owner, "hook.refused", &format!("hook={} flow={} outcome={outcome} addr={peer}", rec.id, rec.flow));
+            }
+            a
+        };
+        // 3. on, near, still allowed, still published
+        if !rec.enabled {
+            return done(not_found(), "off", "");
+        }
+        if !is_local(rq.peer) && rec.public_until <= now {
+            return done(Answer::err(403, "denied", "this address only takes requests from the local network"), "outside_network", "");
+        }
+        if !w.owner_allowed(&rec.owner) {
+            return done(Answer::err(403, "denied", "the owner of this webhook may not run flows"), "owner_not_allowed", "");
+        }
+        let Some(cfg) = w.config(&rec) else { return done(not_found(), "not_published", "") };
+        // 4. method, size, rate, content type
+        if !cfg.methods.iter().any(|m| m == rq.method) {
+            let mut a = Answer::err(405, "invalid_input", "method not allowed");
+            a.body["allow"] = json!(cfg.methods);
+            return done(a, "wrong_method", "");
+        }
+        if rq.body.len() > cfg.max_body {
+            return done(Answer::err(413, "too_large", "the body is too large"), "too_large", "");
+        }
+        if !self.rate_ok(&rec.id, cfg.rate_per_min, now) {
+            return done(Answer { retry_after: Some(30), ..Answer::err(429, "rate_limited", "too many calls for this webhook") }, "rate_limited", "");
+        }
+        let kind = match content_kind(rq.content_type) {
+            _ if rq.body.is_empty() => None,
+            Some(k) if cfg.content.contains(&k) => Some(k),
+            _ => return done(Answer::err(415, "invalid_input", "this webhook does not take that content type"), "bad_content_type", ""),
+        };
+        // 5. the signature
+        let mut sig_key = None;
+        if cfg.signed {
+            let ts = rq.timestamp.and_then(|t| t.trim().parse::<i64>().ok());
+            let sig = rq.signature.map(|s| s.trim().to_ascii_lowercase());
+            let (Some(ts), Some(sig)) = (ts, sig.filter(|s| s.starts_with("sha256="))) else {
+                self.note_bad(&peer, now);
+                return done(Answer::err(401, "unauthorized", "send X-Iyakki-Timestamp (unix seconds) and X-Iyakki-Signature: sha256=<hex>"), "bad_signature", "");
+            };
+            if (now - ts).abs() > WINDOW_S {
+                return done(Answer::err(401, "unauthorized", "the timestamp is too far from this computer's clock"), "stale", "");
+            }
+            let secret = match w.secret(&rec) {
+                Ok(s) if !s.is_empty() => s,
+                _ => return done(Answer { retry_after: Some(60), ..Answer::err(503, "unavailable", "the shared secret cannot be read now (the owner's vault is locked)") }, "vault_locked", ""),
+            };
+            if !same(&sign(&secret, ts, rq.body), &sig) {
+                self.note_bad(&peer, now);
+                return done(Answer::err(401, "unauthorized", "the signature does not match"), "bad_signature", "");
+            }
+            if !self.first_use(&rec.id, &sig, now) {
+                return done(Answer::err(409, "conflict", "this signed request was already taken"), "replay", "");
+            }
+            sig_key = Some(sig);
+        }
+        // 6. the payload as data
+        let payload = match parse_payload(kind, rq.body) {
+            Ok(p) => p,
+            Err(m) => return done(Answer::err(400, "invalid_input", m), "bad_payload", ""),
+        };
+        let mut inputs = if cfg.inputs.is_object() { cfg.inputs.clone() } else { json!({}) };
+        inputs["webhook"] = json!({
+            "method": rq.method,
+            "content_type": kind.map_or("none", Content::label),
+            "body": payload,
+            "bytes": rq.body.len(),
+            "received_at": now,
+            "signed": cfg.signed,
+            "untrusted": true,
+        });
+        let key = match (rq.idempotency_key.filter(|k| safe_key(k)), sig_key) {
+            (Some(k), _) => Some(format!("hook-{}-{k}", rec.id)),
+            (None, Some(s)) => Some(format!("hook-{}-{s}", rec.id)),
+            (None, None) => None,
+        };
+        match w.start(&rec, &cfg, inputs, key) {
+            Ok((run, existing)) => {
+                w.audit(&rec.owner, "hook.fire", &format!("hook={} flow={} run={run} existing={existing} addr={peer}", rec.id, rec.flow));
+                done(Answer { status: 202, body: json!({"run": run, "existing": existing}), retry_after: None }, "accepted", &run)
+            }
+            Err(_) => done(Answer::err(409, "conflict", "the flow could not be started now"), "not_started", ""),
+        }
     }
+}
+
+fn safe_key(k: &str) -> bool {
+    !k.is_empty() && k.len() <= 64 && k.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_' || c == b'.')
+}
+
+fn content_kind(ct: Option<&str>) -> Option<Content> {
+    let base = ct?.split(';').next()?.trim().to_ascii_lowercase();
+    match base.as_str() {
+        "application/json" => Some(Content::Json),
+        "application/x-www-form-urlencoded" => Some(Content::Form),
+        "text/plain" => Some(Content::Text),
+        b if b.ends_with("+json") => Some(Content::Json),
+        _ => None,
+    }
+}
+
+fn parse_payload(kind: Option<Content>, body: &[u8]) -> Result<Value, &'static str> {
+    match kind {
+        None => Ok(Value::Null),
+        Some(Content::Json) => {
+            let v: Value = serde_json::from_slice(body).map_err(|_| "the body is not valid JSON")?;
+            if depth(&v) > 24 {
+                return Err("the JSON is nested too deeply");
+            }
+            Ok(v)
+        }
+        Some(Content::Text) => std::str::from_utf8(body).map(|t| Value::String(t.to_string())).map_err(|_| "the text is not UTF-8"),
+        Some(Content::Form) => {
+            let text = std::str::from_utf8(body).map_err(|_| "the form is not UTF-8")?;
+            let mut m = Map::new();
+            for pair in text.split('&').filter(|p| !p.is_empty()).take(200) {
+                let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+                let (k, v) = (pct_decode(k).ok_or("bad %-escape in the form")?, pct_decode(v).ok_or("bad %-escape in the form")?);
+                match m.get_mut(&k) {
+                    Some(Value::Array(a)) => a.push(Value::String(v)),
+                    Some(old) => *old = json!([old.clone(), v]),
+                    None => {
+                        m.insert(k, Value::String(v));
+                    }
+                }
+            }
+            Ok(Value::Object(m))
+        }
+    }
+}
+
+fn depth(v: &Value) -> usize {
+    match v {
+        Value::Array(a) => 1 + a.iter().map(depth).max().unwrap_or(0),
+        Value::Object(o) => 1 + o.values().map(depth).max().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+fn pct_decode(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'+' => out.push(b' '),
+            b'%' => {
+                let h = b.get(i + 1..i + 3)?;
+                out.push(u8::from_str_radix(std::str::from_utf8(h).ok()?, 16).ok()?);
+                i += 2;
+            }
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    String::from_utf8(out).ok()
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const SECRET: &[u8] = b"correct horse battery staple 0123456789";
-    const NOW: i64 = 1_800_000_000;
-
-    fn flow(path: &str, enabled: bool) -> Flow {
-        let mut f: Flow = serde_json::from_value(json!({"id": "deploy", "name": "Deploy", "nodes": [], "edges": []})).unwrap();
-        let mut t = iyakki_flow::Trigger::new("w", TriggerKind::Webhook { path: path.into() });
-        t.enabled = enabled;
-        t.inputs = json!({"env": "staging"});
-        f.triggers.push(t);
-        f
-    }
-
-    fn call(g: &WebhookGate, flows: &[Flow], now: i64, ts: &str, sig: &str, body: &[u8]) -> (Result<Value, Refusal>, Vec<StartRequest>) {
-        let mut started = vec![];
-        let r = g.handle(flows, &|p| (p == "/deploy").then(|| SECRET.to_vec()), "/deploy", now, ts, sig, body, &mut |r| {
-            started.push(r);
-            Ok(StartOutcome { run_id: "r1".into(), existing: false })
-        });
-        (r, started)
-    }
-
-    #[test]
-    fn a_valid_signature_starts_the_flow_with_the_body_merged_over_the_triggers_inputs() {
-        let (g, flows) = (WebhookGate::new(), vec![flow("/deploy", true)]);
-        let body = br#"{"ref":"main"}"#;
-        let (r, started) = call(&g, &flows, NOW, &NOW.to_string(), &sign(SECRET, NOW, body), body);
-        assert_eq!(r.unwrap(), json!({"run": "r1", "existing": false}));
-        assert_eq!(started.len(), 1);
-        assert_eq!((started[0].flow_id.as_str(), started[0].trigger.kind.as_str(), started[0].trigger.by.as_str()), ("deploy", "webhook", "w"));
-        assert_eq!(started[0].inputs, json!({"env": "staging", "ref": "main"}));
-        assert!(started[0].idempotency_key.as_deref().unwrap().starts_with("hook-sha256="));
-    }
-
-    #[test]
-    fn a_bad_wrong_or_stale_signature_is_refused_and_starts_nothing() {
-        let (g, flows) = (WebhookGate::new(), vec![flow("/deploy", true)]);
-        let body = b"{}";
-        let good = sign(SECRET, NOW, body);
-        let bad = sign(b"another secret entirely", NOW, body);
-        for (ts, sig, body, want) in [
-            (NOW.to_string(), bad.clone(), &body[..], Refusal::Unauthorized),
-            (NOW.to_string(), good.clone(), &b"{\"x\":1}"[..], Refusal::Unauthorized),
-            ((NOW - 301).to_string(), sign(SECRET, NOW - 301, body), &body[..], Refusal::Unauthorized),
-            ((NOW + 301).to_string(), sign(SECRET, NOW + 301, body), &body[..], Refusal::Unauthorized),
-            (NOW.to_string(), "".into(), &body[..], Refusal::BadRequest("X-Iyakki-Signature must look like sha256=<hex>")),
-            ("soon".into(), good.clone(), &body[..], Refusal::BadRequest("X-Iyakki-Timestamp must be unix seconds")),
-        ] {
-            let (r, started) = call(&g, &flows, NOW, &ts, &sig, body);
-            assert_eq!(r.unwrap_err(), want);
-            assert!(started.is_empty());
-        }
-        assert_eq!(Refusal::Unauthorized.status(), 401);
-    }
-
-    #[test]
-    fn the_same_signed_request_twice_is_a_replay_but_the_same_body_signed_later_is_new() {
-        let (g, flows) = (WebhookGate::new(), vec![flow("/deploy", true)]);
-        let body = b"{}";
-        let sig = sign(SECRET, NOW, body);
-        assert!(call(&g, &flows, NOW, &NOW.to_string(), &sig, body).0.is_ok());
-        let (r, started) = call(&g, &flows, NOW + 5, &NOW.to_string(), &sig, body);
-        assert_eq!(r.unwrap_err(), Refusal::Replay);
-        assert!(started.is_empty());
-        assert_eq!(Refusal::Replay.status(), 409);
-        assert!(call(&g, &flows, NOW + 6, &(NOW + 6).to_string(), &sign(SECRET, NOW + 6, body), body).0.is_ok());
-    }
-
-    #[test]
-    fn a_path_without_an_enabled_trigger_or_without_a_secret_looks_the_same_and_the_rate_is_limited() {
-        let g = WebhookGate::new();
-        let body = b"{}";
-        let sig = sign(SECRET, NOW, body);
-        assert_eq!(call(&g, &[flow("/deploy", false)], NOW, &NOW.to_string(), &sig, body).0.unwrap_err(), Refusal::NotFound);
-        assert_eq!(call(&g, &[flow("/other", true)], NOW, &NOW.to_string(), &sig, body).0.unwrap_err(), Refusal::NotFound);
-        let mut nosecret = vec![];
-        let r = g.handle(&[flow("/deploy", true)], &|_| None, "/deploy", NOW, &NOW.to_string(), &sig, body, &mut |r| {
-            nosecret.push(r);
-            Ok(StartOutcome { run_id: "x".into(), existing: false })
-        });
-        assert_eq!(r.unwrap_err(), Refusal::NotFound);
-        assert!(nosecret.is_empty());
-        // wrong signatures count against the rate too: the 31st call within a minute is refused whatever it carries
-        let flows = vec![flow("/deploy", true)];
-        for i in 0..PER_MINUTE {
-            assert_eq!(call(&g, &flows, NOW + 1, &NOW.to_string(), "sha256=00", body).0.unwrap_err(), Refusal::Unauthorized, "{i}");
-        }
-        assert_eq!(call(&g, &flows, NOW + 1, &NOW.to_string(), &sig, body).0.unwrap_err(), Refusal::TooMany);
-        assert_eq!(Refusal::TooMany.status(), 429);
-        // a minute later it is open again
-        assert!(call(&g, &flows, NOW + 70, &(NOW + 70).to_string(), &sign(SECRET, NOW + 70, body), body).0.is_ok());
-    }
-
-    #[test]
-    fn a_huge_body_is_refused_before_anything_is_computed() {
-        let (g, flows) = (WebhookGate::new(), vec![flow("/deploy", true)]);
-        let body = vec![b'a'; MAX_BODY + 1];
-        assert_eq!(call(&g, &flows, NOW, &NOW.to_string(), &sign(SECRET, NOW, &body), &body).0.unwrap_err(), Refusal::BadRequest("the body is too large"));
-    }
-}
+mod tests;

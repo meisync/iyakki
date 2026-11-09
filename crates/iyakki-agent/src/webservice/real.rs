@@ -65,6 +65,11 @@ impl Extras for ServicesExtras {
         }
     }
 
+    fn hook_serve(&self, auth: &dyn Authenticator, audit: &dyn AuditSink, rq: &crate::flows::webhook::HookRequest) -> Option<crate::flows::webhook::Answer> {
+        let world = crate::flows::hookenv::RealWorld { svc: &self.svc, auth, audit, only: None };
+        Some(crate::flows::webhook::Hooks::shared(self.svc.dir()).serve(&world, rq))
+    }
+
     fn flows(&self, p: &Principal) -> ApiResult<Vec<Value>> {
         let env = crate::flows::FlowEnv::build(&self.svc, &p.user, &p.policy, false);
         Ok(env.summaries().into_iter().map(|f| json!({"id": f.id, "name": f.name, "description": f.description, "published": f.published, "nodes": f.nodes, "triggers": f.triggers, "production": f.production})).collect())

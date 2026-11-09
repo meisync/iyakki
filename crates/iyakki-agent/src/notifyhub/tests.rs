@@ -272,11 +272,12 @@ fn the_webhook_signature_matches_the_known_vectors_and_the_flows_gate() {
     assert_eq!(h("X-Iyakki-Signature"), Some("sha256=1698a50bc74d1ff1db85c4e0a5297c2ad9fdba245d5737cdb789e4cc6e098940"));
     assert_eq!(h("X-Iyakki-Timestamp"), Some("1700000000"));
     assert_eq!(req.timeout_secs, 10);
-    // the receiving gate of the flows accepts it, and refuses a stale or altered one
-    let gate = crate::flows::webhook::WebhookGate::new();
-    assert!(gate.check(b"s3cret", "p", 1_700_000_000, "1700000000", h("X-Iyakki-Signature").unwrap(), &req.body).is_ok());
-    assert!(gate.check(b"s3cret", "p2", 1_700_000_000 + 4000, "1700000000", h("X-Iyakki-Signature").unwrap(), &req.body).is_err(), "stale");
-    assert!(gate.check(b"s3cret", "p3", 1_700_000_000, "1700000000", h("X-Iyakki-Signature").unwrap(), b"{\"a\":2}").is_err(), "altered");
+    // the receiving gate of the flows (`flows::webhook`) signs and checks the same way: its signature over the same timestamp and body is
+    // the one sent, and an altered body or another time gives another signature (the gate's own refusals are tested in `flows::webhook`)
+    let sent = h("X-Iyakki-Signature").unwrap();
+    assert_eq!(crate::flows::webhook::sign(b"s3cret", 1_700_000_000, &req.body), sent);
+    assert_ne!(crate::flows::webhook::sign(b"s3cret", 1_700_000_000, b"{\"a\":2}"), sent, "altered");
+    assert_ne!(crate::flows::webhook::sign(b"s3cret", 1_700_000_001, &req.body), sent, "another time");
 }
 
 #[test]

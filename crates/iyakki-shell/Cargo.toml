@@ -7,6 +7,7 @@ license.workspace = true
 [dev-dependencies]
 iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }
 iyakki-proxy = { path = "../iyakki-proxy", features = ["testcerts"] }
+iyakki-rtsp = { path = "../iyakki-rtsp" }
 
 [dependencies]
 iyakki-agent = { path = "../iyakki-agent" }
@@ -14,6 +15,8 @@ iyakki-uikit = { path = "../iyakki-uikit" }
 iyakki-tile-api = { path = "../iyakki-tile-api" }
 iyakki-tile-usage = { path = "../iyakki-tile-usage" }
 iyakki-tile-calendar = { path = "../iyakki-tile-calendar" }
+iyakki-tile-remotefiles = { path = "../iyakki-tile-remotefiles" }
+iyakki-tile-cameras = { path = "../iyakki-tile-cameras" }
 iyakki-vpn = { path = "../iyakki-vpn" }
 iyakki-sec.workspace = true
 iyakki-storage.workspace = true
@@ -25,6 +28,7 @@ iyakki-hwinfo.workspace = true
 iyakki-drivers.workspace = true
 iyakki-devctl.workspace = true
 iyakki-web.workspace = true
+iyakki-pdf.workspace = true
 iyakki-js.workspace = true
 iyakki-netscan.workspace = true
 iyakki-webview.workspace = true

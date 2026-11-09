@@ -8,6 +8,8 @@ use iyakki_uikit::gfx::{Gfx, Icon};
 use iyakki_uikit::ui::{Event, R};
 
 pub mod calendar;
+pub mod cameras;
+pub mod remote;
 pub mod usage;
 
 /// What a tile answers to an event: stay on the screen, or go back to the launcher.
@@ -28,6 +30,10 @@ pub struct TileCx<'a> {
     pub calendar: &'a dyn calendar::CalendarSource,
     /// The audit log.
     pub audit: &'a dyn AuditSink,
+    /// Saved connections, sessions and transfers of the remote files tile.
+    pub remote: &'a dyn remote::RemoteSource,
+    /// Saved and USB cameras, their streams and pictures (the Cameras tile).
+    pub cameras: &'a dyn cameras::CameraSource,
 }
 
 /// Where a tile records what the person did (the shell's audit log; a fake in tests).
