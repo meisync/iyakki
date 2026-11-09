@@ -292,3 +292,36 @@ fn the_lock_draws_at_many_sizes_with_the_field_and_button_inside_the_screen_and_
     let mut g = Gfx::new(1280, 720);
     sh.render(&mut g);
 }
+
+/// A locked screen stays locked, but a computer asking through developer mode gets the lock card (state "Locked screen", no click regions)
+/// and a picture of it instead of a timeout.
+#[test]
+fn a_locked_screen_still_answers_a_computer_that_asks_and_stays_locked() {
+    use iyakki_agent::devmode::state;
+    let mut sh = signed_in("lk-dev", "root", "rootpass12");
+    assert!(sh.lock_screen("test"));
+    let mut g = Gfx::new(1280, 720);
+    sh.render(&mut g);
+    let dir = sh.env.services.dir().to_path_buf();
+    let _ = state::fetch(&dir, 0);
+    sh.handle(&Event::Tick);
+    sh.render(&mut g);
+    let snap = state::fetch(&dir, 500).expect("a frame of the lock card");
+    assert_eq!(snap.app, "Locked screen");
+    assert!(snap.buttons.is_empty(), "nothing to click behind a lock: {:?}", snap.buttons.iter().map(|b| &b.label).collect::<Vec<_>>());
+    assert!(sh.is_locked(), "asking does not unlock");
+    // a picture is served too
+    let svc = sh.env.services.clone();
+    svc.screen.set_present(true);
+    let asker = std::thread::spawn(move || svc.screen.request(iyakki_agent::devmode::SCREEN_ANY, std::time::Duration::from_secs(5)));
+    for _ in 0..200 {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        sh.handle(&Event::Tick);
+        sh.render(&mut g);
+        if asker.is_finished() {
+            break;
+        }
+    }
+    assert!(asker.join().unwrap().is_ok());
+    assert!(sh.is_locked());
+}

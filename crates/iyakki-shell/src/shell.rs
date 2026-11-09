@@ -3324,10 +3324,17 @@ impl Shell {
     // ------------------------------------------------------------------ drawing
 
     pub fn render(&mut self, g: &mut Gfx) {
+        // developer mode: a paired computer asking for the state or a picture ends the saver / black screen (as input would), so the request is
+        // answered instead of timing out ("the screen did not answer in time") while nobody is at the machine
+        self.dev_wake_for_capture();
         if self.saver_render(g) {
             return;
         }
-        if self.lock_render(g) {
+        if self.lockui.active {
+            // a locked screen stays locked, but still answers: the lock card is all a computer asking can see
+            let want = self.dev_state_begin(g);
+            self.lock_render(g);
+            self.dev_locked_answer(g, want);
             return;
         }
         // developer mode's `iyakki dev state`: this frame is kept as text when a computer is asking

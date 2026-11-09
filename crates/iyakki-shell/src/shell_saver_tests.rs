@@ -509,3 +509,41 @@ fn a_frame_changes_a_small_part_of_a_big_screen() {
     let rows: usize = before.chunks(2880 * 4).zip(g.rgba().chunks(2880 * 4)).filter(|(a, b)| a != b).count();
     assert!(rows > 0 && rows < 900, "{rows} of 1800 rows changed: the logo's old and new boxes only");
 }
+
+/// Found on the Mac mini (2026-11-09): after ten idle minutes the saver and then the black screen drew only their own frames, which never
+/// went through the capture, so `iyakki dev state` and `dev screenshot` both timed out until someone touched the machine.
+#[test]
+fn a_computer_asking_for_the_state_or_a_picture_ends_the_saver_instead_of_timing_out() {
+    use iyakki_agent::devmode::state;
+    let (mut sh, clock) = saver_shell("sv-dev", cfg());
+    run(&mut sh, &clock, 11 * MIN);
+    assert_eq!(sh.screen_stage(), Stage::Off);
+    let mut g = Gfx::new(1280, 720);
+    sh.render(&mut g);
+    let dir = sh.env.services.dir().to_path_buf();
+    // the state
+    let _ = state::fetch(&dir, 0); // a computer asks: "wanted" for a few seconds
+    run(&mut sh, &clock, 250);
+    sh.render(&mut g);
+    assert_eq!(sh.screen_stage(), Stage::Awake, "the request ended the black screen");
+    let snap = state::fetch(&dir, 500).expect("a frame");
+    assert_eq!(snap.app, "Home");
+    // and the same after the saver came back
+    run(&mut sh, &clock, 11 * MIN);
+    assert_eq!(sh.screen_stage(), Stage::Off);
+    // a picture
+    let svc = sh.env.services.clone();
+    svc.screen.set_present(true);
+    let asker = std::thread::spawn(move || svc.screen.request(iyakki_agent::devmode::SCREEN_ANY, std::time::Duration::from_secs(5)));
+    for _ in 0..200 {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        run(&mut sh, &clock, 33);
+        sh.render(&mut g);
+        if asker.is_finished() {
+            break;
+        }
+    }
+    let frame = asker.join().unwrap().expect("a picture");
+    assert!(frame.w > 0 && frame.h > 0 && !frame.rgba.is_empty());
+    assert_eq!(sh.screen_stage(), Stage::Awake);
+}
