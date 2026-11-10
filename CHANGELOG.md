@@ -10,6 +10,40 @@ listed in [KNOWN-ISSUES.md](KNOWN-ISSUES.md); an item below is not a promise tha
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.0-alpha.2] - 2026-11-10
+
+**Highlights since alpha.1 (2026-10-29 to 2026-11-10).** Each line says where it was tried. "Tried on the Mac mini" means a person or the
+test machine ran it on the real Mac mini 2018; everything else is checked by tests and fakes only, and [KNOWN-ISSUES.md](KNOWN-ISSUES.md) says what is
+still unproven.
+
+- **Boot and updates.** Our own boot loader has a menu that opens on any key, "previous version" rows and an automatic fall-back after failed starts; it now
+  lives in its own repository (`github.com/meisync/iyakki-boot`, a git submodule at `iyakki-boot/`). Component updates (boot files, base, kernel layer,
+  apps) with a signed manifest, deltas and roll-back: tried on the Mac mini. The image boots on the Mac mini 2018, a MacBook Pro 14,1, an HP laptop and a
+  Lenovo laptop (owner-checked on 1109a).
+- **Bluetooth, in-house (no BlueZ).** Pairing with passkey and PIN entry, keyboards and mice over HID and BLE, a phone's sound through the computer (A2DP), a phone's
+  internet (tether). Pair, sound and tether with internet: tried on the MacBook Pro 14,1. The page was redesigned and Scan opens a popup with Scan again;
+  tried on the Mac mini. Devices appear when a scan ends, not one by one.
+- **Encrypted home folders.** A private folder per account in an encrypted container: make it or move your files in (the old copy is kept until you remove it),
+  a recovery key shown once, unlock at sign-in, lock at sign-out and with Lock now, password change, an administrator's reset keeps the folder sealed until the
+  recovery key is used. Tried on the Mac mini: all of that except Make on a fresh account after the last fix. The first real-kernel run found four bugs the fakes
+  could not (no `/dev/mapper` node without udev, the loop device cleared too early, the new file system's `lost+found` counted as extra, a second sign-in stub file);
+  all are fixed.
+- **Lock, power and the screen.** A lock screen (Power menu; Super+L on a PC keyboard; Control+Command+Q or L on a Mac keyboard), anyone signed in at the machine's
+  own screen has Power, Restart and Sleep (remote sessions still need the permission). Lock screen from the Power menu: tried on the Mac mini.
+- **Cameras and media.** Live view, recording with retention and encrypted storage, motion detection, two USB cameras at once (tried on the Mac mini), a USB camera
+  that does not answer is reset by the OS; a PDF reader, writer and viewer; OS and browser accessibility (screen reader basics, high contrast).
+- **Files and network.** An SFTP server and an SFTP/FTPS client with saved connections, a Domains page (names for services on the cluster), flow webhooks.
+- **Voice.** "My IYAKKI" voice session; the wake phrase is **experimental**: off by default, opt-in with an approval, a red sign while the microphone listens, and no
+  real-voice measurement yet.
+- **Developer mode.** `iyakki dev state` and `dev screenshot` answer on a locked screen, under the screen saver and on the black screen (and the screen stays on while
+  developer mode is on); key names are not case-sensitive; a one-time power approval is used up by the action it was for.
+- **Quality.** Crates split out of the agent (SSH, SFTP, camera detection, disk crypt, clock floor, macOS Recovery client, regex, OpenPGP and others); the tests
+  that failed in full runs were made to pass every time; a wave of P0 and P1 partial rows was re-checked (17 closed, the rest narrowed and split).
+- **Removed.** The SRE PILOT demo app is no longer part of the OS (its source is in `github.com/meisync/meisync-sre-pilot`).
+
+
 ### Added
 
 - **Core contract: real adapters, three screens on it, an opt-in dev-mode transport (2026-10-28), tests only.** `iyakki-agent::contract_local` implements the settings, vault, flows and consent traits over the settings store, the personal vault and the flows engine (no call returns a secret; remote callers cannot answer a consent or unlock), and one conformance suite runs against both it and the in-memory fakes. Settings > Time, Settings > Vault and the FLOWS next-runs list read through it with no change in behaviour. The developer-mode channel can carry the contract (`/v1/dev/core/...`: hello and version negotiation, scopes granted per computer, event resume, chunked streams, rate limit) but it is off by default and has no Settings page yet. No cloud relay. F-CORE-09, F-CORE-10; open questions in [docs/development/CORE-CONTRACT.md](docs/development/CORE-CONTRACT.md).

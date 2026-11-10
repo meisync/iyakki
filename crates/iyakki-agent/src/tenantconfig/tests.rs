@@ -770,7 +770,7 @@ fn sev(v: &Value, code: &str) -> String {
 }
 
 fn claude_key(team_extra: Value) -> Value {
-    let mut b = json!({"enabled": true, "namespace": "web", "name": "default", "values": {"mode": "shared", "terms_ack": true, "allowed_models": ["claude-sonnet-4"], "daily_requests_per_person": 5, "monthly_requests_team": 200}, "secrets": {"token": "sk-ant-TEAMSECRET-999999999999"}});
+    let mut b = json!({"enabled": true, "namespace": "web", "name": "default", "values": {"mode": "shared", "terms_ack": true, "allowed_models": ["claude-sonnet-4"], "daily_requests_per_person": 5, "monthly_requests_team": 200}, "secrets": {"token": "sk-ant-TEAMSECRET-999"}});
     for (k, v) in team_extra.as_object().unwrap() {
         b["values"][k] = v.clone();
     }
@@ -812,11 +812,11 @@ fn tcfg_a_team_admin_adds_a_claude_key_that_lives_only_in_the_vault_and_members_
     assert!(x.rec.all().contains("team=web") && x.rec.all().contains("tenant.agent.use"));
     // rotation: a new key replaces the old one, no config edit needed and the audit says only that a secret was set
     let mut b = claude_key(json!({}));
-    b["secrets"]["token"] = json!("sk-ant-ROTATED-888888888888");
+    b["secrets"]["token"] = json!("sk-ant-ROTATED-888");
     x.put("mia", "agent.claude", &url, b).unwrap();
     let mut seen = String::new();
     enforce::with_agent_token(&x.env(), "agent.claude", "default", Some("web"), "max", "check", &mut |k| { seen = k.into(); Ok(String::new()) }).unwrap();
-    assert_eq!(seen, "sk-ant-ROTATED-888888888888");
+    assert_eq!(seen, "sk-ant-ROTATED-888");
     assert!(!x.rec.all().contains("ROTATED"));
     // a locked vault holds it back
     x.vault.set_locked(true);
