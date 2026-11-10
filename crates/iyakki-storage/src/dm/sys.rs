@@ -18,6 +18,23 @@ const LOOP_INFO64_FLAGS_AT: usize = 52;
 
 pub struct SysKernel;
 
+/// The loop devices we attached, with the handle we attached them through. A loop device set to auto-clear is cleared the moment its
+/// last handle closes, and device-mapper has not opened it yet when `loop_attach` returns: without this the file came off at once
+/// and the encrypted device was 0 sectors long ("attempt to access beyond end of device loop1", found on the Mac mini 2018).
+static HELD: std::sync::Mutex<Vec<(String, OwnedFd)>> = std::sync::Mutex::new(Vec::new());
+
+fn hold(path: &str, fd: OwnedFd) {
+    HELD.lock().unwrap_or_else(|e| e.into_inner()).push((path.to_string(), fd));
+}
+
+/// Let go of our handle on `path` (the device clears itself once nothing else holds it). Returns how many handles were let go.
+fn release(path: &str) -> usize {
+    let mut h = HELD.lock().unwrap_or_else(|e| e.into_inner());
+    let before = h.len();
+    h.retain(|(p, _)| p != path);
+    before - h.len()
+}
+
 /// What to do with the device node of a mapping after a successful ioctl.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum NodeChange {
@@ -147,6 +164,7 @@ impl DmKernel for SysKernel {
                 unsafe { libc::ioctl(dev.as_raw_fd(), LOOP_CLR_FD as _) };
                 return Err(e);
             }
+            hold(&path, dev);
             return Ok(path);
         }
         Err(last)
@@ -156,7 +174,10 @@ impl DmKernel for SysKernel {
         let fd = open(dev, true)?;
         // SAFETY: LOOP_CLR_FD takes no argument.
         let r = unsafe { libc::ioctl(fd.as_raw_fd(), LOOP_CLR_FD as _) };
-        if r < 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
+        let result = if r < 0 { Err(io::Error::last_os_error()) } else { Ok(()) };
+        // our own handle goes either way: the device clears itself when the last one closes
+        release(dev);
+        result
     }
 
     fn make_fs(&self, dev: &str, label: &str) -> io::Result<()> {
@@ -199,6 +220,16 @@ mod tests {
         b[40..48].copy_from_slice(&dev.to_le_bytes());
         b[48..48 + name.len()].copy_from_slice(name.as_bytes());
         b
+    }
+
+    #[test]
+    fn an_attached_loop_device_is_held_until_it_is_detached() {
+        // /dev/null stands in for a loop device handle
+        let fd = open("/dev/null", false).unwrap();
+        hold("/dev/loop-test-held", fd);
+        assert!(HELD.lock().unwrap().iter().any(|(p, _)| p == "/dev/loop-test-held"), "held after attach");
+        assert_eq!(release("/dev/loop-test-held"), 1, "let go at detach");
+        assert_eq!(release("/dev/loop-test-held"), 0, "and only once");
     }
 
     #[test]
