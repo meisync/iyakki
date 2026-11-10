@@ -12,7 +12,7 @@ Machines: Mac mini 2018 (internal install and the T7), MacBook Pro 14,1, HP Pavi
 |---|---|---|
 | Image 1109a boots, normal start, signed loader, no menu countdown | all four | you |
 | Bluetooth: pair a phone, phone sound plays (A2DP), tether gets an IP and carries internet | MacBook Pro 14,1 | you |
-| Bluetooth page redesign (switch card, paired list, nearby list, popup pairing) | Mac mini | you |
+| Bluetooth page redesign (switch card, paired list, scan popup with the nearby list, popup pairing) | Mac mini | you |
 | Live USB camera view, red band, snapshot (valid 1280x720 JPEG) | Mac mini | auto |
 | Domains: `store.local` to a cluster service, 200 through the listener, 404 for an unknown name | Mac mini | auto |
 | PDF viewer opens, renders, searches | Mac mini | auto |

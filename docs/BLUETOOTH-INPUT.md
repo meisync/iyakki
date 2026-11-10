@@ -20,12 +20,16 @@ Settings, Bluetooth (administrators). Top to bottom:
    loop is visible. Clicking the row or Enter does its first button. A second click while a connection is starting does nothing
    (the row says Connecting...); a new try is allowed when the attempt has ended or after 25 seconds. "Audio from a phone" below
    them lets a phone pair with this computer for two minutes.
-3. **Nearby devices**: Scan shows "Scanning... N s" with a Stop button and ends by itself after 15 seconds or when the pairing
-   popup opens. At most 8 rows are shown: named and pairable devices (keyboard, mouse, game pad, phone) first, strongest signal
-   first, then other named devices; devices with no name and no useful type are behind "Show N more devices", which opens a
-   scroll area of 8 rows with its own scroll bar and a search field (name or address). A device seen once with a name keeps it in
-   later scans. Headphones and speakers are listed but say they cannot be used yet (this computer plays sound from a phone, it
-   cannot send sound).
+3. **Scan**: one row with a Scan button (or `s`, or Enter on the row). It opens a popup in the same frame as the Wi-Fi list and
+   starts the scan at once: "Scanning... N s" with Stop and Close. The scan ends by itself after 15 seconds. The list shows at
+   most 5 rows at a time (it scrolls): named and pairable devices (keyboard, mouse, game pad, phone) first, strongest signal
+   first, then other named devices; each row has the name, the kind and the signal, and a Pair button. Devices with no name and
+   no useful type are behind "Show N more devices", with a search field (name or address). The devices appear when the scan
+   ends (the controller returns its list then). Once it has finished, Scan again clears the list and scans anew in the same
+   popup (`s`, or Enter on the button); a scan that failed shows the reason in plain words with Try again. Esc or Close stops the
+   scan and closes the popup. Pair (or Enter on a row) closes it and opens the pairing popup. A device seen once with a name
+   keeps it in later scans. Headphones and speakers are listed but say they cannot be used yet (this computer plays sound from a
+   phone, it cannot send sound). The page behind keeps the switch, the paired devices and the tether.
 4. **Advanced** (closed by default): the radio switch and the controller power separately, Load driver (when held), Look again.
 
 **Pairing is a popup.** Pair (or Enter) on a nearby device opens a centred dialog "Pair with <name>": Connecting...; the number to
@@ -36,8 +40,8 @@ pairing, No when the other device did), Esc cancels. The popup traps the keys an
 screen reader, and also opens when the other device starts the pairing; when Settings is not open the shell shows a notice naming
 the device. When the OTHER device shows the number (a phone or a car kit shows a passkey or a PIN, the kernel's User Passkey Request or PIN Code Request), the popup has a typing stage: "Type the passkey shown on <device>" (six boxes, digits only, paste keeps only the digits) or "Type the PIN shown on <device>" (1 to 16 characters; for a mouse or game pad that has none printed, Use 0000 and Use 1234 buttons fill the entry, never for a phone). OK or Enter sends it, Cancel or Esc sends the negative reply, a wrong length is refused in plain words and the popup stays open. The device is watched while you type: if it gives up the popup shows why, and after 45 seconds without an answer the negative reply is sent. A keyboard is the other way round: its PIN or passkey is typed on the keyboard (the page shows it). What you type is wiped when sent, cancelled or closed, is not kept in the pairing state and is never logged (the log only says that an entry was sent or cancelled); the screen reader hears "Passkey, edit, 3 of 6 digits", never the digits. A pairing that a phone starts toward this computer ("Let a phone pair") still answers only the number comparison.
 
-Keys: Up and Down choose a row, Enter its main action, `e` the switch, `s` scan or stop, `/` search, `m` more devices, `t` the
-first phone's tethering, `u` forget the chosen paired device, `a` Advanced, `r` look again. Every button is also reachable with
+Keys: Up and Down choose a row, Enter its main action, `e` the switch, `s` the scan popup, `t` the
+first phone's tethering, `u` forget the chosen paired device, `a` Advanced, `r` look again. In the scan popup: Up and Down choose a device (the last stop is Scan again), Enter pairs, `s` scans again, `m` more devices, `/` search, Esc closes. Every button is also reachable with
 the keyboard walk and has a name, role and state for the screen reader. The page scrolls by whole blocks and fits 360x740.
 
 **System log.** Settings writes outcomes as well as requests (`settings.bluetooth` lines): the controller (address, power, radio,

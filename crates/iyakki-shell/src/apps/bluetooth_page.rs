@@ -1,12 +1,16 @@
 //! Settings -> Bluetooth: the page.
 //!
-//! One switch with its state in words, the paired devices first (each row with its own buttons), a short list of nearby devices with a
-//! live scan, a popup for pairing, and an Advanced part with the separate radio and controller switches. The page draws and takes
+//! One switch with its state in words, the paired devices first (each row with its own buttons), a Scan row that opens a popup (like
+//! the Wi-Fi scan: the same modal frame) with the short list of nearby devices, a popup for pairing, and an Advanced part with the
+//! separate radio and controller switches. The page draws and takes
 //! keys; everything about the machine is in [`crate::btmodel`] (a fake `Control` drives it in tests). The pairing popup follows the
 //! pairing state of the machine, so a pairing the other device starts opens it too.
 //!
-//! Keys: Up and Down choose a row, Enter does its main action, `/` searches the nearby list, `s` scans or stops, `e` the Bluetooth
-//! switch, `u` forgets the chosen paired device, `t` the first phone's tethering, `a` Advanced, `m` more devices, `r` looks again.
+//! Keys: Up and Down choose a row, Enter does its main action, `s` opens the scan popup, `e` the Bluetooth switch, `u` forgets the
+//! chosen paired device, `t` the first phone's tethering, `a` Advanced, `r` looks again.
+//!
+//! The scan popup: Up and Down choose a device (the last stop is the Scan again button), Enter pairs the device (or scans again),
+//! `s` scans again once the scan has finished, `m` shows more devices, `/` searches, Esc or Close stops the scan and closes it.
 
 use crate::access::{self, Meta, Role, State};
 use crate::btmodel::{BtModel, Fix, Icon, NearbyRow, PairState, PairedRow, RowAct, ScanView, Switch, Tone, NEARBY_SHOWN, TICKS_PER_SEC};
@@ -26,6 +30,7 @@ const SUB_MORE: u8 = 253;
 const SUB_FIRMWARE: u8 = 254;
 const SUB_DRIVER: u8 = 255;
 const SUB_ADV: u8 = 249;
+const SUB_AGAIN: u8 = 247;
 const SUB_AUDIO: u8 = 248;
 const MAX_ROW_CODE: usize = 240;
 /// A status line stays this many ticks.
@@ -36,9 +41,21 @@ const STATUS_TICKS: u64 = 8 * TICKS_PER_SEC;
 enum Focus {
     Switch,
     Paired(String),
-    Nearby(String),
-    More,
+    Scan,
     Advanced,
+}
+
+/// The scan popup. The list itself is the model's nearby list; this holds what the person did with it.
+struct Popup {
+    /// The chosen stop: a device row, or (one past the last row) the Scan again button.
+    sel: usize,
+    /// The first device row drawn, and how many rows fit (set when drawn).
+    first: usize,
+    fit: usize,
+    /// A plain message under the list (a device that cannot be paired here, a scan that could not start).
+    msg: String,
+    /// The last thing announced to the screen reader.
+    said: String,
 }
 
 /// The pairing popup.
@@ -83,11 +100,6 @@ enum Block {
     Paired(usize),
     AudioCard,
     Scan,
-    Search,
-    NearbyEmpty,
-    Nearby(usize),
-    Region,
-    More,
     AdvancedToggle,
     Advanced,
 }
@@ -100,15 +112,15 @@ pub struct BtPage {
     all: bool,
     search: TextField,
     search_focus: bool,
-    region_first: usize,
+    popup: Option<Popup>,
+    /// The scan was closed by the person: its end is not announced on the page.
+    quiet_end: bool,
     dialog: Option<Dialog>,
     forget: Option<(String, String)>,
     /// A cancelled pairing: a question that arrives later is answered No by itself.
     suppress: bool,
     status: Option<(String, bool, u64)>,
     ticks: u64,
-    mouse: (i32, i32),
-    region: R,
     request: Option<(String, String)>,
     opened: bool,
     was_scanning: bool,
@@ -124,14 +136,13 @@ impl BtPage {
             all: false,
             search: TextField::new("Search nearby devices", false),
             search_focus: false,
-            region_first: 0,
+            popup: None,
+            quiet_end: false,
             dialog: None,
             forget: None,
             suppress: false,
             status: None,
             ticks: 0,
-            mouse: (0, 0),
-            region: R::new(0.0, 0.0, 0.0, 0.0),
             request: None,
             opened: false,
             was_scanning: false,
@@ -147,7 +158,7 @@ impl BtPage {
     }
 
     pub fn has_dialog(&self) -> bool {
-        self.dialog.is_some() || self.forget.is_some()
+        self.dialog.is_some() || self.forget.is_some() || self.popup.is_some()
     }
 
     pub fn take_request(&mut self) -> Option<(String, String)> {
@@ -156,6 +167,21 @@ impl BtPage {
 
     pub fn search_text(&self) -> &str {
         &self.search.value
+    }
+
+    /// The plain message under the scan list (empty when there is none).
+    pub fn popup_message(&self) -> &str {
+        self.popup.as_ref().map(|p| p.msg.as_str()).unwrap_or("")
+    }
+
+    /// The Scan row of the page is the chosen one.
+    #[cfg(test)]
+    pub fn scan_row_chosen(&self) -> bool {
+        self.focus_list().get(self.sel) == Some(&Focus::Scan)
+    }
+
+    pub fn scan_popup_open(&self) -> bool {
+        self.popup.is_some()
     }
 
     pub fn pairing_name(&self) -> Option<&str> {
@@ -207,20 +233,30 @@ impl BtPage {
         let scanning = matches!(self.model.scanning(), ScanView::Running(_));
         if self.was_scanning && !scanning {
             let n = self.model.nearby("", true).total;
-            match self.model.scan_error() {
-                Some(e) => {
-                    let e = e.to_string();
-                    self.fail(e)
-                }
-                None => self.ok(match n {
-                    0 => "The scan found no other device.".to_string(),
-                    1 => "The scan found 1 device.".to_string(),
-                    n => format!("The scan found {n} devices."),
-                }),
+            let (words, good) = match self.model.scan_error() {
+                Some(e) => (e.to_string(), false),
+                None => (
+                    match n {
+                        0 => "The scan found no other device.".to_string(),
+                        1 => "The scan found 1 device.".to_string(),
+                        n => format!("The scan found {n} devices."),
+                    },
+                    true,
+                ),
+            };
+            if std::mem::take(&mut self.quiet_end) {
+                // closed by the person: nothing to say
+            } else if self.popup.is_some() {
+                // the popup shows it (and says it to the screen reader)
+            } else if good {
+                self.ok(words)
+            } else {
+                self.fail(words)
             }
         }
         self.was_scanning = scanning;
         self.follow_pairing();
+        self.follow_popup();
         self.model.take_log()
     }
 
@@ -245,7 +281,7 @@ impl BtPage {
                 _ => String::new(),
             };
             self.model.stop_scan();
-            self.search_focus = false;
+            self.close_popup();
             self.dialog = Some(Dialog::new(name, self.model.pair_target.is_some() && matches!(state, PairState::Running(_))));
         }
         if let Some(d) = &self.dialog {
@@ -264,10 +300,8 @@ impl BtPage {
     fn focus_list(&self) -> Vec<Focus> {
         let mut v = vec![Focus::Switch];
         v.extend(self.model.paired_rows().into_iter().map(|r| Focus::Paired(r.address)));
-        let n = self.model.nearby(&self.search.value, self.all);
-        v.extend(n.rows.iter().map(|r| Focus::Nearby(r.address.clone())));
-        if n.more > 0 || (self.all && n.total > NEARBY_SHOWN) {
-            v.push(Focus::More);
+        if self.model.view.switch == Switch::On || matches!(self.model.scanning(), ScanView::Running(_)) {
+            v.push(Focus::Scan);
         }
         v.push(Focus::Advanced);
         v
@@ -310,27 +344,30 @@ impl BtPage {
                     }
                 }
             }
-            Focus::Nearby(a) => self.pair(a),
-            Focus::More => self.toggle_more(),
+            Focus::Scan => self.open_scan(),
             Focus::Advanced => self.advanced = !self.advanced,
         }
     }
 
     fn pair(&mut self, address: &str) {
-        let Some(row) = self.model.nearby("", true).rows.into_iter().find(|r| r.address.eq_ignore_ascii_case(address)) else { return self.fail("Scan again: that device is no longer in the list.") };
+        if let Err(e) = self.try_pair(address) {
+            self.fail(e);
+        }
+    }
+
+    /// Asks the device to pair and opens the pairing popup (the scan popup, if it is open, goes away); the reason when it cannot.
+    fn try_pair(&mut self, address: &str) -> Result<(), String> {
+        let Some(row) = self.model.nearby("", true).rows.into_iter().find(|r| r.address.eq_ignore_ascii_case(address)) else { return Err("Scan again: that device is no longer in the list.".into()) };
         if !row.pairable {
-            return self.fail(row.note);
+            return Err(row.note);
         }
-        match self.model.start_pair(address) {
-            Ok(_) => {
-                self.model.poll(self.ticks);
-                self.suppress = false;
-                self.search_focus = false;
-                self.dialog = Some(Dialog::new(row.name, true));
-                self.follow_pairing();
-            }
-            Err(e) => self.fail(e),
-        }
+        self.model.start_pair(address)?;
+        self.model.poll(self.ticks);
+        self.suppress = false;
+        self.close_popup();
+        self.dialog = Some(Dialog::new(row.name, true));
+        self.follow_pairing();
+        Ok(())
     }
 
     fn toggle_switch(&mut self) {
@@ -343,18 +380,95 @@ impl BtPage {
         self.run(r);
     }
 
-    fn toggle_scan(&mut self) {
-        if matches!(self.model.scanning(), ScanView::Running(_)) {
-            self.model.stop_scan();
-            return self.ok("Stopping the scan ...");
+    /// Scan: the popup opens at once and the scan starts (a scan that is still running is shown, not started twice).
+    fn open_scan(&mut self) {
+        if !matches!(self.model.scanning(), ScanView::Running(_)) {
+            if let Err(e) = self.model.start_scan() {
+                return self.fail(e);
+            }
+            self.model.clear_nearby();
         }
-        let r = self.model.start_scan();
-        self.run(r);
+        self.search.clear();
+        self.search_focus = false;
+        self.all = false;
+        self.quiet_end = false;
+        self.popup = Some(Popup { sel: 0, first: 0, fit: 1, msg: String::new(), said: String::new() });
+        self.follow_popup();
     }
 
-    fn toggle_more(&mut self) {
-        self.all = !self.all;
-        self.region_first = 0;
+    /// Closes the scan popup and stops its scan.
+    fn close_popup(&mut self) {
+        if self.popup.take().is_some() {
+            if matches!(self.model.scanning(), ScanView::Running(_)) {
+                self.model.stop_scan();
+                self.quiet_end = true;
+            }
+            self.search.clear();
+            self.search_focus = false;
+            self.all = false;
+        }
+    }
+
+    /// Scan again in the same popup: the old list and the old message go, a new scan starts.
+    fn scan_again(&mut self) {
+        if matches!(self.model.scanning(), ScanView::Running(_)) {
+            return;
+        }
+        match self.model.start_scan() {
+            Ok(_) => {
+                self.model.clear_nearby();
+                self.search.clear();
+                self.search_focus = false;
+                self.all = false;
+                if let Some(p) = self.popup.as_mut() {
+                    p.sel = 0;
+                    p.first = 0;
+                    p.msg.clear();
+                }
+            }
+            Err(e) => self.popup_msg(e),
+        }
+    }
+
+    fn popup_msg(&mut self, m: String) {
+        access::announce(&m);
+        if let Some(p) = self.popup.as_mut() {
+            p.msg = m;
+        }
+    }
+
+    /// What the screen reader hears when the scan popup changes: scanning, finished with a count, or the problem.
+    fn follow_popup(&mut self) {
+        if self.popup.is_none() {
+            return;
+        }
+        let words = match (self.model.scanning(), self.model.scan_error()) {
+            (ScanView::Running(_), _) => "Scan for devices. Scanning.".to_string(),
+            (_, Some(e)) => format!("Scan for devices. {e} Try again is the first button."),
+            _ => match self.model.nearby("", true).total {
+                0 => "Scan for devices. The scan found no other device. Scan again, or Close.".to_string(),
+                1 => "Scan for devices. The scan found 1 device. Up and Down choose, Enter pairs.".to_string(),
+                n => format!("Scan for devices. The scan found {n} devices. Up and Down choose, Enter pairs."),
+            },
+        };
+        let stops = self.popup_stops();
+        if let Some(p) = self.popup.as_mut() {
+            p.sel = p.sel.min(stops.saturating_sub(1));
+            if p.said != words {
+                access::announce(&words);
+                p.said = words;
+            }
+        }
+    }
+
+    /// How many stops Up and Down have in the popup: the device rows, and the Scan again button once the scan has finished.
+    fn popup_stops(&self) -> usize {
+        let rows = self.model.nearby(&self.search.value, self.all).rows.len();
+        if matches!(self.model.scanning(), ScanView::Running(_)) {
+            rows.max(1)
+        } else {
+            rows + 1
+        }
     }
 
     fn firmware(&mut self) {
@@ -371,8 +485,7 @@ impl BtPage {
 
     /// A key or click. `true`: the page took it.
     pub fn handle(&mut self, ev: &Event) -> bool {
-        if let Event::MouseMove(x, y) = ev {
-            self.mouse = (*x, *y);
+        if let Event::MouseMove(..) = ev {
             return false;
         }
         if self.forget.is_some() {
@@ -381,30 +494,17 @@ impl BtPage {
         if self.dialog.is_some() {
             return self.dialog_event(ev);
         }
+        if self.popup.is_some() {
+            return self.popup_event(ev);
+        }
         match ev {
             Event::Sub(i, k) => {
                 self.sub(*i, k);
                 true
             }
-            Event::FocusAt(SEARCH_ID, x) => {
-                self.search_focus = true;
-                self.search.click(*x);
-                true
-            }
-            Event::Paste(t) if self.search_focus => {
-                self.search.paste(t);
-                self.after_search();
-                true
-            }
             Event::Scroll(n) => {
-                let inside = self.region.w > 0.0 && self.region.contains(self.mouse.0, self.mouse.1);
-                if inside {
-                    let max = self.model.nearby(&self.search.value, true).rows.len().saturating_sub(NEARBY_SHOWN);
-                    self.region_first = (self.region_first as i32 - n.signum()).clamp(0, max as i32) as usize;
-                } else {
-                    let max = 60usize;
-                    self.first = (self.first as i32 - n.signum()).clamp(0, max as i32) as usize;
-                }
+                let max = 60usize;
+                self.first = (self.first as i32 - n.signum()).clamp(0, max as i32) as usize;
                 true
             }
             Event::Key(k) => self.key(k),
@@ -413,11 +513,66 @@ impl BtPage {
     }
 
     fn after_search(&mut self) {
-        self.region_first = 0;
-        self.sel = self.sel.min(self.focus_list().len() - 1);
+        if let Some(p) = self.popup.as_mut() {
+            p.first = 0;
+            p.sel = 0;
+        }
     }
 
-    fn key(&mut self, k: &Key) -> bool {
+    /// A key or click while the scan popup is open: it takes everything (the page behind is out of reach).
+    fn popup_event(&mut self, ev: &Event) -> bool {
+        match ev {
+            Event::Sub(SUB_SCAN, _) => {
+                self.model.stop_scan();
+                access::announce("Stopping the scan.");
+            }
+            Event::Sub(SUB_AGAIN, _) => self.scan_again(),
+            Event::Sub(SUB_MORE, _) => self.popup_more(),
+            Event::Sub(i, _) if (*i as usize) < MAX_ROW_CODE => {
+                if let Some(row) = self.model.nearby(&self.search.value, self.all).rows.get(*i as usize) {
+                    let a = row.address.clone();
+                    self.popup_pair(&a);
+                }
+            }
+            Event::FocusAt(SEARCH_ID, x) => {
+                self.search_focus = true;
+                self.search.click(*x);
+            }
+            Event::Paste(t) if self.search_focus => {
+                self.search.paste(t);
+                self.after_search();
+            }
+            Event::Scroll(n) => {
+                let max = self.model.nearby(&self.search.value, self.all).rows.len().saturating_sub(1);
+                if let Some(p) = self.popup.as_mut() {
+                    p.first = (p.first as i32 - n.signum()).clamp(0, max as i32) as usize;
+                    // the chosen row follows the window (it would pull the list back otherwise)
+                    if p.sel <= max {
+                        p.sel = p.sel.clamp(p.first, p.first + p.fit.max(1) - 1).min(max);
+                    }
+                }
+            }
+            Event::Key(k) => self.popup_key(k),
+            _ => {}
+        }
+        true
+    }
+
+    fn popup_more(&mut self) {
+        self.all = !self.all;
+        if let Some(p) = self.popup.as_mut() {
+            p.first = 0;
+            p.sel = 0;
+        }
+    }
+
+    fn popup_pair(&mut self, address: &str) {
+        if let Err(e) = self.try_pair(address) {
+            self.popup_msg(e);
+        }
+    }
+
+    fn popup_key(&mut self, k: &Key) {
         if self.search_focus {
             match k {
                 Key::Esc => {
@@ -431,8 +586,36 @@ impl BtPage {
                     self.after_search();
                 }
             }
-            return true;
+            return;
         }
+        let rows = self.model.nearby(&self.search.value, self.all).rows;
+        let stops = self.popup_stops();
+        let Some(sel) = self.popup.as_ref().map(|p| p.sel.min(stops - 1)) else { return };
+        let set = |s: &mut Self, v: usize| {
+            if let Some(p) = s.popup.as_mut() {
+                p.sel = v;
+                p.msg.clear();
+            }
+        };
+        match k {
+            Key::Esc => self.close_popup(),
+            Key::Up => set(self, sel.saturating_sub(1)),
+            Key::Down => set(self, (sel + 1).min(stops - 1)),
+            Key::Enter | Key::Char(' ') => match rows.get(sel) {
+                Some(r) => self.popup_pair(&r.address),
+                None => self.scan_again(),
+            },
+            Key::Char('s') | Key::Char('r') => self.scan_again(),
+            Key::Char('m') => self.popup_more(),
+            Key::Char('/') => {
+                self.search_focus = true;
+                self.all = true;
+            }
+            _ => {}
+        }
+    }
+
+    fn key(&mut self, k: &Key) -> bool {
         let list = self.clamp_sel();
         match k {
             Key::Up => self.sel = self.sel.saturating_sub(1),
@@ -442,13 +625,8 @@ impl BtPage {
                 self.main_action(&f);
             }
             Key::Char('e') | Key::Char('p') => self.toggle_switch(),
-            Key::Char('s') => self.toggle_scan(),
-            Key::Char('/') => {
-                self.search_focus = true;
-                self.all = true;
-            }
+            Key::Char('s') => self.open_scan(),
             Key::Char('a') => self.advanced = !self.advanced,
-            Key::Char('m') => self.toggle_more(),
             Key::Char('f') if self.model.view.fixes().contains(&Fix::Firmware) => self.firmware(),
             Key::Char('f') => self.fail("Bluetooth does not need firmware on this machine."),
             Key::Char('l') if self.model.view.state.held => self.driver(),
@@ -460,7 +638,7 @@ impl BtPage {
             }
             Key::Char('t') => match self.model.paired_rows().into_iter().find(|r| r.buttons.iter().any(|b| b.0 == RowAct::Tether)) {
                 Some(r) => self.act(RowAct::Tether, &r.address),
-                None => self.fail("No phone is paired yet. Scan, then choose your phone under Nearby to pair it (Bluetooth must be on in the phone); then Tether connects its internet."),
+                None => self.fail("No phone is paired yet. Scan, then choose Pair next to your phone in the scan list (Bluetooth must be on in the phone); then Tether connects its internet."),
             },
             Key::Char('u') => match &list[self.sel] {
                 Focus::Paired(a) => {
@@ -477,9 +655,8 @@ impl BtPage {
     fn sub(&mut self, i: u8, k: &Key) {
         match (i, k) {
             (SUB_SWITCH, _) => self.toggle_switch(),
-            (SUB_SCAN, _) => self.toggle_scan(),
+            (SUB_SCAN, _) => self.open_scan(),
             (SUB_ADVANCED, _) => self.advanced = !self.advanced,
-            (SUB_MORE, _) => self.toggle_more(),
             (SUB_FIRMWARE, _) => self.firmware(),
             (SUB_DRIVER, _) => self.driver(),
             (SUB_AUDIO, _) => {
@@ -701,23 +878,19 @@ impl BtPage {
             }
             self.first += 1;
         }
-        self.region = R::new(0.0, 0.0, 0.0, 0.0);
         let mut y = top;
         for (idx, (b, h)) in blocks.iter().enumerate().skip(self.first) {
-            let mut h = *h;
+            let h = *h;
             if y + h > a.y + a.h + 0.5 {
                 if idx == self.first {
                     // a block taller than the page: draw it anyway from the top (nothing else would be reachable)
-                } else if matches!(b, Block::Region) && a.y + a.h - y >= 58.0 * s {
-                    // the scroll area of the nearby list takes the room that is left
-                    h = a.y + a.h - y;
                 } else {
                     break;
                 }
             }
             let h = &h;
             // a heading with nothing under it is not drawn at the bottom
-            if matches!(b, Block::Heading(_)) && blocks.get(idx + 1).is_some_and(|n| y + h + 8.0 * s + if matches!(n.0, Block::Region) { n.1.min(58.0 * s) } else { n.1 } > a.y + a.h + 0.5) {
+            if matches!(b, Block::Heading(_)) && blocks.get(idx + 1).is_some_and(|n| y + h + 8.0 * s + n.1 > a.y + a.h + 0.5) {
                 break;
             }
             let r = R::new(a.x, y, cw, *h);
@@ -740,7 +913,7 @@ impl BtPage {
             super::widgets::render_confirm(g, area, s, &text, "Yes, forget it");
             return;
         }
-        let Some(d) = &self.dialog else { return };
+        let Some(d) = &self.dialog else { return self.render_popup(g, area, s) };
         let state = self.model.pair.clone();
         let ours = d.ours;
         let name = state_name(&state).unwrap_or(&d.name).to_string();
@@ -836,6 +1009,125 @@ impl BtPage {
         g.button_flow(p.x + 26.0 * s, y, text_w, size, 10.0 * s, &buttons);
     }
 
+    /// The scan popup: the frame of the Wi-Fi list, "Scanning..." or the problem, a short list of devices (scrolls), the buttons.
+    fn render_popup(&mut self, g: &mut Gfx, area: R, s: f32) {
+        if self.popup.is_none() {
+            return;
+        }
+        let running = match self.model.scanning() {
+            ScanView::Running(secs) => Some(secs),
+            ScanView::Idle => None,
+        };
+        let err = self.model.scan_error().map(|e| e.to_string());
+        let n = self.model.nearby(&self.search.value, self.all);
+        let rows = n.rows.clone();
+        let pw = (520.0 * s).min(area.w - 40.0 * s);
+        let text_w = pw - 52.0 * s;
+        let msg = self.popup.as_ref().map(|p| p.msg.clone()).unwrap_or_default();
+        // the words under the title
+        let (info, info_col): (String, [u8; 4]) = match (&running, &err) {
+            (Some(secs), _) if rows.is_empty() => (format!("Scanning... {secs} s. Keyboards, mice, game pads and phones appear here."), TEXT),
+            (Some(secs), _) => (format!("Scanning... {secs} s"), TEXT),
+            (None, Some(e)) => (format!("The scan did not work. {e}"), WARN),
+            (None, None) if !self.search.value.is_empty() && rows.is_empty() => ("No device matches the search.".to_string(), MUTED),
+            (None, None) if n.total == 0 => ("No other device was found. Put the device in pairing mode and scan again.".to_string(), MUTED),
+            (None, None) => (format!("Scan finished: {} device{} found. Choose Pair next to the one you want.", n.total, if n.total == 1 { "" } else { "s" }), MUTED),
+        };
+        let mut info_lines: Vec<String> = g.wrap(14.0 * s, &info, Face::Sans, text_w).into_iter().take(4).collect();
+        if !msg.is_empty() {
+            info_lines.extend(g.wrap(13.0 * s, &msg, Face::Sans, text_w).into_iter().take(3));
+        }
+        let msg_from = info_lines.len() - if msg.is_empty() { 0 } else { g.wrap(13.0 * s, &msg, Face::Sans, text_w).len().min(3) };
+        // the buttons
+        let more_label = if self.all { "Show fewer devices".to_string() } else { format!("Show {} more device{}", n.more, if n.more == 1 { "" } else { "s" }) };
+        let mut buttons: Vec<(String, [u8; 4], Event)> = Vec::new();
+        let mut again_at = None;
+        if running.is_some() {
+            buttons.push(("Stop".into(), MUTED, Event::Sub(SUB_SCAN, Key::Enter)));
+        } else {
+            again_at = Some(buttons.len());
+            buttons.push((if err.is_some() { "Try again" } else { "Scan again" }.into(), ACCENT, Event::Sub(SUB_AGAIN, Key::Enter)));
+            if self.search.value.is_empty() && (n.more > 0 || (self.all && n.total > NEARBY_SHOWN)) {
+                buttons.push((more_label, MUTED, Event::Sub(SUB_MORE, Key::Enter)));
+            }
+        }
+        buttons.push(("Close".into(), MUTED, Event::Key(Key::Esc)));
+        let bsize = 14.0 * s;
+        let bh = bsize * 2.1;
+        let brows = flow_rows(g, text_w, bsize, 10.0 * s, &buttons.iter().map(|b| b.0.as_str()).collect::<Vec<_>>());
+        let search_h = if self.all || n.total > NEARBY_SHOWN { 44.0 * s } else { 0.0 };
+        let rowh = 58.0 * s;
+        let fixed = 56.0 * s + info_lines.len() as f32 * 19.0 * s + 8.0 * s + search_h + 12.0 * s + brows as f32 * (bh + 10.0 * s) + 20.0 * s;
+        let room = (area.h - 16.0 * s - fixed).max(0.0);
+        let fit = if rows.is_empty() { 0 } else { ((room / rowh).floor() as usize).clamp(1, 5).min(rows.len()) };
+        let ph = fixed + fit as f32 * rowh;
+        let p = fx::modal(g, area, s, pw, ph, ACCENT, false);
+        let mut y = fx::modal_title(g, p, s, "Scan for devices", ACCENT) + 2.0 * s;
+        if running.is_some() {
+            let pulse = ((self.ticks / 6) % 3) as f32;
+            for k in 0..3 {
+                g.circle(p.x + p.w - 30.0 * s + k as f32 * 8.0 * s - 12.0 * s, p.y + 30.0 * s, 2.0 * s + if k as f32 == pulse { 2.0 * s } else { 0.0 }, ACCENT);
+            }
+        }
+        for (i, l) in info_lines.iter().enumerate() {
+            let (size, col) = if i >= msg_from { (13.0 * s, WARN) } else { (14.0 * s, info_col) };
+            g.text(p.x + 26.0 * s, y, size, col, l, Face::Sans);
+            y += 19.0 * s;
+        }
+        y += 8.0 * s;
+        if search_h > 0.0 {
+            let focused = self.search_focus;
+            self.search.render(g, R::new(p.x + 26.0 * s, y, text_w, 36.0 * s), focused, s, (self.ticks / 15) % 2 == 0, Face::Sans, SEARCH_ID);
+            y += search_h;
+        }
+        // keep the chosen row inside the window
+        let sel = self.popup.as_ref().map(|p| p.sel).unwrap_or(0);
+        let mut first = self.popup.as_ref().map(|p| p.first).unwrap_or(0);
+        if fit > 0 {
+            if sel < rows.len() {
+                if sel < first {
+                    first = sel;
+                } else if sel >= first + fit {
+                    first = sel + 1 - fit;
+                }
+            }
+            first = first.min(rows.len().saturating_sub(fit));
+        } else {
+            first = 0;
+        }
+        if let Some(pp) = self.popup.as_mut() {
+            pp.first = first;
+            pp.fit = fit.max(1);
+        }
+        for (k, row) in rows.iter().enumerate().skip(first).take(fit) {
+            let rr = R::new(p.x + 20.0 * s, y + (k - first) as f32 * rowh, p.w - 40.0 * s - if rows.len() > fit { 10.0 * s } else { 0.0 }, rowh - 4.0 * s);
+            self.draw_nearby(g, rr, s, row, k, k == sel);
+            if k == sel {
+                access::report_focus(access::Node::new(&format!("{}, {}", row.name, if row.pairable { "pair" } else { "not supported" }), Role::Button, State::default()));
+            }
+        }
+        if rows.len() > fit && fit > 0 {
+            fx::scrollbar(g, R::new(p.x + p.w - 28.0 * s, y, 8.0 * s, fit as f32 * rowh), s, first, fit, rows.len(), ACCENT);
+        }
+        y += fit as f32 * rowh + 12.0 * s;
+        // the buttons, one flow; the chosen one gets a ring
+        let (mut bx, mut by) = (p.x + 26.0 * s, y);
+        let x0 = bx;
+        for (i, (label, acc, ev)) in buttons.iter().enumerate() {
+            let bw = g.text_width(bsize, label, Face::Bold) + bsize * 1.7;
+            if bx > x0 && bx + bw > x0 + text_w {
+                bx = x0;
+                by += bh + 10.0 * s;
+            }
+            g.button(bx, by, bsize, label, *acc, ev.clone());
+            if again_at == Some(i) && sel == rows.len() {
+                g.rrect_outline(bx - 3.0 * s, by - 3.0 * s, bw + 6.0 * s, bh + 6.0 * s, (bh + 6.0 * s) / 2.0, 2.0 * s, TEXT);
+                access::report_focus(access::Node::new(label, Role::Button, State::default()));
+            }
+            bx += bw + 10.0 * s;
+        }
+    }
+
     fn blocks(&self, g: &mut Gfx, w: f32, s: f32) -> Vec<(Block, f32)> {
         let mut v = Vec::new();
         v.push((Block::Switch, self.switch_height(g, w, s)));
@@ -851,25 +1143,7 @@ impl BtPage {
             v.push((Block::AudioCard, 56.0 * s));
         }
         v.push((Block::Heading("Nearby devices"), 22.0 * s));
-        if self.model.view.switch == Switch::On || matches!(self.model.scanning(), ScanView::Running(_)) {
-            v.push((Block::Scan, self.scan_height(g, w, s)));
-        }
-        let n = self.model.nearby(&self.search.value, self.all);
-        if (self.all || n.total > NEARBY_SHOWN) && self.model.view.switch == Switch::On {
-            v.push((Block::Search, 40.0 * s));
-        }
-        if n.rows.is_empty() {
-            v.push((Block::NearbyEmpty, 40.0 * s));
-        } else if self.all {
-            v.push((Block::Region, n.rows.len().min(NEARBY_SHOWN) as f32 * 58.0 * s));
-        } else {
-            for i in 0..n.rows.len() {
-                v.push((Block::Nearby(i), 54.0 * s));
-            }
-        }
-        if n.more > 0 || (self.all && n.total > NEARBY_SHOWN) {
-            v.push((Block::More, 42.0 * s));
-        }
+        v.push((Block::Scan, self.scan_height(g, w, s)));
         v.push((Block::AdvancedToggle, 46.0 * s));
         if self.advanced {
             v.push((Block::Advanced, self.advanced_height(g, w, s)));
@@ -880,16 +1154,11 @@ impl BtPage {
     /// The focus index a block stands for.
     fn block_focus(&self, b: &Block, list: &[Focus]) -> Option<usize> {
         let paired = self.model.paired_rows();
-        let n = self.model.nearby(&self.search.value, self.all);
+        let _ = paired;
         match b {
             Block::Switch => Some(0),
             Block::Paired(i) => Some(1 + i),
-            Block::Nearby(i) => Some(1 + paired.len() + i),
-            Block::Region => {
-                let at = list.iter().position(|f| matches!(f, Focus::Nearby(_)));
-                at.map(|a| if self.sel >= a && self.sel < a + n.rows.len() { self.sel } else { a })
-            }
-            Block::More => list.iter().position(|f| *f == Focus::More),
+            Block::Scan => list.iter().position(|f| *f == Focus::Scan),
             Block::AdvancedToggle => list.iter().position(|f| *f == Focus::Advanced),
             _ => None,
         }
@@ -946,12 +1215,22 @@ impl BtPage {
     }
 
     fn scan_height(&self, g: &mut Gfx, w: f32, s: f32) -> f32 {
-        let _ = (g, w);
-        let mut h = 44.0 * s;
-        if self.model.scan_error().is_some() {
-            h += 20.0 * s;
+        let tw = self.scan_text_w(g, w, s);
+        let lines = g.wrap(13.0 * s, &self.scan_text(), Face::Sans, tw).len().min(3) as f32;
+        (lines * 17.0 * s + 22.0 * s).max(56.0 * s)
+    }
+
+    fn scan_text(&self) -> String {
+        if self.model.view.switch == Switch::On {
+            "Look for keyboards, mice, game pads and phones to pair. The list opens in a popup.".to_string()
+        } else {
+            "Turn Bluetooth on to look for devices.".to_string()
         }
-        h
+    }
+
+    fn scan_text_w(&self, g: &mut Gfx, w: f32, s: f32) -> f32 {
+        let bw = if self.model.view.switch == Switch::On { g.text_width(14.0 * s, "Scan", Face::Bold) + 14.0 * s * 1.7 } else { 0.0 };
+        (w - 36.0 * s - bw - 12.0 * s).max(60.0)
     }
 
     fn advanced_height(&self, _g: &mut Gfx, _w: f32, s: f32) -> f32 {
@@ -969,7 +1248,7 @@ impl BtPage {
                 fx::section_title(g, r.x, r.y, r.w, s, t, fx::CYAN);
             }
             Block::NoPaired => {
-                let t = if self.model.view.switch == Switch::On { "Nothing is paired yet. Put a keyboard, mouse or phone in pairing mode and choose it under Nearby devices." } else { "Nothing is paired yet." };
+                let t = if self.model.view.switch == Switch::On { "Nothing is paired yet. Put a keyboard, mouse or phone in pairing mode and choose Scan, then Pair next to it." } else { "Nothing is paired yet." };
                 for (i, l) in g.wrap(13.0 * s, t, Face::Sans, r.w - 8.0 * s).into_iter().take(2).enumerate() {
                     g.text(r.x + 4.0 * s, r.y + 4.0 * s + i as f32 * 17.0 * s, 13.0 * s, DIM, &l, Face::Sans);
                 }
@@ -981,58 +1260,7 @@ impl BtPage {
                 }
             }
             Block::AudioCard => self.draw_audio(g, r, s),
-            Block::Scan => self.draw_scan(g, r, s),
-            Block::Search => {
-                let focused = self.search_focus;
-                self.search.render(g, R::new(r.x, r.y, r.w, 36.0 * s), focused, s, (self.ticks / 15) % 2 == 0, Face::Sans, SEARCH_ID);
-            }
-            Block::NearbyEmpty => {
-                let t = match (self.model.scanning(), self.model.scan_error(), self.model.has_scanned(), self.search.value.is_empty()) {
-                    (ScanView::Running(_), ..) => "Looking for devices. Keyboards, mice, game pads and phones appear here.".to_string(),
-                    (_, Some(e), ..) => e.to_string(),
-                    (_, None, _, false) => "No device matches the search.".to_string(),
-                    (_, None, true, _) => "No other device was found. Put the device in pairing mode and scan again.".to_string(),
-                    _ => if self.model.view.switch == Switch::On { "Choose Scan to look for devices nearby.".to_string() } else { "Turn Bluetooth on to look for devices.".to_string() },
-                };
-                for (i, l) in g.wrap(13.0 * s, &t, Face::Sans, r.w - 8.0 * s).into_iter().take(2).enumerate() {
-                    g.text(r.x + 4.0 * s, r.y + 4.0 * s + i as f32 * 17.0 * s, 13.0 * s, DIM, &l, Face::Sans);
-                }
-            }
-            Block::Nearby(i) => {
-                let n = self.model.nearby(&self.search.value, self.all);
-                if let Some(row) = n.rows.get(*i) {
-                    let fi = list.iter().position(|f| *f == Focus::Nearby(row.address.clone())).unwrap_or(0);
-                    self.draw_nearby(g, r, s, row, fi);
-                }
-            }
-            Block::Region => {
-                self.region = r;
-                let n = self.model.nearby(&self.search.value, true);
-                let at = list.iter().position(|f| matches!(f, Focus::Nearby(_))).unwrap_or(0);
-                let rowh = 58.0 * s;
-                let fit = (r.h / rowh).floor().max(1.0) as usize;
-                // keep the chosen row inside the window
-                if self.sel >= at && self.sel < at + n.rows.len() {
-                    let i = self.sel - at;
-                    if i < self.region_first {
-                        self.region_first = i;
-                    } else if i >= self.region_first + fit {
-                        self.region_first = i + 1 - fit;
-                    }
-                }
-                self.region_first = self.region_first.min(n.rows.len().saturating_sub(fit));
-                for (k, row) in n.rows.iter().enumerate().skip(self.region_first).take(fit) {
-                    let rr = R::new(r.x, r.y + (k - self.region_first) as f32 * rowh, r.w - 12.0 * s, rowh - 4.0 * s);
-                    self.draw_nearby(g, rr, s, row, at + k);
-                }
-                fx::scrollbar(g, R::new(r.x + r.w - 8.0 * s, r.y, 8.0 * s, r.h), s, self.region_first, fit, n.rows.len(), ACCENT);
-            }
-            Block::More => {
-                let n = self.model.nearby(&self.search.value, false);
-                let t = if self.all { "Show fewer devices".to_string() } else { format!("Show {} more device{}", n.more, if n.more == 1 { "" } else { "s" }) };
-                let fi = list.iter().position(|f| *f == Focus::More).unwrap_or(0);
-                self.draw_simple_row(g, r, s, &t, if self.all { "Back to the best matches." } else { "Devices without a name or a useful type, and the rest. You can search them." }, fi, Event::Sub(SUB_MORE, Key::Enter));
-            }
+            Block::Scan => self.draw_scan(g, r, s, list),
             Block::AdvancedToggle => {
                 let fi = list.iter().position(|f| *f == Focus::Advanced).unwrap_or(0);
                 let t = if self.advanced { "Advanced (open)" } else { "Advanced" };
@@ -1108,34 +1336,21 @@ impl BtPage {
         g.button(r.x + r.w - bw - 12.0 * s, r.y + (r.h - size * 2.1) / 2.0, size, button, ACCENT, Event::Sub(SUB_AUDIO, Key::Enter));
     }
 
-    fn draw_scan(&mut self, g: &mut Gfx, r: R, s: f32) {
-        let running = self.model.scanning();
+    /// The page's Scan row: what it does, and the button that opens the scan popup.
+    fn draw_scan(&mut self, g: &mut Gfx, r: R, s: f32, list: &[Focus]) {
         let can = self.model.view.switch == Switch::On;
-        let line = match &running {
-            ScanView::Running(secs) => format!("Scanning... {secs} s"),
-            ScanView::Idle if !can => String::new(),
-            ScanView::Idle => "Scanning stops by itself after 15 seconds.".to_string(),
-        };
-        let size = 14.0 * s;
-        if matches!(running, ScanView::Running(_)) {
-            // a moving dot: something is happening
-            let pulse = ((self.ticks / 6) % 3) as f32;
-            for k in 0..3 {
-                g.circle(r.x + 8.0 * s + k as f32 * 12.0 * s, r.y + 14.0 * s, 3.0 * s + if k as f32 == pulse { 2.0 * s } else { 0.0 }, ACCENT);
-            }
+        let fi = list.iter().position(|f| *f == Focus::Scan);
+        let hot = g.hovered(r);
+        fx::row_at(g, r.x, r.y, r.w, r.h, 12.0 * s, fi == Some(self.sel), hot, ACCENT);
+        let tw = self.scan_text_w(g, r.w, s);
+        for (i, l) in g.wrap(13.0 * s, &self.scan_text(), Face::Sans, tw).into_iter().take(3).enumerate() {
+            g.text(r.x + 18.0 * s, r.y + 10.0 * s + i as f32 * 17.0 * s, 13.0 * s, if can { MUTED } else { DIM }, &l, Face::Sans);
         }
-        let tx = r.x + if matches!(running, ScanView::Running(_)) { 46.0 * s } else { 4.0 * s };
-        let label = if matches!(running, ScanView::Running(_)) { "Stop" } else { "Scan" };
-        let bw = g.text_width(size, label, Face::Bold) + size * 1.7;
-        let t = g.fit(14.0 * s, &line, if matches!(running, ScanView::Running(_)) { Face::Bold } else { Face::Sans }, (r.w - bw - 20.0 * s - (tx - r.x)).max(40.0));
-        g.text(tx, r.y + 6.0 * s, 14.0 * s, if matches!(running, ScanView::Running(_)) { TEXT } else { DIM }, &t, Face::Sans);
-        if can || matches!(running, ScanView::Running(_)) {
-            let acc = if matches!(running, ScanView::Running(_)) { MUTED } else { ACCENT };
-            g.button_touch(r.x + r.w - bw - 4.0 * s, r.y + 1.0 * s, size, label, acc, Event::Sub(SUB_SCAN, Key::Enter), 40.0 * s);
-        }
-        if let Some(e) = self.model.scan_error() {
-            let e = g.fit(12.0 * s, e, Face::Sans, r.w - 8.0 * s);
-            g.text(r.x + 4.0 * s, r.y + 40.0 * s, 12.0 * s, WARN, &e, Face::Sans);
+        if can {
+            g.hit(r, Event::Sub(SUB_SCAN, Key::Enter), "Scan for devices");
+            let size = 14.0 * s;
+            let bw = g.text_width(size, "Scan", Face::Bold) + size * 1.7;
+            g.button_touch(r.x + r.w - bw - 12.0 * s, r.y + (r.h - size * 2.1) / 2.0, size, "Scan", ACCENT, Event::Sub(SUB_SCAN, Key::Enter), 40.0 * s);
         }
     }
 
@@ -1188,9 +1403,9 @@ impl BtPage {
         }
     }
 
-    fn draw_nearby(&mut self, g: &mut Gfx, r: R, s: f32, row: &NearbyRow, fi: usize) {
+    fn draw_nearby(&mut self, g: &mut Gfx, r: R, s: f32, row: &NearbyRow, fi: usize, chosen: bool) {
         let hot = g.hovered(r);
-        fx::row_at(g, r.x, r.y, r.w, r.h, 12.0 * s, fi == self.sel, hot, ACCENT);
+        fx::row_at(g, r.x, r.y, r.w, r.h, 12.0 * s, chosen, hot, ACCENT);
         if fi < MAX_ROW_CODE {
             g.hit(r, Event::Sub(fi as u8, Key::Enter), &format!("{}, {}", row.name, if row.pairable { "pair" } else { "not supported" }));
         }

@@ -601,6 +601,9 @@ impl BtModel {
     pub fn scanning(&self) -> ScanView {
         match &*self.scan.lock().unwrap_or_else(|e| e.into_inner()) {
             ScanSlot::Running(from) => ScanView::Running(self.tick.saturating_sub(*from) / TICKS_PER_SEC),
+            // the scan thread has finished but the next tick has not taken its result into the list yet: still "scanning", so the
+            // page never shows a finished scan with no devices for a frame (and nobody reads the list before the result is in it)
+            ScanSlot::Done(_) => ScanView::Running(SCAN_SECS),
             _ => ScanView::Idle,
         }
     }
@@ -777,6 +780,11 @@ impl BtModel {
         });
         self.say(format!("bluetooth hci{index} scan"));
         Ok("Scanning for devices ...".into())
+    }
+
+    /// Forgets the devices of the last scan (the names seen before are kept for the next one).
+    pub fn clear_nearby(&mut self) {
+        self.found.clear();
     }
 
     pub fn stop_scan(&mut self) {

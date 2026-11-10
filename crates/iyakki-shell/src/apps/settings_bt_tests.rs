@@ -322,9 +322,9 @@ fn app(tag: &str) -> (SettingsApp, AppCx, Arc<Fake>) {
 fn wait_scan(a: &mut SettingsApp, cx: &AppCx) {
     // the page looks idle until the scan thread has started: first give a scan that was just asked for time to begin (or to end
     // already: an error or devices on the page), then wait for the end
-    for _ in 0..200 {
+    for _ in 0..600 {
         tick(a, cx, 1);
-        if a.bt.model.scanning() != crate::btmodel::ScanView::Idle || a.bt.model.scan_error().is_some() {
+        if a.bt.model.scanning() != crate::btmodel::ScanView::Idle || a.bt.model.has_scanned() {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -648,14 +648,13 @@ fn advanced_holds_the_separate_radio_and_controller_switches_and_look_again() {
 #[test]
 fn paired_devices_come_first_with_a_chip_and_their_own_buttons_without_any_selected_row() {
     let (mut a, cx, ctl) = app_with("pd", Fake { devs: Mutex::new(vec![keyboard(), phone()]), scan: Mutex::new(crowd()), ..Fake::new() });
-    key(&mut a, &cx, Key::Char('s'));
-    wait_scan(&mut a, &cx);
     let g = draw(&mut a, &cx, 1280, 1000);
     let l = labels(&g);
     let kb = l.iter().position(|x| x == "K380, Not connected").expect("the keyboard row with its chip");
     let ph = l.iter().position(|x| x == "Pixel, Not connected").expect("the phone row");
-    let first_nearby = l.iter().position(|x| x.ends_with(", pair")).expect("nearby rows");
-    assert!(kb < ph && ph < first_nearby, "paired devices first: {l:?}");
+    let scan = l.iter().position(|x| x == "Scan").expect("the Scan button");
+    assert!(kb < ph && ph < scan, "paired devices first, then Scan: {l:?}");
+    assert!(!l.iter().any(|x| x.ends_with(", pair")), "no scan list on the page itself: {l:?}");
     for b in ["Connect", "Forget", "Tether", "Audio"] {
         assert!(l.iter().any(|x| x == b), "{b}");
     }
@@ -932,11 +931,17 @@ fn nearby_is_short_sorted_and_hides_nameless_devices_behind_show_more() {
     assert_eq!(&names[5..], ["Buds", "Living room TV", "Speaker"]);
     assert!(n.rows.iter().all(|r| r.named));
     let g = draw(&mut a, &cx, 1280, 1300);
-    assert_eq!(nearby_labels(&g).len(), 8);
+    assert_eq!(nearby_labels(&g).len(), 5, "the popup list is short (it scrolls)");
     assert!(g.hits.iter().any(|h| h.label == "Show 14 more devices"));
+    // the rest of the 8 are one scroll away
+    for _ in 0..7 {
+        key(&mut a, &cx, Key::Down);
+    }
+    let g = draw(&mut a, &cx, 1280, 1300);
+    assert!(g.hits.iter().any(|h| h.label == "Buds, not supported"), "{:?}", labels(&g));
     // a headphone is shown but honest: it cannot be paired here
     assert!(g.hits.iter().any(|h| h.label == "Buds, not supported"));
-    assert!(g.hits.iter().any(|h| h.label == "Pixel 8, pair"));
+    key(&mut a, &cx, Key::Esc);
 }
 
 #[test]
@@ -949,10 +954,8 @@ fn show_more_search_and_the_scroll_area_reach_every_device() {
     let g = draw(&mut a, &cx, 1280, 1300);
     assert!(g.hits.iter().any(|h| h.label == "Show fewer devices"));
     let seen: Vec<String> = nearby_labels(&g);
-    assert_eq!(seen.len(), 8, "the scroll area shows 8 rows at a time: {seen:?}");
-    // the wheel over the area scrolls it
-    let region = g.hits.iter().find(|h| h.label == "Keyboard K2, pair").unwrap().rect;
-    a.handle(&Event::MouseMove(region.x as i32 + 20, region.y as i32 + 10), &cx);
+    assert_eq!(seen.len(), 5, "the popup shows 5 rows at a time: {seen:?}");
+    // the wheel scrolls the list
     for _ in 0..30 {
         a.handle(&Event::Scroll(-1), &cx);
     }
@@ -973,6 +976,9 @@ fn show_more_search_and_the_scroll_area_reach_every_device() {
     // Esc clears the search and leaves the field
     key(&mut a, &cx, Key::Esc);
     assert_eq!(a.bt.search_text(), "");
+    // the next Esc closes the popup
+    key(&mut a, &cx, Key::Esc);
+    assert!(!a.bt.has_dialog());
 }
 
 #[test]
@@ -996,18 +1002,20 @@ fn the_scan_shows_progress_stops_with_the_button_and_asks_the_controller_for_fif
     let (mut a, cx, ctl) = app_with("sc", Fake { scan_blocks: true, scan: Mutex::new(vec![found("K", "30:00:00:00:00:02", -50, Kind::Keyboard)]), ..Fake::new() });
     let g = draw(&mut a, &cx, 1280, 900);
     click(&mut a, &cx, &g, "Scan");
+    assert!(a.bt.has_dialog(), "the popup opens at once");
     assert!(matches!(a.bt.model.scanning(), crate::btmodel::ScanView::Running(0)));
     // seconds count on the page
     tick(&mut a, &cx, 190);
     assert!(matches!(a.bt.model.scanning(), crate::btmodel::ScanView::Running(6)), "{:?}", a.bt.model.scanning());
     let g = draw(&mut a, &cx, 1280, 900);
-    assert!(g.hits.iter().any(|h| h.label == "Stop") && !g.hits.iter().any(|h| h.label == "Scan"), "{:?}", labels(&g));
+    assert!(g.hits.iter().any(|h| h.label == "Stop") && !g.hits.iter().any(|h| h.label == "Scan again"), "{:?}", labels(&g));
     click(&mut a, &cx, &g, "Stop");
     wait_scan(&mut a, &cx);
     assert!(ctl.calls().contains(&"scan stopped".to_string()) && ctl.calls().contains(&"scan 0 15".to_string()), "{:?}", ctl.calls());
     let g = draw(&mut a, &cx, 1280, 900);
-    assert!(g.hits.iter().any(|h| h.label == "Scan"));
+    assert!(g.hits.iter().any(|h| h.label == "Scan again"), "{:?}", labels(&g));
     assert_eq!(a.bt.model.nearby("", false).rows.len(), 1, "what it found is listed");
+    assert!(g.hits.iter().any(|h| h.label == "K, pair"), "{:?}", labels(&g));
 }
 
 #[test]
@@ -1025,8 +1033,10 @@ fn a_scan_offers_pairing_for_classic_and_low_energy_input_devices_and_says_why_f
     // choosing one that cannot be paired explains and opens nothing
     let g = draw(&mut a, &cx, 1280, 900);
     click(&mut a, &cx, &g, "Buds, not supported");
-    assert!(status(&a).contains("cannot send sound"), "{}", status(&a));
-    assert!(!a.bt.has_dialog());
+    let g = draw(&mut a, &cx, 1280, 900);
+    assert!(labels(&g).iter().any(|l| l == "Close"), "the scan popup stays open");
+    assert!(a.bt.popup_message().contains("cannot send sound"), "{}", a.bt.popup_message());
+    assert_eq!(a.bt.pairing_name(), None, "no pairing popup");
 }
 
 // ---------------------------------------------------------------------------------------------- the pairing popup
@@ -1203,15 +1213,40 @@ fn an_incoming_request_opens_the_popup_on_the_page_and_the_shell_can_name_it_els
 #[test]
 fn the_page_draws_inside_the_window_at_four_sizes_and_the_largest_text_with_nothing_overlapping() {
     let cx = admin("lay");
-    let buttons = ["Connect", "Disconnect", "Forget", "Tether", "Audio", "Pair", "Scan", "Stop", "Let a phone pair", "Turn off", "Power off", "Look again"];
+    let buttons = ["Connect", "Disconnect", "Forget", "Tether", "Audio", "Pair", "Scan", "Stop", "Scan again", "Try again", "Close", "Show 14 more devices", "Let a phone pair", "Turn off", "Power off", "Look again"];
     for (w, h) in [(360u32, 740u32), (800, 480), (1280, 720), (1920, 1080)] {
         for big in [1.0f32, 2.0] {
             let ctl = Arc::new(Fake { devs: Mutex::new(vec![keyboard(), phone()]), scan: Mutex::new(crowd()), ..Fake::new() });
             let mut a = SettingsApp::new(&cx).with_hardware(env(&format!("lay-{w}-{big}"), ctl, "HP Laptop", Some((false, false)), false));
             a.go_to(Tab::Bluetooth);
             tick(&mut a, &cx, 3);
+            // the scan popup first, with the whole crowd, inside the window
             key(&mut a, &cx, Key::Char('s'));
             wait_scan(&mut a, &cx);
+            for step in 0..4 {
+                let g = draw_big(&mut a, &cx, w, h, big);
+                for hit in g.hits.iter().filter(|x| x.rect.w > 0.0) {
+                    let r = hit.rect;
+                    assert!(r.x >= -0.5 && r.y >= -0.5 && r.x + r.w <= w as f32 + 0.5 && r.y + r.h <= h as f32 + 0.5, "popup {w}x{h} x{big} step {step}: {:?} {:?}", hit.label, r);
+                }
+                let b: Vec<&crate::ui::Hit> = g.hits.iter().filter(|x| buttons.contains(&x.label.as_str()) && x.rect.w > 0.0).collect();
+                for (i, p) in b.iter().enumerate() {
+                    for q in &b[i + 1..] {
+                        let (r1, r2) = (p.rect, q.rect);
+                        let overlap = r1.x < r2.x + r2.w - 1.0 && r2.x < r1.x + r1.w - 1.0 && r1.y < r2.y + r2.h - 1.0 && r2.y < r1.y + r1.h - 1.0;
+                        assert!(!overlap, "popup {w}x{h} x{big} step {step}: {:?} {:?} overlaps {:?} {:?}", p.label, r1, q.label, r2);
+                    }
+                }
+                assert!(g.hits.iter().any(|x| x.label == "Close") && g.hits.iter().any(|x| x.label == "Scan again"), "popup {w}x{h} x{big}: {:?}", labels(&g));
+                if step == 1 {
+                    // more devices: the list scrolls inside the popup
+                    let g2 = draw_big(&mut a, &cx, w, h, big);
+                    click(&mut a, &cx, &g2, "Show 14 more devices");
+                }
+                key(&mut a, &cx, Key::Down);
+            }
+            key(&mut a, &cx, Key::Esc);
+            assert!(!a.bt.has_dialog());
             key(&mut a, &cx, Key::Char('a'));
             for step in 0..14 {
                 let g = draw_big(&mut a, &cx, w, h, big);
@@ -1275,13 +1310,11 @@ fn the_popup_fits_the_smallest_window_and_the_largest_text() {
 #[test]
 fn every_control_of_the_page_is_reachable_by_the_keyboard_walk_and_named() {
     let (mut a, cx, _) = app_with("kw", Fake { devs: Mutex::new(vec![keyboard(), phone()]), scan: Mutex::new(crowd()), ..Fake::new() });
-    key(&mut a, &cx, Key::Char('s'));
-    wait_scan(&mut a, &cx);
     key(&mut a, &cx, Key::Char('a'));
     let g = draw(&mut a, &cx, 1280, 1500);
     let walk = crate::access::entries(&g.hits, (1280.0, 1500.0));
     let names: Vec<String> = walk.iter().map(|e| e.node.name.clone()).collect();
-    for b in ["Bluetooth", "Connect", "Forget", "Tether", "Audio", "Scan", "Advanced", "Look again", "Turn off", "Power off", "Show 14 more devices", "Pixel 8, pair", "Let a phone pair"] {
+    for b in ["Bluetooth", "Connect", "Forget", "Tether", "Audio", "Scan", "Advanced", "Look again", "Turn off", "Power off", "Let a phone pair"] {
         assert!(names.iter().any(|n| n.starts_with(b)), "{b} is in the walk: {names:?}");
     }
     assert!(walk.iter().all(|e| !e.node.name.trim().is_empty()), "every control has a name");
@@ -1557,6 +1590,207 @@ fn the_typing_stages_fit_the_smallest_window_and_the_largest_text_and_work_by_ke
                 let want = if matches!(start, PairState::TypePasskey(_)) { "123456" } else { "1234556" };
                 assert_eq!(typed, Some(Some(want.to_string())), "{w}x{h} x{big}");
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------- the scan popup
+
+fn scan_popup(tag: &str, f: Fake) -> (SettingsApp, AppCx, Arc<Fake>) {
+    let (mut a, cx, ctl) = app_with(tag, f);
+    key(&mut a, &cx, Key::Char('s'));
+    (a, cx, ctl)
+}
+
+#[test]
+fn scan_opens_a_popup_at_once_says_scanning_and_esc_stops_it_and_the_page_keeps_its_rows() {
+    let (mut a, cx, ctl) = app_with("pp1", Fake { scan_blocks: true, devs: Mutex::new(vec![keyboard(), phone()]), scan: Mutex::new(crowd()), ..Fake::new() });
+    let g = draw(&mut a, &cx, 1280, 900);
+    click(&mut a, &cx, &g, "Scan");
+    // at once: the popup is open and the scan is running, nothing has been waited for
+    assert!(a.bt.scan_popup_open() && a.bt.has_dialog());
+    assert!(matches!(a.bt.model.scanning(), crate::btmodel::ScanView::Running(_)));
+    assert!(crate::access::take_announcements().join(" | ").contains("Scanning"));
+    let g = draw(&mut a, &cx, 1280, 900);
+    let l = labels(&g);
+    assert!(l.iter().any(|x| x == "Stop") && l.iter().any(|x| x == "Close"), "{l:?}");
+    assert!(!l.iter().any(|x| x == "Scan again"), "no Scan again while it runs: {l:?}");
+    assert!(!l.iter().any(|x| x == "Advanced" || x == "Tether"), "the page behind cannot be reached: {l:?}");
+    // Esc stops the scan and closes the popup; nothing is said on the page about the end
+    key(&mut a, &cx, Key::Esc);
+    assert!(!a.bt.scan_popup_open() && !a.bt.has_dialog());
+    wait_scan(&mut a, &cx);
+    assert!(ctl.calls().contains(&"scan stopped".to_string()), "{:?}", ctl.calls());
+    tick(&mut a, &cx, 3);
+    assert_eq!(status(&a), "");
+    // the page behind kept its paired devices, the switch card and the tether
+    let l = labels(&draw(&mut a, &cx, 1280, 900));
+    for want in ["K380, Not connected", "Pixel, Not connected", "Bluetooth", "Tether", "Scan"] {
+        assert!(l.iter().any(|x| x == want), "{want} in {l:?}");
+    }
+    // the Close button does the same
+    let g = draw(&mut a, &cx, 1280, 900);
+    click(&mut a, &cx, &g, "Scan");
+    let g = draw(&mut a, &cx, 1280, 900);
+    click(&mut a, &cx, &g, "Close");
+    assert!(!a.bt.scan_popup_open());
+    wait_scan(&mut a, &cx);
+}
+
+#[test]
+fn the_popup_list_is_named_first_strongest_first_short_and_each_row_has_a_pair_button() {
+    let (mut a, cx, _) = scan_popup("pp2", Fake { scan: Mutex::new(crowd()), ..Fake::new() });
+    wait_scan(&mut a, &cx);
+    let g = draw(&mut a, &cx, 1280, 900);
+    let rows = nearby_labels(&g);
+    assert_eq!(rows, ["Keyboard K2, pair", "Pixel 8, pair", "MX Anywhere, pair", "Pad X, pair", "Old keys, pair"], "short, named first, strongest first");
+    assert_eq!(g.hits.iter().filter(|h| h.label == "Pair").count(), 5, "a Pair button on each row");
+    assert!(g.hits.iter().any(|h| h.label == "Show 14 more devices"), "the rest is behind a button");
+}
+
+#[test]
+fn a_scan_error_is_shown_in_the_popup_with_try_again_and_the_retry_clears_it() {
+    let (mut a, cx, _) = scan_popup("pp3", Fake { scan_error: Mutex::new(Some("the scan did not work: busy".into())), scan: Mutex::new(vec![found("MX Anywhere", "10:00:00:00:00:02", -50, Kind::Mouse)]), ..Fake::new() });
+    wait_scan(&mut a, &cx);
+    assert!(a.bt.scan_popup_open(), "the popup stays open on an error");
+    assert!(crate::access::take_announcements().join(" | ").contains("busy"));
+    let g = draw(&mut a, &cx, 1280, 900);
+    let l = labels(&g);
+    assert!(l.iter().any(|x| x == "Try again") && l.iter().any(|x| x == "Close"), "{l:?}");
+    assert!(!l.iter().any(|x| x == "Scan again"));
+    assert_eq!(status(&a), "", "the error is in the popup, not on the page");
+    click(&mut a, &cx, &g, "Try again");
+    assert_eq!(a.bt.model.scan_error(), None, "the old error is gone at once");
+    wait_scan(&mut a, &cx);
+    let l = labels(&draw(&mut a, &cx, 1280, 900));
+    assert!(l.iter().any(|x| x == "MX Anywhere, pair") && l.iter().any(|x| x == "Scan again") && !l.iter().any(|x| x == "Try again"), "{l:?}");
+}
+
+#[test]
+fn scan_again_clears_the_old_list_starts_a_new_scan_and_works_by_s_or_enter_or_click() {
+    let (mut a, cx, ctl) = scan_popup("pp4", Fake { scan: Mutex::new(vec![found("Old mouse", "10:00:00:00:00:02", -50, Kind::Mouse)]), ..Fake::new() });
+    wait_scan(&mut a, &cx);
+    let l = labels(&draw(&mut a, &cx, 1280, 900));
+    assert!(l.iter().any(|x| x == "Old mouse, pair") && l.iter().any(|x| x == "Scan again"), "visible once the list is complete: {l:?}");
+    assert_eq!(ctl.count("scan 0"), 1);
+    // by click: the old rows are gone at once, a new scan runs, Scan again is hidden meanwhile
+    *ctl.scan.lock().unwrap() = vec![found("New keys", "10:00:00:00:00:03", -40, Kind::Keyboard)];
+    let g = draw(&mut a, &cx, 1280, 900);
+    click(&mut a, &cx, &g, "Scan again");
+    // (the fake scan ends within a moment, so only what cannot race is checked here: the old list is gone right away)
+    assert_eq!(a.bt.model.nearby("", true).total, 0, "the old list is cleared by the click itself");
+    wait_scan(&mut a, &cx);
+    let l = labels(&draw(&mut a, &cx, 1280, 900));
+    assert!(l.iter().any(|x| x == "New keys, pair") && !l.iter().any(|x| x == "Old mouse, pair"), "{l:?}");
+    assert_eq!(ctl.count("scan 0"), 2);
+    // by the key s
+    key(&mut a, &cx, Key::Char('s'));
+    wait_scan(&mut a, &cx);
+    assert_eq!(ctl.count("scan 0"), 3);
+    // by Enter on the button (Down from the last device)
+    key(&mut a, &cx, Key::Down);
+    key(&mut a, &cx, Key::Enter);
+    wait_scan(&mut a, &cx);
+    assert_eq!(ctl.count("scan 0"), 4);
+    assert!(a.bt.scan_popup_open(), "all in the same popup");
+    // while it runs s does not start a second scan
+    let (mut b, cx2, ctl2) = scan_popup("pp4b", Fake { scan_blocks: true, ..Fake::new() });
+    key(&mut b, &cx2, Key::Char('s'));
+    key(&mut b, &cx2, Key::Esc);
+    wait_scan(&mut b, &cx2);
+    assert_eq!(ctl2.count("scan 0"), 1);
+}
+
+#[test]
+fn an_old_error_and_old_rows_are_gone_after_scan_again() {
+    let (mut a, cx, ctl) = scan_popup("pp5", Fake { scan_error: Mutex::new(Some("the scan did not work: busy".into())), ..Fake::new() });
+    wait_scan(&mut a, &cx);
+    assert!(a.bt.model.scan_error().is_some());
+    // no rows: Enter is on the button at once
+    *ctl.scan.lock().unwrap() = vec![found("Pad", "10:00:00:00:00:09", -50, Kind::Gamepad)];
+    key(&mut a, &cx, Key::Enter);
+    assert_eq!(a.bt.model.scan_error(), None);
+    wait_scan(&mut a, &cx);
+    let l = labels(&draw(&mut a, &cx, 1280, 900));
+    assert!(l.iter().any(|x| x == "Pad, pair") && !l.iter().any(|x| x == "Try again"), "{l:?}");
+}
+
+#[test]
+fn pairing_from_the_popup_by_keyboard_replaces_it_with_the_pairing_popup_and_keeps_its_focus_trap() {
+    let (mut a, cx, ctl) = scan_popup("pp6", Fake { scan: Mutex::new(crowd()), pair_on_start: PairState::Confirm("Pixel 8".into(), 123456), ..Fake::new() });
+    wait_scan(&mut a, &cx);
+    // Down once: the second device (Pixel 8); Enter pairs it
+    key(&mut a, &cx, Key::Down);
+    key(&mut a, &cx, Key::Enter);
+    tick(&mut a, &cx, 2);
+    assert!(ctl.calls().iter().any(|c| c == "pair 10:00:00:00:00:04"), "{:?}", ctl.calls());
+    assert!(!a.bt.scan_popup_open(), "the scan popup is replaced");
+    assert_eq!(a.bt.pairing_name(), Some("Pixel 8"));
+    let l = labels(&draw(&mut a, &cx, 1280, 900));
+    assert!(l.iter().any(|x| x == "Yes") && l.iter().any(|x| x == "No"), "{l:?}");
+    assert!(!l.iter().any(|x| x == "Scan" || x == "Scan again" || x == "Advanced"), "the focus is trapped: {l:?}");
+    key(&mut a, &cx, Key::Esc);
+    assert!(!a.bt.has_dialog());
+}
+
+#[test]
+fn the_popup_works_by_keyboard_alone_with_names_for_the_screen_reader() {
+    let (mut a, cx, _) = app_with("pp7", Fake { scan: Mutex::new(crowd()), ..Fake::new() });
+    // the page: Scan is on the keyboard walk and Enter opens the popup
+    for _ in 0..10 {
+        let g = draw(&mut a, &cx, 1280, 900);
+        let _ = g;
+        if !a.bt.scan_popup_open() {
+            key(&mut a, &cx, Key::Down);
+        }
+        if a.bt.model.view.switch == Switch::On && a.bt.scan_popup_open() {
+            break;
+        }
+        // Enter only when the Scan row is chosen: the row before Advanced
+        if a.bt.scan_row_chosen() {
+            key(&mut a, &cx, Key::Enter);
+        }
+    }
+    assert!(a.bt.scan_popup_open(), "Enter on the Scan row opens the popup");
+    wait_scan(&mut a, &cx);
+    let g = draw(&mut a, &cx, 1280, 900);
+    let walk = crate::access::entries(&g.hits, (1280.0, 900.0));
+    let names: Vec<String> = walk.iter().map(|e| e.node.name.clone()).collect();
+    for want in ["Keyboard K2, pair", "Pair", "Scan again", "Close", "Show 14 more devices"] {
+        assert!(names.iter().any(|n| n == want), "{want} in the walk: {names:?}");
+    }
+    assert!(walk.iter().all(|e| !e.node.name.trim().is_empty()));
+    // Up and Down, then Esc: everything without the pointer
+    for _ in 0..3 {
+        key(&mut a, &cx, Key::Down);
+    }
+    key(&mut a, &cx, Key::Up);
+    key(&mut a, &cx, Key::Char('m'));
+    assert!(labels(&draw(&mut a, &cx, 1280, 900)).iter().any(|x| x == "Show fewer devices"));
+    key(&mut a, &cx, Key::Esc);
+    assert!(!a.bt.scan_popup_open());
+}
+
+#[test]
+fn the_popup_with_a_crowd_fits_the_smallest_window_and_the_largest_text_and_dev_state_can_find_pair() {
+    let cx = admin("pp8");
+    for (w, h) in [(360u32, 740u32), (800, 480), (1280, 720)] {
+        for big in [1.0f32, 2.0] {
+            let ctl = Arc::new(Fake { scan: Mutex::new(crowd()), ..Fake::new() });
+            let mut a = SettingsApp::new(&cx).with_hardware(env(&format!("pp8-{w}-{big}"), ctl, "HP Laptop", Some((false, false)), false));
+            a.go_to(Tab::Bluetooth);
+            tick(&mut a, &cx, 3);
+            key(&mut a, &cx, Key::Char('s'));
+            wait_scan(&mut a, &cx);
+            let g = draw_big(&mut a, &cx, w, h, big);
+            for l in ["Close", "Scan again", "Pair"] {
+                let hit = g.hits.iter().find(|x| x.label == l).unwrap_or_else(|| panic!("{w}x{h} x{big}: {l} in {:?}", labels(&g)));
+                let r = hit.rect;
+                assert!(r.x >= 0.0 && r.y >= 72.0 && r.x + r.w <= w as f32 && r.y + r.h <= h as f32, "{w}x{h} x{big}: {l} {r:?}");
+            }
+            // the first device is a plain "Pair" button beside its name row
+            assert!(g.hits.iter().any(|x| x.label == "Keyboard K2, pair"), "{:?}", labels(&g));
+            key(&mut a, &cx, Key::Esc);
         }
     }
 }
