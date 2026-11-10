@@ -167,6 +167,12 @@ impl Shell {
     /// How often the backend must redraw at least (ms): the desktop every 100 ms, the saver once a second (its own frames come
     /// earlier), nothing while the screen is off.
     pub fn redraw_interval_ms(&self) -> u64 {
+        // a paired computer is asking for the screen while the saver or the black screen covers it: draw soon, so the request wakes the
+        // display. (Found on the Mac mini 2018 after six idle hours: the black screen drew once a minute, and `dev state` gave up after ten
+        // seconds, so the wake in the render never ran in time.)
+        if self.saver.m.stage().covers() && self.dev_capture_asked() {
+            return 100;
+        }
         match self.saver.m.stage() {
             Stage::Awake | Stage::Dim if self.tick < self.live_until => self.live_every_ms,
             Stage::Awake | Stage::Dim => match &self.screen {

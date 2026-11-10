@@ -43,10 +43,14 @@ impl Shell {
     /// like the first input would. Without this the saver's own frames never go through the capture, so `iyakki dev state` and `dev screenshot`
     /// time out on any machine nobody has touched for the idle minutes (found on the Mac mini, 2026-11-09).
     pub(super) fn dev_wake_for_capture(&mut self) {
-        let asked = state::wanted(self.env.services.dir()) || self.env.services.screen.wanted(iyakki_agent::devmode::SCREEN_ANY);
-        if asked && self.screen_stage().covers() {
+        if self.dev_capture_asked() && self.screen_stage().covers() {
             self.saver_touch_wake();
         }
+    }
+
+    /// Is a paired computer asking for the state or a picture of the screen right now?
+    pub(super) fn dev_capture_asked(&self) -> bool {
+        state::wanted(self.env.services.dir()) || self.env.services.screen.wanted(iyakki_agent::devmode::SCREEN_ANY)
     }
 
     /// The lock screen was drawn: hand a computer that is asking the lock card and nothing else (state "Locked screen", the card's texts,

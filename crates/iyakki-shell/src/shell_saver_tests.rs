@@ -547,3 +547,31 @@ fn a_computer_asking_for_the_state_or_a_picture_ends_the_saver_instead_of_timing
     assert!(frame.w > 0 && frame.h > 0 && !frame.rgba.is_empty());
     assert_eq!(sh.screen_stage(), Stage::Awake);
 }
+
+#[test]
+fn a_computer_asking_for_the_screen_makes_the_black_screen_draw_soon_instead_of_once_a_minute() {
+    use iyakki_agent::devmode::state;
+    // the backend draws when the time since its last frame passes redraw_interval_ms(): 60 s with the screen off, so a request that
+    // arrived just after a frame waited up to a minute, and `iyakki dev state` gave up after ten seconds (found on the Mac mini)
+    let (mut sh, clock) = saver_shell("sv-dev-interval", cfg());
+    run(&mut sh, &clock, 11 * MIN);
+    assert_eq!(sh.screen_stage(), Stage::Off);
+    assert_eq!(sh.redraw_interval_ms(), 60_000, "nothing asks: the black screen stays quiet");
+    let dir = sh.env.services.dir().to_path_buf();
+    let _ = state::fetch(&dir, 0); // a computer asks for the state
+    assert!(sh.redraw_interval_ms() <= 200, "it draws soon: {}", sh.redraw_interval_ms());
+    // and for a picture, in the saver stage too
+    let (mut sh2, clock2) = saver_shell("sv-dev-interval2", cfg());
+    run(&mut sh2, &clock2, 6 * MIN);
+    assert!(sh2.screen_stage().covers());
+    assert!(sh2.redraw_interval_ms() >= 1000 || sh2.screen_stage() == Stage::Off);
+    let svc = sh2.env.services.clone();
+    svc.screen.set_present(true);
+    let asker = std::thread::spawn(move || svc.screen.request(iyakki_agent::devmode::SCREEN_ANY, std::time::Duration::from_secs(2)));
+    let t0 = std::time::Instant::now();
+    while sh2.redraw_interval_ms() > 200 && t0.elapsed() < std::time::Duration::from_secs(2) {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(sh2.redraw_interval_ms() <= 200, "a request for a picture makes it draw soon too");
+    let _ = asker.join();
+}
