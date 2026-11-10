@@ -86,7 +86,6 @@ mod voice_ui;
 pub mod lab;
 mod lab_pic;
 mod lab_ui;
-pub mod srepilot;
 pub mod story;
 pub mod system;
 pub mod calendar;

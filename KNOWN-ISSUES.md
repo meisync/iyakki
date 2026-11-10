@@ -204,7 +204,6 @@ other USB cameras, sound devices and drives. `docs/BOOT-TEST.md` is the guide an
 | system | 1366x768 | 1 | window: 2.54 · 2.51 (5 and 15 min) |
 | media | 360x740 | 1 | control: / search: kutt… |
 | media | 800x480 | 4 | window: Repeat off (l); window: / search: kutthu … |
-| srepilot | 360x740 | 1 | overlap: Whiteboard (W) |
 | inbox | 800x480 | 1 | control: show up here. |
 | tales | 800x480 | 8 | control: different name, funnier, another languag; overlap: Say it in words if you like: a 5-minute |
 | dash | 360x740 | 1 | overlap: Elasticsear… |

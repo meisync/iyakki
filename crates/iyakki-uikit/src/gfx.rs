@@ -58,7 +58,6 @@ pub enum Icon {
     Calendar,
     System,
     Media,
-    SrePilot,
     Ide,
     Bell,
     Data,
@@ -1238,39 +1237,6 @@ impl Gfx {
                     self.pm.fill_path(&h, &p, FillRule::Winding, id, None);
                 }
             }
-            Icon::SrePilot => {
-                // a radar: two rings, cross hairs, a sweep line and a blip (the pilot watching the site)
-                let (cx, cy, r) = (x0 + s * 0.5, y0 + s * 0.5, s * 0.40);
-                self.pm.stroke_path(&PathBuilder::from_circle(cx, cy, r).unwrap(), &p, &st, id, None);
-                self.pm.stroke_path(&PathBuilder::from_circle(cx, cy, r * 0.5).unwrap(), &p, &st, id, None);
-                let mut cross = PathBuilder::new();
-                for (dx, dy) in [(1.0f32, 0.0f32), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
-                    cross.move_to(cx + dx * r * 0.82, cy + dy * r * 0.82);
-                    cross.line_to(cx + dx * r * 1.18, cy + dy * r * 1.18);
-                }
-                if let Some(cp) = cross.finish() {
-                    self.pm.stroke_path(&cp, &p, &st, id, None);
-                }
-                let a = (-48.0f32).to_radians();
-                let mut sweep = PathBuilder::new();
-                sweep.move_to(cx, cy);
-                sweep.line_to(cx + r * a.cos(), cy + r * a.sin());
-                if let Some(sp) = sweep.finish() {
-                    self.pm.stroke_path(&sp, &p, &st, id, None);
-                }
-                let mut wedge = PathBuilder::new();
-                wedge.move_to(cx, cy);
-                for i in 0..=6 {
-                    let b = (-48.0 - 34.0 * i as f32 / 6.0).to_radians();
-                    wedge.line_to(cx + r * b.cos(), cy + r * b.sin());
-                }
-                wedge.close();
-                if let Some(wp) = wedge.finish() {
-                    self.pm.fill_path(&wp, &paint([c[0], c[1], c[2], (c[3] as f32 * 0.28) as u8]), FillRule::Winding, id, None);
-                }
-                self.circle(cx + r * 0.62, cy + r * 0.12, s * 0.07, c);
-                self.circle(cx - r * 0.2, cy + r * 0.45, s * 0.045, c);
-            }
             Icon::Ide => {
                 // a window with a sidebar and the code chevrons </>, and a small spark (the assistant) at its corner
                 if let Some(b) = rrect_path(x0 + s * 0.06, y0 + s * 0.14, s * 0.88, s * 0.7, s * 0.09) {
@@ -1788,7 +1754,7 @@ mod tests {
 
     #[test]
     fn every_icon_draws_something() {
-        for icon in [Icon::Chat, Icon::Rag, Icon::Mcp, Icon::Cli, Icon::Users, Icon::Settings, Icon::Clipboard, Icon::Mic, Icon::Speaker, Icon::Runs, Icon::Edit, Icon::Browser, Icon::Camera, Icon::Mesh, Icon::Radio, Icon::Scan, Icon::Skills, Icon::Usage, Icon::Calendar, Icon::System, Icon::Media, Icon::SrePilot, Icon::Ide, Icon::Data, Icon::Tales, Icon::Bell, Icon::Lock, Icon::Power, Icon::Logout, Icon::Store, Icon::Dash, Icon::Flows, Icon::Devices, Icon::Disks, Icon::Lab, Icon::Git, Icon::Doctor, Icon::Checkup, Icon::Learn, Icon::Volume(0), Icon::Volume(1), Icon::Volume(2), Icon::Volume(3), Icon::Volume(4), Icon::Home] {
+        for icon in [Icon::Chat, Icon::Rag, Icon::Mcp, Icon::Cli, Icon::Users, Icon::Settings, Icon::Clipboard, Icon::Mic, Icon::Speaker, Icon::Runs, Icon::Edit, Icon::Browser, Icon::Camera, Icon::Mesh, Icon::Radio, Icon::Scan, Icon::Skills, Icon::Usage, Icon::Calendar, Icon::System, Icon::Media, Icon::Ide, Icon::Data, Icon::Tales, Icon::Bell, Icon::Lock, Icon::Power, Icon::Logout, Icon::Store, Icon::Dash, Icon::Flows, Icon::Devices, Icon::Disks, Icon::Lab, Icon::Git, Icon::Doctor, Icon::Checkup, Icon::Learn, Icon::Volume(0), Icon::Volume(1), Icon::Volume(2), Icon::Volume(3), Icon::Volume(4), Icon::Home] {
             let mut g = Gfx::new(96, 96);
             g.clear(rgb(0, 0, 0));
             g.icon(icon, 48.0, 48.0, 80.0, rgb(255, 255, 255));

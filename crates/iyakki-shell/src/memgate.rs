@@ -59,7 +59,7 @@ impl AppClass {
 pub fn class_of(app: PApp) -> AppClass {
     match app {
         PApp::Browser | PApp::Ide | PApp::Camera | PApp::Data | PApp::Dash | PApp::Flows | PApp::Media | PApp::Voice | PApp::LinuxWin | PApp::Lab => AppClass::Heavy,
-        PApp::Checkup | PApp::Chat | PApp::Rag | PApp::Edit | PApp::Mcp | PApp::Cli | PApp::Store | PApp::Skills | PApp::SrePilot | PApp::Tales | PApp::Scan | PApp::Mesh | PApp::Runs | PApp::System | PApp::Usage | PApp::Calendar | PApp::Remote | PApp::Cameras | PApp::Pdf => AppClass::Medium,
+        PApp::Checkup | PApp::Chat | PApp::Rag | PApp::Edit | PApp::Mcp | PApp::Cli | PApp::Store | PApp::Skills | PApp::Tales | PApp::Scan | PApp::Mesh | PApp::Runs | PApp::System | PApp::Usage | PApp::Calendar | PApp::Remote | PApp::Cameras | PApp::Pdf => AppClass::Medium,
         PApp::Users | PApp::Settings | PApp::Inbox | PApp::Radio | PApp::K8s | PApp::Disks | PApp::Git | PApp::Doctor | PApp::Learn | PApp::DevTools | PApp::Auth => AppClass::Light,
     }
 }

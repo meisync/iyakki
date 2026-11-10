@@ -105,7 +105,6 @@ Sizes are lines of the main file (plus helpers where noted). "Services" are `Ser
 | USAGE | `usage.rs` 394 | totals | table | `usage`, `settings` | none |
 | SYSTEM | `system.rs` 880 | load, agents, hardware | gauges | `runs`; direct `sysinfo`, `iyakki_hwinfo`; 28 fs/process uses | none |
 | CALENDAR | `calendar.rs` 790 | month/day view, forms | grid | `calendar` | none |
-| SRE PILOT | `srepilot.rs` 1658 | demo data only | dashboards | none (DEMO ribbon) | none |
 | AI IDE | `ide.rs` 2294, `ide_bottom.rs` 816, `ide_k8s.rs` 1094, `ide_deploy.rs` 457, `ide_tree.rs` 506, `ide_ui.rs` 625, `ide_layout.rs` 330, `ide_chrome.rs`, `board.rs` 1990, `ide_tests.rs` 1868 | workspaces registry (`Registry`), per-workspace `Ws {editor: EditApp, chat: ChatApp, board, k8s: Option<K8sView>, bottom tabs, prefs, layout}`, density, modal | 3-pane layout, dividers, tabs; routes events to children | `dir`; direct `workspace`, `k8stools`, `devcluster`, `featureboard`, `boardtools`, `wsexec`, `cluster`, `k8s` | **Embeds** chat, editor (as full `App`s), board, K8s view, deploy view, bottom terminal/log tabs |
 | INBOX | `inbox.rs` 1314 | notifications, tasks, approvals, secret prompts | list/detail | 11 `services` fields (`inbox`, `approvals`, `decide_approval`, `answer_secret_request`, `browser`, `calendar`, `runs`...) | Opens other apps through `take_request` |
 | (support) | `devices.rs` 652, `widgets.rs` 612, `controls.rs`, `neon.rs` | USB/devices view (used by SETTINGS/SYSTEM), shared widgets | | | |
@@ -340,7 +339,7 @@ Tests: registry round-trip (schema defaults, validation errors); slot id remap/d
 
 **B5. `component_open` tool (3 d, M).** Tool in `iyakki-agent` (`componenttools.rs`), queue in `Services` (or its replacement), consent card in `chat.rs`/`inbox.rs`, audit. Tests: schema validation errors reach the model as tool results; consent denied = nothing opened; auto-approval only for read-only kinds; scope violation refused; prompt-injection test (page text cannot trigger `component_open` for a different host).
 
-**B6. Convert the remaining tiles, one per change (~1 d each).** Order by "likely to be embedded" and by smallness: RUNS, USAGE, CALENDAR, RAG, SKILLS, MCP, RADIO, INBOX (list), SYSTEM, NET SCAN, MESH, USERS, SETTINGS (last: 3.7k lines, never embedded), SRE PILOT (demo). Each conversion is `impl Component` plus one registry line plus removing its row from `TILES` and its arm from `Shell::open`.
+**B6. Convert the remaining tiles, one per change (~1 d each).** Order by "likely to be embedded" and by smallness: RUNS, USAGE, CALENDAR, RAG, SKILLS, MCP, RADIO, INBOX (list), SYSTEM, NET SCAN, MESH, USERS, SETTINGS (last: 3.7k lines, never embedded). Each conversion is `impl Component` plus one registry line plus removing its row from `TILES` and its arm from `Shell::open`.
 
 Stop criteria: after B3 the IDE needs no knowledge of concrete child types; after B6 `Shell::open` and `TILES` are generated from the registry and `PApp` stays only as the permission id.
 

@@ -138,7 +138,7 @@ entry; Esc goes back a page and closes; a click outside closes.
 ## The launcher
 
 Tiles are sorted into built-in groups shown as tabs at the top: **Ask & Create** (CHAT, RAG, SKILLS, CALENDAR, TALES, VOICE, LAB),
-**Build** (AI IDE, GIT, FLOWS, K8S, EDIT, CLI, MCP, RUNS, SRE PILOT), **Media** (BROWSER, RADIO, MEDIA, CAMERA), **Data** (DATA, DASH, USAGE)
+**Build** (AI IDE, GIT, FLOWS, K8S, EDIT, CLI, MCP, RUNS), **Media** (BROWSER, RADIO, MEDIA, CAMERA), **Data** (DATA, DASH, USAGE)
 and **Devices & System** (SYSTEM, DISKS, NET SCAN, MESH, USERS, STORE, LINUX WINDOW), plus the groups you make yourself. A tile you install later
 (a custom tile app from developer mode, a Store app) appears in the group **Apps** at once, without a restart, unless its app.json names another group or you
 moved it; the Apps tab shows only once it holds something. Nothing disappears: a tile whose group you deleted goes back to its own group.
@@ -150,8 +150,7 @@ per notch, press and hold it (or press and drag up and down) for a slider, or pr
 To put the tiles back in the groups above use *Reset to default layout* (right-click a tab or a tile, or Settings, Home layout); your own groups stay.
 Arrow keys choose, Enter opens, **Tab / Shift+Tab** (or clicking a tab) switches section (your last section is remembered),
 **PageUp/PageDown**, the wheel or the dots turn the page when a section has more tiles than fit. **1-9** open the Nth tile of the fixed tile table
-(the order of the sections as shipped: CHAT, RAG, MCP, CLI, ...), whichever group a tile has been moved to. A tile with a DEMO ribbon (SRE PILOT)
-shows sample data only. Tiles your role may not use are locked: a message names your role.
+(the order of the sections as shipped: CHAT, RAG, MCP, CLI, ...), whichever group a tile has been moved to. Tiles your role may not use are locked: a message names your role.
 
 ### Moving tiles and making groups
 
@@ -620,10 +619,6 @@ defaults and the DNS-name caveat: [`FIREWALL.md`](FIREWALL.md).
 ### USERS (administrators)
 Accounts, roles and per-user limits. See the next section and [`ADMIN-GUIDE.md`](ADMIN-GUIDE.md#accounts-roles-and-policy).
 
-### SRE PILOT (demo)
-An animated picture of a site-reliability assistant with sample data; nothing is connected to a real system. Click a part,
-`Space` pauses, `1 2 3` speed, `W` whiteboard photo. "Click To Schedule a Demo" is a dummy button.
-
 ### AI IDE
 One workspace (folder) per product with editor tabs, file tree, terminal, tests, chat limited to the workspace, a feature
 board (reads and writes `FEATURES.md`; rows can wait for other rows, a Graph view draws the order and who is working on what), a Context tab (what the whole team and every agent must remember, kept in the committed `.iyakki/context.json`; say "remember that ..." in the chat to add to it), a Browser tab, parallel tasks, and a Kubernetes view with a Deploy flow
@@ -1016,7 +1011,7 @@ server uses. A run is started with `POST /api/v1/chat/runs` `{"prompt"}` and fol
 | admin | all, including USERS |
 | operator | everything except USERS |
 | user | everything except USERS, MESH, NET SCAN (restricted terminal; no MCP servers by default) |
-| guest | CHAT, SRE PILOT, INBOX only; no terminal, no files, no network |
+| guest | CHAT, INBOX only; no terminal, no files, no network |
 
 An administrator can switch tiles and limits per person in USERS. You cannot do more than your role, and neither can the assistant.
 

@@ -12,7 +12,7 @@ try on a MacBookPro14,1 with an external monitor and on a Mac mini with HDMI, an
   `area` with `App::render(g, area, s, cx, tick)` and handles `Event`s through `App::handle`.
 * Apps are ordinary objects. They can be kept alive side by side: the shell already does it for the inbox (`stash`) and the
   Browser/Radio keep running in the background. They get their size only through `area` (and `g.width()/g.height()` in a few
-  places: `browser_full`, `mediaplay`, `srepilot`, `story`, `ide_browser`). They do not read the screen size from a global.
+  places: `browser_full`, `mediaplay`, `story`, `ide_browser`). They do not read the screen size from a global.
 * Global state that matters: `ui.rs` thread-locals (UI size, drag flag, click count, shift, caret/focus-ring counters, window
   focus), the clipboard (one history per UI thread, shared by design), `ctxmenu` field notes (per frame), the single-entry
   background cache (`fx::background`, one size), `web_agent::TABS` (per user, not per app instance). None of them is per
@@ -152,7 +152,7 @@ and give the conservative answer (single pane, single display).
 * **Cost** of a layout: pane surfaces = display area x 4 bytes (all panes together cover the display) plus 3 MiB per pane for
   the glyph cache and scratch; each extra display = width x height x 4 x 2 (double buffer) plus 3 MiB; plus one **app
   instance** per pane beyond the first by class: light 8 MiB, medium 40 MiB, heavy 200 MiB. Heavy: Browser (full engine), IDE,
-  Camera, Data, Dash, Flows, Media, Voice. Medium: Chat, Rag, Edit, Mcp, Cli, Store, Skills, SrePilot, Tales, Scan, Mesh, Runs, System,
+  Camera, Data, Dash, Flows, Media, Voice. Medium: Chat, Rag, Edit, Mcp, Cli, Store, Skills, Tales, Scan, Mesh, Runs, System,
   Usage, Calendar. Light: the launcher, Settings, Users, Inbox, Radio and the rest. These are estimates from the code (frame
   buffers dominate light apps; engines and the IDE hold pages, indexes and surfaces); they are constants with tests, to be
   adjusted after measuring on hardware.

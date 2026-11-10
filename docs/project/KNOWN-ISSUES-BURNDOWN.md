@@ -381,7 +381,7 @@ Fixed in the tree (test and cause):
 | `browser_full::tests::addresses_without_a_host_...` | `url_allowed` let `javascript:` through (real bug) | only `Pass` is allowed |
 | `cli::tests::the_cli_tile_has_a_terminal_tab...` | 10 key presses no longer reach the end of a longer catalogue | presses until the entry shows |
 | `store::setup::tests::{install_all_in_this_category..., the_category_bar...}`, `voice_tests::pressing_install...` | OpenSearch added, the Voices category now holds two items, voice review now says "integration code only" (owner decision 2026-10-27) | assertions updated |
-| `monkey_tests::monkey_the_rest` | real bug: `srepilot::draw_canvas` multiplied a negative width cast to usize in a 1x1 window | `.max(0)` |
+| `monkey_tests::monkey_the_rest` | real bug: a demo screen (since removed) multiplied a negative width cast to usize in a 1x1 window | `.max(0)` |
 | `upgrade_tests::what_the_stores_say_while_loading...` | the sentence queue is shared by all tests; an audit line is cut at 300 chars | retries with a fresh sentence; checks file name and "damaged" |
 | `ide_notes_tests::a_read_only_workspace_...` | fixed 2 ticks | waits for the tick |
 | `release_version::the_feature_matrix_totals_are_consistent` vs `feature_matrix::matrix_is_consistent` | two checkers printed a zero count differently (real bug of the checkers) | `relcheck features::summary` lists every status, as the core test does |

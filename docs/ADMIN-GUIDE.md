@@ -32,7 +32,7 @@ the default is `/var/lib/iyakki/users.json`.
 | admin | all (USERS, SETTINGS...) | full | `/` | any | large |
 | operator | all except USERS | full | `{home}`, `/shared` | any | large |
 | user | no USERS, MESH, NET SCAN | restricted | read `{home}`, `/shared`; write `{home}` | any | standard |
-| guest | CHAT, SRE PILOT, INBOX | none | none | none | tiny |
+| guest | CHAT, INBOX | none | none | none | tiny |
 
 Only admins manage users and system settings; an override can never give a non-admin that power. Budgets are presets (tiny 20k
 tokens, small 60k, standard 200k, large 1M, unlimited).

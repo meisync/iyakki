@@ -70,7 +70,7 @@ Missing: an emulator for tile apps on the developer's PC, `iyakki dev mcp`, CI f
 | They can | How | Status |
 |---|---|---|
 | Browse clusters, pods, events and logs, with retries and a log of failed calls | K8S tile | today |
-| Ask the assistant to diagnose a failing deploy | SRE pilot, chat tools (`k8s_status`, logs) | partial |
+| Ask the assistant to diagnose a failing deploy | chat tools (`k8s_status`, logs) | partial |
 | Run `kubectl`, `aws`, `gcloud`, `az`, `terraform` style tools through approvals | CLI tile, chat | partial: depends on the tools being installed (downloaded at the user's click) |
 | Write workflows that run on a timer, retry, and ask for help when they fail | FLOWS (graph editor, scheduler, healing agent) | today (alpha) |
 | Query data and show dashboards | DATA and DASH tiles | partial |

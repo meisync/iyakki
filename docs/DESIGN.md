@@ -93,17 +93,6 @@ signal "live" with `CYAN` to `MAGENTA`. Animate only small things and only while
 for decoration. The static background is cached; do not paint full-screen gradients per frame. Keep hit labels and keys when
 restyling. The editor's text area and the browser's page content stay as they are (legibility first).
 
-### SRE PILOT (demo)
-
-A demo page in the same language (`apps/srepilot.rs`): glass node cards with a glowing accent border, neon particles (cyan data,
-amber action, magenta notification, green feedback, red incident) moving along the edges, a side panel (`fx::panel`, sections,
-`kv_row`, a sparkline in a `well`), chips for DEMO and the modes, and a primary neon pill button ("Click To Schedule a Demo": filled
-cyan, dark text, glow that breathes while the page animates and grows on hover or keyboard focus). Its launcher tile wears the
-**DEMO ribbon** (`fx::demo_ribbon`: an amber pill straddling the tile's top edge; `launcher::is_demo` says which apps get it).
-The static layer (nodes, edges, or the scaled whiteboard photo) is drawn once per size and copied each frame; only particles,
-pulses and small texts are drawn per frame. The button's handler is the single function `schedule_demo()`; replace it when the
-real scheduling flow is decided.
-
 ### AI IDE
 
 The AI IDE (`apps/ide.rs`, `ide_ui.rs`, `ide_layout.rs`, `ide_tree.rs`, `ide_bottom.rs`, `ide_k8s.rs`, `board.rs`; `docs/AI-IDE.md`) is the largest user of the

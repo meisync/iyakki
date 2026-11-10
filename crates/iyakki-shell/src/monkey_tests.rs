@@ -573,7 +573,7 @@ fn monkey_store_setup_tab() {
 fn monkey_the_rest() {
     run_apps(
         "monkey-rest",
-        &[Some(PApp::Cli), Some(PApp::Users), Some(PApp::Runs), Some(PApp::Mesh), Some(PApp::Radio), Some(PApp::Scan), Some(PApp::Skills), Some(PApp::Usage), Some(PApp::Calendar), Some(PApp::System), Some(PApp::Media), Some(PApp::SrePilot), Some(PApp::Inbox), Some(PApp::Camera)],
+        &[Some(PApp::Cli), Some(PApp::Users), Some(PApp::Runs), Some(PApp::Mesh), Some(PApp::Radio), Some(PApp::Scan), Some(PApp::Skills), Some(PApp::Usage), Some(PApp::Calendar), Some(PApp::System), Some(PApp::Media), Some(PApp::Inbox), Some(PApp::Camera)],
         false,
     );
 }
@@ -762,7 +762,7 @@ const KNOWN_OVERFLOWS: &[(&str, &str)] = &[
     ("skills", "360x740"), ("usage", "360x740"),
     ("usage", "800x480"), ("usage", "1366x768"), ("calendar", "360x740"), ("system", "360x740"),
     ("system", "800x480"), ("system", "1366x768"), ("media", "360x740"), ("media", "800x480"),
-    ("srepilot", "360x740"), ("inbox", "800x480"), ("tales", "800x480"), ("dash", "360x740"),
+    ("inbox", "800x480"), ("tales", "800x480"), ("dash", "360x740"),
     ("camera", "360x740"), ("camera", "1366x768"), ("lab", "360x740"), ("lab", "800x480"),
     ("lab", "1366x768"),
     // pages the test did not reach before the list was keyed by name (the old loop stopped at 31 pages): not new breakage

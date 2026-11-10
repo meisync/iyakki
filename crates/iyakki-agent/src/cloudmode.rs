@@ -103,7 +103,7 @@ pub fn app_class(app: App) -> Class {
         App::Voice => Hardware(Need::Audio),
         // mounting and partitioning the drives of this computer: pointless over a remote desktop, so hidden in cloud mode
         App::Disks => Hardware(Need::Disks),
-        App::Chat | App::Rag | App::Mcp | App::Cli | App::Users | App::Settings | App::Runs | App::Edit | App::Browser | App::Mesh | App::Scan | App::Skills | App::Usage | App::Calendar | App::System | App::SrePilot | App::Inbox | App::Ide | App::Data | App::Store | App::Dash | App::Flows | App::K8s | App::LinuxWin | App::Lab | App::Git | App::Doctor | App::Checkup | App::Learn | App::DevTools | App::Auth | App::Remote | App::Cameras | App::Pdf => Remote,
+        App::Chat | App::Rag | App::Mcp | App::Cli | App::Users | App::Settings | App::Runs | App::Edit | App::Browser | App::Mesh | App::Scan | App::Skills | App::Usage | App::Calendar | App::System | App::Inbox | App::Ide | App::Data | App::Store | App::Dash | App::Flows | App::K8s | App::LinuxWin | App::Lab | App::Git | App::Doctor | App::Checkup | App::Learn | App::DevTools | App::Auth | App::Remote | App::Cameras | App::Pdf => Remote,
     }
 }
 
@@ -333,7 +333,7 @@ mod tests {
         }
         let hw: Vec<App> = App::ALL.iter().copied().filter(|a| matches!(app_class(*a), Class::Hardware(_))).collect();
         assert_eq!(hw.len(), 6, "MEDIA, RADIO, TALES, VOICE, CAMERA and DISKS are the apps that need local hardware");
-        for a in [App::Chat, App::Rag, App::Mcp, App::Cli, App::Skills, App::Calendar, App::Ide, App::Edit, App::Data, App::Dash, App::Flows, App::Runs, App::SrePilot, App::System, App::Store, App::Users, App::Usage, App::Scan, App::Mesh, App::Browser, App::Settings, App::K8s] {
+        for a in [App::Chat, App::Rag, App::Mcp, App::Cli, App::Skills, App::Calendar, App::Ide, App::Edit, App::Data, App::Dash, App::Flows, App::Runs, App::System, App::Store, App::Users, App::Usage, App::Scan, App::Mesh, App::Browser, App::Settings, App::K8s] {
             assert_eq!(app_class(a), Class::Remote, "{a:?} is remote-safe");
         }
     }

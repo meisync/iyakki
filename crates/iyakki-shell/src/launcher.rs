@@ -13,7 +13,7 @@ use crate::ui::R;
 pub enum Group {
     /// Ask & Create: the assistant and what it makes (CHAT, RAG, SKILLS, CALENDAR, TALES, VOICE, LAB).
     Home,
-    /// Build: AI IDE, GIT, FLOWS, K8S, EDIT, CLI, MCP, RUNS, SRE PILOT.
+    /// Build: AI IDE, GIT, FLOWS, K8S, EDIT, CLI, MCP, RUNS.
     Work,
     /// Media: BROWSER, RADIO, MEDIA, CAMERA.
     WebMedia,
@@ -79,11 +79,6 @@ pub fn group_of_custom(name: &str) -> Group {
         _ => {}
     }
     Group::CHIPS.into_iter().find(|g| g.label().to_lowercase() == n || g.id() == n).unwrap_or(Group::Apps)
-}
-
-/// Apps whose tile wears the DEMO ribbon: they show sample data only and touch no real system.
-pub fn is_demo(app: App) -> bool {
-    app == App::SrePilot
 }
 
 /// The tabs to show for these apps: every section that has at least one of them (empty sections are hidden).

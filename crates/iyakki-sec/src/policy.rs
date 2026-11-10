@@ -29,7 +29,6 @@ pub enum App {
     Calendar,
     System,
     Media,
-    SrePilot,
     Inbox,
     Ide,
     Data,
@@ -68,7 +67,12 @@ pub enum App {
 }
 
 impl App {
-    pub const ALL: [App; 40] = [App::Chat, App::Rag, App::Mcp, App::Cli, App::Users, App::Settings, App::Runs, App::Edit, App::Browser, App::Mesh, App::Radio, App::Scan, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::SrePilot, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::LinuxWin, App::Lab, App::Git, App::Doctor, App::Checkup, App::Learn, App::DevTools, App::Auth, App::Remote, App::Cameras, App::Pdf];
+    pub const ALL: [App; 39] = [App::Chat, App::Rag, App::Mcp, App::Cli, App::Users, App::Settings, App::Runs, App::Edit, App::Browser, App::Mesh, App::Radio, App::Scan, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::LinuxWin, App::Lab, App::Git, App::Doctor, App::Checkup, App::Learn, App::DevTools, App::Auth, App::Remote, App::Cameras, App::Pdf];
+
+    /// The app with this id (or lower-case name), `None` for an app that does not exist (any more).
+    pub fn from_id(name: &str) -> Option<App> {
+        App::ALL.iter().copied().find(|a| a.id() == name || format!("{a:?}").to_lowercase() == name)
+    }
 
     pub fn id(self) -> &'static str {
         match self {
@@ -89,7 +93,6 @@ impl App {
             App::Calendar => "calendar",
             App::System => "system",
             App::Media => "media",
-            App::SrePilot => "srepilot",
             App::Inbox => "inbox",
             App::Ide => "ide",
             App::Data => "data",
@@ -120,7 +123,6 @@ impl App {
         match self {
             App::Cli => "CLI".to_string(),
             App::Scan => "NET SCAN".to_string(),
-            App::SrePilot => "SRE PILOT".to_string(),
             App::Ide => "AI IDE".to_string(),
             App::LinuxWin => "LINUX WINDOW".to_string(),
             App::Checkup => "CHECK-UP".to_string(),
@@ -224,8 +226,21 @@ fn default_browser_minutes() -> u32 {
     20
 }
 
+/// Stored lists of apps are read leniently: an app that was taken out of the system is dropped from the list
+/// instead of failing the whole account or policy that mentions it.
+fn lenient_set<'de, D: serde::Deserializer<'de>>(d: D) -> Result<BTreeSet<App>, D::Error> {
+    let names: Vec<String> = Vec::deserialize(d)?;
+    Ok(names.iter().filter_map(|n| App::from_id(n)).collect())
+}
+
+fn lenient_vec<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<App>, D::Error> {
+    let names: Vec<String> = Vec::deserialize(d)?;
+    Ok(names.iter().filter_map(|n| App::from_id(n)).collect())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Policy {
+    #[serde(deserialize_with = "lenient_set")]
     pub apps: BTreeSet<App>,
     pub cli: CliLevel,
     /// Path prefixes; `{home}` expands to `/home/<user>`.
@@ -312,7 +327,9 @@ impl AgentBudget {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PolicyOverride {
+    #[serde(deserialize_with = "lenient_vec")]
     pub deny_apps: Vec<App>,
+    #[serde(deserialize_with = "lenient_vec")]
     pub allow_apps: Vec<App>,
     pub net_hosts: Option<Vec<String>>,
     pub mcp_servers: Option<Vec<String>>,
@@ -365,7 +382,7 @@ impl Role {
                 browser_max_minutes: 20,
             },
             Role::Operator => Policy {
-                apps: set(&[App::Chat, App::Rag, App::Mcp, App::Cli, App::Settings, App::Runs, App::Edit, App::Browser, App::Mesh, App::Radio, App::Scan, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::SrePilot, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::LinuxWin, App::Lab, App::Git, App::Doctor, App::Checkup, App::Learn, App::DevTools, App::Auth, App::Remote, App::Cameras, App::Pdf]),
+                apps: set(&[App::Chat, App::Rag, App::Mcp, App::Cli, App::Settings, App::Runs, App::Edit, App::Browser, App::Mesh, App::Radio, App::Scan, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::LinuxWin, App::Lab, App::Git, App::Doctor, App::Checkup, App::Learn, App::DevTools, App::Auth, App::Remote, App::Cameras, App::Pdf]),
                 cli: CliLevel::Full,
                 fs_read: strs(&["{home}", "/shared"]),
                 fs_write: strs(&["{home}", "/shared"]),
@@ -388,7 +405,7 @@ impl Role {
                 browser_max_minutes: 20,
             },
             Role::User => Policy {
-                apps: set(&[App::Chat, App::Rag, App::Mcp, App::Cli, App::Settings, App::Runs, App::Edit, App::Browser, App::Radio, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::SrePilot, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::Lab, App::Git, App::Doctor, App::Checkup, App::Learn, App::DevTools, App::Auth, App::Remote, App::Cameras, App::Pdf]),
+                apps: set(&[App::Chat, App::Rag, App::Mcp, App::Cli, App::Settings, App::Runs, App::Edit, App::Browser, App::Radio, App::Skills, App::Usage, App::Calendar, App::System, App::Media, App::Inbox, App::Ide, App::Data, App::Tales, App::Store, App::Dash, App::Flows, App::Camera, App::Voice, App::K8s, App::Disks, App::Lab, App::Git, App::Doctor, App::Checkup, App::Learn, App::DevTools, App::Auth, App::Remote, App::Cameras, App::Pdf]),
                 cli: CliLevel::Restricted,
                 fs_read: strs(&["{home}", "/shared"]),
                 fs_write: strs(&["{home}"]),
@@ -411,7 +428,7 @@ impl Role {
                 browser_max_minutes: 20,
             },
             Role::Guest => Policy {
-                apps: set(&[App::Chat, App::SrePilot, App::Inbox]),
+                apps: set(&[App::Chat, App::Inbox]),
                 cli: CliLevel::Off,
                 fs_read: vec![],
                 fs_write: vec![],
@@ -582,6 +599,25 @@ pub fn valid_username(n: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_app_taken_out_of_the_system_is_dropped_from_stored_lists_instead_of_failing_them() {
+        // an app that was taken out of the system must not fail the accounts that were saved with it
+        assert_eq!(App::from_id("chat"), Some(App::Chat));
+        assert_eq!(App::from_id("retired-app"), None);
+        let o: PolicyOverride = serde_json::from_str(r#"{"deny_apps":["retired-app","chat"],"allow_apps":["retired-app"]}"#).unwrap();
+        assert_eq!(o.deny_apps, vec![App::Chat]);
+        assert!(o.allow_apps.is_empty());
+        let mut p = Role::Guest.template();
+        let mut v = serde_json::to_value(&p).unwrap();
+        v["apps"].as_array_mut().unwrap().push(serde_json::json!("retired-app"));
+        p = serde_json::from_value(v).unwrap();
+        assert_eq!(p.apps, [App::Chat, App::Inbox].into());
+        // every app still round-trips by its id
+        for a in App::ALL {
+            assert_eq!(App::from_id(a.id()), Some(a), "{a:?}");
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -610,7 +646,7 @@ mod tests {
         assert!(a.max_fuel > o.max_fuel && o.max_fuel > u.max_fuel && u.max_fuel > g.max_fuel);
         assert!(a.manage_users && !o.manage_users && !u.manage_users && !g.manage_users);
         assert!(a.manage_settings && !o.manage_settings && !u.manage_settings && !g.manage_settings);
-        assert_eq!(g.apps, [App::Chat, App::SrePilot, App::Inbox].into());
+        assert_eq!(g.apps, [App::Chat, App::Inbox].into());
         assert_eq!(g.cli, CliLevel::Off);
         assert!(a.apps.contains(&App::Users) && !o.apps.contains(&App::Users));
         assert!(o.apps.contains(&App::Settings) && u.apps.contains(&App::Settings) && !g.apps.contains(&App::Settings), "settings app = personal vault + password for everyone but guests");

@@ -33,7 +33,7 @@ One table in code (`cloudmode.rs`); a test fails when a new app has no class.
 | IYAKKI menu entries Media player, Mac drivers | sound; Apple hardware or the Mac image |
 | Volume, brightness, keyboard-light and media keys, and their on-screen bar (the power and sleep keys still work) | a keyboard or pointer |
 
-Kept, because they work over a remote desktop: CHAT, RAG, MCP, CLI, SKILLS, CALENDAR, AI IDE, EDIT, DATA, DASH, FLOWS, RUNS, SRE PILOT,
+Kept, because they work over a remote desktop: CHAT, RAG, MCP, CLI, SKILLS, CALENDAR, AI IDE, EDIT, DATA, DASH, FLOWS, RUNS,
 SYSTEM, STORE, K8S (cluster tools need nothing local), USERS, USAGE, NET SCAN, MESH, BROWSER (the web engine needs no screen) and SETTINGS (without its hardware pages). Network
 (wired settings) stays. Printers: IYAKKI has no printer page yet, so nothing is hidden for them.
 

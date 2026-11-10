@@ -289,7 +289,6 @@ const TILES: &[Tile] = &[
     Tile { app: PApp::System, icon: Icon::System, label: "SYSTEM", sub: "Load, agents", accent: rgb(176, 226, 92), group: Some(Group::System) },
     Tile { app: PApp::Calendar, icon: Icon::Calendar, label: "CALENDAR", sub: "Plans, alarms", accent: rgb(110, 190, 255), group: Some(Group::Home) },
     Tile { app: PApp::Media, icon: Icon::Media, label: "MEDIA", sub: "Music, videos", accent: rgb(240, 120, 220), group: Some(Group::WebMedia) },
-    Tile { app: PApp::SrePilot, icon: Icon::SrePilot, label: "SRE PILOT", sub: "Assist · Auto", accent: rgb(60, 235, 200), group: Some(Group::Work) },
     Tile { app: PApp::Ide, icon: Icon::Ide, label: "AI IDE", sub: "Code with the AI", accent: rgb(100, 230, 255), group: Some(Group::Work) },
     Tile { app: PApp::Data, icon: Icon::Data, label: "DATA", sub: "Tables, CSV", accent: crate::apps::data::ACCENT, group: Some(Group::Data) },
     Tile { app: PApp::Tales, icon: Icon::Tales, label: "TALES", sub: "Read-aloud tales", accent: crate::apps::story::ACCENT, group: Some(Group::Home) },
@@ -1157,7 +1156,6 @@ impl Shell {
             PApp::System => Box::new(crate::apps::system::SystemApp::new(&cx)),
             PApp::Calendar => Box::new(crate::apps::calendar::CalendarApp::new(&cx)),
             PApp::Media => Box::new(crate::apps::media::MediaApp::new(&cx)),
-            PApp::SrePilot => Box::new(crate::apps::srepilot::SrePilotApp::new()),
             PApp::Ide => Box::new(crate::apps::ide::IdeApp::new(&cx)),
             PApp::Data => Box::new(crate::apps::data::DataApp::new(&cx)),
             PApp::Store => Box::new(crate::apps::store::StoreApp::new(&cx)),
@@ -4021,9 +4019,6 @@ impl Shell {
             }
             let lw = g.text_width(ss, sub, Face::Sans);
             g.text(x + (r.w - lw) / 2.0, y + 26.0 * s + badge + 54.0 * s, ss, if t.app == PApp::Store && self.update_count > 0 { t.accent } else { MUTED }, sub, Face::Sans);
-            if launcher::is_demo(t.app) {
-                crate::fx::demo_ribbon(g, R::new(x, y, r.w, r.h), s);
-            }
             if !permitted {
                 g.icon(Icon::Lock, x + r.w - 30.0 * s, y + 28.0 * s, 22.0 * s, DIM);
             }
@@ -5234,24 +5229,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_sre_pilot_tile_is_one_demo_tile_in_a_group_for_every_role_with_a_ribbon() {
-        assert_eq!(TILES.iter().filter(|t| t.app == PApp::SrePilot).count(), 1);
-        let t = TILES.iter().find(|t| t.app == PApp::SrePilot).unwrap();
-        assert_eq!((t.label, t.sub), ("SRE PILOT", "Assist · Auto"));
-        assert_eq!(Group::of(PApp::SrePilot), Some(Group::Work));
-        assert!(launcher::is_demo(PApp::SrePilot) && !launcher::is_demo(PApp::System));
-        assert_eq!(PApp::SrePilot.id(), "srepilot");
-        for r in Role::ALL {
-            assert!(r.template().apps.contains(&PApp::SrePilot), "{r:?}");
-        }
-        let (mut sh, _) = shell_with_users("srepilot-tile");
-        login(&mut sh, "root", "rootpass12");
-        assert_eq!(sh.visible_tiles().iter().filter(|t| t.app == PApp::SrePilot).count(), 1);
-        assert!(sh.open_for_demo("srepilot"));
-        assert_eq!(sh.screen_name(), "app:srepilot");
-    }
-
-    #[test]
     fn the_ai_ide_tile_is_one_tile_in_build_for_every_role_but_guest() {
         assert_eq!(TILES.iter().filter(|t| t.app == PApp::Ide).count(), 1);
         let t = TILES.iter().find(|t| t.app == PApp::Ide).unwrap();
@@ -5299,41 +5276,6 @@ pub(crate) mod tests {
             sh.leave_app();
         }
         assert!(seen > 10, "the apps were opened: {seen}");
-    }
-
-    #[test]
-    fn the_demo_ribbon_is_drawn_at_the_top_of_the_tile_in_every_group_and_only_on_that_tile() {
-        let (mut sh, _) = shell_with_users("srepilot-ribbon");
-        let mut g = Gfx::new(1280, 720);
-        login(&mut sh, "root", "rootpass12");
-        let amber = |g: &Gfx, r: R| {
-            let mut n = 0;
-            for y in (r.y as i32 - 12)..(r.y as i32 + 20) {
-                for x in (r.x as i32)..(r.x + r.w) as i32 {
-                    let o = (y as usize * g.width() as usize + x as usize) * 4;
-                    let p = &g.rgba()[o..o + 3];
-                    if p[0] > 230 && p[1] > 180 && p[1] < 215 && p[2] > 70 && p[2] < 120 {
-                        n += 1;
-                    }
-                }
-            }
-            n
-        };
-        for group in [Group::Work] {
-            sh.set_group(group);
-            sh.render(&mut g);
-            let s = scale_for(1280, 720);
-            let tiles = sh.group_tiles();
-            let rects = tile_rects(1280, 720, s, tiles.len());
-            for (t, r) in tiles.iter().zip(&rects) {
-                let n = amber(&g, *r);
-                if t.app == PApp::SrePilot {
-                    assert!(n > 200, "the ribbon is drawn on SRE PILOT in {group:?}: {n}");
-                } else {
-                    assert_eq!(n, 0, "no ribbon on {} in {group:?}", t.label);
-                }
-            }
-        }
     }
 
     #[test]

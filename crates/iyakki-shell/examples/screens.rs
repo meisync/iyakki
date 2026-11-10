@@ -107,7 +107,7 @@ fn main() {
     sh.handle(&Event::Key(Key::Enter));
     sh.render(&mut g);
     shot(&mut sh, &mut g, &dir, "01-launcher", &mut rows);
-    let apps = ["settings", "system", "users", "rag", "runs", "mcp", "skills", "calendar", "scan", "mesh", "usage", "inbox", "cli", "edit", "radio", "browser", "chat", "media", "srepilot", "tales", "data", "dash", "flows", "store"];
+    let apps = ["settings", "system", "users", "rag", "runs", "mcp", "skills", "calendar", "scan", "mesh", "usage", "inbox", "cli", "edit", "radio", "browser", "chat", "media", "tales", "data", "dash", "flows", "store"];
     for id in apps {
         if only.as_deref().is_some_and(|o| o != id) {
             continue;
