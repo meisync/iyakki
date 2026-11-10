@@ -13,6 +13,10 @@ members = [
     "crates/iyakki-camdetect",
     "crates/iyakki-diskcrypt",
     "crates/iyakki-battery",
+    "crates/iyakki-clockfloor",
+    "crates/iyakki-macrecovery",
+    "crates/iyakki-regex",
+    "crates/iyakki-openpgp",
     "crates/iyakki-lint",
     "crates/iyakki-bindelta",
     "crates/iyakki-archive",
@@ -77,6 +81,10 @@ iyakki-sshfs = { path = "crates/iyakki-sshfs" }
 iyakki-camdetect = { path = "crates/iyakki-camdetect" }
 iyakki-diskcrypt = { path = "crates/iyakki-diskcrypt" }
 iyakki-battery = { path = "crates/iyakki-battery" }
+iyakki-clockfloor = { path = "crates/iyakki-clockfloor" }
+iyakki-macrecovery = { path = "crates/iyakki-macrecovery" }
+iyakki-regex = { path = "crates/iyakki-regex" }
+iyakki-openpgp = { path = "crates/iyakki-openpgp" }
 iyakki-lint = { path = "crates/iyakki-lint" }
 iyakki-bindelta = { path = "crates/iyakki-bindelta" }
 iyakki-archive = { path = "crates/iyakki-archive" }

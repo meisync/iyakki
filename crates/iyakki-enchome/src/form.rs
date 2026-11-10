@@ -60,6 +60,20 @@ pub fn take_request(dir: &Path, user: &str) -> Option<Request> {
     Request::from_word(&t)
 }
 
+/// What a move is doing now, in plain words, once `step` is done (shown as progress while it runs).
+pub fn step_words(step: Step) -> &'static str {
+    match step {
+        Step::Planned => "Making the encrypted container (step 1 of 7)",
+        Step::ContainerMade => "Opening the new folder (step 2 of 7)",
+        Step::StagingMounted => "Copying your files (step 3 of 7)",
+        Step::Copied => "Checking every file against the original (step 4 of 7)",
+        Step::Verified => "Closing the new folder (step 5 of 7)",
+        Step::StagingUnmounted => "Putting the old folder aside (step 6 of 7)",
+        Step::PlainRenamed => "Switching over (step 7 of 7)",
+        Step::Switched => "Finishing",
+    }
+}
+
 /// What the form needs from the rest of the system.
 pub struct Ctx<'a> {
     pub env: &'a EncHome,
@@ -146,6 +160,12 @@ impl Form {
         }
     }
 
+    /// Type a field the caller owns: the caller's copy is wiped here once it is in the form.
+    pub fn type_owned(&mut self, s: String) {
+        let s = Zeroizing::new(s);
+        self.type_text(&s);
+    }
+
     pub fn backspace(&mut self) {
         match &mut self.flow {
             Flow::Ask { stage, first, second, .. } => {
@@ -164,15 +184,31 @@ impl Form {
         self.notice = Some(e.to_string());
     }
 
+    /// Whether the next `submit` does slow work (Argon2id, the container, the copy) and so belongs on a background job. Only typing the
+    /// recovery key back is quick.
+    pub fn needs_background(&self) -> bool {
+        matches!(self.flow, Flow::Ask { .. } | Flow::MigratePlan { .. })
+    }
+
+    /// Whether the next `submit` is the move itself (the long one, which reports its steps).
+    pub fn is_move(&self) -> bool {
+        matches!(self.flow, Flow::MigratePlan { .. })
+    }
+
     /// Enter / the main button.
     pub fn submit(&mut self, cx: &Ctx) {
+        self.submit_with(cx, &mut |_s: Step| true);
+    }
+
+    /// Like `submit`, and `step` hears each step of a move as it is done (return false to stop). Runs on any thread: nothing here draws.
+    pub fn submit_with(&mut self, cx: &Ctx, step: &mut dyn FnMut(Step) -> bool) {
         self.failed = false;
         let flow = std::mem::replace(&mut self.flow, Flow::Idle);
         match flow {
             Flow::Idle | Flow::Done => {}
             Flow::Ask { purpose, stage, first, second } => self.submit_ask(cx, purpose, stage, first, second),
             Flow::MigratePlan { password, plan } => {
-                let r = migrate::run(cx.env, cx.user, &password, &mut |_s: Step| true);
+                let r = migrate::run(cx.env, cx.user, &password, step);
                 match r {
                     Ok(rep) => {
                         self.notice = Some(format!("{} files ({}) were copied, checked one by one and switched over. Your old folder is kept as {}; remove it from this page once you have saved the recovery key and are happy with the new one.", rep.files, crate::human(rep.bytes), rep.plain_copy.display()));
@@ -299,4 +335,11 @@ impl Form {
             }
         }
     }
+}
+
+/// The form is handed to a background thread and back; the secrets in it are zeroized wherever it ends.
+#[allow(dead_code)]
+fn _form_is_send() {
+    fn needs_send<T: Send>() {}
+    needs_send::<Form>();
 }

@@ -40,7 +40,7 @@ pub mod fwextra_net;
 pub mod sharing;
 pub mod fwpack;
 pub mod macfw;
-pub mod macrecovery;
+pub use iyakki_macrecovery as macrecovery;
 pub mod mcp;
 pub mod utcp;
 #[cfg(test)]
@@ -171,6 +171,7 @@ pub mod voicedesk;
 pub mod voiceassist;
 pub mod voiceassist_ports;
 pub mod voiceassisttools;
+pub mod wakelisten;
 #[cfg(test)]
 #[path = "voiceassist_tests.rs"]
 mod voiceassist_tests;
@@ -296,12 +297,23 @@ pub use iyakki_devctl::{bnep, bt_pan};
 pub mod msg;
 pub mod gitjobs;
 pub use iyakki_clock as clock;
-pub mod clockfloor;
+// the pure floor logic is in iyakki-clockfloor; the two boot steps here hand it the real clock setter (`ntp::set_clock`)
+pub mod clockfloor {
+    pub use iyakki_clockfloor::*;
+    /// Boot, first step: see `iyakki_clockfloor::apply_early`.
+    pub fn apply_early() -> Applied {
+        iyakki_clockfloor::apply_early(&mut |t| crate::ntp::set_clock(t as f64))
+    }
+    /// Boot, second step: see `iyakki_clockfloor::apply_after_data`.
+    pub fn apply_after_data(on_disk: bool) -> Applied {
+        iyakki_clockfloor::apply_after_data(on_disk, &mut |t| crate::ntp::set_clock(t as f64))
+    }
+}
 pub mod ntp;
 pub mod totp;
 pub mod authcodes;
 pub mod tzdetect;
-pub mod regex;
+pub use iyakki_regex as regex;
 pub mod textcmd;
 pub mod toollog;
 pub mod usage;
@@ -319,7 +331,7 @@ pub use iyakki_archive::xz;
 pub mod player;
 pub mod clis;
 pub mod dlmanifest;
-pub mod openpgp;
+pub use iyakki_openpgp as openpgp;
 pub mod cluster;
 pub mod clusters;
 pub mod quickinstall;

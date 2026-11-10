@@ -11,10 +11,21 @@
 use super::*;
 use iyakki_agent::enchome::form::{self as ef, Ctx, Flow, Purpose, Request};
 use iyakki_agent::enchome::{migrate, EncHome, SlotInfo, State};
+use std::sync::Mutex;
+
+/// How a background job gets its lifecycle: the real one when `None`; tests hand in a fake machine.
+pub(super) type EnvFactory = Arc<dyn Fn() -> EncHome + Send + Sync>;
 
 #[derive(Default)]
 pub(super) struct EncPanel {
-    flow: ef::Form,
+    pub(super) flow: ef::Form,
+    /// A step is running on the settings job (Make, Open, Change password, recovery-key open, Move): what it says on the page, and the
+    /// last step it reported. The page stays drawn and answers keys; a second job cannot start while this is set.
+    pub(super) working: Option<&'static str>,
+    pub(super) progress: Arc<Mutex<String>>,
+    /// The job was the move itself (its end is audited as a move).
+    working_move: bool,
+    pub(super) env: Option<EnvFactory>,
     /// What the last drawing showed (state, has an administrator slot, an old plain copy waits): the buttons follow it.
     shown: Option<(State, bool, bool)>,
 }
@@ -100,12 +111,26 @@ impl SettingsApp {
             Flow::Ask { .. } | Flow::ShowRecovery { .. } => {}
             _ => return None,
         }
-        let typed = form.raw(0);
-        let was_migrating = matches!(self.ench.flow.flow, Flow::MigratePlan { .. });
-        self.ench.flow.type_text(&typed);
+        if self.ench.flow.needs_background() && self.job.is_some() {
+            form.error = Some("Another operation is still running. Wait for it to finish, then try again.".into());
+            return Some(Modal::Form(FormKind::EncHome, form.clone()));
+        }
+        self.ench.flow.type_owned(form.raw(0));
+        if self.ench.flow.needs_background() {
+            self.ench_spawn(cx);
+            return None;
+        }
+        // typing the recovery key back is quick: it stays on the screen's thread
         self.ench_run(cx, |f, c| f.submit(c));
+        self.ench_audit(cx, false);
+        self.ench_next()
+    }
+
+    fn ench_audit(&self, cx: &AppCx, was_move: bool) {
         let user = cx.session.user.clone();
-        if !self.ench.flow.failed {
+        if was_move {
+            cx.audit.record(&user, "enchome.move", if self.ench.flow.failed { "failed" } else { "done" });
+        } else if !self.ench.flow.failed {
             let what = match &self.ench.flow.flow {
                 Flow::ShowRecovery { .. } => "recovery key shown",
                 Flow::Done => "done",
@@ -115,8 +140,62 @@ impl SettingsApp {
         } else {
             cx.audit.record(&user, "enchome.step.failed", "");
         }
-        let _ = was_migrating;
-        self.ench_next()
+    }
+
+    /// Hand the form to the settings job: Argon2id (about a second, 256 MiB), the container and the copy run off the screen's thread.
+    /// The form goes into the thread whole (its passwords are zeroized when it ends) and comes back in `ench_finished`.
+    fn ench_spawn(&mut self, cx: &AppCx) {
+        let is_move = self.ench.flow.is_move();
+        let mut form = std::mem::take(&mut self.ench.flow);
+        let factory = self.ench.env.clone();
+        let dir = cx.services.dir().to_path_buf();
+        let store = cx.store.clone();
+        let user = cx.session.user.clone();
+        let progress = self.ench.progress.clone();
+        if let Ok(mut p) = progress.lock() {
+            *p = if is_move { "Checking the plan again".into() } else { String::new() };
+        }
+        self.ench.working = Some(if is_move { "Moving your files into the encrypted home" } else { "Working on your encrypted home" });
+        self.ench.working_move = is_move;
+        self.modal = None;
+        self.start("working on your encrypted home", move || {
+            let run = std::panic::AssertUnwindSafe(|| {
+                let env = match &factory {
+                    Some(f) => f(),
+                    None => EncHome::real(&dir),
+                };
+                let verify = |p: &str| store.lock().map(|mut s| s.authenticate(&user, p).is_ok()).unwrap_or(false);
+                let ctx = Ctx { env: &env, user: &user, verify_signin: &verify };
+                form.submit_with(&ctx, &mut |st| {
+                    if let Ok(mut p) = progress.lock() {
+                        *p = ef::step_words(st).to_string();
+                    }
+                    true
+                });
+            });
+            if std::panic::catch_unwind(run).is_err() {
+                form = ef::Form::default();
+                form.failed = true;
+                form.notice = Some("Something went wrong while working on the encrypted home. Nothing was changed that could not be undone; look at its state on this page.".into());
+            }
+            JobOut::Enc(Box::new(form))
+        });
+    }
+
+    /// The job ended: the form comes back with its next step or its outcome in plain words.
+    pub(super) fn ench_finished(&mut self, cx: &AppCx, form: ef::Form) {
+        self.ench.flow = form;
+        self.ench.working = None;
+        let was_move = std::mem::take(&mut self.ench.working_move);
+        self.ench_audit(cx, was_move);
+        self.modal = self.ench_next();
+        if self.modal.is_some() {
+            // a form to answer (the recovery key, a wrong password): bring the person back to the page it belongs to
+            if let Some(i) = self.tabs.iter().position(|t| *t == Tab::EncHome) {
+                self.tab = i;
+                self.show_list = false;
+            }
+        }
     }
 
     /// `y` on the migration plan, or on removing the old plain copy.
@@ -124,9 +203,12 @@ impl SettingsApp {
         let user = cx.session.user.clone();
         match kind {
             ConfirmKind::EncMove => {
-                self.ench_run(cx, |f, c| f.submit(c));
-                cx.audit.record(&user, "enchome.move", if self.ench.flow.failed { "failed" } else { "done" });
-                self.modal = self.ench_next();
+                if self.job.is_some() {
+                    self.fail("Another operation is still running. Wait for it to finish, then press Move again.");
+                    self.modal = self.ench_next();
+                    return;
+                }
+                self.ench_spawn(cx);
             }
             ConfirmKind::EncRemovePlain => {
                 let env = EncHome::real(cx.services.dir());
@@ -144,7 +226,7 @@ impl SettingsApp {
 
     /// Every heartbeat: a request the assistant left (one word) opens the matching form here.
     pub(super) fn ench_tick(&mut self, cx: &AppCx) {
-        if self.modal.is_some() || self.ticks % 10 != 0 {
+        if self.modal.is_some() || self.job.is_some() || self.ticks % 10 != 0 {
             return;
         }
         let Some(r) = ef::take_request(cx.services.dir(), &cx.session.user) else { return };
@@ -165,6 +247,10 @@ impl SettingsApp {
 
     pub(super) fn handle_ench(&mut self, k: &Key, cx: &AppCx) {
         let Key::Char(c) = k else { return };
+        if self.ench.working.is_some() || self.job.is_some() {
+            self.fail("Another operation is still running. Wait for it to finish.");
+            return;
+        }
         let st = Self::ench_status(cx);
         match (*c, st.state) {
             ('c', State::NotSetUp) => self.ench_start(cx, Purpose::Create),
@@ -203,6 +289,9 @@ impl SettingsApp {
     }
 
     pub(super) fn ench_buttons(&self) -> Vec<Btn> {
+        if self.ench.working.is_some() {
+            return vec![];
+        }
         let (state, admin, plain) = self.ench.shown.unwrap_or((State::NotSetUp, false, false));
         match state {
             State::NotSetUp => vec![("Make my home encrypted", ACCENT, 'c'), ("Move my existing files", TEXT, 'm')],
@@ -229,6 +318,11 @@ impl SettingsApp {
             State::Open => ("Encrypted and open".to_string(), OK),
             State::Damaged => ("Damaged: cannot be opened".to_string(), ERR),
         };
+        if let Some(w) = self.ench.working {
+            lines.push((format!("{w}…"), ACCENT, true));
+            let p = self.ench.progress.lock().map(|p| p.clone()).unwrap_or_default();
+            lines.push((if p.is_empty() { "This takes a few seconds. You can leave this page; the work goes on and the result is shown here.".to_string() } else { format!("{p}. You can leave this page; the work goes on and the result is shown here.") }, TEXT, false));
+        }
         lines.push((head, col, true));
         lines.push((iyakki_agent::enchometools::describe_status(&st, open), TEXT, false));
         if let Some(b) = iyakki_agent::enchome::take_banner(&cx.session.user) {

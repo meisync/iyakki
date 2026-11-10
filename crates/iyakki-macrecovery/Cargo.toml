@@ -1,0 +1,11 @@
+[package]
+name = "iyakki-macrecovery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Apple macOS Recovery image download (board id, policy, resumable chunk-checked fetch), split out of iyakki-agent (docs/development/COMPILE-SPLIT-PILOT-4.md). The agent re-exports the module under the old path.
+[dependencies]
+iyakki-proxy = { path = "../iyakki-proxy" }
+iyakki-drivers = { path = "../iyakki-drivers" }
+sha2 = "0.10"

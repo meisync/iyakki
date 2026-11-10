@@ -817,7 +817,7 @@ impl VoiceApp {
         self.dirty = true;
     }
 
-    fn switch(&mut self, a: Area, cx: &AppCx) {
+    pub(super) fn switch(&mut self, a: Area, cx: &AppCx) {
         if self.area != a {
             if self.area == Area::Record {
                 self.rec_leave(cx);

@@ -119,6 +119,10 @@ impl Capture for BrowserMic {
         self.pull();
         self.media.is_on(Kind::Mic)
     }
+    fn drain(&mut self) -> Vec<i16> {
+        self.pull();
+        std::mem::take(&mut self.inner.lock().unwrap_or_else(|e| e.into_inner()).samples)
+    }
     fn stop(self: Box<Self>) -> Result<Vec<i16>, String> {
         self.pull();
         let v = std::mem::take(&mut self.inner.lock().unwrap_or_else(|e| e.into_inner()).samples);

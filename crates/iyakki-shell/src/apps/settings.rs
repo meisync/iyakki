@@ -361,6 +361,8 @@ mod computer_page;
 mod screensaver_page;
 #[path = "settings_enchome.rs"]
 mod enchome_page;
+#[path = "settings_voicewake.rs"]
+mod voicewake_page;
 #[path = "settings_browserdev.rs"]
 mod settings_browserdev;
 #[cfg(test)]
@@ -598,6 +600,8 @@ enum JobOut {
     Backup(backup_page::BackupOut),
     /// Settings -> Models: a provider's own list of model ids.
     ModelList(mo_page::MoList),
+    /// Settings -> Encrypted home: the form comes back from its background step (Make, Open, Move, ...).
+    Enc(Box<iyakki_agent::enchome::form::Form>),
 }
 
 struct Job {
@@ -1110,6 +1114,7 @@ impl SettingsApp {
                 self.refresh_devices();
             }
             JobOut::HwCheck(card_id, r) => self.hw_check_done(card_id, r),
+            JobOut::Enc(form) => self.ench_finished(cx, *form),
             JobOut::Backup(out) => self.backup_job_done(out),
             JobOut::ModelList(out) => self.mo_list_done(cx, out),
             JobOut::Dc(out) => self.dc_job_done(cx, out),
@@ -1962,6 +1967,8 @@ impl SettingsApp {
                 }
                 Err(e) => self.fail(e),
             },
+            Key::Char('M') if self.admin(cx) => self.vo_wake_toggle(cx),
+            Key::Char('N') if self.admin(cx) => self.vo_wake_sens(cx),
             Key::Char('r') if self.admin(cx) => match toggle(cx, &|v| v.speak_replies = !v.speak_replies) {
                 Ok(()) => self.ok("Read replies aloud toggled."),
                 Err(e) => self.fail(e.to_string()),
@@ -2364,7 +2371,8 @@ impl SettingsApp {
                 (true, Some(SpeechEngine::Http { url, model, .. })) => format!("aligned with {model} on {} ({})", iyakki_sec::url_host(&url).unwrap_or_default(), iyakki_agent::speechtime::locality(&url).label()),
                 (true, _) => "estimated (no speech-to-text server on this computer or allowed)".to_string(),
             };
-            let lines: [(&str, String, [u8; 4]); 10] = [
+            let wake_rows = Self::vo_wake_rows(cx);
+            let lines: [(&str, String, [u8; 4]); 12] = [
                 ("Speech-to-text", v.stt.as_ref().map_or("not set up".into(), |e| e.label()), if v.stt.is_some() { OK } else { MUTED }),
                 ("Text-to-speech", match &v.tts {
                     Some(e) => e.label(),
@@ -2378,6 +2386,8 @@ impl SettingsApp {
                 ("Read replies aloud", if v.speak_replies { "on".into() } else { "off".into() }, TEXT),
                 ("Highlight while reading", v.highlight.label().to_lowercase(), TEXT),
                 ("Word timing", timing, TEXT),
+                wake_rows[0].clone(),
+                wake_rows[1].clone(),
             ];
             yy += 8.0 * s;
             for (k, val, col) in lines.iter() {

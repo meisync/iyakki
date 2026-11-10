@@ -1,0 +1,7 @@
+old test path	new test path
+iyakki-agent::openpgp::tests::a_good_armored_sha512_signature_verifies	iyakki-openpgp::tests::a_good_armored_sha512_signature_verifies
+iyakki-agent::openpgp::tests::a_good_binary_sha256_signature_verifies	iyakki-openpgp::tests::a_good_binary_sha256_signature_verifies
+iyakki-agent::openpgp::tests::a_changed_file_is_refused	iyakki-openpgp::tests::a_changed_file_is_refused
+iyakki-agent::openpgp::tests::a_damaged_signature_is_refused	iyakki-openpgp::tests::a_damaged_signature_is_refused
+iyakki-agent::openpgp::tests::another_key_does_not_verify	iyakki-openpgp::tests::another_key_does_not_verify
+iyakki-agent::openpgp::tests::garbage_and_empty_input_are_refused_without_panicking	iyakki-openpgp::tests::garbage_and_empty_input_are_refused_without_panicking

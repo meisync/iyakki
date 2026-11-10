@@ -576,9 +576,17 @@ pub trait Capture: Send {
     fn is_alive(&mut self) -> bool;
     /// Stop and give the samples (16 kHz mono). Nothing is written to disk.
     fn stop(self: Box<Self>) -> Result<Vec<i16>, String>;
+    /// The samples captured since the last call, forgotten at once (for the wake listener, which reads small frames and keeps
+    /// nothing). A capture that cannot stream returns nothing.
+    fn drain(&mut self) -> Vec<i16> {
+        Vec::new()
+    }
 }
 
 impl Capture for voice::Recorder {
+    fn drain(&mut self) -> Vec<i16> {
+        self.drain_samples()
+    }
     fn level(&self) -> f32 {
         voice::Recorder::level(self)
     }

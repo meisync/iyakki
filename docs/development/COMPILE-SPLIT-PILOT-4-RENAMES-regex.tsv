@@ -1,0 +1,5 @@
+old test path	new test path
+iyakki-agent::regex::tests::the_usual_operators_work	iyakki-regex::tests::the_usual_operators_work
+iyakki-agent::regex::tests::groups_are_captured_and_case_can_be_ignored	iyakki-regex::tests::groups_are_captured_and_case_can_be_ignored
+iyakki-agent::regex::tests::the_basic_syntax_uses_backslashes_for_operators	iyakki-regex::tests::the_basic_syntax_uses_backslashes_for_operators
+iyakki-agent::regex::tests::bad_patterns_are_errors_and_runaway_patterns_stop	iyakki-regex::tests::bad_patterns_are_errors_and_runaway_patterns_stop

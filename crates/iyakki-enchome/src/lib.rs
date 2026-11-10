@@ -13,6 +13,7 @@
 
 pub mod form;
 pub mod migrate;
+pub mod testkit;
 
 #[cfg(test)]
 mod form_tests;

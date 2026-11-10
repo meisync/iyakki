@@ -1,0 +1,6 @@
+old test path	new test path
+iyakki-agent::clockfloor::tests::a_clock_behind_the_floor_is_set_to_the_largest_of_saved_build_and_compiled	iyakki-clockfloor::tests::a_clock_behind_the_floor_is_set_to_the_largest_of_saved_build_and_compiled
+iyakki-agent::clockfloor::tests::a_clock_ahead_of_the_floor_is_never_moved_back	iyakki-clockfloor::tests::a_clock_ahead_of_the_floor_is_never_moved_back
+iyakki-agent::clockfloor::tests::a_missing_damaged_or_absurd_saved_time_is_ignored	iyakki-clockfloor::tests::a_missing_damaged_or_absurd_saved_time_is_ignored
+iyakki-agent::clockfloor::tests::the_time_is_written_atomically_and_reads_back	iyakki-clockfloor::tests::the_time_is_written_atomically_and_reads_back
+iyakki-agent::clockfloor::tests::only_a_fixed_clock_is_saved	iyakki-clockfloor::tests::only_a_fixed_clock_is_saved

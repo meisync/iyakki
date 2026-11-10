@@ -132,6 +132,9 @@ pub struct VoiceSettings {
     /// The local wake phrase "My IYAKKI" (`iyakki-wake`) may listen: opt-in, off by default, a second choice after `my_on`. Nothing listens
     /// continuously until the person turns this on; `my_muted` stops it at once.
     pub my_wake: bool,
+    /// How easily the wake phrase triggers: 0 low (fewer false wakes, more misses), 1 normal, 2 high (the reverse). Moves the model's
+    /// suggested threshold (`wakelisten::threshold_for`).
+    pub my_wake_sens: u8,
 }
 
 /// What is highlighted while text is read aloud (TALES, chat).
@@ -169,7 +172,7 @@ impl Highlight {
 
 impl Default for VoiceSettings {
     fn default() -> Self {
-        Self { stt: None, tts: None, record_cmd: DEFAULT_RECORD_CMD.into(), play_cmd: DEFAULT_PLAY_CMD.into(), auto_send: false, speak_replies: false, speed_pct: 100, highlight: Highlight::default(), align_words: true, remote_ok: Vec::new(), mic: String::new(), auto_stop: true, pause_ms: 1500, keep_listening: false, fix_wording: false, assistant_open: true, my_on: false, my_muted: false, my_follow_ms: 8000, my_wake: false }
+        Self { stt: None, tts: None, record_cmd: DEFAULT_RECORD_CMD.into(), play_cmd: DEFAULT_PLAY_CMD.into(), auto_send: false, speak_replies: false, speed_pct: 100, highlight: Highlight::default(), align_words: true, remote_ok: Vec::new(), mic: String::new(), auto_stop: true, pause_ms: 1500, keep_listening: false, fix_wording: false, assistant_open: true, my_on: false, my_muted: false, my_follow_ms: 8000, my_wake: false, my_wake_sens: 1 }
     }
 }
 
@@ -192,6 +195,9 @@ impl VoiceSettings {
         }
         if self.my_follow_ms > 20_000 {
             return Err("the follow-up window must be between 0 and 20 seconds".into());
+        }
+        if self.my_wake_sens > 2 {
+            return Err("the wake phrase sensitivity must be 0 (low), 1 (normal) or 2 (high)".into());
         }
         if self.mic.len() > 30 || !self.mic.chars().all(|c| c.is_ascii_alphanumeric() || ":,_-".contains(c)) {
             return Err("microphone: not a sound device name".into());
@@ -531,6 +537,15 @@ impl Recorder {
         let tail = &g[g.len() - n..];
         let pk = tail.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]]).saturating_abs()).max().unwrap_or(0);
         (pk as f32 / 12000.0).min(1.0)
+    }
+
+    /// Hand over the samples captured since the last call and forget them (the wake listener reads small frames this way, so the buffer
+    /// never grows and nothing is kept). A half sample at the end stays for the next call.
+    pub fn drain_samples(&self) -> Vec<i16> {
+        let mut g = self.buf.lock().unwrap_or_else(|e| e.into_inner());
+        let n = g.len() & !1;
+        let bytes: Vec<u8> = g.drain(..n).collect();
+        bytes.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect()
     }
 
     /// Whether the recording process is still running (it exits early if the device is missing/busy).

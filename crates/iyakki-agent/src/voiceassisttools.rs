@@ -6,8 +6,9 @@
 //! The wake phrase ("My IYAKKI", the in-house spotter in `crates/iyakki-wake`) has two chat-facing parts: `voice_wake_status` (free) says
 //! whether it is opted in, whether a model file exists and what it was trained on, and plainly whether anything listens; the `wake`
 //! option of `voice_assistant_set` (the same hard-ask tool: it asks every time, a tap or key approves, never a spoken yes) saves the
-//! opt-in. In this version the spotter is built and tested but NOT connected to the microphone, so saving the opt-in starts no listening
-//! and the status line says so (`WAKE_CONNECTED_TO_MICROPHONE`).
+//! opt-in; `wake_sensitivity` (low, normal, high) is part of the same tool. The spotter is connected to the microphone by the shell
+//! (`wakelisten`): it listens only after the person opted in, only while a usable model file exists (the opt-in is refused with the
+//! reason otherwise), a red sign shows on every screen while the microphone is open, and the audit log records on and off (never sound).
 
 use std::sync::Arc;
 
@@ -16,15 +17,14 @@ use serde_json::{json, Value};
 use crate::agent::{Risk, ToolDef, Tools};
 use crate::chat::ToolSpec;
 
-pub const PROMPT_RULE: &str = "\nMY IYAKKI (voice assistant): voice_assistant_status says whether the push-to-talk voice assistant is on, muted, and its follow-up window (Voice tile -> Assistant tab). voice_assistant_set (on, muted, wake, follow_up_seconds 0 to 20) changes it; voice_wake_status says whether the opt-in wake phrase \"My IYAKKI\" has a model and whether anything listens for it (in this version nothing does); it always asks the person, and only a tap or key approves it, never a spoken yes. The microphone is only open while the Voice tile shows it; nothing is recorded to disk.";
+pub const PROMPT_RULE: &str = "\nMY IYAKKI (voice assistant): voice_assistant_status says whether the push-to-talk voice assistant is on, muted, and its follow-up window (Voice tile -> Assistant tab). voice_assistant_set (on, muted, wake, follow_up_seconds 0 to 20) changes it; voice_wake_status says whether the opt-in wake phrase \"My IYAKKI\" has a model and whether anything listens for it. voice_assistant_set with wake=true (needs a trained model file; wake_sensitivity low, normal or high) always asks the person, and only a tap or key approves it, never a spoken yes. With the wake phrase on, the microphone listens on every screen (a red sign shows while it does) but sound stays in memory and is never recorded or sent. Otherwise the microphone is only open while the Voice tile shows it.";
 
 pub const STATUS_TOOL: &str = "voice_assistant_status";
 pub const SET_TOOL: &str = "voice_assistant_set";
 pub const WAKE_STATUS_TOOL: &str = "voice_wake_status";
 
-/// Is the wake spotter fed from the microphone by anything in this build? No: the always-on listening is not enabled. When it is, this
-/// becomes true in the change that wires it, with its tests (the indicator, the mute, the opt-in).
-pub const WAKE_CONNECTED_TO_MICROPHONE: bool = false;
+/// The wake spotter is fed from the microphone by the shell's listener (`wakelisten`), only while the person opted in.
+pub const WAKE_CONNECTED_TO_MICROPHONE: bool = true;
 
 /// Where the trained weights live (under the data folder), made by `iyakki-wake-train`.
 pub const WAKE_WEIGHTS_FILE: &str = "voice/my-iyakki-wake.iywk";
@@ -44,21 +44,23 @@ pub enum ModelState {
 /// The wake phrase status in plain words. `opted_in` is the setting `voice.my_iyakki_wake`.
 pub fn wake_status_line(opted_in: bool, assistant_on: bool, muted: bool, model: &ModelState) -> String {
     let setting = if opted_in { "The wake phrase \"My IYAKKI\" is opted in" } else { "The wake phrase \"My IYAKKI\" is off (it is opt-in)" };
-    let model = match model {
+    let model_text = match model {
         ModelState::Missing => "No wake model file exists yet (record takes and train one: docs/development/WAKE-PHRASE.md).".to_string(),
         ModelState::Bad(e) => format!("The wake model file cannot be used: {e}."),
         ModelState::Found { how_trained, threshold } => format!("A wake model file is installed, {how_trained}; its suggested threshold is {threshold:.2}."),
     };
-    let listening = if WAKE_CONNECTED_TO_MICROPHONE && opted_in && assistant_on && !muted {
-        "The microphone is open to the local spotter (sound stays in memory and is never saved)."
-    } else if opted_in && !WAKE_CONNECTED_TO_MICROPHONE {
-        "Nothing is listening for it: this version has the spotter built and tested but not connected to the microphone, so use push to talk."
+    let listening = if opted_in && assistant_on && !muted && matches!(model, ModelState::Found { .. }) {
+        "The microphone listens for it on every screen while this is so (a red sign shows while it is open); sound stays in memory and is never saved or sent, and the Voice tile has the microphone while it is open."
     } else if muted {
         "Nothing is listening: the microphone is muted."
+    } else if opted_in && !assistant_on {
+        "Nothing is listening: My IYAKKI itself is off."
+    } else if opted_in {
+        "Nothing is listening: there is no usable model."
     } else {
         "Nothing is listening for it."
     };
-    format!("{setting}. {model} {listening}")
+    format!("{setting}. {model_text} {listening}")
 }
 
 /// What the tools change (a fake in tests).
@@ -74,6 +76,10 @@ pub trait Backend: Send + Sync {
     fn wake_status(&self) -> String {
         wake_status_line(false, false, false, &ModelState::Missing)
     }
+    /// Save the wake phrase sensitivity (0 low, 1 normal, 2 high).
+    fn set_wake_sensitivity(&self, _s: u8) -> Result<(), String> {
+        Err("the wake phrase sensitivity is not available here".into())
+    }
 }
 
 /// A validated change.
@@ -83,12 +89,17 @@ pub struct Change {
     pub muted: Option<bool>,
     pub follow_ms: Option<u32>,
     pub wake: Option<bool>,
+    pub wake_sens: Option<u8>,
 }
 
 pub fn parse(args: &Value) -> Result<Change, String> {
     let on = args.get("on").map(|v| v.as_bool().ok_or("`on` must be true or false")).transpose()?;
     let muted = args.get("muted").map(|v| v.as_bool().ok_or("`muted` must be true or false")).transpose()?;
     let wake = args.get("wake").map(|v| v.as_bool().ok_or("`wake` must be true or false")).transpose()?;
+    let wake_sens = match args.get("wake_sensitivity") {
+        None => None,
+        Some(v) => Some(v.as_str().and_then(crate::wakelisten::parse_sensitivity).ok_or("`wake_sensitivity` must be low, normal or high")?),
+    };
     let follow_ms = match args.get("follow_up_seconds") {
         None => None,
         Some(v) => {
@@ -99,10 +110,10 @@ pub fn parse(args: &Value) -> Result<Change, String> {
             Some((s * 1000.0).round() as u32)
         }
     };
-    if on.is_none() && muted.is_none() && follow_ms.is_none() && wake.is_none() {
-        return Err("give at least one of `on`, `muted`, `wake`, `follow_up_seconds`".into());
+    if on.is_none() && muted.is_none() && follow_ms.is_none() && wake.is_none() && wake_sens.is_none() {
+        return Err("give at least one of `on`, `muted`, `wake`, `wake_sensitivity`, `follow_up_seconds`".into());
     }
-    Ok(Change { on, muted, follow_ms, wake })
+    Ok(Change { on, muted, follow_ms, wake, wake_sens })
 }
 
 pub struct VoiceAssistantTools {
@@ -125,8 +136,8 @@ impl Tools for VoiceAssistantTools {
         v.push(ToolDef {
             spec: ToolSpec {
                 name: SET_TOOL.into(),
-                description: "Turn My IYAKKI on or off, mute or unmute its microphone, opt in or out of the wake phrase (`wake`), or set the follow-up window (seconds, 0 to 20). The person approves with a tap or key.".into(),
-                schema: json!({"type": "object", "properties": {"on": {"type": "boolean"}, "muted": {"type": "boolean"}, "wake": {"type": "boolean"}, "follow_up_seconds": {"type": "number"}}}),
+                description: "Turn My IYAKKI on or off, mute or unmute its microphone, opt in or out of the wake phrase (`wake`; needs a trained model file; the microphone then listens on every screen with a red sign, sound stays in memory), set its sensitivity (`wake_sensitivity`: low, normal, high), or set the follow-up window (seconds, 0 to 20). The person approves with a tap or key.".into(),
+                schema: json!({"type": "object", "properties": {"on": {"type": "boolean"}, "muted": {"type": "boolean"}, "wake": {"type": "boolean"}, "wake_sensitivity": {"type": "string", "enum": ["low", "normal", "high"]}, "follow_up_seconds": {"type": "number"}}}),
             },
             risk: Risk::Ask,
             untrusted: false,
@@ -148,6 +159,9 @@ impl Tools for VoiceAssistantTools {
                 }
                 if let Some(w) = c.wake {
                     self.backend.set_wake(w)?;
+                }
+                if let Some(w) = c.wake_sens {
+                    self.backend.set_wake_sensitivity(w)?;
                 }
                 if let Some(f) = c.follow_ms {
                     self.backend.set_follow_ms(f)?;
@@ -174,9 +188,12 @@ impl Tools for VoiceAssistantTools {
                         None => {}
                     }
                     match c.wake {
-                        Some(true) => p.push("opt in to the wake phrase \"My IYAKKI\" (a local spotter would listen for it; sound stays in memory; in this version it is not connected to the microphone)".to_string()),
+                        Some(true) => p.push("opt in to the wake phrase \"My IYAKKI\": the microphone will listen for it on every screen while My IYAKKI is on and not muted (a red sign shows while it does; sound stays in memory and is never saved or sent)".to_string()),
                         Some(false) => p.push("turn the wake phrase off".to_string()),
                         None => {}
+                    }
+                    if let Some(w) = c.wake_sens {
+                        p.push(format!("set the wake phrase sensitivity to {}", crate::wakelisten::SENSITIVITY[w as usize]));
                     }
                     if let Some(f) = c.follow_ms {
                         p.push(format!("set the follow-up window to {} seconds", f as f64 / 1000.0));
@@ -277,11 +294,17 @@ impl Backend for RealBackend {
     }
     fn set_wake(&self, on: bool) -> Result<(), String> {
         self.admin()?;
-        if on && !self.svc.voice_settings().my_on {
-            return Err("turn My IYAKKI on first; the wake phrase is an extra on top of it".into());
+        if on {
+            crate::wakelisten::can_enable(&self.svc)?;
         }
         self.update(|v| v.my_wake = on)?;
         (self.audit)("voice.assistant", if on { "wake-on" } else { "wake-off" });
+        Ok(())
+    }
+    fn set_wake_sensitivity(&self, s: u8) -> Result<(), String> {
+        self.admin()?;
+        self.update(|v| v.my_wake_sens = s)?;
+        (self.audit)("voice.assistant", "wake-sensitivity");
         Ok(())
     }
     fn wake_status(&self) -> String {
@@ -338,6 +361,10 @@ mod tests {
             self.log.lock().unwrap().push(format!("wake={on}"));
             Ok(())
         }
+        fn set_wake_sensitivity(&self, s: u8) -> Result<(), String> {
+            self.log.lock().unwrap().push(format!("sens={s}"));
+            Ok(())
+        }
     }
 
     fn tools() -> (VoiceAssistantTools, Arc<Fake>) {
@@ -384,21 +411,37 @@ mod tests {
         assert!(t.refusal(SET_TOOL, &json!({"wake": "yes"})).is_some());
         t.call(SET_TOOL, &json!({"wake": true})).unwrap();
         assert_eq!(*f.log.lock().unwrap(), vec!["wake=true"]);
-        assert!(t.describe(SET_TOOL, &json!({"wake": true})).contains("not connected to the microphone"));
+        let d = t.describe(SET_TOOL, &json!({"wake": true}));
+        assert!(d.contains("on every screen") && d.contains("red sign") && d.contains("never saved or sent"), "the card says what will listen: {d}");
         assert_eq!(t.call(WAKE_STATUS_TOOL, &json!({})).unwrap(), wake_status_line(false, false, false, &ModelState::Missing));
         assert!(is_tool(WAKE_STATUS_TOOL));
     }
 
     #[test]
-    fn the_wake_status_never_claims_to_listen_when_nothing_does() {
-        assert!(!WAKE_CONNECTED_TO_MICROPHONE, "this version does not listen; flip this only with the wiring and its tests");
+    fn the_wake_status_claims_listening_only_when_every_condition_holds() {
+        let found = ModelState::Found { how_trained: "trained on synthetic speech only (it has not heard a real voice)".into(), threshold: 0.85 };
         let off = wake_status_line(false, true, false, &ModelState::Missing);
         assert!(off.contains("is off (it is opt-in)") && off.contains("No wake model file") && off.contains("Nothing is listening"));
-        let on = wake_status_line(true, true, false, &ModelState::Found { how_trained: "trained on synthetic speech only (it has not heard a real voice)".into(), threshold: 0.85 });
-        assert!(on.contains("opted in") && on.contains("synthetic speech only") && on.contains("not connected to the microphone"));
-        assert!(!on.contains("microphone is open"));
+        let on = wake_status_line(true, true, false, &found);
+        assert!(on.contains("opted in") && on.contains("synthetic speech only") && on.contains("listens for it on every screen") && on.contains("red sign"));
+        for (opt, assistant, muted, m) in [(true, true, true, &found), (true, false, false, &found), (true, true, false, &ModelState::Missing), (false, true, false, &found)] {
+            let t = wake_status_line(opt, assistant, muted, m);
+            assert!(t.contains("Nothing is listening"), "{t}");
+            assert!(!t.contains("listens for it on every screen"), "{t}");
+        }
         let bad = wake_status_line(true, true, true, &ModelState::Bad("damaged".into()));
         assert!(bad.contains("cannot be used: damaged"));
+    }
+
+    #[test]
+    fn the_sensitivity_is_part_of_the_hard_ask_tool() {
+        let (t, f) = tools();
+        assert!(t.refusal(SET_TOOL, &json!({"wake_sensitivity": "loud"})).is_some());
+        assert!(t.refusal(SET_TOOL, &json!({"wake_sensitivity": 7})).is_some());
+        assert!(crate::agent::hard_ask(SET_TOOL, &json!({"wake_sensitivity": "high"})).is_some());
+        assert!(t.describe(SET_TOOL, &json!({"wake_sensitivity": "high"})).contains("sensitivity to high"));
+        t.call(SET_TOOL, &json!({"wake_sensitivity": "low"})).unwrap();
+        assert_eq!(*f.log.lock().unwrap(), vec!["sens=0"]);
     }
 
     #[test]

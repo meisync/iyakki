@@ -31,19 +31,25 @@ impl RecorderAudio {
     }
 }
 
+/// Open the microphone the way the Voice tile does (the saved microphone choice, the record command, the named-format PCM of
+/// `micpcm`): the one place that does it, shared by the assistant's push to talk and the wake listener (`wakelisten`).
+pub fn open_capture(recorders: &dyn Recorders, svc: &Services, max_secs: usize) -> Result<Box<dyn Capture>, String> {
+    let mics = recorders.mics();
+    let v = svc.voice_settings();
+    let mic = vd::pick_mic(&mics, &v.mic);
+    if mic.is_none() && mics.is_empty() {
+        return Err(vd::no_mic_text_t2(&recorders.product(), vd::t2_mic_hidden(&vd::proc_root())));
+    }
+    let cmd = vd::record_cmd_for(&v.record_cmd, mic);
+    recorders.start(&cmd, max_secs)
+}
+
 impl AudioIn for RecorderAudio {
     fn open(&mut self) -> Result<(), String> {
         if self.cap.is_some() {
             return Ok(());
         }
-        let mics = self.recorders.mics();
-        let v = self.svc.voice_settings();
-        let mic = vd::pick_mic(&mics, &v.mic);
-        if mic.is_none() && mics.is_empty() {
-            return Err(vd::no_mic_text_t2(&self.recorders.product(), vd::t2_mic_hidden(&vd::proc_root())));
-        }
-        let cmd = vd::record_cmd_for(&v.record_cmd, mic);
-        self.cap = Some(self.recorders.start(&cmd, (MAX_LISTEN_MS / 1000 + 10) as usize)?);
+        self.cap = Some(open_capture(self.recorders.as_ref(), &self.svc, (MAX_LISTEN_MS / 1000 + 10) as usize)?);
         Ok(())
     }
     fn is_open(&self) -> bool {

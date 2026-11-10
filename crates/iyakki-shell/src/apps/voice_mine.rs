@@ -92,6 +92,13 @@ impl VoiceApp {
 
     /// Called every heartbeat: copy the worker's state for drawing; close the worker when the assistant was turned off.
     pub(super) fn mine_tick(&mut self, cx: &AppCx) {
+        // the wake phrase was heard (the shell opened this tile for it): show the Assistant tab and tap Talk, the same as the person would
+        if iyakki_agent::wakelisten::take_session_request() {
+            if cx.services.voice_settings().my_on {
+                self.switch(super::voice::Area::Mine, cx);
+                self.mine_click(T_MINE_TALK, cx);
+            }
+        }
         if !cx.services.voice_settings().my_on {
             if self.mine.worker.take().is_some() {
                 self.mine.st = None;

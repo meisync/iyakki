@@ -2054,6 +2054,7 @@ dependencies = [
  "iyakki-bindelta",
  "iyakki-camdetect",
  "iyakki-clock",
+ "iyakki-clockfloor",
  "iyakki-core-api",
  "iyakki-core-fake",
  "iyakki-data",
@@ -2070,11 +2071,14 @@ dependencies = [
  "iyakki-ledger",
  "iyakki-link",
  "iyakki-lint",
+ "iyakki-macrecovery",
  "iyakki-mem",
  "iyakki-netscan",
+ "iyakki-openpgp",
  "iyakki-pdf",
  "iyakki-proxy",
  "iyakki-qr",
+ "iyakki-regex",
  "iyakki-rtsp",
  "iyakki-schema",
  "iyakki-sec",
@@ -2148,6 +2152,14 @@ dependencies = [
 [[package]]
 name = "iyakki-clock"
 version = "0.1.0-alpha.1"
+
+[[package]]
+name = "iyakki-clockfloor"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "iyakki-clock",
+ "log",
+]
 
 [[package]]
 name = "iyakki-connect"
@@ -2353,6 +2365,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "iyakki-macrecovery"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "iyakki-drivers",
+ "iyakki-proxy",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "iyakki-mem"
 version = "0.1.0-alpha.1"
 dependencies = [
@@ -2367,6 +2388,13 @@ dependencies = [
  "libc",
  "serde_json",
  "ureq",
+]
+
+[[package]]
+name = "iyakki-openpgp"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -2393,6 +2421,10 @@ dependencies = [
 
 [[package]]
 name = "iyakki-qr"
+version = "0.1.0-alpha.1"
+
+[[package]]
+name = "iyakki-regex"
 version = "0.1.0-alpha.1"
 
 [[package]]

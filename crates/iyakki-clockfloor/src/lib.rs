@@ -13,7 +13,7 @@
 //!   there yet) and again once the data volume is mounted (the saved time).
 //!
 //! The decisions are pure functions ([`floor`], [`behind`], [`apply`]) with tests; the real clock is set with
-//! [`crate::ntp::set_clock`]. The k3s dev cluster waits for [`pending`] to end (docs/K3S-DEV.md).
+//! the setter the agent passes in (`ntp::set_clock`). The k3s dev cluster waits for [`pending`] to end (docs/K3S-DEV.md).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -133,24 +133,24 @@ pub fn image_build_time() -> i64 {
 }
 
 fn now_secs() -> i64 {
-    crate::clock::now_unix()
+    iyakki_clock::now_unix()
 }
 
 /// Boot, first step (before the data volume exists): the build-time floor. Marks the floor as pending for the k3s gate.
-pub fn apply_early() -> Applied {
+pub fn apply_early(set: &mut dyn FnMut(i64) -> Result<(), String>) -> Applied {
     MANAGED.store(true, Ordering::SeqCst);
     PENDING.store(true, Ordering::SeqCst);
-    let a = apply(None, image_build_time(), now_secs(), &mut |t| crate::ntp::set_clock(t as f64));
+    let a = apply(None, image_build_time(), now_secs(), set);
     log::info!("clock floor (early): {}", describe(&a));
     a
 }
 
 /// Boot, second step: the data volume is mounted (`on_disk`: it is a real disk), so the saved time is read and applied. Ends
 /// the pending state; starts the saver when the data lives on a disk.
-pub fn apply_after_data(on_disk: bool) -> Applied {
+pub fn apply_after_data(on_disk: bool, set: &mut dyn FnMut(i64) -> Result<(), String>) -> Applied {
     DATA_READY.store(on_disk, Ordering::SeqCst);
     let text = if on_disk { std::fs::read_to_string(data_dir().join(FILE_NAME)).ok() } else { None };
-    let a = apply(text.as_deref(), image_build_time(), now_secs(), &mut |t| crate::ntp::set_clock(t as f64));
+    let a = apply(text.as_deref(), image_build_time(), now_secs(), set);
     log::info!("clock floor (data volume): {}", describe(&a));
     PENDING.store(false, Ordering::SeqCst);
     if on_disk {

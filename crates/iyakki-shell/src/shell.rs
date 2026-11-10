@@ -458,6 +458,8 @@ pub struct Shell {
     camera: crate::camera::Presence,
     /// The "camera in use by the assistant" sign was on in the last frame.
     cam_sign: bool,
+    /// The wake phrase listener and its sign (`shell_wake.rs`).
+    wake: wake_impl::WakeUi,
     /// The top bar's speaker: its slider and press (`shell_volbar.rs`).
     vol: volbar_impl::VolUi,
     /// What is still starting after boot: the Home strip, its list and the sign-in line (`shell_startup.rs`).
@@ -578,7 +580,7 @@ impl Shell {
         };
         // tests run as a desktop unless one asks for cloud mode (`set_cloud_for_test`)
         let cloud = if cfg!(test) { iyakki_agent::cloudmode::CloudMode::desktop() } else { iyakki_agent::cloudmode::detect(env.services.cloud_setting()) };
-        let mut sh = Shell { env, acc: Default::default(), hits: Vec::new(), clip: None, hostdlg: None, permpop: None, login: None, clipscan: None, scan_src: None, drag_over: false, ctx: None, fields: Vec::new(), last_click: None, press: None, click_run: (0, 0, 0, 0), screen, custom: Vec::new(), custom_at: 0, custom_open: None, session: None, sel: 0, group: Group::Home, cgroup: None, layout: Default::default(), lay: Default::default(), mouse: (0, 0), tick: 0, toast: None, size: (1280, 720), probes: Vec::new(), stale: true, live: false, live_paint: false, live_rects: Vec::new(), live_every_ms: 100, live_until: 0, want_host_paste: false, host_sync_until: 0, clip_note: ClipNote::None, help: false, shot: Shot::Off, ring: None, last_alarm_check: 0, snoozed: Vec::new(), stash: None, badge: Badge::default(), update_count: 0, cues: Default::default(), clock: Default::default(), clock_tip: None, clock_text: String::new(), clock_ready: false, devpop: Default::default(), devprobe: None, brand: Default::default(), installs: Default::default(), battery: Default::default(), loss: Default::default(), quick_launch: None, dev_sign: None, devask: Default::default(), tzask: Default::default(), camera: if wants_system_camera(cfg!(test), &cloud) { crate::camera::Presence::system() } else { crate::camera::Presence::none() }, cam_sign: false, fnk: Default::default(), vol: Default::default(), startup: startup_impl::StartupUi::new(), tbar: Default::default(), osk: Default::default(), tenants: Default::default(), lbar: Default::default(), cloud: cloud.clone(), panes: Default::default(), saver: Default::default(), lockui: Default::default(), scroll_rem: 0.0, scroll_rem_at: 0 };
+        let mut sh = Shell { env, acc: Default::default(), hits: Vec::new(), clip: None, hostdlg: None, permpop: None, login: None, clipscan: None, scan_src: None, drag_over: false, ctx: None, fields: Vec::new(), last_click: None, press: None, click_run: (0, 0, 0, 0), screen, custom: Vec::new(), custom_at: 0, custom_open: None, session: None, sel: 0, group: Group::Home, cgroup: None, layout: Default::default(), lay: Default::default(), mouse: (0, 0), tick: 0, toast: None, size: (1280, 720), probes: Vec::new(), stale: true, live: false, live_paint: false, live_rects: Vec::new(), live_every_ms: 100, live_until: 0, want_host_paste: false, host_sync_until: 0, clip_note: ClipNote::None, help: false, shot: Shot::Off, ring: None, last_alarm_check: 0, snoozed: Vec::new(), stash: None, badge: Badge::default(), update_count: 0, cues: Default::default(), clock: Default::default(), clock_tip: None, clock_text: String::new(), clock_ready: false, devpop: Default::default(), devprobe: None, brand: Default::default(), installs: Default::default(), battery: Default::default(), loss: Default::default(), quick_launch: None, dev_sign: None, devask: Default::default(), tzask: Default::default(), camera: if wants_system_camera(cfg!(test), &cloud) { crate::camera::Presence::system() } else { crate::camera::Presence::none() }, cam_sign: false, fnk: Default::default(), vol: Default::default(), startup: startup_impl::StartupUi::new(), tbar: Default::default(), osk: Default::default(), tenants: Default::default(), lbar: Default::default(), cloud: cloud.clone(), panes: Default::default(), saver: Default::default(), lockui: Default::default(), wake: Default::default(), scroll_rem: 0.0, scroll_rem_at: 0 };
         if cloud.on {
             sh.apply_cloud(cloud);
         }
@@ -1924,6 +1926,11 @@ impl Shell {
             self.stale = true;
             return;
         }
+        // the click on the red sign "listening for My IYAKKI" switches the wake phrase off (and audits it)
+        if matches!(ev, Event::Tab(916)) {
+            self.wake_sign_click();
+            return;
+        }
         // the click on the red REC sign switches off every recording of the signed-in person's cameras (and audits it)
         if matches!(ev, Event::Tab(915)) {
             if let Some(s) = &self.session {
@@ -2228,6 +2235,8 @@ impl Shell {
                         self.stale = true;
                     }
                 }
+                // the wake phrase listener follows the settings; its red sign comes and goes on every screen
+                self.wake_tick();
                 // the red REC sign of a camera that records comes and goes on every screen
                 if self.tick % 15 == 0 && crate::apps::cameras::rec_sign_changed(self.env.services.dir()) {
                     self.stale = true;
@@ -3584,13 +3593,19 @@ impl Shell {
             g.hit(r, Event::Tab(913), "Stop what the page is capturing");
         }
         // a camera records (F-CAM-03): a red REC sign on every screen while the signed-in person's recording runs, a click stops it
+        let mut stacked = usize::from(self.cam_sign) + usize::from(cap != 0 && !in_browser);
         if self.session.is_some() {
             let names = crate::apps::cameras::sign_names(self.env.services.dir());
             if !names.is_empty() {
-                let below = usize::from(self.cam_sign) + usize::from(cap != 0 && !in_browser);
-                let r = draw_rec_sign(g, h, s, &names, below);
+                let r = draw_rec_sign(g, h, s, &names, stacked);
                 g.hit(r, Event::Tab(915), "Stop recording");
+                stacked += 1;
             }
+        }
+        // the microphone is open to the wake phrase listener: a red sign on every screen while it is, a click switches it off
+        if self.wake.sign {
+            let r = wake_impl::draw_wake_sign(g, h, s, stacked);
+            g.hit(r, Event::Tab(916), "Switch the wake phrase off");
         }
         // the person's own browser has its microphone or camera on for this session: a sign on every screen, drawn over every app
         // (a tile cannot hide it), bottom right, a click stops it
@@ -6772,6 +6787,8 @@ mod osk_tests;
 mod battery_impl;
 #[path = "shell_saver.rs"]
 mod saver_impl;
+#[path = "shell_wake.rs"]
+mod wake_impl;
 #[path = "shell_lock.rs"]
 mod lock_impl;
 #[path = "shell_access.rs"]
@@ -6854,6 +6871,9 @@ mod loss_tests;
 #[cfg(test)]
 #[path = "shell_saver_tests.rs"]
 mod saver_tests;
+#[cfg(test)]
+#[path = "shell_wake_tests.rs"]
+mod wake_tests;
 
 #[cfg(test)]
 #[path = "shell_loginbar_tests.rs"]

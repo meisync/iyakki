@@ -21,6 +21,10 @@ iyakki-camdetect.workspace = true
 iyakki-diskcrypt.workspace = true
 # Battery model and health logic, split out of iyakki-agent. Uses serde (already in the workspace).
 iyakki-battery.workspace = true
+iyakki-clockfloor.workspace = true
+iyakki-macrecovery.workspace = true
+iyakki-regex.workspace = true
+iyakki-openpgp.workspace = true
 # Deploy-file and Dockerfile lint rules (pure text), split out of iyakki-agent.
 iyakki-lint.workspace = true
 # The binary delta (build and apply), split out of iyakki-agent. Uses sha2 (already in the workspace).

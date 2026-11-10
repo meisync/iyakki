@@ -265,8 +265,8 @@ fn the_manifest_scanner_reads_dependency_tables_only() {
 /// them gained a dependency on the agent, the shell or a tile, the split would be undone (the crate would rebuild whenever the agent does).
 #[test]
 fn the_crates_split_out_of_the_agent_depend_on_small_leaf_crates_only() {
-    // PILOT 3: iyakki-camdetect also takes iyakki-clock (events.rs); the others are std plus crates the agent already had
-    let allowed: [(&str, &[&str]); 10] = [
+    // PILOT 4 adds four (below). PILOT 3: iyakki-camdetect also takes iyakki-clock (events.rs); the others are std plus crates the agent already had
+    let allowed: [(&str, &[&str]); 14] = [
         ("iyakki-sshfs", &["iyakki-sec"]),
         ("iyakki-camdetect", &["iyakki-sec", "iyakki-volcrypt", "iyakki-clock"]),
         ("iyakki-diskcrypt", &[]),
@@ -277,6 +277,11 @@ fn the_crates_split_out_of_the_agent_depend_on_small_leaf_crates_only() {
         ("iyakki-bindelta", &[]),
         ("iyakki-lint", &[]),
         ("iyakki-battery", &[]),
+        // PILOT 4: clockfloor takes the clock; macrecovery the download client and the board-id check; regex and openpgp are std/sha2 only
+        ("iyakki-clockfloor", &["iyakki-clock"]),
+        ("iyakki-macrecovery", &["iyakki-proxy", "iyakki-drivers"]),
+        ("iyakki-regex", &[]),
+        ("iyakki-openpgp", &[]),
     ];
     for (krate, ok) in allowed {
         let deps = iyakki_deps(&manifest(krate));
