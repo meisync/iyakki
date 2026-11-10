@@ -36,18 +36,39 @@ fn hand() -> std::sync::MutexGuard<'static, Hand> {
 
 const NAMED: [&str; 22] = ["Enter", "Esc", "Tab", "Backspace", "Delete", "Up", "Down", "Left", "Right", "Home", "End", "PageUp", "PageDown", "BackTab", "Space", "F1", "F2", "F3", "F4", "F5", "F6", "F7"];
 
+/// The one spelling of a key name: names are not case-sensitive (`ctrl+a`, `BACKSPACE`, `f5`, `escape`, `return` all work);
+/// a single character keeps its case (`A` is not `a`). `None` when it is no key the shell knows.
+pub fn canonical_key(k: &str) -> Option<String> {
+    if let Some(n) = NAMED.iter().find(|n| n.eq_ignore_ascii_case(k)) {
+        return Some((*n).to_string());
+    }
+    match k.to_ascii_lowercase().as_str() {
+        "escape" => return Some("Esc".into()),
+        "return" => return Some("Enter".into()),
+        "bksp" | "back" => return Some("Backspace".into()),
+        "del" => return Some("Delete".into()),
+        "pgup" => return Some("PageUp".into()),
+        "pgdn" | "pgdown" => return Some("PageDown".into()),
+        _ => {}
+    }
+    if k.len() > 1 && k.starts_with(['F', 'f']) {
+        if let Ok(n) = k[1..].parse::<u8>() {
+            return (1..=12).contains(&n).then(|| format!("F{n}"));
+        }
+    }
+    if k.len() > 5 && k[..5].eq_ignore_ascii_case("ctrl+") {
+        let mut it = k[5..].chars();
+        return match (it.next(), it.next()) {
+            (Some(c), None) if c.is_ascii_alphabetic() => Some(format!("Ctrl+{}", c.to_ascii_lowercase())),
+            _ => None,
+        };
+    }
+    (k.chars().count() == 1 && !k.chars().any(|c| c.is_control())).then(|| k.to_string())
+}
+
 /// Is this a key name the shell understands?
 pub fn valid_key(k: &str) -> bool {
-    if NAMED.contains(&k) {
-        return true;
-    }
-    if let Some(n) = k.strip_prefix('F').and_then(|n| n.parse::<u8>().ok()) {
-        return (1..=12).contains(&n);
-    }
-    if let Some(c) = k.strip_prefix("Ctrl+") {
-        return c.chars().count() == 1 && c.chars().all(|c| c.is_ascii_alphabetic());
-    }
-    k.chars().count() == 1 && !k.chars().any(|c| c.is_control())
+    canonical_key(k).is_some()
 }
 
 /// Check an event before it is queued.

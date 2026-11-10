@@ -7,7 +7,8 @@ use crate::ui::{Event, Key};
 
 /// The shell key for a name the device accepted (`Enter`, `Esc`, `Up`, `F5`, `Ctrl+c`, `a`...).
 pub fn key_of(name: &str) -> Option<Key> {
-    Some(match name {
+    let name = iyakki_agent::devmode::input::canonical_key(name)?;
+    Some(match name.as_str() {
         "Enter" => Key::Enter,
         "Esc" => Key::Esc,
         "Tab" => Key::Tab,
@@ -73,6 +74,14 @@ mod tests {
         assert_eq!(key_of("F5"), Some(Key::F(5)));
         assert_eq!(key_of("Ctrl+c"), Some(Key::Ctrl('c')));
         assert_eq!(key_of("F13"), None);
+        // names are not case-sensitive: the first Ctrl+A on a device was refused because it was typed ctrl+a
+        assert_eq!(key_of("ctrl+a"), Some(Key::Ctrl('a')));
+        assert_eq!(key_of("CTRL+A"), Some(Key::Ctrl('a')));
+        assert_eq!(key_of("BackSpace"), Some(Key::Backspace));
+        assert_eq!(key_of("escape"), Some(Key::Esc));
+        assert_eq!(key_of("f5"), Some(Key::F(5)));
+        assert_eq!(key_of("A"), Some(Key::Char('A')));
+        assert_eq!(key_of("ctrl+ab"), None);
         assert_eq!(key_of("ab"), None);
         assert_eq!(events(&InputEv::Tap(5, 6)), vec![Event::MouseMove(5, 6), Event::MouseDown(5, 6), Event::MouseUp(5, 6)]);
         assert_eq!(events(&InputEv::Text("a\nb".into())), vec![Event::Key(Key::Char('a')), Event::Key(Key::Enter), Event::Key(Key::Char('b'))]);
