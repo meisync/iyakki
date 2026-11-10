@@ -575,3 +575,28 @@ fn a_computer_asking_for_the_screen_makes_the_black_screen_draw_soon_instead_of_
     assert!(sh2.redraw_interval_ms() <= 200, "a request for a picture makes it draw soon too");
     let _ = asker.join();
 }
+
+#[test]
+fn while_developer_mode_is_on_the_screen_stays_on_and_when_it_is_off_the_saver_works_as_before() {
+    // asked by the owner 2026-11-10: the black screen of a test machine got in the way of the developer driving it
+    use iyakki_agent::devmode::DevMode;
+    let (mut sh, clock) = saver_shell("sv-dev-on", cfg());
+    // developer mode on for real: the shell reads it every few seconds and would overwrite a value set by hand
+    let dm = DevMode::open(sh.env.services.dir());
+    dm.enable(&iyakki_sec::policy::Role::Admin.template(), "root", 0).unwrap();
+    run(&mut sh, &clock, 30 * MIN);
+    assert!(sh.dev_sign.as_deref().is_some_and(|s| s.starts_with("DEV")), "the sign: {:?}", sh.dev_sign);
+    assert_eq!(sh.screen_stage(), Stage::Awake, "developer mode keeps the screen on");
+    assert_eq!(sh.saver_keep_on(), Some("developer mode"));
+    // developer mode off: the idle time counts again and the saver and the black screen come as before
+    dm.disable(&iyakki_sec::policy::Role::Admin.template(), "root").unwrap();
+    run(&mut sh, &clock, 12 * MIN);
+    assert!(sh.dev_sign.is_none(), "{:?}", sh.dev_sign);
+    assert_eq!(sh.screen_stage(), Stage::Off);
+    // an unfinished system update is not developer mode
+    let (mut sh2, clock2) = saver_shell("sv-dev-upd", cfg());
+    sh2.dev_sign = Some("UPDATE INTERRUPTED \u{00b7} choose \"previous version\" at boot".to_string());
+    assert_eq!(sh2.saver_keep_on(), None);
+    run(&mut sh2, &clock2, 11 * MIN);
+    assert_eq!(sh2.screen_stage(), Stage::Off);
+}

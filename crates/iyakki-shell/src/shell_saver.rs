@@ -253,6 +253,11 @@ impl Shell {
         if self.session.is_some() && self.badge.approvals > 0 {
             return Some("a waiting approval");
         }
+        // developer mode is on (the DEV sign): the machine is a test machine that paired computers drive and look at, so the screen stays
+        // on like on any desktop, instead of dimming, showing the saver and powering the display down in front of a developer
+        if self.dev_sign.as_deref().is_some_and(|s| s == "DEV" || s.starts_with("DEV \u{00b7}")) {
+            return Some("developer mode");
+        }
         if self.ring.is_some() {
             return Some("an alarm");
         }
