@@ -108,7 +108,7 @@ even the right password is refused during it. The typed password is wiped after 
 
 | Way to lock | Notes |
 |---|---|
-| Super+L (a PC keyboard) or the keyboard's lock key (KEY_SCREENLOCK) | Not in the Mac profile, where Command+L is the browser's address bar; a Mac keyboard has no lock key, use the Power menu |
+| Super+L (a PC keyboard) or the keyboard's lock key (KEY_SCREENLOCK) | Not in the Mac profile, where Command+L is the browser's address bar and a Mac keyboard has no lock key: there, Control+Command+Q locks (as on a Mac), or use the Power menu |
 | Power menu: Lock (also `l` on the power key's card) | Was "sign out"; now it locks |
 | Settings -> Display & sound -> Screen saver -> "Lock the screen now" | Asks the shell by a small file in the data folder |
 | The assistant: `lock_screen` | Asks nothing (it only protects the person). The assistant can lock but never unlock |

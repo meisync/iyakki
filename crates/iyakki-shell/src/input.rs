@@ -277,6 +277,20 @@ impl InputState {
 
     /// `abs_max` is the device's (max_x, max_y) when it is an absolute pointer (tablet, QEMU usb-tablet).
     /// The input profile's view of a key press. True when it took the key (the events, if any, are in `out`).
+    /// Is the key printed Command held, in the Mac profile only? (The driver's swap of Command and Option is undone here, as in
+    /// `profile_key`.)
+    fn command_held(&self) -> bool {
+        use iyakki_agent::inputprofile as ip;
+        if crate::inputprofile::resolved() != ip::Resolved::Mac {
+            return false;
+        }
+        if crate::inputprofile::swap_in_effect() {
+            self.alt
+        } else {
+            self.meta
+        }
+    }
+
     fn profile_key(&mut self, code: u16, first: bool, out: &mut Vec<Event>) -> bool {
         use iyakki_agent::inputprofile as ip;
         let mac = crate::inputprofile::resolved() == ip::Resolved::Mac;
@@ -401,6 +415,12 @@ impl InputState {
                     if let Some(k) = crate::panes::chord_from_evdev(c, self.shift) {
                         out.push(Event::Layout(k));
                     }
+                }
+                // Control+Command+Q locks the screen in the Mac profile, as it does on a Mac (a Mac keyboard has no lock key, and Command+L
+                // stays the browser's address bar)
+                16 if self.ctrl && r.value == 1 && self.command_held() => {
+                    out.push(Event::Fn(crate::fnkeys::FnKey::Lock, true));
+                    out.push(Event::Fn(crate::fnkeys::FnKey::Lock, false));
                 }
                 // Super+L locks the screen (a PC keyboard; the Mac profile keeps Command+L for the browser's address bar)
                 38 if self.meta && r.value == 1 && crate::inputprofile::resolved() != iyakki_agent::inputprofile::Resolved::Mac => {
@@ -1615,6 +1635,37 @@ mod profile_tests {
         hold(&mut st, 125, true);
         assert_ne!(press(&mut st, 38), lock, "Command+L is the browser's address bar in the Mac profile");
         hold(&mut st, 125, false);
+        profile("pc", None, false);
+    }
+
+    #[test]
+    fn control_command_q_locks_the_screen_in_the_mac_profile_only() {
+        let lock = vec![Event::Fn(crate::fnkeys::FnKey::Lock, true), Event::Fn(crate::fnkeys::FnKey::Lock, false)];
+        let mut st = InputState::new(100, 100);
+        profile("mac", None, true);
+        hold(&mut st, 125, true); // Command alone: Q does nothing, as before
+        assert_eq!(press(&mut st, 16), vec![], "Command+Q does nothing");
+        hold(&mut st, 29, true); // and Control with it locks
+        assert_eq!(press(&mut st, 16), lock, "Control+Command+Q");
+        hold(&mut st, 29, false);
+        hold(&mut st, 125, false);
+        hold(&mut st, 29, true);
+        assert_eq!(press(&mut st, 16), vec![Event::Key(Key::Ctrl('q'))], "Control+Q alone is still Control+Q");
+        hold(&mut st, 29, false);
+        // the PC profile has Super+L; Control+Windows+Q is nothing there
+        profile("pc", None, false);
+        hold(&mut st, 125, true);
+        hold(&mut st, 29, true);
+        assert_ne!(press(&mut st, 16), lock);
+        hold(&mut st, 29, false);
+        hold(&mut st, 125, false);
+        // with the driver's swap of Command and Option, the key printed Command arrives as Alt
+        profile("mac", Some(true), true);
+        hold(&mut st, 56, true);
+        hold(&mut st, 29, true);
+        assert_eq!(press(&mut st, 16), lock, "the swapped Command key");
+        hold(&mut st, 29, false);
+        hold(&mut st, 56, false);
         profile("pc", None, false);
     }
 
