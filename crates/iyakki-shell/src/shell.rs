@@ -3247,7 +3247,7 @@ impl Shell {
         let (pages, page) = (launcher::page_count(n, cap), self.sel / cap);
         let first = page * cap;
         let rects = launcher::page_rects(w, h, s, n, page);
-        let power = self.session.as_ref().is_some_and(|s| s.policy.power);
+        let power = self.may_power();
         match ev {
             Event::Key(Key::Left) => self.sel = self.sel.saturating_sub(1),
             Event::Key(Key::Right) => self.sel = (self.sel + 1).min(n - 1),
@@ -3884,7 +3884,7 @@ impl Shell {
 
     fn draw_launcher(&mut self, g: &mut Gfx, w: u32, h: u32, s: f32) {
         let Some(sess) = self.session.clone() else { return };
-        let power = sess.policy.power;
+        let power = self.may_power();
         // top bar (a launcher in a pane has the pane's title strip instead)
         let top_bar = !self.panes.compact;
         let lay = top_bar && self.panes_button();
@@ -5591,8 +5591,17 @@ pub(crate) mod tests {
     fn power_menu_needs_permission() {
         let (mut sh, host) = shell_with_users("sh4");
         login(&mut sh, "alice", "alicepass1");
+        // a plain user at the machine's own screen may power off: the login screen has Power with no password, because someone at
+        // the machine can pull the plug anyway
         key(&mut sh, Key::Char('p'));
-        assert_eq!(sh.screen_name(), "launcher", "plain users have no power control");
+        assert_eq!(sh.screen_name(), "power", "a plain user at the machine has the power control");
+        key(&mut sh, Key::Char('x'));
+        assert_eq!(sh.screen_name(), "launcher");
+        // over the browser or cloud the permission still decides
+        sh.set_remote(true);
+        key(&mut sh, Key::Char('p'));
+        assert_eq!(sh.screen_name(), "launcher", "a remote plain user has no power control");
+        sh.set_remote(false);
         key(&mut sh, Key::Char('o'));
         login(&mut sh, "oscar", "operpass12");
         key(&mut sh, Key::Char('p'));

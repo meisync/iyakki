@@ -162,7 +162,7 @@ pub(super) struct VolUi {
 impl Shell {
     pub(super) fn bar_slots(&self) -> BarSlots {
         let Some(sess) = self.session.as_ref().filter(|_| !self.panes.compact) else { return BarSlots { speaker: None, settings: None, count: 0 } };
-        let base = 4 + usize::from(sess.policy.power) + usize::from(sess.policy.allows_app(PApp::Inbox)) + usize::from(self.panes_button());
+        let base = 4 + usize::from(self.may_power()) + usize::from(sess.policy.allows_app(PApp::Inbox)) + usize::from(self.panes_button());
         let mut n = base;
         let mut next = |on: bool| on.then(|| {
             n += 1;

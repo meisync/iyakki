@@ -29,7 +29,7 @@ Contents: [Global keys](#global-keys-and-the-help-overlay) · [Launcher](#the-la
 | **Ctrl+V** | Paste the latest copy |
 | **Ctrl+Shift+V** or right-click | Clipboard history; its **Scan QR** button (Ctrl+K) copies text from a QR code held up to the camera (see below) |
 | `o` (launcher) | Sign out |
-| `p` (launcher) | Power menu, if your role allows |
+| `p` (launcher) | Power menu: anyone signed in at the machine's own screen; over the browser or cloud only if your role allows |
 
 **Selecting and copying.** Drag over text in the chat transcript, terminal output and detail panes to select (double-click
 a word, triple-click a paragraph, Shift+click to extend), then **Ctrl+C**. A plain click does not copy; hover a message

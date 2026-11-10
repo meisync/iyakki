@@ -181,8 +181,15 @@ impl Shell {
         self.fn_notice(t);
     }
 
+    /// May this session use Power (the card, the `p` key, the bar's button)? The account's `power` permission, or anyone signed in at the
+    /// machine's own screen: the login screen has Power with no password because someone at the machine can pull the plug anyway, so a
+    /// plain user after sign-in gains nothing from being refused. A remote (browser, cloud) session keeps the permission.
+    pub(crate) fn may_power(&self) -> bool {
+        self.session.as_ref().is_some_and(|s| s.policy.power || !self.lbar.remote)
+    }
+
     fn fn_power_card(&mut self) {
-        let allowed = self.session.as_ref().is_some_and(|s| s.policy.power);
+        let allowed = self.may_power();
         if self.session.is_none() {
             // the login and setup screens of the local console have a power card of their own; a remote session never does
             if self.on_auth_screen() && !self.lbar.remote {

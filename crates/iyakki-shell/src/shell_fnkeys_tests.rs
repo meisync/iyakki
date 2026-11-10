@@ -240,10 +240,17 @@ fn the_power_card_opens_on_the_key_and_acts_only_on_a_choice() {
     press(&mut sh, FnKey::Power);
     sh.handle(&Event::Key(Key::Char('r')));
     assert_eq!(*host.powered_off.lock().unwrap(), Some("reboot".into()));
-    // an account that may not power off is told so
+    // an account without the power permission, at the machine's own screen, may power off (the login screen has no password either:
+    // someone at the machine can pull the plug)
     let (mut sh2, host2) = shell_with_users("fn-power2");
     login(&mut sh2, "root", "rootpass12");
     sh2.session.as_mut().unwrap().policy.power = false;
+    press(&mut sh2, FnKey::Power);
+    assert!(sh2.fnk.power_card, "a plain user at the machine gets the power card");
+    sh2.handle(&Event::Key(Key::Esc));
+    assert!(!sh2.fnk.power_card && host2.powered_off.lock().unwrap().is_none());
+    // a remote (browser or cloud) session without the permission is told so
+    sh2.set_remote(true);
     press(&mut sh2, FnKey::Power);
     assert!(!sh2.fnk.power_card);
     assert!(osd(&sh2).unwrap().text.contains("may not"));
