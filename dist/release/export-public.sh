@@ -33,19 +33,40 @@ if grep -rInE '/home/[a-z][a-z0-9_-]+/|\b192\.168\.(0|1)\.[0-9]+\b.*(owner|my )|
   echo "export-public: pattern hits above (home paths, key blocks, tokens); review them" >&2; bad=1
 fi
 rm -f /tmp/export-public-hits.$$
-# 3b. relative markdown links that now point at nothing
-python3 - "$OUT" <<'P' || bad=1
+# 3b. relative markdown links: a link to a file that was left out on purpose becomes plain text; any other link that points at nothing is an error
+python3 - "$OUT" "$PWD" <<'P' || bad=1
 import os, re, sys
-root = sys.argv[1]; missing = []
+from urllib.parse import unquote
+root, src = sys.argv[1], sys.argv[2]
+link = re.compile(r"\[([^\]]*)\]\((<[^>]+>|[^)\s]+)\)")
+fence = re.compile(r"```.*?```|`[^`\n]*`", re.S)
+unlinked, broken = 0, []
 for d, _, fs in os.walk(root):
+    if os.sep + ".git" in d: continue
     for f in fs:
         if not f.endswith(".md"): continue
         p = os.path.join(d, f)
-        for m in re.finditer(r"\]\((?!https?:|mailto:|#)([^)#\s]+)", open(p, errors="ignore").read()):
-            t = os.path.normpath(os.path.join(d, m.group(1)))
-            if not os.path.exists(t): missing.append((os.path.relpath(p, root), m.group(1)))
-for p, t in missing[:60]: print(f"  dangling link: {p} -> {t}", file=sys.stderr)
-if missing: print(f"export-public: {len(missing)} dangling link(s)", file=sys.stderr); sys.exit(1)
+        text = open(p, errors="ignore").read()
+        keep = [(m.start(), m.end()) for m in fence.finditer(text)]
+        def fix(m):
+            global unlinked
+            if any(a <= m.start() < b for a, b in keep): return m.group(0)
+            raw = m.group(2).strip("<>")
+            if re.match(r"(https?:|mailto:|#)", raw) or not raw: return m.group(0)
+            t = unquote(raw.split("#")[0])
+            if not t: return m.group(0)
+            if os.path.exists(os.path.normpath(os.path.join(d, t))): return m.group(0)
+            rel = os.path.relpath(os.path.normpath(os.path.join(d, t)), root)
+            if os.path.exists(os.path.join(src, rel)):
+                unlinked += 1
+                return m.group(1)
+            broken.append((os.path.relpath(p, root), raw))
+            return m.group(0)
+        new = link.sub(fix, text)
+        if new != text: open(p, "w").write(new)
+for p, t in broken[:60]: print(f"  dangling link: {p} -> {t}", file=sys.stderr)
+print(f"export-public: {unlinked} link(s) to left-out files made plain text, {len(broken)} broken link(s)")
+sys.exit(1 if broken else 0)
 P
 # 3c. (nothing else yet)
 [ "$bad" = 0 ] || fail "checks failed (the export is left in $OUT for you to look at)"
