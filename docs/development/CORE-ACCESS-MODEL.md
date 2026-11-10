@@ -78,6 +78,28 @@ whatever was approved at install, as today for recording, listening and the SFTP
 * Built-in apps call the same functions through a direct function table (no socket). Store apps go through the broker socket; the broker finds out who is
   calling from the connection's credentials, never from what the app says about itself.
 
+## 6b. Access log: network connections and device use, by domain, per app
+
+Decision of 2026-11-10: the system keeps a log of network connections and device use, by domain, per app. The broker is the one place every call passes, so it is
+where the log is written; nothing else writes it.
+
+* **What is recorded.** For each network connection: the app, the account, the host name the app asked for (or the address, when it asked by address), the port,
+  allowed or denied, the time, and the bytes sent and received when the connection closes. For each device use: the app, the account, the device (camera,
+  microphone, speaker, Bluetooth, USB, screen capture, input), which unit, the time, how long, allowed or denied, and for a hard ask whether the person pressed Allow.
+* **What is not recorded.** No content, no paths, no query strings, no headers, no sound or pictures. A domain is kept, a full address is not.
+* **Two tables.** A ring of the latest events (default: the last 5 000 per account) and daily totals by (day, account, app, capability, domain or device) with
+  counts and bytes. The ring answers "what just happened"; the totals answer "what did this app do this week" and are kept 30 days by default (a setting).
+* **Who sees it.** A person sees the apps they use; an administrator sees every account. The log is not shared outside the machine, and an export is a file the
+  person saves.
+* **Where it is shown.** (1) Settings, Apps, one page per app: the capabilities it holds (with revoke) beside its access log for the last day, week and month,
+  by domain and by device. (2) An **Access** tab in the USAGE tile: the overview, app by domain and app by device, with a range (today, 7, 30 days).
+  (3) The assistant has a read tool, `access_log_query`, to answer "which apps contacted which domains today". The decisions themselves (approvals, revokes,
+  denials) stay in the tamper-evident audit chain under Users, Audit log; this log is for volume and is not part of that chain.
+* **Where it starts.** Before the broker exists, the log is written at the places that already see the calls: the shared HTTP client (`iyakki-proxy`), the firewall
+  rules (`iyakki-fw`) and the camera and sound services. Each entry carries the app id of the caller; calls from code that has no app id are logged as `system`.
+* **Cost and privacy.** The write is one small append per connection or device use, off the hot path. Retention limits keep it small; clearing it per app is
+  allowed and is itself audited.
+
 ## 7. Packaging
 
 * `iyakki-core` becomes `crate-type = ["cdylib", "rlib"]`; the boot and supervisor program (today's `iyakki-core` binary) becomes a thin main that uses it.
@@ -88,7 +110,7 @@ whatever was approved at install, as today for recording, listening and the SFTP
 ## 8. Slices
 
 1. **Catalogue and manifest.** The capability names, the `app.json` field, the approval record and its audit entry, and the install card in the Store. Tests with fakes.
-2. **The broker and one capability.** `camera.view` through the broker and through the direct table; the camera tile as its first user; a denied call is refused and audited.
+2. **The broker and one capability, with the access log.** `camera.view` through the broker and through the direct table; the camera tile as its first user; a denied call is refused and audited; the first access-log table and the Settings, Apps page that shows it (section 6b).
 3. **The ratchet.** A gate that fails when app code (outside the core and the platform modules) calls a device node or opens a socket; it only shrinks, like the others.
 4. **The shared library.** `cdylib`, the header script, `iyakki_core_abi_version`, the loader on the image, a QEMU boot test.
 5. **The sandbox for store apps** and a sample app in its own repository (the SRE pilot is the natural first: it needs no device at all).
@@ -100,4 +122,5 @@ whatever was approved at install, as today for recording, listening and the SFTP
 * Is in-process loading of a plug-in into the shell ever allowed for a store app? The proposal: no, built-in apps only.
 * Network grants: per host, per app, or per host and app? The proposal: per app and host, shown at install.
 * How long may the interface stay unstable? The proposal: until the beta tag.
+* Should the access log be on by default for every account, or only for administrators until a person opts in? The proposal: on for everyone, stored on the machine only.
 * Where does the broker run when the OS is only a cloud profile (no devices)? The proposal: the same broker with fewer capabilities.

@@ -10,17 +10,11 @@
   <a href="LICENSE">Apache-2.0</a> · free for any use · permissive dependencies only
 </p>
 
-<p align="center">
-  <a href="docs/media/iyakki-tour.webp"><b>▶ See IYAKKI in action — a 30-second animated tour</b></a><br>
-  <a href="docs/media/iyakki-tour.webp"><img src="docs/media/iyakki-tour.webp" alt="Animated tour of IYAKKI: sign-in, launcher, chat, media, radio, browser, editor, system and inbox" width="720"></a>
-</p>
-
-
-> **Status: alpha (0.1.0-alpha.1), 2026-10-19.** IYAKKI is a first public preview **for developers and testers, not for production**.
-> The desktop window and the QEMU virtual machine are the long-tested paths; the USB image has been booted on **one real computer, a
-> Mac mini 2018 (Macmini8,1, T2), and nowhere else** (its Wi-Fi and Bluetooth do not work yet); many features are partial
+> **Status: alpha (0.1.0-alpha.2), 2026-11-10.** IYAKKI is a preview **for developers and testers, not for production**.
+> The desktop window and the QEMU virtual machine are the long-tested paths; the USB image has booted on **four real computers (a Mac mini 2018, a
+> MacBook Pro 14,1, an HP laptop and a Lenovo laptop)**, and most of what was tried on real hardware was tried on the Mac mini; many features are partial
 > ([`FEATURES.md`](FEATURES.md)); data formats and upgrade paths are not promised to stay stable. The installer erases the whole drive you
-> pick: do not use it on a machine holding anything you cannot lose. Read [`KNOWN-ISSUES.md`](KNOWN-ISSUES.md) first, and the [`RELEASE-NOTES-0.1.0-alpha.1.md`](RELEASE-NOTES-0.1.0-alpha.1.md).
+> pick: do not use it on a machine holding anything you cannot lose. Read [`KNOWN-ISSUES.md`](KNOWN-ISSUES.md) first, and the [`RELEASE-NOTES-0.1.0-alpha.2.md`](RELEASE-NOTES-0.1.0-alpha.2.md) (what was tried where).
 
 ![The IYAKKI launcher](docs/media/shots/01-launcher.png)
 
@@ -585,7 +579,7 @@ Everything listed in `FEATURES.md` as *done* has unit tests; the file is checked
 test that does not exist. At the time of writing: **311 features done, 301 partial, 65 planned**.
 
 **Verified in this repo**
-* `cargo test --workspace` (3,845 tests passed on 2026-10-18), licence audit for both workspaces (`cargo deny`), the third-party licence file
+* `cargo test --workspace` (the full run passes before each release; see `ALPHA-GATE.md`), licence audit for both workspaces (`cargo deny`), the third-party licence file
   (`cargo about`).
 * The x86-64 ISO and the ARM64 disk image were built, and booted in QEMU (BIOS and UEFI): kernel, `iyakki` as PID 1, driver
   autoload, DHCP, a sandboxed WASM guest, clean power-off, a data volume that survives a reboot
@@ -594,16 +588,15 @@ test that does not exist. At the time of writing: **311 features done, 301 parti
 * On real hardware (one machine, a Mac mini 2018, Macmini8,1, T2, 2026-10-18/19): booting the install image from a USB SSD, persistent
   `/home`, HDMI and built-in audio, a USB webcam, the k3s dev cluster and Store → Setup (formerly Quick install), Claude Code and Copilot CLI sign-in, and the full web
   engine opening Google and YouTube (VP9 video plays).
-* Last full `cargo test --workspace` (2026-10-18): 3,845 passed, 0 failed, 59 ignored; a final run precedes the tag.
 * Against the real services: Ollama (list, chat, pulling a model, and installing and starting the real server), all eleven CLI
   tools from their vendors with checksums, a real k3s cluster running sandboxed code with its limits (in a privileged
   container and on the booted image), the Docker image on a real K3s, the browser front end in a real Chrome.
 * The static program on Alpine, Debian, Ubuntu, Fedora and Arch containers, and as a hardened systemd service.
 
 **Not verified**
-* Real hardware other than that one Mac mini: booting on any PC or other Mac (`docs/BOOT-TEST.md` is the guide), touch, other GPUs. Wi-Fi
-  and Bluetooth of the Mac mini do not work yet (Apple's firmware and the `BCM.hcd` patch file are missing); no Wi-Fi association has
-  happened on any real access point. Secure Boot is verified in QEMU only; the T2 MacBook Pro 2019 patches were never booted; Apple Silicon is a VM only.
+* Real hardware beyond what the release notes list: other PCs and Macs (`docs/BOOT-TEST.md` is the guide), touch outside the Mac mini, other GPUs. Wi-Fi
+  and Bluetooth on a Mac need Apple's firmware, which the person installs on their own machine (it is not shipped); Wi-Fi association is recorded on Macs with that firmware
+  (`docs/project/HARDWARE-MATRIX.md`), and Bluetooth pairing, phone sound and tether on one MacBook Pro 14,1. Secure Boot is verified in QEMU only; the T2 MacBook Pro 2019 patches were never booted; Apple Silicon is a VM only.
 * Live calls to OpenAI, Anthropic and Gemini (needs keys); picture generation (Ollama's image models run only on macOS);
   Copilot full tool use, Autopilot with external agents, Developer mode and tile-app publishing beyond loopback; the ARM64 cluster and CLI installs.
 * Platform services (Gitea, the private store), jobs, voice engines and TALES pictures: fakes and scripted stand-ins only, never a real cluster, speaker or picture model (`KNOWN-ISSUES.md`).
@@ -617,7 +610,7 @@ test that does not exist. At the time of writing: **311 features done, 301 parti
 * Radio plays MP3 only.
 * Size: the libre ISO is about 60 MB; the spec's 30 MB / 100 ms targets are not met for the all-hardware image.
 * No direct DRM/KMS renderer (the window uses eframe on Wayland/X11, so the screen resolution cannot be chosen); no copy-on-write
-  snapshots; a built-in cosine store instead of LanceDB/Qdrant; no Bluetooth userland (Bluetooth does not work on the Mac mini 2018 yet).
+  snapshots; a built-in cosine store instead of LanceDB/Qdrant; Bluetooth is written in-house (no BlueZ) and is tried only on one MacBook Pro 14,1: low-energy devices and a real PIN device are untried.
 
 ## Licence
 

@@ -3,7 +3,7 @@ Copyright 2026 IYAKKI contributors
 
 Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-All code in this repository was written for this project. Third-party Rust
+Except for the third-party material named in this file, the code in this repository was written for this project. Third-party Rust
 dependencies are used under their own permissive licenses (Apache-2.0, MIT,
 BSD, ISC, Unicode, Zlib, ...); `cargo deny check licenses` (config: deny.toml)
 enforces this in CI and fails on any copyleft or unknown license.
@@ -37,3 +37,16 @@ own licences; the web image's legal-info/ directory carries their source and lic
 
 The boot menu's larger font is built at image time from DejaVu Sans Bold (Bitstream Vera licence with the DejaVu changes, public domain
 additions; free to use, copy and redistribute, the font itself may not be sold alone): https://dejavu-fonts.github.io/License.html
+
+Linux kernel patches. dist/buildroot/board/iyakki/patches/linux/6.12.112/ holds four patches for the Linux kernel, which is GPL-2.0-only. Patch 0001 was
+written for this project. Patches 0002 (Kerem Karabay), 0003 (Aun-Ali Zaidi) and 0004 (Atharva Tiwari) are the work of those authors (upstream or the t2linux
+project) and keep their authorship and Signed-off-by lines in their headers. All four stay under the kernel's licence (GPL-2.0-only); they are applied when the
+kernel is built and are not licensed under the Apache License.
+
+Out-of-tree drivers for Apple hardware. The Mac images build apple-bce (t2linux, GPL-2.0), snd_hda_macbookpro (GPL-2.0) and facetimehd (GPL-2.0), and the images
+for PCs with an NVIDIA card build NVIDIA's open GPU kernel modules (MIT or GPL-2.0), from their upstream sources, which Buildroot downloads at image build time
+(dist/buildroot/package). Their source is not part of this repository; each keeps its own licence, and the image's legal-info/ directory carries the source and
+licence texts of what an image ships.
+
+IYAKKI's own boot loader lives in its own repository, https://github.com/meisync/iyakki-boot (MIT OR Apache-2.0), and is included here as a git submodule.
+

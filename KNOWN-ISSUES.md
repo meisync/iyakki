@@ -68,13 +68,14 @@ other USB cameras, sound devices and drives. `docs/BOOT-TEST.md` is the guide an
   or a USB adapter meanwhile. On the 2020 T2 MacBook Pro the same firmware route worked (Wi-Fi up with addresses by DHCP, 2026-10-26/27, observed through developer mode); on the Mac mini 2018 no
   adapter has associated yet and the run must be repeated there. The Mac mini 2014's BCM4360 needs Broadcom's non-free `wl` that you build yourself (`dist/drivers/build-wl-pack.sh`); never
   loaded on a real Mac. (F-NET-02, F-DRIVERS-*)
-* KI-006 **Bluetooth does not work.** The Mac mini 2018's BCM4364 has no firmware file in macOS (measured: neither the latest nor the other
+* KI-006 **Bluetooth is limited on the Mac mini 2018.** Its BCM4364 has no firmware file in macOS (measured: neither the latest nor the other
   macOS version Apple offers contains a BCM4364 patch file, and there is no legal source), so its controller runs in its ROM state
   (limited): it registers as `hci0` but has no valid address. Settings → Bluetooth shows that (controller, address, powered on/off,
   reason), can power it on and scan for devices for 10 seconds as proof it works; the Bluetooth drivers stay set aside until the
-  person presses "Load the Bluetooth driver anyway" (Mac drivers page, Devices) or a Bluetooth driver pack is installed. Pairing
-  and audio are not available yet (they need a Bluetooth stack: docs/BETA-PLAN.md). A USB Bluetooth adapter is the reliable option.
-  Not yet seen on the Mac: the new page and the scan. Elsewhere: adapter on/off only. (F-NET-11, F-NET-12)
+  person presses "Load the Bluetooth driver anyway" (Mac drivers page, Devices) or a Bluetooth driver pack is installed. IYAKKI has its own
+  Bluetooth stack now (pairing with passkey or PIN, keyboards and mice, phone sound, tether): pairing, phone sound and tether with internet were tried on a
+  MacBook Pro 14,1 (2026-11-08); on the Mac mini 2018 the new page scans and lists devices (2026-11-10) and pairing is untried. A USB Bluetooth adapter is the
+  reliable option there. Low-energy devices and a real PIN device are untried anywhere. (F-NET-11, F-NET-12)
 * KI-007 **The newest image is not confirmed on the Mac.** The fix for a 5.3 s input-device scan stall at boot and the shared sound mixer fix (YouTube
   had no sound while the radio played) are in the newest image but were not tested on the Mac mini.
 * KI-008 **The boot is slow at the start.** GRUB waits 20 to 30 s at the logo (the screen says 'please wait 30 s to 1 min') while the 160 MB initramfs

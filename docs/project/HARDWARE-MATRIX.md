@@ -73,7 +73,7 @@ Column letters are the ids of section 1.
 | Built-in camera | verified | not supported | not supported | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported |
 | Wi-Fi | verified | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported |
 | Ethernet | partly | verified | untested | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported |
-| Bluetooth | failing | failing | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported |
+| Bluetooth | mixed | 2026-11-10 | owner on a MacBook Pro 14,1 (2026-11-08): pair, phone sound and tether with internet; the Mac mini 2018 (BCM4364, no patch file in macOS images): the page scans and lists devices, pairing untried | In-house stack. MacBook Pro 14,1 works; on the Mac mini 2018 the controller runs in its ROM state, so a USB dongle is the fallback. |
 | USB-C link and internet sharing | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported |
 | k3s start | verified | verified | untested | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported |
 | GPU for k3s | untested | untested | untested | untested | untested | untested | partly | not supported | not supported | untested | not supported | not supported | not supported |

@@ -58,3 +58,9 @@ dist/tts-indic/venv/
 /iyakki-screen-*.png
 /kmsg-previous-*.log
 __pycache__/
+
+# compiled Python (it can carry the build machine's paths)
+*.pyc
+
+# built program (the Makefile makes it next to its sources): never tracked
+/dist/webview/wpe-helper/webview-helper
