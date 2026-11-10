@@ -370,3 +370,25 @@ fn error_texts_never_hold_a_password_or_key() {
         assert!(!l.contains("SECRET"));
     }
 }
+
+#[test]
+fn a_new_home_with_only_sign_in_stubs_and_empty_folders_can_be_made_but_a_person_file_still_blocks() {
+    // found on the Mac mini 2018: sign-in makes .claude/.claude.json and empty folders, and Make refused every new account
+    let r = rig("stubs");
+    let h = r.home("amy");
+    std::fs::create_dir_all(h.join(".cache/copilot")).unwrap();
+    std::fs::create_dir_all(h.join(".claude/backups")).unwrap();
+    std::fs::write(h.join(".claude/.claude.json"), b"{}").unwrap();
+    // a person's file next to them blocks
+    std::fs::write(h.join(".claude/notes.txt"), b"mine").unwrap();
+    assert_eq!(r.env.create("amy", "amy-pass-1", Some(MIN_PAYLOAD)).unwrap_err(), HomeError::PlainHomeHasFiles);
+    assert!(h.join(".claude/.claude.json").exists(), "a refused make removes nothing");
+    std::fs::remove_file(h.join(".claude/notes.txt")).unwrap();
+    // a file in the same name in another place is a person's file
+    std::fs::write(h.join(".cache/.claude.json"), b"mine").unwrap();
+    assert_eq!(r.env.create("amy", "amy-pass-1", Some(MIN_PAYLOAD)).unwrap_err(), HomeError::PlainHomeHasFiles);
+    std::fs::remove_file(h.join(".cache/.claude.json")).unwrap();
+    // only the stubs and empty folders: it works, and the stub is gone from underneath the mount
+    r.env.create("amy", "amy-pass-1", Some(MIN_PAYLOAD)).unwrap();
+    assert!(!h.join(".claude/.claude.json").exists());
+}

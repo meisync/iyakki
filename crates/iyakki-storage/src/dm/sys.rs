@@ -18,6 +18,61 @@ const LOOP_INFO64_FLAGS_AT: usize = 52;
 
 pub struct SysKernel;
 
+/// What to do with the device node of a mapping after a successful ioctl.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum NodeChange {
+    /// The mapping was created: make `/dev/mapper/<name>` for the device number the kernel answered with.
+    Make { name: String, dev: u64 },
+    /// The mapping was removed: take its node away.
+    Drop { name: String },
+}
+
+/// The node work a finished `cmd` asks for, read from the buffer (`dev` is at byte 40 and `name` at 48, as in `struct dm_ioctl`).
+pub(crate) fn node_change(cmd: DmCmd, buf: &[u8]) -> Option<NodeChange> {
+    if buf.len() < 176 {
+        return None;
+    }
+    let name = {
+        let raw = &buf[48..176];
+        let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
+        String::from_utf8_lossy(&raw[..end]).to_string()
+    };
+    // a name that could be a path is never turned into one
+    if name.is_empty() || name.contains('/') || name == "." || name == ".." || name == "control" {
+        return None;
+    }
+    match cmd {
+        DmCmd::DevCreate => {
+            let dev = u64::from_le_bytes(buf[40..48].try_into().ok()?);
+            Some(NodeChange::Make { name, dev })
+        }
+        DmCmd::DevRemove => Some(NodeChange::Drop { name }),
+        _ => None,
+    }
+}
+
+fn make_node(name: &str, dev: u64) -> io::Result<()> {
+    let path = format!("/dev/mapper/{name}");
+    let c = CString::new(path.as_str()).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    // a node left by an earlier run, maybe for another device number, is replaced
+    // SAFETY: valid NUL-terminated path.
+    unsafe { libc::unlink(c.as_ptr()) };
+    // SAFETY: valid path; `dev` is the number the kernel gave for this mapping.
+    let r = unsafe { libc::mknod(c.as_ptr(), libc::S_IFBLK | 0o600, dev as libc::dev_t) };
+    if r < 0 {
+        let e = io::Error::last_os_error();
+        return Err(io::Error::new(e.kind(), format!("could not make the device node {path}: {e}")));
+    }
+    Ok(())
+}
+
+fn drop_node(name: &str) {
+    if let Ok(c) = CString::new(format!("/dev/mapper/{name}")) {
+        // SAFETY: valid NUL-terminated path; a node that is already gone is fine.
+        unsafe { libc::unlink(c.as_ptr()) };
+    }
+}
+
 fn open(path: &str, write: bool) -> io::Result<OwnedFd> {
     let c = CString::new(path).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
     // SAFETY: valid NUL-terminated path.
@@ -41,7 +96,17 @@ impl DmKernel for SysKernel {
             return Err(io::Error::from(io::ErrorKind::InvalidInput));
         }
         let fd = open("/dev/mapper/control", true)?;
-        ioctl_ptr(&fd, cmd.request(), buf.as_mut_ptr().cast()).map(|_| ())
+        ioctl_ptr(&fd, cmd.request(), buf.as_mut_ptr().cast())?;
+        // this system has no udev: nothing else makes /dev/mapper/<name>, which mke2fs and mount(2) need (found on the Mac mini
+        // 2018: "The file /dev/mapper/iyakki-home-scratch does not exist")
+        match node_change(cmd, buf) {
+            Some(NodeChange::Make { name, dev }) => make_node(&name, dev),
+            Some(NodeChange::Drop { name }) => {
+                drop_node(&name);
+                Ok(())
+            }
+            None => Ok(()),
+        }
     }
 
     fn loop_attach(&self, file: &Path) -> io::Result<String> {
@@ -121,5 +186,38 @@ impl DmKernel for SysKernel {
     fn is_mounted(&self, target: &Path) -> bool {
         let want = target.display().to_string();
         crate::mounts_text().lines().any(|l| l.split_whitespace().nth(1).map(|m| m.replace("\\040", " ")).as_deref() == Some(want.as_str()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A buffer as the kernel answers: `dev` at 40, `name` at 48.
+    fn answer(name: &str, dev: u64) -> Vec<u8> {
+        let mut b = vec![0u8; DM_IOCTL_LEN];
+        b[40..48].copy_from_slice(&dev.to_le_bytes());
+        b[48..48 + name.len()].copy_from_slice(name.as_bytes());
+        b
+    }
+
+    #[test]
+    fn a_created_mapping_gets_its_node_and_a_removed_one_loses_it_and_nothing_else_touches_nodes() {
+        // found on the Mac mini 2018: no udev, so /dev/mapper/<name> never existed and mke2fs failed
+        let dev = (252u64 << 8) | 3;
+        assert_eq!(node_change(DmCmd::DevCreate, &answer("iyakki-home-amy", dev)), Some(NodeChange::Make { name: "iyakki-home-amy".into(), dev }));
+        assert_eq!(node_change(DmCmd::DevRemove, &answer("iyakki-home-amy", 0)), Some(NodeChange::Drop { name: "iyakki-home-amy".into() }));
+        for other in [DmCmd::Version, DmCmd::DevSuspend, DmCmd::DevStatus, DmCmd::TableLoad] {
+            assert_eq!(node_change(other, &answer("iyakki-home-amy", dev)), None, "{other:?}");
+        }
+    }
+
+    #[test]
+    fn a_name_that_could_be_a_path_or_the_control_node_never_makes_or_drops_a_node() {
+        for bad in ["", "..", ".", "control", "a/b", "../etc"] {
+            assert_eq!(node_change(DmCmd::DevCreate, &answer(bad, 1)), None, "{bad:?}");
+            assert_eq!(node_change(DmCmd::DevRemove, &answer(bad, 1)), None, "{bad:?}");
+        }
+        assert_eq!(node_change(DmCmd::DevCreate, &[0u8; 10]), None, "a short buffer");
     }
 }

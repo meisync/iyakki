@@ -588,7 +588,9 @@ impl EncHome {
             return Err(HomeError::AlreadyExists);
         }
         let mp = self.mount_point(user);
-        if mp.is_dir() && std::fs::read_dir(&mp).map_err(io_err)?.next().is_some() {
+        // empty folders and the few files the system itself puts in a new home at sign-in do not count as "files" (found on the
+        // Mac mini 2018: every new account failed here, because sign-in had made .claude/.claude.json)
+        if mp.is_dir() && holds_person_files(&mp).map_err(io_err)? {
             return Err(HomeError::PlainHomeHasFiles);
         }
         let payload = match payload_bytes {
@@ -602,6 +604,8 @@ impl EncHome {
         if password.is_empty() {
             return Err(HomeError::Volume("a password is needed to make the encrypted home".into()));
         }
+        // what the system wrote there at sign-in goes before the mount hides it (it makes it again, in the encrypted home)
+        remove_sign_in_stubs(&mp);
         self.make_container(user, password, payload, true)
     }
 
@@ -905,6 +909,42 @@ impl EncHome {
     pub fn note_admin_reset_if_any(data_dir: &Path, user: &str) {
         if has_container(data_dir, user) {
             EncHome::real(data_dir).note_admin_reset(user);
+        }
+    }
+}
+
+/// Files the system itself puts in a new home folder at sign-in (relative to the home). Nothing a person made.
+const SIGN_IN_STUBS: [&str; 1] = [".claude/.claude.json"];
+
+/// Does this folder hold anything a person could have made? Empty folders (at any depth) and the sign-in stubs do not count.
+fn holds_person_files(dir: &Path) -> std::io::Result<bool> {
+    fn walk(root: &Path, dir: &Path) -> std::io::Result<bool> {
+        for e in std::fs::read_dir(dir)? {
+            let e = e?;
+            let path = e.path();
+            let t = e.file_type()?;
+            if t.is_dir() {
+                if walk(root, &path)? {
+                    return Ok(true);
+                }
+            } else {
+                let rel = path.strip_prefix(root).map(|r| r.to_string_lossy().to_string()).unwrap_or_default();
+                if !t.is_file() || !SIGN_IN_STUBS.contains(&rel.as_str()) {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+    walk(dir, dir)
+}
+
+/// Remove the sign-in stubs (only those, only plain files).
+fn remove_sign_in_stubs(home: &Path) {
+    for rel in SIGN_IN_STUBS {
+        let p = home.join(rel);
+        if std::fs::symlink_metadata(&p).map(|m| m.is_file()).unwrap_or(false) {
+            let _ = std::fs::remove_file(&p);
         }
     }
 }
