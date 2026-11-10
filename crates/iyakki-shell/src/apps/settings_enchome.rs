@@ -83,7 +83,8 @@ impl SettingsApp {
         let err = fl.notice.as_deref().filter(|_| fl.failed);
         match &fl.flow {
             Flow::Ask { purpose, stage, .. } => Some(Modal::Form(FormKind::EncHome, Self::ench_ask_form(*purpose, *stage, note, err))),
-            Flow::MigratePlan { plan, .. } => Some(Modal::Confirm(ConfirmKind::EncMove, format!("{}  Press y to move, Esc to cancel.", plan.describe()))),
+            // a move that failed comes back here: say why first (it used to come back with the same plan and no reason)
+            Flow::MigratePlan { plan, .. } => Some(Modal::Confirm(ConfirmKind::EncMove, format!("{}{}  Press y to move, Esc to cancel.", err.map(|e| format!("The move did not work: {e}  ")).unwrap_or_default(), plan.describe()))),
             Flow::ShowRecovery { text, .. } => Some(Modal::Form(FormKind::EncHome, Self::ench_recovery_form(text, note, err))),
             Flow::Idle | Flow::Done => {
                 if let Some(n) = fl.notice.clone() {
@@ -128,8 +129,13 @@ impl SettingsApp {
 
     fn ench_audit(&self, cx: &AppCx, was_move: bool) {
         let user = cx.session.user.clone();
+        // what failed goes to the audit log and the log in words (cut at 300 characters): these sentences never hold a password or a key
+        let why: String = self.ench.flow.notice.as_deref().filter(|_| self.ench.flow.failed).unwrap_or_default().chars().take(300).collect();
+        if self.ench.flow.failed {
+            log::warn!("encrypted home: a step failed for {user}: {why}");
+        }
         if was_move {
-            cx.audit.record(&user, "enchome.move", if self.ench.flow.failed { "failed" } else { "done" });
+            cx.audit.record(&user, "enchome.move", &if self.ench.flow.failed { format!("failed: {why}") } else { "done".to_string() });
         } else if !self.ench.flow.failed {
             let what = match &self.ench.flow.flow {
                 Flow::ShowRecovery { .. } => "recovery key shown",
@@ -138,7 +144,7 @@ impl SettingsApp {
             };
             cx.audit.record(&user, "enchome.step", what);
         } else {
-            cx.audit.record(&user, "enchome.step.failed", "");
+            cx.audit.record(&user, "enchome.step.failed", &why);
         }
     }
 

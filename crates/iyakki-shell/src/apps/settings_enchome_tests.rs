@@ -135,6 +135,8 @@ use std::time::{Duration, Instant};
 struct SlowKernel {
     inner: FakeKernel,
     pause: Duration,
+    /// making the file system fails with this (a real kernel's refusal)
+    fs_error: Option<&'static str>,
 }
 
 impl DmKernel for SlowKernel {
@@ -149,6 +151,9 @@ impl DmKernel for SlowKernel {
     }
     fn make_fs(&self, dev: &str, label: &str) -> std::io::Result<()> {
         std::thread::sleep(self.pause);
+        if let Some(e) = self.fs_error {
+            return Err(std::io::Error::other(e));
+        }
         self.inner.make_fs(dev, label)
     }
     fn mount(&self, dev: &str, target: &std::path::Path) -> std::io::Result<()> {
@@ -170,6 +175,10 @@ fn slow_page(tag: &str, pause: Duration) -> (AppCx, SettingsApp) {
 
 /// The same, with a file in the home folder: only "Move my existing files" works on a home that holds files (Make needs it empty).
 fn page_with_home(tag: &str, pause: Duration, with_file: bool) -> (AppCx, SettingsApp) {
+    page_on_kernel(tag, pause, with_file, None)
+}
+
+fn page_on_kernel(tag: &str, pause: Duration, with_file: bool, fs_error: Option<&'static str>) -> (AppCx, SettingsApp) {
     let cx = admin(tag);
     let root = temp_dir(&format!("{tag}-machine"));
     let (home, fs) = (root.join("home"), root.join("fs"));
@@ -178,7 +187,7 @@ fn page_with_home(tag: &str, pause: Duration, with_file: bool) -> (AppCx, Settin
     if with_file {
         std::fs::write(home.join("root").join("note.txt"), b"hello").unwrap();
     }
-    let kernel: Arc<dyn DmKernel> = Arc::new(SlowKernel { inner: FakeKernel::new(&fs), pause });
+    let kernel: Arc<dyn DmKernel> = Arc::new(SlowKernel { inner: FakeKernel::new(&fs), pause, fs_error });
     let data = cx.services.dir().to_path_buf();
     let mut a = SettingsApp::new(&cx).on(Tab::EncHome);
     a.ench.env = Some(Arc::new(move || iyakki_agent::enchome::testkit::fake_env(&data, &home, kernel.clone())));
@@ -355,4 +364,26 @@ fn a_move_shows_its_progress_while_it_copies_and_stays_responsive() {
     wait_idle(&mut a, &cx);
     let _ = recovery_text(&a);
     assert!(a.ench.flow.notice.as_deref().unwrap_or("").contains("copied, checked one by one"));
+}
+
+#[test]
+fn a_move_that_fails_says_why_on_the_plan_card_and_in_the_audit_log() {
+    // found on the Mac mini 2018: the move failed, the plan card came back with the same words and no reason, and nothing said why
+    let (cx, mut a) = page_on_kernel("ench-bg-movefail", Duration::from_millis(10), true, Some("mke2fs failed: the test kernel refuses"));
+    press(&mut a, &cx, 'm');
+    type_in(&mut a, &cx, "rootpass12");
+    a.handle(&Event::Key(Key::Enter), &cx);
+    wait_idle(&mut a, &cx);
+    assert!(matches!(a.modal, Some(Modal::Confirm(ConfirmKind::EncMove, _))), "the plan card comes back");
+    a.handle(&Event::Key(Key::Char('y')), &cx);
+    wait_idle(&mut a, &cx);
+    let card = match &a.modal {
+        Some(Modal::Confirm(ConfirmKind::EncMove, t)) => t.clone(),
+        _ => panic!("the plan card must come back after a failed move: {:?}", a.status),
+    };
+    assert!(card.contains("The move did not work") && card.contains("the test kernel refuses"), "{card}");
+    assert!(!card.contains("rootpass12"), "no password on the card");
+    let log = cx.audit.recent(400).join("\n");
+    assert!(log.contains("failed: ") && log.contains("the test kernel refuses"), "{log}");
+    assert!(!log.contains("rootpass12"), "{log}");
 }
