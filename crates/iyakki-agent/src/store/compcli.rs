@@ -373,7 +373,7 @@ fn device_plan(a: &Args) -> Result<String, String> {
         let staged = comps::stage(&p, &store.base, st.as_ref(), &inst, &Path::new(dir).join("staging"), 2, &mut |c, have, total| {
             let pct = if total == 0 { 100 } else { have * 100 / total };
             if (c != last.0 || pct / 10 != last.1 / 10) && total > (4 << 20) {
-                eprintln!("  {c}: {pct}%");
+                crate::qeprintln!("  {c}: {pct}%");
                 last = (c.to_string(), pct);
             }
         }, &|| false)?;

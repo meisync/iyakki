@@ -320,7 +320,7 @@ mod tests {
         let v = StorageLayout { isolation: Isolation::Volumes, ..Default::default() };
         assert!(l.mount(&root, &v.locate("asha", &sc).unwrap()).unwrap_err().contains("not mounted"));
         assert!(Isolation::Volumes.check().is_ok() && Isolation::Folders.check().is_ok());
-        assert!(Isolation::Folders.deployable().is_ok() && Isolation::Volumes.deployable().unwrap_err().contains("not built yet"));
+        assert!(Isolation::Folders.deployable().is_ok() && Isolation::Volumes.deployable().unwrap_err().contains("not deployed"));
         // the setting round-trips by name
         assert_eq!(serde_json::from_str::<Isolation>("\"volumes\"").unwrap(), Isolation::Volumes);
     }

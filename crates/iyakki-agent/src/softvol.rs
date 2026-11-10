@@ -452,6 +452,16 @@ impl St {
     }
 }
 
+#[cfg(not(test))]
+fn default_mics() -> Box<dyn Fn() -> String + Send + Sync> {
+    Box::new(crate::micpcm::sections)
+}
+
+#[cfg(test)]
+fn default_mics() -> Box<dyn Fn() -> String + Send + Sync> {
+    Box::new(String::new)
+}
+
 /// Keeps the ALSA configuration in step with the chosen output.
 pub struct Softvol {
     path: PathBuf,
@@ -463,12 +473,22 @@ pub struct Softvol {
     gate: Option<Box<dyn Gate>>,
     /// Time since the start, replaceable so tests need no sleeping.
     clock: Box<dyn Fn() -> Duration + Send + Sync>,
+    /// The capture PCMs with a named format that ride along in the file (micpcm.rs). In the unit tests of this crate it starts empty:
+    /// the list is a process-wide variable that other tests fill while these run, and the host's own microphone could add to it.
+    mics: Box<dyn Fn() -> String + Send + Sync>,
 }
 
 impl Softvol {
     pub fn new(path: impl Into<PathBuf>, runner: impl Runner + 'static) -> Softvol {
         let start = Instant::now();
-        Softvol { path: path.into(), runner: Box::new(runner), st: Mutex::new(St::default()), boost: Default::default(), gate: None, clock: Box::new(move || start.elapsed()) }
+        Softvol { path: path.into(), runner: Box::new(runner), st: Mutex::new(St::default()), boost: Default::default(), gate: None, clock: Box::new(move || start.elapsed()), mics: default_mics() }
+    }
+
+    /// Take the capture sections from `mics` (the real list unless a test says otherwise).
+    #[allow(dead_code)]
+    pub fn with_mics(mut self, mics: impl Fn() -> String + Send + Sync + 'static) -> Softvol {
+        self.mics = Box::new(mics);
+        self
     }
 
     /// Ask `gate` before every open of the speaker (see [`Gate`]).
@@ -627,7 +647,7 @@ impl Softvol {
     fn write_plan(&self, st: &mut St, plan: &Plan) -> Result<(), String> {
         let existing = std::fs::read_to_string(&self.path).ok();
         // the capture PCMs with a named format ride along (micpcm.rs); learned after the first write, they land on the next sync
-        let text = config_text_boost(plan, self.boost.load(std::sync::atomic::Ordering::SeqCst)) + &crate::micpcm::sections();
+        let text = config_text_boost(plan, self.boost.load(std::sync::atomic::Ordering::SeqCst)) + &(self.mics)();
         if existing.as_deref() != Some(text.as_str()) {
             if let Err(e) = write_atomic(&self.path, &text) {
                 st.reset();

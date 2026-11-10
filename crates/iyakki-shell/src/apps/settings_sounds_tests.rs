@@ -144,8 +144,15 @@ fn preview_plays_the_cue_through_the_play_command_and_says_so() {
     a.handle(&ev, &cx);
     settle(&mut a, &cx);
     assert_eq!(status(&a), "Played the signing out sound.");
-    let wav = std::fs::read(&out).unwrap();
-    let parsed = iyakki_agent::voice::parse_wav(&wav).unwrap();
+    // "Played" is said when the player has started; the shell command writes the file a moment later (longer on a busy machine)
+    let t0 = std::time::Instant::now();
+    let parsed = loop {
+        if let Some(p) = std::fs::read(&out).ok().and_then(|w| iyakki_agent::voice::parse_wav(&w).ok()) {
+            break p;
+        }
+        assert!(t0.elapsed() < std::time::Duration::from_secs(15), "the play command never wrote a whole sound file");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
     assert_eq!(parsed.rate, 44_100);
     assert_eq!(parsed.samples.len(), ss::render(Cue::Logout, -12).len(), "the logout cue at the level of the settings");
     // with the master switch off the preview still plays (the person asked to hear it)

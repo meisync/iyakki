@@ -122,7 +122,8 @@ mod tests {
         let old_browser = specs_tokens(&select_specs(&defs, &old_core.iter().copied().chain([Group::Browser]).collect())) + spec_tokens(&more_tools_spec());
         eprintln!("TOKENS before routing: plain/flows {old_plain}, browser {old_browser}");
         assert!(old_plain > 2 * 2321 / 2);
-        for (label, (ask, ctx), budget) in [("plain", PLAIN, 2600u64), ("flows", FLOWS, 6000), ("browser", BROWSER, 7500)] {
+        // flows: 6000 until the six webhook tools (about 570 tokens) were routed here from every request (they start flows)
+        for (label, (ask, ctx), budget) in [("plain", PLAIN, 2600u64), ("flows", FLOWS, 6500), ("browser", BROWSER, 7500)] {
             let o = offered(&defs, ask, ctx);
             let t = specs_tokens(&o);
             eprintln!("TOKENS {label}: {} tools offered of {}, {t} tokens ({}% of all)", o.len(), all.len(), t * 100 / all_t);

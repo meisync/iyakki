@@ -1235,6 +1235,72 @@
         ],
         "type": "object"
       },
+      "TileEvents": {
+        "additionalProperties": false,
+        "properties": {
+          "dark": {
+            "type": "boolean"
+          },
+          "events": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "height": {
+            "type": "integer"
+          },
+          "reset": {
+            "type": "boolean"
+          },
+          "scale_pct": {
+            "type": "integer"
+          },
+          "width": {
+            "type": "integer"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "TileFrame": {
+        "additionalProperties": false,
+        "properties": {
+          "frame": {
+            "type": "object"
+          },
+          "id": {
+            "type": "string"
+          },
+          "redraw": {
+            "type": "boolean"
+          },
+          "stats": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "id",
+          "redraw",
+          "frame"
+        ],
+        "type": "object"
+      },
+      "TileList": {
+        "additionalProperties": false,
+        "properties": {
+          "tiles": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "tiles"
+        ],
+        "type": "object"
+      },
       "Tools": {
         "additionalProperties": false,
         "properties": {
@@ -3061,6 +3127,155 @@
         ],
         "summary": "The tenants the signed-in person may use (id, name, their role, which one is current) and whether there is more than one to switch to. A machine that is not a pod has one, `this-machine`. Query `scope=all` (service administrators only) lists every tenant of the directory.",
         "x-access": "user"
+      }
+    },
+    "/api/v1/tiles": {
+      "get": {
+        "operationId": "tile_list",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TileList"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "No or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The role does not allow this"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "The WASM tiles the caller may open in the browser (they run on this machine, in the tile sandbox).",
+        "x-access": "user"
+      }
+    },
+    "/api/v1/tiles/{id}/events": {
+      "post": {
+        "operationId": "tile_events",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TileEvents"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TileFrame"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "No or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The role does not allow this"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Send input events (pointer, key, text, resize, tick) to the caller's own copy of a tile and get its new display list. The first call needs `width` and `height`; `reset` starts again. Body at most 64 KiB, 128 events.",
+        "x-access": "user",
+        "x-audited": true
       }
     },
     "/api/v1/tools": {

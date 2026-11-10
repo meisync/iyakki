@@ -92,7 +92,8 @@ struct Fake {
     held: Mutex<bool>,
     fw_file: bool,
     scan: Mutex<Vec<Found>>,
-    scan_error: Option<String>,
+    /// the first scan fails with this (then it is used up, so a later scan works)
+    scan_error: Mutex<Option<String>>,
     /// the scan runs until Stop (at most three seconds)
     scan_blocks: bool,
     devs: Mutex<Vec<DeviceView>>,
@@ -119,7 +120,7 @@ impl Fake {
             held: Mutex::new(false),
             fw_file: false,
             scan: Mutex::new(vec![]),
-            scan_error: None,
+            scan_error: Mutex::new(None),
             scan_blocks: false,
             devs: Mutex::new(vec![keyboard()]),
             pair: Mutex::new(PairState::Idle),
@@ -181,8 +182,8 @@ impl iyakki_devctl::Control for Fake {
     }
     fn bt_scan(&self, index: u16, secs: u64) -> Result<Vec<Found>, String> {
         self.calls.lock().unwrap().push(format!("scan {index} {secs}"));
-        match &self.scan_error {
-            Some(e) => Err(e.clone()),
+        match self.scan_error.lock().unwrap().take() {
+            Some(e) => Err(e),
             None => Ok(self.scan.lock().unwrap().clone()),
         }
     }
@@ -319,6 +320,15 @@ fn app(tag: &str) -> (SettingsApp, AppCx, Arc<Fake>) {
 }
 
 fn wait_scan(a: &mut SettingsApp, cx: &AppCx) {
+    // the page looks idle until the scan thread has started: first give a scan that was just asked for time to begin (or to end
+    // already: an error or devices on the page), then wait for the end
+    for _ in 0..200 {
+        tick(a, cx, 1);
+        if a.bt.model.scanning() != crate::btmodel::ScanView::Idle || a.bt.model.scan_error().is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     for _ in 0..600 {
         tick(a, cx, 1);
         if a.bt.model.scanning() == crate::btmodel::ScanView::Idle {
@@ -459,8 +469,16 @@ fn a_failed_power_says_why_for_a_blocked_radio_and_a_silent_kernel_and_the_scan_
     key(&mut a, &cx, Key::Char('e'));
     assert!(status(&a).contains("gave no reason") && status(&a).contains("Look again"), "{}", status(&a));
     // after a failed scan nothing of it stays once the next scan starts
-    let (mut b, cx2, _) = app_with("pf2", Fake { scan_error: Some("the scan did not work: busy".into()), ..Fake::new() });
+    let (mut b, cx2, _) = app_with("pf2", Fake { scan_error: Mutex::new(Some("the scan did not work: busy".into())), ..Fake::new() });
     key(&mut b, &cx2, Key::Char('s'));
+    // not wait_scan: the page looks idle until the scan thread has started, so wait for the error itself
+    for _ in 0..600 {
+        tick(&mut b, &cx2, 1);
+        if b.bt.model.scan_error().is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     wait_scan(&mut b, &cx2);
     assert_eq!(b.bt.model.scan_error(), Some("the scan did not work: busy"));
     let g = draw(&mut b, &cx2, 1280, 720);
@@ -1018,7 +1036,16 @@ fn pairing(tag: &str, start: PairState) -> (SettingsApp, AppCx, Arc<Fake>) {
     let (mut a, cx, ctl) = app_with(tag, Fake { pair_on_start: start, scan: Mutex::new(vec![found("MX Anywhere", "10:00:00:00:00:02", -50, Kind::Mouse)]), ..Fake::new() });
     key(&mut a, &cx, Key::Char('s'));
     wait_scan(&mut a, &cx);
-    let g = draw(&mut a, &cx, 1280, 900);
+    // the scan runs on its own thread: wait for its result to be on the page (up to ten seconds on a loaded machine)
+    let t0 = std::time::Instant::now();
+    let g = loop {
+        let g = draw(&mut a, &cx, 1280, 900);
+        if g.hits.iter().any(|h| h.label == "Pair") || t0.elapsed() > std::time::Duration::from_secs(10) {
+            break g;
+        }
+        tick(&mut a, &cx, 1);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
     click(&mut a, &cx, &g, "Pair");
     (a, cx, ctl)
 }

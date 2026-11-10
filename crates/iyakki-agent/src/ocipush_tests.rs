@@ -197,10 +197,22 @@ fn the_real_client_talks_http_to_a_local_listener() {
     assert_eq!((r.status, r.body.as_slice()), (201, &b"done"[..]));
     let seen = t.join().unwrap();
     assert!(seen.starts_with("PUT /v2/x/manifests/1 HTTP/1.1\r\n") && seen.contains("Content-Length: 7\r\n") && seen.contains("Content-Type: text/plain\r\n"), "{seen}");
-    // nothing listens on a closed port
-    let gone = TcpListener::bind("127.0.0.1:0").unwrap();
-    let a = gone.local_addr().unwrap().to_string();
-    drop(gone);
-    assert!(TcpHttp::default().request("GET", &a, "/v2/", &[], &[]).unwrap_err().contains("cannot connect"));
+    // nothing listens on a closed port. A port that was just freed can be taken by another test in this process before the connect,
+    // so a few fresh ones are tried: it is enough that a port nobody holds answers "cannot connect".
+    let mut errs = vec![];
+    let mut refused = false;
+    for _ in 0..8 {
+        let gone = TcpListener::bind("127.0.0.1:0").unwrap();
+        let a = gone.local_addr().unwrap().to_string();
+        drop(gone);
+        match TcpHttp::default().request("GET", &a, "/v2/", &[], &[]) {
+            Err(e) if e.contains("cannot connect") => {
+                refused = true;
+                break;
+            }
+            other => errs.push(format!("{a}: {other:?}")),
+        }
+    }
+    assert!(refused, "no closed port refused the connection: {errs:?}");
     assert!(TcpHttp::default().request("GET", "a b", "/v2/", &[], &[]).is_err());
 }

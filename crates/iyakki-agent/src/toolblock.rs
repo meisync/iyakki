@@ -106,7 +106,7 @@ pub fn group_of(name: &str) -> Group {
         "list_dir" | "read_file" | "write_file" | "search_documents" | "terminal" => Group::Files,
         n if n.starts_with("rag_") || n.starts_with("share_") => Group::Files,
         n if n.starts_with("data_") => Group::Data,
-        n if n.starts_with("flow_") => Group::Flows,
+        n if n.starts_with("flow_") || n.starts_with("webhook_") => Group::Flows,
         n if n.starts_with("dash_") => Group::Dash,
         "cluster_setup_plan" | "git_service_status" | "registry_setup" | "registry_setup_help" => Group::Cluster,
         n if n.starts_with("k8s_") || n.starts_with("deploy_") || n.starts_with("platform_") => Group::Cluster,
@@ -157,7 +157,7 @@ pub fn intent_groups(text: &str) -> BTreeSet<Group> {
     if has(&t, &["draw", "picture", "image", "diagram", "svg", "chart", "logo", "icon", "camera", "photo", "screen", "plot", "illustrat", "sketch"]) {
         g.insert(Group::Pictures);
     }
-    if has(&t, &["flow", "pipeline", "automation", "automate", "self-heal", "heal policy"]) {
+    if has(&t, &["flow", "pipeline", "automation", "automate", "self-heal", "heal policy", "webhook", "web hook"]) {
         g.insert(Group::Flows);
     }
     if has(&t, &["dashboard", "panel", "metric", "prometheus", "elasticsearch", "clickhouse", "kibana", "grafana", "time series"]) {
