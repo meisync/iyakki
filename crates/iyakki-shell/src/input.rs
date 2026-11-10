@@ -416,9 +416,9 @@ impl InputState {
                         out.push(Event::Layout(k));
                     }
                 }
-                // Control+Command+Q locks the screen in the Mac profile, as it does on a Mac (a Mac keyboard has no lock key, and Command+L
-                // stays the browser's address bar)
-                16 if self.ctrl && r.value == 1 && self.command_held() => {
+                // Control+Command+Q (as on a Mac) or Control+Command+L (the owner's habit, next to Super+L) locks the screen in the Mac profile:
+                // a Mac keyboard has no lock key, and Command+L alone stays the browser's address bar
+                16 | 38 if self.ctrl && r.value == 1 && self.command_held() => {
                     out.push(Event::Fn(crate::fnkeys::FnKey::Lock, true));
                     out.push(Event::Fn(crate::fnkeys::FnKey::Lock, false));
                 }
@@ -1647,7 +1647,9 @@ mod profile_tests {
         assert_eq!(press(&mut st, 16), vec![], "Command+Q does nothing");
         hold(&mut st, 29, true); // and Control with it locks
         assert_eq!(press(&mut st, 16), lock, "Control+Command+Q");
+        assert_eq!(press(&mut st, 38), lock, "Control+Command+L too");
         hold(&mut st, 29, false);
+        assert_ne!(press(&mut st, 38), lock, "Command+L alone is still the browser's address bar");
         hold(&mut st, 125, false);
         hold(&mut st, 29, true);
         assert_eq!(press(&mut st, 16), vec![Event::Key(Key::Ctrl('q'))], "Control+Q alone is still Control+Q");

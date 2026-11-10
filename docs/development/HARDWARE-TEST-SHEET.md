@@ -46,7 +46,7 @@ Use a scratch account, not your main one. Settings, Account and data, **Encrypte
 
 ## 4. Lock screen (you type your password, so I could not test it)
 
-1. Press Super+L (a PC keyboard), Control+Command+Q (a Mac keyboard in the Mac profile: Command+L is the browser's), or choose Lock in the Power menu. Expect: a lock card with one password field; apps and runs keep going behind it.
+1. Press Super+L (a PC keyboard), Control+Command+Q or Control+Command+L (a Mac keyboard in the Mac profile: Command+L is the browser's), or choose Lock in the Power menu. Expect: a lock card with one password field; apps and runs keep going behind it.
 2. Type a wrong password. Expect: a refusal and a wait. Type yours. Expect: back to where you were.
 3. Settings, Display and sound, Screen saver: set "Lock the screen when idle" to 5 minutes, wait. Expect: the screen locks (the default is Never).
 
