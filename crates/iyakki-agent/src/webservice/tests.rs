@@ -967,7 +967,18 @@ fn readiness_follows_the_services_and_shutdown_is_graceful() {
     let addr = svc.local_addr();
     svc.shutdown(Duration::from_secs(2));
     svc.shutdown(Duration::from_secs(2));
-    assert!(std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_err(), "nothing listens after shutdown");
+    // shutdown joined the accept thread, so the listener is gone. A freed port can be taken at once by another test of this process
+    // (they all bind port 0): so a refusal at any of the tries over two seconds is the proof; only a port that answers the whole time fails
+    let t0 = Instant::now();
+    let mut refused = false;
+    while t0.elapsed() < Duration::from_secs(2) {
+        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_err() {
+            refused = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(refused, "nothing listens after shutdown");
     drop(h);
     let _ = std::fs::remove_dir_all(&dir);
 }
