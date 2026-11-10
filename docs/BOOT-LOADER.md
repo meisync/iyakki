@@ -3,6 +3,10 @@
 IYAKKI's own boot loader (`iyakki-boot/`, standalone, MIT OR Apache-2.0) is on the install and lean images as an extra, selectable
 entry. GRUB stays the default way in; the loader has not yet booted on any real machine.
 
+**Where the source lives.** `iyakki-boot/` is a git submodule of its own repository, `github.com/meisync/iyakki-boot`. Clone this repository
+with `git clone --recurse-submodules` (or run `git submodule update --init` after a plain clone). The build scripts in `dist/buildroot` read the loader
+from that path as before; change the loader in its own repository and update the pinned commit here (`git add iyakki-boot`).
+
 ## What the image carries
 
 On the boot volume (the FAT partition `IYAKKI-BOOT`, which is the EFI System Partition):

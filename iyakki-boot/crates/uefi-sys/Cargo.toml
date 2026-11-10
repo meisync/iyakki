@@ -1,9 +1,0 @@
-[package]
-name = "uefi-sys"
-version.workspace = true
-edition.workspace = true
-publish.workspace = true
-license.workspace = true
-description = "Raw #[repr(C)] UEFI definitions (types only, no dependencies, no entry point): tables, protocols, GUIDs, status codes"
-
-[dependencies]
