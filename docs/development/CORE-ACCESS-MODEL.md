@@ -54,6 +54,8 @@ whatever was approved at install, as today for recording, listening and the SFTP
 | `screen.capture` | a picture of the screen | none | no | **yes** |
 | `input.inject` | keys and pointer | none | no | **yes** |
 | `notify` | inbox notes | none | yes | no |
+| `notify.receive` | notes that match the app's filter | filter | yes | no |
+| `schedule.use` | triggers at a set time | schedule | yes | no |
 
 "May ask" means a built-in app may request the capability, and the person still answers each time.
 
@@ -99,6 +101,22 @@ where the log is written; nothing else writes it.
   rules (`iyakki-fw`) and the camera and sound services. Each entry carries the app id of the caller; calls from code that has no app id are logged as `system`.
 * **Cost and privacy.** The write is one small append per connection or device use, off the hot path. Retention limits keep it small; clearing it per app is
   allowed and is itself audited.
+
+## 6c. Published interface and two-way delivery
+
+Decisions of 2026-11-10:
+
+* **The interface is published.** The `iyakki-core` C interface (header, capability catalogue, error numbers, event format, version rules) is a public document and the
+  only supported way for an app to reach a device, the network or the system. A generated reference page and a conformance test (a sample app and a fake core) ship
+  with it, so an app in its own repository can check itself without an image. Until the beta tag it is marked unstable (section 9).
+* **Core to app: notifications with filters.** An app subscribes with a filter (source, kind, tag, minimum importance, text match). The core delivers only the
+  notes that match; an app that holds no subscription sees nothing. The subscription is a capability (`notify.receive`) shown at install, like the others.
+* **Core to app: scheduled triggers.** An app registers a schedule (once, interval, or a calendar rule) and the core delivers a trigger event at that time; the
+  core wakes the app if it is not running. A schedule is a capability (`schedule.use`), limited per app (count and shortest interval) and listed in Settings, Apps.
+* **Same channel both ways.** Apps call the core (open, read, close); the core calls the app through events on the same handle or broker connection
+  (`iyakki_poll_event` for built-in apps, a message on the broker socket for store apps). Every delivery is logged in the access log (section 6b): app, kind,
+  allowed or dropped, time, never the content.
+* **Limits.** A filter cannot read other apps' notes; delivery is rate limited per app; a trigger never runs an app that the person's role does not allow.
 
 ## 7. Packaging
 

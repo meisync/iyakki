@@ -10,7 +10,7 @@ IYAKKI 0.1.0-alpha.1 is a preview built by a small team. There is no support con
 
 ## Reporting a problem
 
-Open an issue on the project's repository (OWNER: fill in the issues address) or write to OWNER: fill in the support mailbox. Please include:
+Open an issue on the project's GitHub repository (Issues for a bug, Discussions for a question or an idea). Please include:
 
 * the version: `iyakki --version`, or SYSTEM, About (it shows the build date, git describe, variant and kernel),
 * how you run it: ISO or install image on a PC (model, firmware BIOS/UEFI), QEMU or another VM, the window tarball, a container,

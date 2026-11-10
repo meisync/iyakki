@@ -42,7 +42,7 @@ individual is officially representing the community in public spaces.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the community leaders at
-**OWNER: fill in contact**. All complaints will be reviewed and investigated promptly and fairly, and we respect the privacy and
+the maintainers, through a GitHub private report (Security, "Report a vulnerability" on the repository page) marked as a conduct report, or by asking in a Discussion for a private channel without naming the person involved. All complaints will be reviewed and investigated promptly and fairly, and we respect the privacy and
 security of the reporter of any incident.
 
 Community leaders follow the Contributor Covenant's enforcement guidelines (correction, warning, temporary ban, permanent ban) in

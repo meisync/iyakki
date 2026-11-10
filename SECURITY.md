@@ -16,12 +16,11 @@ There are no long-term-support branches and no backports before 1.0.
 
 Please **do not open a public issue** for a security problem.
 
-* Mailbox: **OWNER: fill in** (a monitored address, for example `security@your-domain`; this placeholder must be replaced before the
-  release is announced).
-* Encrypted mail: **OWNER: fill in** the public key or fingerprint if you want to offer one, or delete this line.
+* Use GitHub's **private vulnerability reporting**: on the project's repository page, Security, then "Report a vulnerability". Only the maintainers see it.
+  Do not put exploit details in an issue or a discussion.
 * Include: the version (`iyakki --version`, or SYSTEM, About), the image variant, what you did, what you expected, what happened, and
   whether the issue needs physical access, a signed-in person, or the network.
-* You will get an acknowledgement within **OWNER: fill in** (suggested: 7 days) and a decision on severity and a fix plan afterwards.
+* You will get an acknowledgement within **7 days** and a decision on severity and a fix plan afterwards.
   Please allow a reasonable time (suggested: 90 days) before publishing details; credit is given if you want it.
 
 For everything that is not a vulnerability use the normal channels in [SUPPORT.md](SUPPORT.md).

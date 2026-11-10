@@ -85,7 +85,7 @@ upstream sources (kernel, Buildroot, base programs).
 
 ## Reporting issues
 
-Use the project's issue tracker (OWNER: fill in the issues address) or the contact in [`SUPPORT.md`](SUPPORT.md). Include the
+Use the project's GitHub Issues or Discussions (see [`SUPPORT.md`](SUPPORT.md)). Include the
 version (`iyakki --version`), how you run IYAKKI, what you did, what you expected, what happened, and for crashes the end of
 `crash.log` ([`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md#what-to-send-with-a-report)). Never attach `users.json`, vault
 files, keys or a full audit log. **Security problems do not go in public issues:** see [`SECURITY.md`](SECURITY.md).
