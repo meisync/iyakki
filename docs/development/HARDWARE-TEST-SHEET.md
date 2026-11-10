@@ -28,7 +28,7 @@ Machines: Mac mini 2018 (internal install and the T7), MacBook Pro 14,1, HP Pavi
 
 ## 2. Encrypted home (new kernel needed: only on 1109b or later)
 
-Done on the Mac mini 2018 on 2026-11-10 (image 1109i, scratch account): 2.1 (through Move), 2.2, 2.3, 2.4, 2.6 and 2.7 passed. Still to try: 2.5 (an administrator's password reset), Make on a fresh account, a busy home refusing to lock, and the other machines.
+Done on the Mac mini 2018 on 2026-11-10 (image 1109i, scratch account): 2.1 (through Move), 2.2, 2.3, 2.4, 2.5, 2.6 and 2.7 passed. Still to try: Make on a fresh account, a busy home refusing to lock, and the other machines.
 
 Use a scratch account, not your main one. Settings, Account and data, **Encrypted home**.
 
