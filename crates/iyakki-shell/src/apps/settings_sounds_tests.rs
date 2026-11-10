@@ -130,7 +130,9 @@ fn only_administrators_change_them() {
 #[test]
 fn preview_plays_the_cue_through_the_play_command_and_says_so() {
     let cx = admin("sysnd-preview");
-    // the cue goes through the configured play command; the mixer (on by default) would take it instead
+    // the cue goes through the configured play command; the mixer (on by default) would take it instead. The switch is process-wide and
+    // any test that changes sound settings flips it, so this test pins the command route for as long as it runs
+    let _route = iyakki_agent::mixer::pin_command_route();
     cx.services.update_sound(|s| s.mixer = false).unwrap();
     let out = temp_dir("sysnd-preview-out").join("played.wav");
     cx.services.settings.lock().unwrap().update(|s| s.voice.play_cmd = format!("sh -c 'cat > {}'", out.display())).unwrap();
