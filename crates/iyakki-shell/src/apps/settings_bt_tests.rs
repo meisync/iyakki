@@ -1603,6 +1603,23 @@ fn scan_popup(tag: &str, f: Fake) -> (SettingsApp, AppCx, Arc<Fake>) {
 }
 
 #[test]
+fn a_scan_whose_devices_are_all_nameless_says_so_instead_of_asking_to_choose_one() {
+    // found on the Mac mini 2018: 7 devices, none named, all behind "Show 7 more devices", and the popup still said "Choose Pair"
+    let nameless = vec![found("", "10:00:00:00:00:91", -70, Kind::Other), found("", "10:00:00:00:00:92", -80, Kind::Other)];
+    let (mut a, cx, _) = scan_popup("pp-nameless", Fake { scan: Mutex::new(nameless), ..Fake::new() });
+    wait_scan(&mut a, &cx);
+    let mut g = Gfx::new(1280, 900);
+    g.clear(rgb(0, 0, 0));
+    let s = crate::shell::scale_for(1280, 900);
+    crate::access::start_frame();
+    a.render(&mut g, R::new(0.0, 46.0 * s, 1280.0, 900.0 - 46.0 * s), s, &cx, 0);
+    let text = g.text_log.iter().map(|(_, _, t)| t.clone()).collect::<Vec<_>>().join(" ");
+    assert!(text.contains("2 devices found, but none has a name"), "{text}");
+    assert!(!text.contains("Choose Pair next to the one you want"), "{text}");
+    assert!(g.hits.iter().any(|h| h.label == "Show 2 more devices"));
+}
+
+#[test]
 fn scan_opens_a_popup_at_once_says_scanning_and_esc_stops_it_and_the_page_keeps_its_rows() {
     let (mut a, cx, ctl) = app_with("pp1", Fake { scan_blocks: true, devs: Mutex::new(vec![keyboard(), phone()]), scan: Mutex::new(crowd()), ..Fake::new() });
     let g = draw(&mut a, &cx, 1280, 900);

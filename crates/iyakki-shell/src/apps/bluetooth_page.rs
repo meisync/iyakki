@@ -1031,6 +1031,8 @@ impl BtPage {
             (None, Some(e)) => (format!("The scan did not work. {e}"), WARN),
             (None, None) if !self.search.value.is_empty() && rows.is_empty() => ("No device matches the search.".to_string(), MUTED),
             (None, None) if n.total == 0 => ("No other device was found. Put the device in pairing mode and scan again.".to_string(), MUTED),
+            // devices were found but none shows: they have no name and are not a keyboard, mouse, game pad or phone
+            (None, None) if rows.is_empty() && n.more > 0 => (format!("Scan finished: {} device{} found, but none has a name or looks like a keyboard, mouse, game pad or phone. Show them, or put your device in pairing mode and scan again.", n.total, if n.total == 1 { "" } else { "s" }), MUTED),
             (None, None) => (format!("Scan finished: {} device{} found. Choose Pair next to the one you want.", n.total, if n.total == 1 { "" } else { "s" }), MUTED),
         };
         let mut info_lines: Vec<String> = g.wrap(14.0 * s, &info, Face::Sans, text_w).into_iter().take(4).collect();
