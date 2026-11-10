@@ -280,7 +280,7 @@ fn host_based_routing_works_end_to_end_through_the_managed_listener_on_a_high_po
     assert!(r.gate.lock().unwrap().made.is_empty());
     // off: the port is closed and the name is withdrawn
     r.mgr.set_listener(ListenerChange { enabled: Some(false), ..Default::default() }).unwrap();
-    assert!(TcpStream::connect(("127.0.0.1", http)).is_err());
+    assert!(crate::testdir::port_is_closed(http), "the listener is closed");
     assert!(r.names.last().is_empty() && !r.mgr.status().running);
     assert!(r.audit.lock().unwrap().iter().any(|a| a.starts_with("domains.listener.stop")));
 }

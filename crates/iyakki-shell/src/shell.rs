@@ -6553,7 +6553,7 @@ pub(crate) mod tests {
         sh.render(&mut g);
         // the button sits next to the camera on the home screen (camera, Devices, then the clipboard)
         let s = scale_for(1280, 720);
-        let power = sh.session().unwrap().policy.power;
+        let power = sh.may_power();
         let b = header_button(1280, s, if power { 4 } else { 3 });
         sh.handle(&Event::MouseDown(b.x as i32 + 5, b.y as i32 + 5));
         assert!(sh.clipboard_picker_open(), "the queue is open");

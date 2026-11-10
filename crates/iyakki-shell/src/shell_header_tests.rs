@@ -77,7 +77,7 @@ fn the_launcher_bar_fits_the_clock_and_the_devices_button_at_four_sizes() {
             let mut g = Gfx::new(w, h);
             sh.render(&mut g);
             let s = scale_for(w, h);
-            let power = sh.session.as_ref().unwrap().policy.power;
+            let power = sh.may_power();
             let bell = sh.inbox_allowed();
             let _ = (power, bell);
             let n = sh.bar_slots().count; // logout, camera, devices, clipboard (+ power, bell, panes) and the speaker and Settings
@@ -254,7 +254,7 @@ fn the_devices_button_and_f8_open_and_close_the_popover_and_it_leads_to_settings
         }
         sh.render(&mut g);
         let s = scale_for(w, h);
-        let power = sh.session.as_ref().unwrap().policy.power;
+        let power = sh.may_power();
         let b = header_button(w, s, if power { 3 } else { 2 });
         // the button opens it
         sh.handle(&Event::MouseDown((b.x + b.w / 2.0) as i32, (b.y + b.h / 2.0) as i32));

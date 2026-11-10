@@ -728,7 +728,7 @@ fn the_port_gate_hears_each_port_once_when_it_gains_its_first_route_and_loses_it
     l.update(table(vec![route(A, "/", a.port, p1), route("new.example.org", "/", a.port, p3)])).unwrap();
     assert_eq!(ev()[2..].to_vec(), vec![format!("open {p3}"), format!("close {p2}")]);
     assert_eq!(l.ports(), vec![p1, p3]);
-    assert!(TcpStream::connect(("127.0.0.1", p2)).is_err(), "the closed port no longer accepts");
+    assert!(crate::testdir::port_is_closed(p2), "the closed port no longer accepts");
     assert_eq!(text(&http(p3, &get("new.example.org", "/"))), "name=a path=/");
     assert_eq!(http(p1, &get(B, "/")).0, 404, "the removed route is gone from the running listener");
     drop(l);
@@ -750,7 +750,7 @@ fn a_port_that_cannot_be_bound_is_an_error_and_nothing_else_is_used() {
     let e = Listener::start(table(vec![route(A, "/", a.port, free), route(B, "/", a.port, taken)]), Arc::new(FileCerts::new(tmp("none"))), gate.clone(), o).err().expect("must fail");
     assert!(e.contains(&format!("cannot listen on port {taken}")) && e.contains("no other port is used"), "{e}");
     assert_eq!(gate.0.lock().unwrap().clone(), vec![format!("open {free}"), format!("close {free}")], "the port bound before the failure is released again");
-    assert!(TcpStream::connect(("127.0.0.1", free)).is_err());
+    assert!(crate::testdir::port_is_closed(free), "the released port is closed");
     // a table that mixes plain and tls routes on one port is refused before anything is bound
     let dir = tmp("mix");
     let (c, k) = self_signed(A).unwrap();

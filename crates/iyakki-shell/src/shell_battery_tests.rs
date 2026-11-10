@@ -182,7 +182,7 @@ fn other_rects(sh: &Shell, w: u32, s: f32, app: bool) -> Vec<(&'static str, R)> 
             v.push(("clock", c.rect));
         }
     } else {
-        let power = sh.session.as_ref().unwrap().policy.power;
+        let power = sh.may_power();
         let n = 3 + power as usize + sh.inbox_allowed() as usize + 1;
         for i in 0..n {
             v.push(("button", header_button(w, s, i)));

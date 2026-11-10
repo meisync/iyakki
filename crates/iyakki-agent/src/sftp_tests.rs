@@ -175,7 +175,18 @@ fn it_is_off_until_enabled_and_enabling_needs_a_way_to_log_in() {
     drop(c);
     assert!(r.sftp.disable("amy"));
     assert_eq!(r.fw.0.lock().unwrap().last().unwrap(), "close");
-    assert!(std::net::TcpStream::connect(("127.0.0.1", st.port)).is_err(), "closed again");
+    // disable joined the listener, so the port is closed; a freed port can be taken at once by another test of this process (they bind
+    // port 0), so a refusal at any try within two seconds is the proof
+    let t0 = std::time::Instant::now();
+    let mut refused = false;
+    while t0.elapsed() < std::time::Duration::from_secs(2) {
+        if std::net::TcpStream::connect(("127.0.0.1", st.port)).is_err() {
+            refused = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(refused, "closed again");
     assert!(!r.sftp.disable("amy"));
     let a = r.audit.lock().unwrap().join("\n");
     assert!(a.contains("sftp.enable by amy") && a.contains("sftp.disable by amy"), "{a}");
@@ -331,7 +342,7 @@ fn it_stops_by_itself_when_the_time_is_up_and_closes_the_firewall() {
     std::thread::sleep(std::time::Duration::from_millis(2600));
     let st = r.sftp.status();
     assert!(!st.running, "the time is up");
-    assert!(std::net::TcpStream::connect(("127.0.0.1", st.port)).is_err() || st.port == 0);
+    assert!(st.port == 0 || crate::testdir::port_is_closed(st.port));
     assert_eq!(r.fw.0.lock().unwrap().last().unwrap(), "close", "the firewall opening is removed");
     assert!(r.audit.lock().unwrap().iter().any(|l| l.starts_with("sftp.disable by expiry")));
     assert!(status_lines(&r.data)[0].contains("off"));

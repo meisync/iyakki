@@ -3,6 +3,14 @@
 
 use super::*;
 use crate::apps::tests::{cx_with_admin_store, temp_dir};
+
+/// A test context whose person has a name of its own: the browser sessions are kept by name in a table the whole process shares, so
+/// tests that all ran as "admin" overwrote each other's fake browser when they ran in parallel.
+fn cx_own_user(tag: &str) -> AppCx {
+    let mut cx = cx_with_admin_store(tag);
+    cx.session.user = format!("{tag}-person");
+    cx
+}
 use iyakki_agent::browsermedia::{self, BrowserMedia, Kind, Policy, CH_MIC};
 use std::sync::Mutex;
 
@@ -23,7 +31,7 @@ fn browser(cx: &AppCx, p: Policy) -> (Arc<BrowserMedia>, Arc<Mutex<Vec<String>>>
 
 #[test]
 fn a_local_session_keeps_the_machines_microphone_and_camera() {
-    let cx = cx_with_admin_store("vb-local");
+    let cx = cx_own_user("vb-local");
     browsermedia::unregister(&cx.session.user);
     let v = VoiceApp::new(&cx);
     assert_ne!(v.rig.recorders.product(), "web browser");
@@ -32,7 +40,7 @@ fn a_local_session_keeps_the_machines_microphone_and_camera() {
 
 #[test]
 fn a_browser_session_dictates_and_records_with_the_browsers_microphone() {
-    let cx = cx_with_admin_store("vb-voice");
+    let cx = cx_own_user("vb-voice");
     let (m, log, _r) = browser(&cx, Policy::allow_all());
     let mut v = VoiceApp::new(&cx).with_recordings_dir(temp_dir("vb-voice-rec"));
     assert_eq!(v.rig.recorders.product(), "web browser");
@@ -55,7 +63,7 @@ fn a_browser_session_dictates_and_records_with_the_browsers_microphone() {
 
 #[test]
 fn a_denied_browser_microphone_is_refused_in_the_tile() {
-    let cx = cx_with_admin_store("vb-denied");
+    let cx = cx_own_user("vb-denied");
     let (m, log, _r) = browser(&cx, Policy::deny_all());
     let mut v = VoiceApp::new(&cx).with_recordings_dir(temp_dir("vb-denied-rec"));
     v.look(&cx);
@@ -68,7 +76,7 @@ fn a_denied_browser_microphone_is_refused_in_the_tile() {
 
 #[test]
 fn the_camera_tile_lists_only_the_browsers_camera_in_a_browser_session() {
-    let cx = cx_with_admin_store("vb-cam");
+    let cx = cx_own_user("vb-cam");
     let (_m, _log, _r) = browser(&cx, Policy::allow_all());
     let c = crate::apps::camera::CameraApp::new(&cx);
     assert_eq!(c.camera_names(), vec!["Browser camera".to_string()]);

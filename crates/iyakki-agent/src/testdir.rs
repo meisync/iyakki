@@ -44,6 +44,19 @@ fn make(dir: &Path, prefix: &str, tag: &str) -> PathBuf {
     d
 }
 
+/// Does nothing answer on `127.0.0.1:port`? A port that was just freed can be taken at once by another test of this process (they all
+/// bind port 0), so a refusal at any try within two seconds is the proof; only a port that answers the whole time is a failure.
+pub fn port_is_closed(port: u16) -> bool {
+    let t0 = std::time::Instant::now();
+    while t0.elapsed() < std::time::Duration::from_secs(2) {
+        if std::net::TcpStream::connect_timeout(&std::net::SocketAddr::from(([127, 0, 0, 1], port)), std::time::Duration::from_millis(200)).is_err() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
+}
+
 /// A fresh folder of its own under [`base`].
 pub fn unique(prefix: &str, tag: &str) -> PathBuf {
     make(&base(), prefix, tag)
