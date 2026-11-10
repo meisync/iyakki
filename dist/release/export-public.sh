@@ -47,8 +47,7 @@ for d, _, fs in os.walk(root):
 for p, t in missing[:60]: print(f"  dangling link: {p} -> {t}", file=sys.stderr)
 if missing: print(f"export-public: {len(missing)} dangling link(s)", file=sys.stderr); sys.exit(1)
 P
-# 3c. the identity and the old logo
-[ ! -e "$OUT/dist/brand/owner-logo.png" ] || { echo "export-public: owner-logo.png is in the tree" >&2; bad=1; }
+# 3c. (nothing else yet)
 [ "$bad" = 0 ] || fail "checks failed (the export is left in $OUT for you to look at)"
 
 # 4. one commit

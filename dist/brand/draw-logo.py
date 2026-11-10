@@ -18,7 +18,7 @@ SS = 3  # supersampling for the shapes
 # Each arrow head: back tip top, back tip bottom, notch (the point of its concave back) and apex (the point of its convex front), all at the same height H/2.
 CHEVRONS = [
     # name, tip top, tip bottom, notch, apex, window (offset at the centre, shrink per pixel of height, width at the centre, narrowing per pixel, reach)
-    ("C", (535, 22), (530, 548), (720, 285), (831, 288), None),
+    ("C", (495, 22), (490, 548), (680, 285), (791, 288), None),
     ("B", (385, 35), (380, 535), (520, 285), (711, 285), (78, 0.25, 56, 0.12, 200)),
     ("A", (222, 10), (212, 552), (357, 285), (640, 285), (83, 0.276, 55, 0.12, 215)),
 ]
@@ -68,18 +68,18 @@ def circuit_layer(mask, seed):
     sheet = Image.new("L", (W, H), 0)
     d = ImageDraw.Draw(sheet)
     lines = []
-    for _ in range(int(len(xs) / 900)):
+    for _ in range(int(len(xs) / 260)):
         x, y = rnd.uniform(x0, x1), rnd.uniform(y0, y1)
         dirn = rnd.choice([(1, 0), (0, 1), (-1, 0), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)])
         pts = [(x, y)]
         for _ in range(rnd.randint(2, 5)):
-            run = rnd.uniform(14, 46)
+            run = rnd.uniform(8, 30)
             x, y = x + dirn[0] * run, y + dirn[1] * run
             pts.append((x, y))
             dirn = rnd.choice([(1, 0), (0, 1), (-1, 0), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)])
         lines.append(pts)
     for pts in lines:
-        d.line(pts, fill=255, width=2)
+        d.line(pts, fill=255, width=1)
         x, y = pts[-1]
         d.ellipse([x - 3, y - 3, x + 3, y + 3], outline=255, width=1)
     core = np.asarray(sheet).astype(np.float32) / 255.0
@@ -87,9 +87,10 @@ def circuit_layer(mask, seed):
     glow2 = np.asarray(sheet.filter(ImageFilter.GaussianBlur(14))).astype(np.float32) / 255.0
     board_t = (np.arange(H, dtype=np.float32)[:, None] / H) * np.ones((1, W), np.float32)
     rgb = np.zeros((H, W, 3), np.float32)
-    rgb[..., 0] = 6 + 10 * board_t + core * 150 + glow * 30
-    rgb[..., 1] = 14 + 22 * board_t + core * 190 + glow * 80 + glow2 * 30
-    rgb[..., 2] = 40 + 60 * board_t + core * 255 + glow * 230 + glow2 * 150
+    mid = 1.0 - np.abs(board_t - 0.5) * 1.4
+    rgb[..., 0] = 4 + 6 * mid + core * 150 + glow * 20
+    rgb[..., 1] = 8 + 16 * mid + core * 200 + glow * 60 + glow2 * 20
+    rgb[..., 2] = 24 + 46 * mid + core * 255 + glow * 150 + glow2 * 90
     return np.clip(rgb, 0, 255) * mask[..., None]
 
 
@@ -132,7 +133,7 @@ def draw_emblem(wall=None):
                 a = abs(dy)
                 back_x = nt[0] - (nt[0] - tt[0]) * a / (cy - tt[1])
                 left = back_x + off0 - shrink * a
-                right = left + max(10.0, w0 - narrow * a)
+                right = left + max(5.0, w0 * (1.0 - (a / (reach + 10.0)) ** 1.6) + 4.0)
                 pts_l.append((left, cy + dy))
                 pts_r.append((right, cy + dy))
             window = poly_mask(pts_l + pts_r[::-1])
@@ -140,6 +141,8 @@ def draw_emblem(wall=None):
             rim = np.clip(np.asarray(glow_edge).astype(np.float32) / 255.0 - window * 0.6, 0, 1)
             over(canvas, np.full((H, W, 3), 25.0, np.float32), window)  # the dark wall of the slot
             over(canvas, circuit_layer(window, 7 + n), window * 0.96)
+            inner = np.asarray(Image.fromarray((window * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(4))).astype(np.float32) / 255.0
+            over(canvas, np.zeros((H, W, 3), np.float32), np.clip(window - inner, 0, 1) * 0.7)
             over(canvas, np.stack([np.full((H, W), 90.0), np.full((H, W), 160.0), np.full((H, W), 255.0)], -1).astype(np.float32), rim * 0.55)
     if wall is not None:
         bg = np.zeros((H, W, 4), np.float32)

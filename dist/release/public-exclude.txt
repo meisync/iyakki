@@ -14,4 +14,3 @@ docs/development/PUBLIC-READINESS-AUDIT-*.md
 docs/development/WAVE*-*.md
 docs/development/PARTIALS-PLAN-*.md
 docs/development/WORK-QUEUE.md
-dist/brand/owner-logo.png

@@ -15,38 +15,14 @@ P = lambda *a: os.path.join(ROOT, *a)
 SS = 4  # supersampling
 
 
-def cut_owner_logo(path):
-    """The owner's logo picture (brushed-steel arrow heads with blue circuit light, on a dark grey wall) as an RGBA picture: the wall is the part of the
-    picture that the corners reach through pixels that change by only a few levels from one to the next and stay dark; the steel and the circuit light
-    stop it. Deterministic (no model, no random numbers)."""
-    from collections import deque
-    src = Image.open(path).convert("RGB")
-    a = np.asarray(src).astype(np.int16)
-    lum = a.mean(axis=2)
-    h, w = lum.shape
-    wall = np.zeros((h, w), bool)
-    q = deque()
-    for x0, y0 in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)):
-        wall[y0, x0] = True
-        q.append((y0, x0))
-    while q:
-        y, x = q.popleft()
-        for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            ny, nx = y + dy, x + dx
-            if 0 <= ny < h and 0 <= nx < w and not wall[ny, nx] and lum[ny, nx] < 100 and abs(lum[ny, nx] - lum[y, x]) <= 3.5:
-                wall[ny, nx] = True
-                q.append((ny, nx))
-    alpha = Image.fromarray(((~wall) * 255).astype(np.uint8))
-    alpha = alpha.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.GaussianBlur(0.9))
-    out = src.convert("RGBA")
-    out.putalpha(alpha)
-    return out
-
-
 def emblem(size=384, circle=378):
-    """The logo: the owner's picture (dist/brand/owner-logo.png, supplied 2026-10-31), cut out of its background, centred in a transparent square.
-    `circle` is the widest the picture may be (the old round emblem filled 378 of 384 pixels)."""
-    cut = cut_owner_logo(P("dist/brand/owner-logo.png"))
+    """The logo: three brushed-steel arrow heads with blue circuit light, drawn from nothing by dist/brand/draw-logo.py (fixed numbers, the same
+    picture every run), cropped to its shape and centred in a transparent square. `circle` is the widest the picture may be."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("draw_logo", P("dist/brand/draw-logo.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    cut = mod.draw_emblem()
     cut = cut.crop(cut.getchannel("A").point(lambda v: 255 if v > 24 else 0).getbbox())
     k = min(circle * 0.94 / cut.width, circle * 0.94 / cut.height)
     cut = cut.resize((round(cut.width * k), round(cut.height * k)), Image.LANCZOS)
