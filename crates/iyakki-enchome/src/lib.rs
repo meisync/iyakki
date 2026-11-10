@@ -913,8 +913,13 @@ impl EncHome {
     }
 }
 
-/// Files the system itself puts in a new home folder at sign-in (relative to the home). Nothing a person made.
-const SIGN_IN_STUBS: [&str; 1] = [".claude/.claude.json"];
+/// Files the system itself puts in a new home folder at sign-in (paths relative to the home): the tool settings file and its timestamped
+/// backup. Nothing a person made. (Found on the Mac mini 2018: the first fix knew only the settings file, and a fresh account still
+/// held `.claude/backups/.claude.json.backup.<number>`.)
+fn is_sign_in_stub(rel: &str) -> bool {
+    rel == ".claude/.claude.json"
+        || rel.strip_prefix(".claude/backups/.claude.json.backup.").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
 
 /// Does this folder hold anything a person could have made? Empty folders (at any depth) and the sign-in stubs do not count.
 fn holds_person_files(dir: &Path) -> std::io::Result<bool> {
@@ -929,7 +934,7 @@ fn holds_person_files(dir: &Path) -> std::io::Result<bool> {
                 }
             } else {
                 let rel = path.strip_prefix(root).map(|r| r.to_string_lossy().to_string()).unwrap_or_default();
-                if !t.is_file() || !SIGN_IN_STUBS.contains(&rel.as_str()) {
+                if !t.is_file() || !is_sign_in_stub(&rel) {
                     return Ok(true);
                 }
             }
@@ -941,10 +946,20 @@ fn holds_person_files(dir: &Path) -> std::io::Result<bool> {
 
 /// Remove the sign-in stubs (only those, only plain files).
 fn remove_sign_in_stubs(home: &Path) {
-    for rel in SIGN_IN_STUBS {
-        let p = home.join(rel);
-        if std::fs::symlink_metadata(&p).map(|m| m.is_file()).unwrap_or(false) {
-            let _ = std::fs::remove_file(&p);
+    fn walk(root: &Path, dir: &Path) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let path = e.path();
+            let Ok(t) = e.file_type() else { continue };
+            if t.is_dir() {
+                walk(root, &path);
+            } else if t.is_file() {
+                let rel = path.strip_prefix(root).map(|r| r.to_string_lossy().to_string()).unwrap_or_default();
+                if is_sign_in_stub(&rel) {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
         }
     }
+    walk(home, home);
 }

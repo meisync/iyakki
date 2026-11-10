@@ -392,3 +392,19 @@ fn a_new_home_with_only_sign_in_stubs_and_empty_folders_can_be_made_but_a_person
     r.env.create("amy", "amy-pass-1", Some(MIN_PAYLOAD)).unwrap();
     assert!(!h.join(".claude/.claude.json").exists());
 }
+
+#[test]
+fn the_timestamped_backup_that_sign_in_writes_is_a_stub_too_but_a_look_alike_is_a_person_file() {
+    // found on the Mac mini 2018: a fresh account still held .claude/backups/.claude.json.backup.<number>
+    let r = rig("stubs-backup");
+    let h = r.home("amy");
+    std::fs::create_dir_all(h.join(".claude/backups")).unwrap();
+    std::fs::write(h.join(".claude/.claude.json"), b"{}").unwrap();
+    std::fs::write(h.join(".claude/backups/.claude.json.backup.1794310770019"), b"{}").unwrap();
+    // a backup-looking file with a name a tool would not write is a person's
+    std::fs::write(h.join(".claude/backups/.claude.json.backup.mine"), b"x").unwrap();
+    assert_eq!(r.env.create("amy", "amy-pass-1", Some(MIN_PAYLOAD)).unwrap_err(), HomeError::PlainHomeHasFiles);
+    std::fs::remove_file(h.join(".claude/backups/.claude.json.backup.mine")).unwrap();
+    r.env.create("amy", "amy-pass-1", Some(MIN_PAYLOAD)).unwrap();
+    assert!(!h.join(".claude/backups/.claude.json.backup.1794310770019").exists(), "the stub is gone from underneath the mount");
+}
