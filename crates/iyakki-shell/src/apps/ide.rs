@@ -1546,6 +1546,7 @@ impl IdeApp {
             .text("Features file", &c.features_file, "default FEATURES.md")
             .text("Test command", &c.commands.test, "e.g. cargo test")
             .text("Run command", &c.commands.run, "F5 runs this when the open file is not a script")
+            .text("Coverage command", &c.commands.coverage, "empty: a detected tool (cargo llvm-cov, pytest --cov, go test -cover, jest --coverage)")
             .text("Stack (language)", &c.stack, "empty: detected from the files (Go, TypeScript, Python, Java, Rust, C#, PHP, C, C++)")
             .choice("IDE density (Ctrl+= denser, Ctrl+- looser)", &["Comfortable", "Compact", "Dense"], self.density.index());
         self.modal = Some(Modal::Form(FormKind::Settings, f));
@@ -1595,11 +1596,12 @@ impl IdeApp {
                 c.features_file = if f.value(5).trim().is_empty() { "FEATURES.md".into() } else { f.value(5).trim().to_string() };
                 c.commands.test = f.value(6).trim().to_string();
                 c.commands.run = f.value(7).trim().to_string();
-                c.stack = f.value(8).trim().to_string();
+                c.commands.coverage = f.value(8).trim().to_string();
+                c.stack = f.value(9).trim().to_string();
                 if !iyakki_agent::projectstate::is_known_stack(&c.stack) {
                     return fail(self, kind, f, "Unknown stack. Use one of: Go, JavaScript, TypeScript, Python, Java, Rust, C#, PHP, C, C++ (or leave it empty).".into());
                 }
-                let density = super::ide_chrome::Density::from_index(f.choice_idx(9));
+                let density = super::ide_chrome::Density::from_index(f.choice_idx(10));
                 if !c.k8s.kubeconfig.is_empty() && !cx.session.policy.allows_read(&cx.session.user, &c.k8s.kubeconfig) {
                     return fail(self, kind, f, "That kubeconfig is outside the folders your account may read.".into());
                 }

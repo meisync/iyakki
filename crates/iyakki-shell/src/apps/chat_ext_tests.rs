@@ -110,6 +110,8 @@ fn an_agent_choice_is_remembered_for_the_workspace_and_an_account_without_comman
     assert_eq!(fresh.ext_id(&cx).as_deref(), Some("copilot"), "a new chat starts with it");
     // a default that no longer exists is ignored
     cx.services.settings.lock().unwrap().update(|s| s.agents.default = Some("custom:gone".into())).unwrap();
+    // (a single installed and ready agent would answer anyway, so make none ready)
+    cx.services.ext_status.set("copilot", status(false, Auth::Unknown));
     assert_eq!(ChatApp::new().ext_id(&cx), None);
 }
 

@@ -305,3 +305,16 @@ fn start_ticker() {
         }
     });
 }
+
+#[cfg(test)]
+mod resolver_tests {
+    use super::*;
+
+    #[test]
+    fn the_system_resolver_answers_for_localhost_and_fails_plainly_for_a_name_that_cannot_exist() {
+        let ok = SysResolver.resolve("localhost").expect("localhost resolves through getaddrinfo");
+        assert!(ok.iter().any(|a| a.is_loopback()), "localhost gives a loopback address: {ok:?}");
+        // `.invalid` is reserved (RFC 2606) and never resolves: an error string, never an empty "allowed" answer
+        assert!(SysResolver.resolve("no-such-host.invalid").is_err());
+    }
+}

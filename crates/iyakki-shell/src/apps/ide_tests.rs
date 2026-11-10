@@ -563,6 +563,21 @@ fn ide_settings_keep_the_stack_override_refuse_an_unknown_one_and_the_chat_foote
     assert_eq!(workspace::ProjectConfig::load(&d).unwrap().stack, "Rust", "and is not saved");
 }
 
+#[test]
+fn ide_the_settings_form_has_a_coverage_command_field_that_is_saved() {
+    let w = world("covfield");
+    let d = project(&w, "alpha", &[("go.mod", "module x")]);
+    let mut app = IdeApp::new(&w.cx);
+    open(&mut app, &w.cx, "Alpha", &d);
+    app.open_settings_form();
+    let Some(Modal::Form(_, f)) = &mut app.modal else { panic!("the settings form") };
+    f.set_value(8, "  cargo llvm-cov --lcov  ");
+    key(&mut app, &w.cx, Key::Ctrl('s'));
+    assert!(app.modal.is_none(), "saved");
+    assert_eq!(workspace::ProjectConfig::load(&d).unwrap().commands.coverage, "cargo llvm-cov --lcov");
+    assert_eq!(cur(&app).cfg.commands.coverage, "cargo llvm-cov --lcov");
+}
+
 // -------------------------------------------------------------------------------------------- chat and the agent
 
 #[test]
@@ -2225,7 +2240,7 @@ fn ide_density_keys_and_the_settings_choice_change_the_whole_ide_and_are_remembe
     // the settings form has the choice, and submitting it applies it
     app.open_settings_form();
     let Some(Modal::Form(_, f)) = &mut app.modal else { panic!("the settings form") };
-    f.set_choice(9, 2);
+    f.set_choice(10, 2);
     key(&mut app, &w.cx, Key::Ctrl('s'));
     assert_eq!(app.density, Density::Dense, "the gear menu's choice applies");
     // the overflow menu cycles it too

@@ -451,3 +451,15 @@ fn the_status_card_text_follows_the_state() {
     assert!(t.contains("key pinned") && t.contains("by default"), "{t}");
     let _ = std::fs::remove_dir_all(&f.dir);
 }
+
+#[test]
+fn the_store_status_text_says_deployed_added_and_the_default_target() {
+    use privatestore::{status_text, StatusInfo};
+    let deployed = StatusInfo { instance: Some(("ps1".into(), "http://10.0.0.5:8080/catalog.json".into())), ..Default::default() };
+    let t = status_text(&deployed);
+    assert!(t.contains("Private store ps1 is deployed") && t.contains("http://10.0.0.5:8080/catalog.json") && t.contains("not added"), "{t}");
+    let added = StatusInfo { added: Some(("s9".into(), "Lab".into())), default_target: Some("Lab".into()), ..deployed };
+    let t = status_text(&added);
+    assert!(t.contains("added as the catalog Lab (s9), key pinned") && t.contains("Publishing goes to Lab by default") && !t.contains("not added"), "{t}");
+    assert!(status_text(&StatusInfo::default()).starts_with("No private store is deployed"));
+}
