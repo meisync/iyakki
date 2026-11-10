@@ -251,6 +251,14 @@ impl DevMode {
         let _ = self.shell_write(&st);
     }
 
+    /// Drop the grants of one kind of `computer` (and nothing else: a shell grant of the same computer stays).
+    fn shell_drop_kind(&self, computer: &str, kind: &str) {
+        let _one_at_a_time = super::keys_lock();
+        let mut st = self.shell_read();
+        st.grants.retain(|g| !(g.computer == computer && g.kind == kind));
+        let _ = self.shell_write(&st);
+    }
+
     /// A shell session of `computer` closed: a one-session grant ends with it.
     pub fn shell_session_closed(&self, computer: &str) {
         if self.shell_grant_kind(computer, "shell").is_some_and(|g| g.once) {
@@ -344,6 +352,13 @@ impl DevMode {
 impl DevMode {
     /// A one-time power grant is used up by the action it was given for.
     pub fn power_used(&self, computer: &str) {
+        // a one-time power approval ends with the restart or switch-off it was for. (It used to call shell_session_closed, which only
+        // looks at shell grants: a power grant was never used up, so the computer could restart the device again without asking until
+        // the grant ran out.)
+        if self.shell_grant_kind(computer, "power").is_some_and(|g| g.once) {
+            self.shell_drop_kind(computer, "power");
+            self.log("system", "", "devmode.shell.end", &format!("{computer}: the one-time power approval was used up"), true);
+        }
         self.shell_session_closed(computer);
     }
 }
