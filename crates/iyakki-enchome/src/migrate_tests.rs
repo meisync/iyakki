@@ -221,3 +221,29 @@ fn verify_notices_mode_link_and_extra_entry_differences() {
     std::os::unix::fs::symlink("elsewhere", b.join("l")).unwrap();
     assert!(verify(&a, &b).is_err());
 }
+
+#[test]
+fn verify_ignores_the_new_file_systems_own_lost_and_found_but_only_at_the_top_and_only_when_the_original_has_none() {
+    // found on the Mac mini 2018: a right copy failed with "holds 3 entries, the original 2" because mke2fs made lost+found
+    let r = rig("verify-lost");
+    let (a, b) = (r.root.join("a"), r.root.join("b"));
+    for d in [&a, &b] {
+        std::fs::create_dir_all(d.join("sub")).unwrap();
+        std::fs::write(d.join("f"), b"same").unwrap();
+    }
+    std::fs::create_dir_all(b.join("lost+found")).unwrap();
+    assert!(verify(&a, &b).is_ok(), "the file system's own folder at the top is not extra");
+    // a lost+found deeper down is a real extra entry
+    std::fs::create_dir_all(b.join("sub/lost+found")).unwrap();
+    assert!(verify(&a, &b).is_err(), "not at depth one");
+    std::fs::remove_dir(b.join("sub/lost+found")).unwrap();
+    // the original has its own lost+found: then it must be copied like any entry
+    std::fs::create_dir_all(a.join("lost+found")).unwrap();
+    assert!(verify(&a, &b).is_ok());
+    std::fs::remove_dir(b.join("lost+found")).unwrap();
+    assert!(verify(&a, &b).is_err(), "missing from the copy");
+    // an extra file at the top is still caught
+    std::fs::remove_dir(a.join("lost+found")).unwrap();
+    std::fs::write(b.join("extra"), b"x").unwrap();
+    assert!(verify(&a, &b).is_err());
+}

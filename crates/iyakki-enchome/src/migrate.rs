@@ -216,7 +216,10 @@ pub fn verify(src: &Path, dst: &Path) -> Result<u64, HomeError> {
         let mut names: Vec<_> = fs::read_dir(src).map_err(|e| format!("{}: {e}", src.display()))?.flatten().map(|e| e.file_name()).collect();
         names.sort();
         // nothing extra may exist in the copy either
-        let extra = fs::read_dir(dst).map_err(|e| format!("{}: {e}", dst.display()))?.flatten().count();
+        // (a new ext4 file system has a lost+found folder of its own at its top: that one is not extra. Found on the Mac mini 2018:
+        // "holds 3 entries, the original 2" after a copy that was right.)
+        let own_top_folder = depth == 0 && !names.iter().any(|nm| nm == "lost+found");
+        let extra = fs::read_dir(dst).map_err(|e| format!("{}: {e}", dst.display()))?.flatten().filter(|e| !(own_top_folder && e.file_name() == "lost+found")).count();
         let expected = names.iter().filter(|nm| fs::symlink_metadata(src.join(nm)).map(|m| { let t = m.file_type(); t.is_dir() || t.is_file() || t.is_symlink() }).unwrap_or(false)).count();
         if extra != expected {
             return Err(format!("{} holds {extra} entries, the original {expected}", dst.display()));
