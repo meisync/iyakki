@@ -458,6 +458,68 @@ pub fn candidate_modes(modes: &[Mode], want: Option<Mode>) -> Vec<Mode> {
 /// How many modes `open` tries before it gives up (each failed try can cost a few seconds of probe timeout).
 const MAX_TRIES: usize = 6;
 
+/// A camera that times out this many tries in a row is not answering at all (a smaller picture will not help): stop trying sizes.
+const TIMEOUTS_BEFORE_RESET: usize = 2;
+
+/// At most one USB reset per camera in this time, so a camera that never recovers is not reset forever.
+const RESET_EVERY: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Is this the kernel's "no answer" (ETIMEDOUT, -110) for a request to the camera?
+fn is_timeout(msg: &str) -> bool {
+    msg.contains("timed out") || msg.contains("os error 110")
+}
+
+/// When each camera was last reset: `allow` says yes at most once per `RESET_EVERY`.
+#[derive(Default)]
+struct ResetLog(std::collections::HashMap<String, std::time::Instant>);
+
+impl ResetLog {
+    fn allow(&mut self, key: &str, now: std::time::Instant) -> bool {
+        match self.0.get(key) {
+            Some(t) if now.duration_since(*t) < RESET_EVERY => false,
+            _ => {
+                self.0.insert(key.to_string(), now);
+                true
+            }
+        }
+    }
+}
+
+/// The software "unplug and plug" of one USB device: write 0 then 1 to its sysfs `authorized` file, so the kernel drops it and
+/// finds it again (a camera that timed out on its first request right after being plugged in answers after this, as it does
+/// after a hand replug). Only for the folder of a USB device (it has an `authorized` switch and an `idVendor`): a plugged-in USB
+/// camera, never the built-in one. The folder comes from camera detection (`CamDevice::physical`), which is where sysfs is read.
+fn usb_reset(physical: &str, pause: std::time::Duration) -> Result<(), String> {
+    let dir = Path::new(physical);
+    if !dir.is_absolute() || dir.components().any(|c| c.as_os_str() == "..") {
+        return Err("not a USB device path".into());
+    }
+    let file = dir.join("authorized");
+    if !file.exists() || !dir.join("idVendor").exists() {
+        return Err("the folder is not a USB device (no authorized switch)".into());
+    }
+    std::fs::write(&file, "0").map_err(|e| format!("could not switch the camera off: {e}"))?;
+    std::thread::sleep(pause);
+    std::fs::write(&file, "1").map_err(|e| format!("could not switch the camera on again: {e}"))
+}
+
+/// Reset the camera's USB port once in a while (see `RESET_EVERY`); says what it did for the log.
+fn reset_when_silent(dev: &CamDevice) -> Option<String> {
+    use std::sync::{Mutex, OnceLock};
+    static LOG: OnceLock<Mutex<ResetLog>> = OnceLock::new();
+    if dev.builtin || !Path::new(&dev.physical).is_absolute() {
+        return None;
+    }
+    let allowed = LOG.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()).allow(&dev.physical, std::time::Instant::now());
+    if !allowed {
+        return None;
+    }
+    Some(match usb_reset(&dev.physical, std::time::Duration::from_secs(2)) {
+        Ok(()) => format!("camera: {} did not answer; its USB port was reset", dev.name),
+        Err(e) => format!("camera: {} did not answer; a reset of its USB port failed: {e}", dev.name),
+    })
+}
+
 impl Opener for V4l2Opener {
     fn open(&self, dev: &CamDevice, want: Option<Mode>) -> Result<Opened, String> {
         let fd = Fd::open(&dev.path)?;
@@ -478,6 +540,7 @@ impl Opener for V4l2Opener {
         }
         let mut first_error: Option<String> = None;
         let mut tried = 0usize;
+        let mut silent = 0usize;
         let mut fd = Some(fd);
         for want_mode in ladder.into_iter().take(MAX_TRIES) {
             tried += 1;
@@ -496,7 +559,11 @@ impl Opener for V4l2Opener {
             f.type_ = BUF_TYPE_VIDEO_CAPTURE;
             f.fmt.pix = PixFormat { width: want_mode.width, height: want_mode.height, pixelformat: if want_mode.pix == Pix::Mjpeg { FMT_MJPEG } else { FMT_YUYV }, field: FIELD_ANY, ..zeroed() };
             if let Err(e) = fd_now.ioctl(VIDIOC_S_FMT, &mut f) {
+                silent = if is_timeout(&e.to_string()) { silent + 1 } else { 0 };
                 first_error.get_or_insert(format!("the camera refused {}x{}: {e}", want_mode.width, want_mode.height));
+                if silent >= TIMEOUTS_BEFORE_RESET {
+                    break;
+                }
                 continue;
             }
             // SAFETY: `pix` is the member the kernel fills for a capture format.
@@ -511,6 +578,14 @@ impl Opener for V4l2Opener {
             }
         }
         let first = first_error.unwrap_or_else(|| "the camera would not start".into());
+        if silent >= TIMEOUTS_BEFORE_RESET {
+            let said = reset_when_silent(dev);
+            if let Some(line) = &said {
+                log::info!("{line}");
+            }
+            let tail = if said.is_some_and(|s| s.contains("was reset")) { "; its USB port was reset, trying again" } else { "" };
+            return Err(format!("{first}: it does not answer{tail}"));
+        }
         Err(if tried > 1 { format!("{first} (also tried {} other picture size(s))", tried - 1) } else { first })
     }
 }
@@ -534,6 +609,36 @@ mod tests {
         // the driver's other formats (NV16, YVYU) are not ones this camera app reads
         assert_eq!(pix_of(fourcc(b"NV16")), None);
         assert_eq!(pix_of(fourcc(b"YVYU")), None);
+    }
+
+    #[test]
+    fn a_camera_that_does_not_answer_is_reset_once_and_not_again_for_ten_minutes() {
+        assert!(is_timeout("Connection timed out (os error 110)"));
+        assert!(!is_timeout("Device or resource busy (os error 16)"));
+        let t0 = std::time::Instant::now();
+        let mut log = ResetLog::default();
+        assert!(log.allow("/x/usb1/1-8", t0));
+        assert!(!log.allow("/x/usb1/1-8", t0 + std::time::Duration::from_secs(30)), "not twice in a row");
+        assert!(log.allow("/x/usb1/1-14", t0 + std::time::Duration::from_secs(30)), "another camera has its own turn");
+        assert!(log.allow("/x/usb1/1-8", t0 + RESET_EVERY + std::time::Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn the_usb_reset_switches_the_device_off_and_on_and_refuses_paths_that_are_not_usb_devices() {
+        let root = std::env::temp_dir().join(format!("iyakki-usbreset-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(usb_reset(&root.display().to_string(), std::time::Duration::ZERO).is_err(), "a folder that is not a USB device");
+        assert!(usb_reset("relative/path", std::time::Duration::ZERO).is_err(), "only absolute paths");
+        assert!(usb_reset(&format!("{}/../etc", root.display()), std::time::Duration::ZERO).is_err(), "no .. in the path");
+        // a USB-looking folder gets the off/on writes
+        std::fs::write(root.join("idVendor"), "1d6c").unwrap();
+        std::fs::write(root.join("authorized"), "1").unwrap();
+        assert!(usb_reset(&root.display().to_string(), std::time::Duration::ZERO).is_ok());
+        assert_eq!(std::fs::read_to_string(root.join("authorized")).unwrap(), "1", "off, then on again");
+        // a built-in or non-USB camera is never reset
+        let dev = CamDevice { node: "video0".into(), path: "/dev/video0".into(), name: "FaceTime HD Camera".into(), caps: Caps { driver: "uvcvideo".into(), card: "x".into(), bus: "pci".into(), caps: CAP_VIDEO_CAPTURE | CAP_STREAMING }, builtin: true, physical: "pci|x".into() };
+        assert_eq!(reset_when_silent(&dev), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
