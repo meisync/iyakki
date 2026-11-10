@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use crate::agent::{Risk, ToolDef, Tools};
 use crate::chat::ToolSpec;
 
-pub const PROMPT_RULE: &str = "\nMY IYAKKI (voice assistant): voice_assistant_status says whether the push-to-talk voice assistant is on, muted, and its follow-up window (Voice tile -> Assistant tab). voice_assistant_set (on, muted, wake, follow_up_seconds 0 to 20) changes it; voice_wake_status says whether the opt-in wake phrase \"My IYAKKI\" has a model and whether anything listens for it. voice_assistant_set with wake=true (needs a trained model file; wake_sensitivity low, normal or high) always asks the person, and only a tap or key approves it, never a spoken yes. With the wake phrase on, the microphone listens on every screen (a red sign shows while it does) but sound stays in memory and is never recorded or sent. Otherwise the microphone is only open while the Voice tile shows it.";
+pub const PROMPT_RULE: &str = "\nMY IYAKKI (voice assistant): voice_assistant_status says whether the push-to-talk voice assistant is on, muted, and its follow-up window (Voice tile -> Assistant tab). voice_assistant_set (on, muted, wake, follow_up_seconds 0 to 20) changes it; voice_wake_status says whether the experimental, opt-in wake phrase \"My IYAKKI\" has a model and whether anything listens for it. voice_assistant_set with wake=true (needs a trained model file; wake_sensitivity low, normal or high) always asks the person, and only a tap or key approves it, never a spoken yes. With the wake phrase on, the microphone listens on every screen (a red sign shows while it does) but sound stays in memory and is never recorded or sent. Otherwise the microphone is only open while the Voice tile shows it.";
 
 pub const STATUS_TOOL: &str = "voice_assistant_status";
 pub const SET_TOOL: &str = "voice_assistant_set";
@@ -60,7 +60,7 @@ pub fn wake_status_line(opted_in: bool, assistant_on: bool, muted: bool, model: 
     } else {
         "Nothing is listening for it."
     };
-    format!("{setting}. {model_text} {listening}")
+    format!("{setting}. {model_text} {listening} It is experimental: it has not been tried on real voices, so it may miss you or wake by mistake.")
 }
 
 /// What the tools change (a fake in tests).
@@ -132,11 +132,11 @@ impl Tools for VoiceAssistantTools {
         let mut v = self.inner.defs();
         v.retain(|d| !is_tool(&d.spec.name));
         v.push(ToolDef { spec: ToolSpec { name: STATUS_TOOL.into(), description: "Say whether My IYAKKI (the push-to-talk voice assistant) is on, whether its microphone is muted, and its follow-up window.".into(), schema: json!({"type": "object", "properties": {}}) }, risk: Risk::Safe, untrusted: false });
-        v.push(ToolDef { spec: ToolSpec { name: WAKE_STATUS_TOOL.into(), description: "Say whether the My IYAKKI wake phrase is opted in, whether a wake model exists and what it was trained on, and whether anything is listening for it.".into(), schema: json!({"type": "object", "properties": {}}) }, risk: Risk::Safe, untrusted: false });
+        v.push(ToolDef { spec: ToolSpec { name: WAKE_STATUS_TOOL.into(), description: "Say whether the experimental My IYAKKI wake phrase is opted in, whether a wake model exists and what it was trained on, and whether anything is listening for it.".into(), schema: json!({"type": "object", "properties": {}}) }, risk: Risk::Safe, untrusted: false });
         v.push(ToolDef {
             spec: ToolSpec {
                 name: SET_TOOL.into(),
-                description: "Turn My IYAKKI on or off, mute or unmute its microphone, opt in or out of the wake phrase (`wake`; needs a trained model file; the microphone then listens on every screen with a red sign, sound stays in memory), set its sensitivity (`wake_sensitivity`: low, normal, high), or set the follow-up window (seconds, 0 to 20). The person approves with a tap or key.".into(),
+                description: "Turn My IYAKKI on or off, mute or unmute its microphone, opt in or out of the experimental wake phrase (`wake`; needs a trained model file; the microphone then listens on every screen with a red sign, sound stays in memory), set its sensitivity (`wake_sensitivity`: low, normal, high), or set the follow-up window (seconds, 0 to 20). The person approves with a tap or key.".into(),
                 schema: json!({"type": "object", "properties": {"on": {"type": "boolean"}, "muted": {"type": "boolean"}, "wake": {"type": "boolean"}, "wake_sensitivity": {"type": "string", "enum": ["low", "normal", "high"]}, "follow_up_seconds": {"type": "number"}}}),
             },
             risk: Risk::Ask,

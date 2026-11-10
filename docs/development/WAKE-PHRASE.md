@@ -1,5 +1,10 @@
 # The "My IYAKKI" wake phrase: recording takes, training, evaluating
 
+> **Experimental (owner decision 2026-11-10).** The wake phrase is an experimental feature: off by default, opt-in, labelled experimental in
+> Settings, Voice and in the chat tools. The only trained model is synthetic and missed 94 % of real speech; nothing has run on a real
+> microphone, so accuracy and false wake-ups per hour are unknown. It leaves "experimental" only after real voices and room noise are
+> recorded, measured and the numbers are written down here.
+
 Crate `crates/iyakki-wake` (step 4 of [`MY-IYAKKI-PLAN.md`](MY-IYAKKI-PLAN.md)). Our own code and data only: no commercial keyword engine, no pre-trained third-party model. Everything below runs on the dev PC under `~/iyakki-work` (never `/tmp`).
 
 **Honest state:** the pipeline works end to end, but the only model trained so far used the built-in formant stub (not real speech); on synthetic held-out data it missed 94 % of the phrase at the useful thresholds. Its accuracy on real voices and rooms is unknown until real takes are recorded and evaluated. The spotter IS now connected to the microphone (section 5), strictly opt-in and off by default, but that wiring has only been tested with a fake microphone and a fake spotter: it has never listened to a real voice or run on the real sound card.
