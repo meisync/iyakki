@@ -1,0 +1,17 @@
+# Paths (git pathspec globs from the repository root) left out of the public tree by dist/release/export-public.sh.
+# Internal process documents: they stay in the private repository.
+COMMIT-PLAN.md
+ALPHA-GATE.md
+docs/OWNER-CHECKLIST.md
+docs/PROJECT-TEAM.md
+docs/ALPHA-2-PLAN.md
+docs/BETA-PLAN.md
+docs/project/ALPHA-3-PLAN.md
+docs/project/BETA-CHECKLIST.md
+docs/project/BETA-RETRIAGE*.md
+docs/project/RELEASE-READINESS.md
+docs/development/PUBLIC-READINESS-AUDIT-*.md
+docs/development/WAVE*-*.md
+docs/development/PARTIALS-PLAN-*.md
+docs/development/WORK-QUEUE.md
+dist/brand/owner-logo.png
