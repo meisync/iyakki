@@ -189,6 +189,12 @@ impl DmKernel for SysKernel {
         if out.status.success() { Ok(()) } else { Err(io::Error::other(format!("mke2fs failed: {}", String::from_utf8_lossy(&out.stderr).trim()))) }
     }
 
+    #[cfg(not(target_os = "linux"))]
+    fn mount(&self, _dev: &str, _target: &Path) -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "mounting an encrypted volume is Linux only"))
+    }
+
+    #[cfg(target_os = "linux")]
     fn mount(&self, dev: &str, target: &Path) -> io::Result<()> {
         let (s, t) = (CString::new(dev).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?, CString::new(target.as_os_str().as_bytes()).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?);
         let (f, d) = (CString::new("ext4").unwrap(), CString::new("").unwrap());
@@ -197,6 +203,12 @@ impl DmKernel for SysKernel {
         if rc == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
     }
 
+    #[cfg(not(target_os = "linux"))]
+    fn umount(&self, _target: &Path) -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "unmounting an encrypted volume is Linux only"))
+    }
+
+    #[cfg(target_os = "linux")]
     fn umount(&self, target: &Path) -> io::Result<()> {
         let t = CString::new(target.as_os_str().as_bytes()).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
         // SAFETY: valid NUL-terminated path.
