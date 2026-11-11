@@ -229,8 +229,9 @@ fn junk_and_oversized_tcp_input_is_dropped_and_the_loop_keeps_serving() {
 #[test]
 fn dropping_the_runner_stops_the_thread_and_frees_the_port() {
     let sink = Sink::new();
-    let b = Bound::bind(0).unwrap();
-    let port = b.port;
+    // a port below the range that bind(0) and outgoing connections use: the number is bound again after the drop, and another test must not be able to take it between
+    let port = crate::testdir::free_port();
+    let b = Bound::bind(port).unwrap();
     let t0 = std::time::Instant::now();
     let run = start(b, Upstreams::default(), None, sink).unwrap();
     drop(run);
