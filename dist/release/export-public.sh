@@ -71,9 +71,17 @@ P
 # 3c. (nothing else yet)
 [ "$bad" = 0 ] || fail "checks failed (the export is left in $OUT for you to look at)"
 
+# 3d. the boot loader is a submodule: readers need its address over https (no key) and a pointer to the commit the build was made with
+SUB_SHA="$(git ls-tree HEAD iyakki-boot | awk '$2=="commit"{print $3}')"
+if [ -n "$SUB_SHA" ] && [ -f "$OUT/.gitmodules" ]; then
+  sed -i 's#git@github.com:#https://github.com/#' "$OUT/.gitmodules"
+  rmdir "$OUT/iyakki-boot" 2>/dev/null || true
+fi
+
 # 4. one commit
 cd "$OUT"
 git init -q -b main
+if [ -n "${SUB_SHA:-}" ] && [ -f .gitmodules ]; then git update-index --add --cacheinfo "160000,$SUB_SHA,iyakki-boot"; fi
 git -c user.name="$NAME" -c user.email="$EMAIL" add -A
 git -c user.name="$NAME" -c user.email="$EMAIL" commit -q -m "$MSG"
 echo "export-public: OK. One commit $(git rev-parse --short HEAD) by $NAME in $OUT. Nothing was pushed."
