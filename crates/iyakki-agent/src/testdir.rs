@@ -123,7 +123,9 @@ pub fn find(prefix: &str, tag: &str) -> PathBuf {
 
 /// A TCP port that is free now, for a test that gives it to a server a moment later. Not from the kernel's ephemeral range
 /// (`bind` to port 0 hands those out, and so does every outgoing connection of the other tests in this process): ports below it,
-/// each handed out once per process (8000 of them), probed on all addresses. The process id spreads concurrent test processes.
+/// each handed out once per process (8000 of them), probed on all addresses. Several test PROCESSES can run at the same time on one machine
+/// (other builds, other people's runs), and two of them could be handed the same number between the probe and the use: every port is therefore
+/// also claimed with a small file in a folder all test processes of this user share (a file of a process that no longer exists is taken over).
 pub fn free_port() -> u16 {
     // 32-bit arithmetic: with 16 bits the product and the sum wrapped around for some process ids, and two different calls then got the same
     // port (a listener restarted on "its" port found it taken by another test). Consecutive calls give 8000 different ports.
@@ -131,8 +133,57 @@ pub fn free_port() -> u16 {
     loop {
         let n = NEXT.fetch_add(1, Ordering::SeqCst);
         let port = (20_000 + ((std::process::id() % 8_000) * 37 + n) % 8_000) as u16;
-        if std::net::TcpListener::bind(("0.0.0.0", port)).is_ok() {
+        if claim_port(port) && std::net::TcpListener::bind(("0.0.0.0", port)).is_ok() {
             return port;
         }
     }
+}
+
+/// Claim `port` for this process in the shared folder `/tmp/iyakki-test-ports-<uid>`: false when a running process holds it.
+/// When the folder cannot be used the claim is given (the probe in `free_port` is then all there is).
+fn claim_port(port: u16) -> bool {
+    use std::io::Write;
+    // SAFETY: getuid has no arguments and cannot fail.
+    let dir = PathBuf::from(format!("/tmp/iyakki-test-ports-{}", unsafe { libc::getuid() }));
+    let _ = std::fs::create_dir_all(&dir);
+    let file = dir.join(port.to_string());
+    let me = std::process::id();
+    for _ in 0..3 {
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&file) {
+            Ok(mut h) => {
+                let _ = write!(h, "{me}");
+                return true;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let owner = std::fs::read_to_string(&file).ok().and_then(|t| t.trim().parse::<u32>().ok());
+                match owner {
+                    Some(p) if p == me => return true,
+                    Some(p) if Path::new(&format!("/proc/{p}")).exists() => return false,
+                    _ => {
+                        let _ = std::fs::remove_file(&file); // the owner is gone (or the file is empty: its writer was just starting)
+                    }
+                }
+            }
+            Err(_) => return true,
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+#[test]
+fn a_port_claimed_by_another_running_process_is_not_handed_out_and_a_dead_owner_is_replaced() {
+    // 29990 is outside the range free_port hands out, so no other test touches it
+    let dir = PathBuf::from(format!("/tmp/iyakki-test-ports-{}", unsafe { libc::getuid() }));
+    let _ = std::fs::create_dir_all(&dir);
+    let f = dir.join("29990");
+    let _ = std::fs::remove_file(&f);
+    std::fs::write(&f, "1").unwrap(); // process 1 always exists
+    assert!(!claim_port(29990), "held by a running process");
+    std::fs::write(&f, "4194303").unwrap(); // above the process id limit of 4194304 minus one: no such process
+    assert!(claim_port(29990), "its owner is gone");
+    assert_eq!(std::fs::read_to_string(&f).unwrap().trim(), std::process::id().to_string());
+    let _ = std::fs::remove_file(&f);
+    let (a, b) = (free_port(), free_port());
+    assert_ne!(a, b);
 }
