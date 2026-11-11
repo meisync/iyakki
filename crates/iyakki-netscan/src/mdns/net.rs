@@ -101,10 +101,16 @@ fn membership(group: Ipv4Addr, iface: Ipv4Addr) -> libc::ip_mreq {
 pub fn bind_shared(port: u16) -> Result<UdpSocket, String> {
     // SAFETY: socket() returns a new descriptor that UdpSocket takes over (closed on drop, also on the error paths below).
     unsafe {
+        // Linux can set close-on-exec in the call; macOS has no SOCK_CLOEXEC, so it is set right after (the one window this leaves is harmless here: nothing forks in between).
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0);
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
         if fd < 0 {
             return Err(format!("socket: {}", std::io::Error::last_os_error()));
         }
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
         let s = UdpSocket::from_raw_fd(fd);
         let one: i32 = 1;
         setsockopt(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR, &one);
@@ -113,7 +119,15 @@ pub fn bind_shared(port: u16) -> Result<UdpSocket, String> {
         setsockopt(fd, libc::IPPROTO_IP, libc::IP_MULTICAST_LOOP, &zero);
         let ttl: i32 = 255;
         setsockopt(fd, libc::IPPROTO_IP, libc::IP_MULTICAST_TTL, &ttl);
-        let addr = libc::sockaddr_in { sin_family: libc::AF_INET as u16, sin_port: port.to_be(), sin_addr: libc::in_addr { s_addr: 0 }, sin_zero: [0; 8] };
+        // the layout of sockaddr_in differs (macOS has a length byte and an 8-bit family), so it is filled field by field
+        let mut addr: libc::sockaddr_in = std::mem::zeroed();
+        addr.sin_family = libc::AF_INET as libc::sa_family_t;
+        addr.sin_port = port.to_be();
+        addr.sin_addr = libc::in_addr { s_addr: 0 };
+        #[cfg(target_vendor = "apple")]
+        {
+            addr.sin_len = std::mem::size_of::<libc::sockaddr_in>() as u8;
+        }
         if libc::bind(fd, &addr as *const _ as *const libc::sockaddr, std::mem::size_of::<libc::sockaddr_in>() as u32) != 0 {
             return Err(format!("bind {port}: {}", std::io::Error::last_os_error()));
         }
