@@ -383,6 +383,51 @@
       ]
     },
     {
+      "id": "cli:cryptsetup",
+      "licence": "GPL-2.0-only",
+      "proprietary": false,
+      "downloaded_not_shipped": true,
+      "kind": "none-vendor",
+      "version": "from-setting",
+      "hosts": [
+        "gitlab.com",
+        "kernel.org"
+      ]
+    },
+    {
+      "id": "cli:dislocker",
+      "licence": "GPL-2.0-only",
+      "proprietary": false,
+      "downloaded_not_shipped": true,
+      "kind": "none-vendor",
+      "version": "from-setting",
+      "hosts": [
+        "github.com"
+      ]
+    },
+    {
+      "id": "cli:exfatprogs",
+      "licence": "GPL-2.0-only",
+      "proprietary": false,
+      "downloaded_not_shipped": true,
+      "kind": "none-vendor",
+      "version": "from-setting",
+      "hosts": [
+        "github.com"
+      ]
+    },
+    {
+      "id": "cli:ntfs-3g",
+      "licence": "GPL-2.0-only",
+      "proprietary": false,
+      "downloaded_not_shipped": true,
+      "kind": "none-vendor",
+      "version": "from-setting",
+      "hosts": [
+        "github.com"
+      ]
+    },
+    {
       "id": "mac-firmware",
       "licence": "LicenseRef-Apple-firmware-no-redistribution",
       "proprietary": true,

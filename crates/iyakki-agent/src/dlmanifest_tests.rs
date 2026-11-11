@@ -71,7 +71,7 @@ fn every_review_row_of_the_download_list_is_covered_with_the_same_kind_licence_a
     let rows = download_rows(&std::fs::read_to_string(repo().join("legal/downloads.txt")).unwrap());
     let b = bundled();
     let review: Vec<_> = rows.iter().filter(|r| is_review(&r.2)).collect();
-    assert_eq!(review.len(), 36, "the licence gate lists 36 REVIEW rows");
+    assert_eq!(review.len(), 40, "the licence gate lists 40 REVIEW rows");
     for r in review {
         let it = b.items.iter().find(|i| i.id == r.0 || i.covers.contains(&r.0)).unwrap_or_else(|| panic!("REVIEW row {} is not in legal/downloads-manifest.json", r.0));
         assert_eq!(it.licence, r.1, "{}: licence differs from legal/downloads.txt", r.0);

@@ -106,6 +106,23 @@ pub struct Bound {
 impl Bound {
     /// Binds loopback only. `port` 0 picks a free one (tests). IPv6 loopback is optional (a machine without IPv6 has none).
     pub fn bind(port: u16) -> Result<Bound, String> {
+        if port != 0 {
+            return Self::bind_once(port);
+        }
+        // port 0: the system picks a free UDP port, but the same number may be taken for TCP by another program (or another test in this process):
+        // try again with another port instead of failing on a collision that is not an error of ours
+        let mut last = String::new();
+        for _ in 0..32 {
+            match Self::bind_once(0) {
+                Ok(b) => return Ok(b),
+                Err(e) if e.contains("in use") => last = e,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last)
+    }
+
+    fn bind_once(port: u16) -> Result<Bound, String> {
         let e = |what: &str, err: std::io::Error| format!("the DNS forwarder could not listen on {what} ({err})");
         let udp4 = UdpSocket::bind((Ipv4Addr::LOCALHOST, port)).map_err(|x| e("127.0.0.1 (UDP)", x))?;
         let port = udp4.local_addr().map_err(|x| e("127.0.0.1", x))?.port();
