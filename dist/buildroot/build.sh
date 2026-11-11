@@ -38,9 +38,18 @@ esac
 BR_VERSION="${BR_VERSION:-2026.02.3}"
 BR_DIR="${BR_DIR:-$ROOT/target/buildroot-src/buildroot-$BR_VERSION}"
 
+# The Buildroot tarball is checked against a pinned sha256 (the one buildroot.org publishes in buildroot-<version>.tar.gz.sign, compared with the
+# download on 2026-11-10). Another BR_VERSION needs its own BR_SHA256 (or BR_SHA256=skip to say, knowingly, that it is not checked).
+if [ "$BR_VERSION" = "2026.02.3" ]; then BR_SHA256="${BR_SHA256:-65528a544f1e07c2f5ec487beca483bd380a6af8351a45f3649a19a0e8b63de2}"; fi
 if [ ! -d "$BR_DIR" ]; then
+  [ -n "${BR_SHA256:-}" ] || { echo "build.sh: BR_VERSION=$BR_VERSION has no pinned checksum: set BR_SHA256 (see https://buildroot.org/downloads/buildroot-$BR_VERSION.tar.gz.sign) or BR_SHA256=skip" >&2; exit 1; }
   mkdir -p "$(dirname "$BR_DIR")"
-  curl -fL "https://buildroot.org/downloads/buildroot-$BR_VERSION.tar.gz" | tar xz -C "$(dirname "$BR_DIR")"
+  BR_TGZ="$(mktemp "${TMPDIR:-/tmp}/buildroot.XXXXXX.tar.gz")"
+  curl -fL "https://buildroot.org/downloads/buildroot-$BR_VERSION.tar.gz" -o "$BR_TGZ"
+  if [ "$BR_SHA256" != "skip" ]; then
+    echo "$BR_SHA256  $BR_TGZ" | sha256sum -c - >&2 || { echo "build.sh: the Buildroot download does not match the pinned sha256; nothing was unpacked" >&2; rm -f "$BR_TGZ"; exit 1; }
+  fi
+  tar xz -C "$(dirname "$BR_DIR")" -f "$BR_TGZ"; rm -f "$BR_TGZ"
 fi
 
 # Buildroot refuses a GNU-incompatible `install` (the uutils one newer Ubuntu puts on /usr/bin/install: "affected by uutils/coreutils#12166")

@@ -1,0 +1,3 @@
+# Kernel 6.12.112: Buildroot's own hash list does not carry this custom version, so the download was not checked. The sha256 below is the one kernel.org
+# publishes in https://cdn.kernel.org/pub/linux/kernel/v6.x/sha256sums.asc (compared with the tarball already used, 2026-11-10).
+sha256  164dc9d1f6c93c61a15e1f071c48379b467f2b17c469cce7223471968208ed03  linux-6.12.112.tar.xz
