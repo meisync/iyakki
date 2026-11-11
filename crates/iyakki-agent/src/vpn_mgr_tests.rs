@@ -454,7 +454,7 @@ fn the_real_netlink_socket_asks_for_the_wireguard_family() {
 // ---- the forwarder on real loopback sockets (fake system layer) ----------------------------------------------------------------
 
 fn free_port() -> u16 {
-    std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    crate::testdir::free_port()
 }
 
 fn rig_sockets(tag: &str, port: u16) -> Rig {

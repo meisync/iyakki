@@ -14,7 +14,8 @@ type Resp = (u16, Vec<(String, String)>, Vec<u8>);
 // ------------------------------------------------------------------------------------------------------------ helpers
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    // below the range the system hands out for bind(0) and outgoing connections, so no other test can take it between two starts
+    crate::testdir::free_port()
 }
 
 fn tmp(tag: &str) -> PathBuf {

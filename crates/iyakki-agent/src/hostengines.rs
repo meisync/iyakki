@@ -922,8 +922,13 @@ pub fn resolve(spec: &Spec, lang: Option<&str>) -> (Spec, Pick) {
 
 /// Make a WAV file of `text` (the engine writes it; nothing is spoken).
 pub fn synth_wav(spec: &Spec, text: &str, lang: Option<&str>, speed: f32) -> Result<Vec<u8>, String> {
+    synth_wav_in(&std::env::temp_dir(), spec, text, lang, speed)
+}
+
+/// `synth_wav` with the folder for its private working directory given.
+fn synth_wav_in(base: &Path, spec: &Spec, text: &str, lang: Option<&str>, speed: f32) -> Result<Vec<u8>, String> {
     let (spec, _) = resolve(spec, lang);
-    let dir = voice::private_tempdir("hosttts")?;
+    let dir = voice::private_tempdir_in(base, "hosttts")?;
     let out = dir.join("speech.wav");
     let result = (|| {
         let p = plan(&spec, lang, speed, text, Some(&out))?;
@@ -1276,8 +1281,10 @@ mod tests {
         let d = tmp("wav");
         fakes(&d);
         let spec = Spec { kind: Kind::EspeakNg, program: d.join("espeak-ng").to_string_lossy().to_string(), voice: None };
-        let before = std::fs::read_dir(std::env::temp_dir()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("iyakki-hosttts")).count();
-        let wav = synth_wav(&spec, HOSTILE, Some("ta-IN"), 2.0).unwrap();
+        // the working folder of the piece is made inside a folder of this test, so no other test's folder can be counted
+        let base = d.join("work");
+        std::fs::create_dir_all(&base).unwrap();
+        let wav = synth_wav_in(&base, &spec, HOSTILE, Some("ta-IN"), 2.0).unwrap();
         assert_eq!(&wav[..4], b"RIFF");
         let args = std::fs::read_to_string(d.join("log.args")).unwrap();
         assert!(args.starts_with("-v ta -s 350 -w ") && args.trim_end().ends_with("--stdin"), "{args}");
@@ -1285,8 +1292,7 @@ mod tests {
         let sent = std::fs::read_to_string(d.join("log.in")).unwrap();
         assert!(sent.contains("$(touch /tmp/pwned)") && sent.contains("`id`"), "{sent:?}");
         assert!(!Path::new("/tmp/pwned").exists());
-        let after = std::fs::read_dir(std::env::temp_dir()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("iyakki-hosttts")).count();
-        assert!(after <= before, "the private folder of the piece is removed");
+        assert_eq!(std::fs::read_dir(&base).unwrap().count(), 0, "the private folder of the piece is removed");
         // an engine that fails or writes nothing is an error, not silence
         let bad = Spec { kind: Kind::Pico, program: d.join("pico2wave").to_string_lossy().to_string(), voice: None };
         assert!(synth_wav(&bad, "hi", None, 1.0).unwrap_err().contains("wrote no audio file"));

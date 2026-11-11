@@ -266,7 +266,7 @@ mod tests {
     use std::net::TcpListener;
 
     fn free_port() -> u16 {
-        TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+        crate::testdir::free_port()
     }
 
     /// A stand-in Ollama server: answers `/api/version` on `port` until the returned flag is set.

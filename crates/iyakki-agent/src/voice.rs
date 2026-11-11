@@ -264,11 +264,16 @@ pub fn validate_command(cmd: &str) -> Result<(), String> {
 }
 
 pub(crate) fn private_tempdir(tag: &str) -> Result<PathBuf, String> {
+    private_tempdir_in(&std::env::temp_dir(), tag)
+}
+
+/// The same in a folder of the caller's choice (tests give their own, so that other tests' folders cannot be counted by mistake).
+pub(crate) fn private_tempdir_in(base: &Path, tag: &str) -> Result<PathBuf, String> {
     use std::os::unix::fs::DirBuilderExt;
     let mut r = [0u8; 8];
     iyakki_sec::random_fill(&mut r).map_err(|e| e.to_string())?;
     let name: String = r.iter().map(|b| format!("{b:02x}")).collect();
-    let dir = std::env::temp_dir().join(format!("iyakki-{tag}-{name}"));
+    let dir = base.join(format!("iyakki-{tag}-{name}"));
     std::fs::DirBuilder::new().mode(0o700).create(&dir).map_err(|e| e.to_string())?;
     Ok(dir)
 }

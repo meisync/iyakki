@@ -422,7 +422,7 @@ fn dhcp_and_dns_are_bound_to_the_shared_interface_only() {
 }
 
 fn free_port() -> u16 {
-    std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    crate::testdir::free_port()
 }
 
 #[test]
