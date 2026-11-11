@@ -5,6 +5,7 @@
 //! only after a tap or key of the person, and the indicator below follows the real state of the open microphone, never a guess. A tool
 //! that the hard-ask list names is approved here by a tap or key only, never by voice.
 
+use crate::safeclamp::SafeClamp;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -205,7 +206,7 @@ impl VoiceApp {
             for (i, l) in lines.iter().take(max).enumerate() {
                 g.text(x, y + i as f32 * lh, sz, c, l, Face::Sans);
             }
-            lines.len().clamp(1, max) as f32 * lh + 2.0 * s
+            lines.len().clamp_safe(1, max) as f32 * lh + 2.0 * s
         };
         if !v.my_on {
             y += para(g, y, TEXT, size, "My IYAKKI is a voice assistant joined to the chat assistant: you press Talk, speak, and it answers aloud and can use its tools. It is off.", 4) + gap;

@@ -25,7 +25,10 @@ fn the_plan_counts_what_will_be_copied_and_changes_nothing() {
     let r = rig("plan");
     let h = r.home("amy");
     populate(&h);
-    let _sock = std::os::unix::net::UnixListener::bind(h.join("agent.sock")).unwrap();
+    // the socket is made through the folder's descriptor: the path of a socket must stay under SUN_LEN, and the test folder can be deep
+    use std::os::fd::AsRawFd;
+    let dirfd = std::fs::File::open(&h).unwrap();
+    let _sock = std::os::unix::net::UnixListener::bind(format!("/proc/self/fd/{}/agent.sock", dirfd.as_raw_fd())).unwrap();
     let p = plan(&r.env, "amy").unwrap();
     assert_eq!((p.files, p.dirs, p.links), (5, 4, 1));
     assert_eq!(p.bytes, 5 + 300_000 + 12 + 10);

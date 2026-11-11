@@ -3,6 +3,7 @@
 //! marked; nothing changes until Apply. Applied revisions go on a bounded undo stack that lives in memory only and is cleared with the
 //! transcript. If part of the transcript is selected, only that part is sent and replaced.
 
+use crate::safeclamp::SafeClamp;
 use std::sync::mpsc::{channel, Receiver};
 
 use iyakki_agent::dictfix::Target;
@@ -356,7 +357,7 @@ impl VoiceApp {
                 let size = 13.0 * s;
                 let total = self.assist_content(g, flex.x, 0.0, flex.w, size, s, false);
                 let max_up = (total - flex.h).max(0.0);
-                self.assist.scroll = self.assist.scroll.clamp(0.0, max_up);
+                self.assist.scroll = self.assist.scroll.clamp_safe(0.0, max_up);
                 let y0 = flex.y + flex.h - total + self.assist.scroll;
                 g.clipped(flex, |g| {
                     self.assist_content(g, flex.x, y0, flex.w, size, s, true);

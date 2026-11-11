@@ -4,6 +4,7 @@
 //! library is single-threaded by design), so a big or hostile file never stalls the screen. What the reader cannot show is listed
 //! under the page, never hidden (docs/PDF.md).
 
+use crate::safeclamp::SafeClamp;
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -790,7 +791,7 @@ impl PdfView {
         };
         let (pw, ph) = (sh.pm.width() as f32, sh.pm.height() as f32);
         let max_scroll = (ph - view.h + 20.0 * s).max(0.0);
-        self.scroll = self.scroll.clamp(0.0, max_scroll + 120.0);
+        self.scroll = self.scroll.clamp_safe(0.0, max_scroll + 120.0);
         let sc = self.scroll.min(max_scroll);
         let ox = view.x + ((view.w - pw) / 2.0).max(8.0 * s);
         let oy = view.y + 10.0 * s - sc;

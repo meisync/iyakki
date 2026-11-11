@@ -12,6 +12,7 @@
 //! The scan popup: Up and Down choose a device (the last stop is the Scan again button), Enter pairs the device (or scans again),
 //! `s` scans again once the scan has finished, `m` shows more devices, `/` searches, Esc or Close stops the scan and closes it.
 
+use crate::safeclamp::SafeClamp;
 use crate::access::{self, Meta, Role, State};
 use crate::btmodel::{BtModel, Fix, Icon, NearbyRow, PairState, PairedRow, RowAct, ScanView, Switch, Tone, NEARBY_SHOWN, TICKS_PER_SEC};
 use crate::fx;
@@ -504,7 +505,7 @@ impl BtPage {
             }
             Event::Scroll(n) => {
                 let max = 60usize;
-                self.first = (self.first as i32 - n.signum()).clamp(0, max as i32) as usize;
+                self.first = (self.first as i32 - n.signum()).clamp_safe(0, max as i32) as usize;
                 true
             }
             Event::Key(k) => self.key(k),
@@ -545,10 +546,10 @@ impl BtPage {
             Event::Scroll(n) => {
                 let max = self.model.nearby(&self.search.value, self.all).rows.len().saturating_sub(1);
                 if let Some(p) = self.popup.as_mut() {
-                    p.first = (p.first as i32 - n.signum()).clamp(0, max as i32) as usize;
+                    p.first = (p.first as i32 - n.signum()).clamp_safe(0, max as i32) as usize;
                     // the chosen row follows the window (it would pull the list back otherwise)
                     if p.sel <= max {
-                        p.sel = p.sel.clamp(p.first, p.first + p.fit.max(1) - 1).min(max);
+                        p.sel = p.sel.clamp_safe(p.first, p.first + p.fit.max(1) - 1).min(max);
                     }
                 }
             }
@@ -977,7 +978,7 @@ impl BtPage {
             _ => vec![],
         };
         // the passkey is six boxes, the PIN one box; both sized to fit the popup at any text size
-        let box_w = ((text_w - 5.0 * 6.0 * s) / PASSKEY_LEN as f32).clamp(10.0, 46.0 * s);
+        let box_w = ((text_w - 5.0 * 6.0 * s) / PASSKEY_LEN as f32).clamp_safe(10.0, 46.0 * s);
         let entry_h = match typing {
             Some(true) => (box_w * 1.3).max(30.0 * s).min(60.0 * s) + 12.0 * s,
             Some(false) => 52.0 * s + 12.0 * s,

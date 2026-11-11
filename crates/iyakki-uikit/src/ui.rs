@@ -1,5 +1,6 @@
 //! Shared UI pieces: input events, colour theme, hit-testing and a single-line text field.
 
+use crate::safeclamp::SafeClamp;
 use crate::gfx::{rgb, Face, Gfx};
 
 /// Navigation keys that can carry modifiers.
@@ -964,7 +965,7 @@ impl TextField {
         }
         let x0 = r.x + pad;
         if let Some((s0, e0)) = self.selection() {
-            let (from, to) = (s0.clamp(start, end), e0.clamp(start, end));
+            let (from, to) = (s0.clamp_safe(start, end), e0.clamp_safe(start, end));
             if to > from {
                 let (xa, xb) = (advances[from - start], advances[to - start]);
                 g.rect(x0 + xa, ty, (xb - xa).max(2.0), lh, rgb(52, 84, 160));

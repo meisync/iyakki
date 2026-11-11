@@ -133,7 +133,7 @@ pub fn engine_memory_mb(size: CacheSize, mem_total: u64, mem_available: u64) -> 
         CacheSize::Small => avail / 5,
     };
     let cap = if mem_total == 0 { 4096 * net::MIB } else { mem_total.min(4096 * net::MIB) };
-    (share.clamp(192 * net::MIB, cap) / net::MIB).max(192)
+    (share.clamp_safe(192 * net::MIB, cap) / net::MIB).max(192)
 }
 
 /// WebKit's cache model for the engine: `document` (smaller in-memory caches, no large back-forward cache) for the Small choice and
