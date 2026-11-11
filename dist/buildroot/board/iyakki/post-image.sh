@@ -49,6 +49,9 @@ else
   echo "post-image: no grub-mkfont or DejaVu Sans Bold/Mono: the boot menu will be plain text" >&2
   [ "${IYAKKI_IMAGE_PROFILE:-}" != release ] || { echo "post-image: release image: the boot menu fonts could not be built" >&2; exit 1; }
 fi
+# GRUB's own install puts its stock Unicode font (GNU Unifont, licence not verified) next to ours; nothing loads it (grub.cfg and the theme name only the
+# DejaVu fonts above), and the owner dropped it on 2026-11-06: remove the leftover so the image carries only the fonts listed in legal/assets.txt.
+rm -f "$TREE/boot/grub/fonts/unicode.pf2"
 # Where the boot fonts came from and under what licence (legal/image-rules.txt `own` row): the text travels with the fonts, on the ISO and in
 # the install template. The DejaVu licence is the repository's own copy; these are the only boot fonts.
 FL="$TREE/boot/grub/fonts/FONTS-LICENSE.txt"

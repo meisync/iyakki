@@ -117,6 +117,19 @@ generated | usr/libexec/intercept-* | scan-build-py wrappers of the clang packag
 generated | boot/bzimage | the Linux kernel image (GPL-2.0) built by Buildroot
 generated | boot/initrd | the root file system archive of this image, scanned separately as rootfs.cpio
 generated | efi/boot/bootx64.efi | GRUB EFI image (GPL-3.0+) built from the grub2 package by post-image.sh; with Secure Boot the signed shim/GRUB set replaces it
+generated | efi/boot/grubx64.efi | signed GRUB (GPL-3.0+) for Secure Boot, built from the grub2 package by post-image.sh and signed with the image's key; its source is in legal-info (reviewed 2026-11-10)
+generated | efi/boot/grub-recovery.efi | the same GRUB EFI image (GPL-3.0+) kept as the loader's Recovery entry by loader-default.sh (reviewed 2026-11-10)
+generated | efi/boot/mmx64.efi | shim's MokManager (BSD-2-Clause, shim 16.1), copied at build time from Debian's signed shim-helpers package; version and sha256 are in EFI/IYAKKI/SHIM-PROVENANCE.txt (reviewed 2026-11-10)
+own | efi/iyakki/readme-secure-boot.txt | text written by the IYAKKI image build (Secure Boot enrolment steps) (reviewed 2026-11-10)
+own | efi/iyakki/shim-provenance.txt | text written by the IYAKKI image build: where the shim binaries came from, with hashes (reviewed 2026-11-10)
+own | efi/iyakki/iyakki-mok.cer | the project's public Machine Owner Key certificate (a public key, no secret), made by the project's own signing setup (reviewed 2026-11-10)
+own | efi/iyakki-boot/loader.efi | IYAKKI's own boot loader, built from the iyakki-boot repository (github.com/meisync/iyakki-boot, Apache-2.0 or MIT) by dist/buildroot/loader-build.sh (reviewed 2026-11-10)
+own | efi/iyakki-boot/boot.cfg | the boot loader's menu, written by dist/buildroot/boot-loader-stage.sh (reviewed 2026-11-10)
+own | efi/iyakki-boot/install-media | marker file written by boot-loader-stage.sh (install media only) (reviewed 2026-11-10)
+own | etc/modprobe.d/iyakki-mt7921.conf | IYAKKI's modprobe setting for MediaTek MT7921 cards (dist/buildroot/board/iyakki/overlay), Apache-2.0 (reviewed 2026-11-10)
+generated | lib/modules/*/updates/nvidia*.ko | NVIDIA open GPU kernel modules (MIT / GPL-2.0, source github.com/NVIDIA/open-gpu-kernel-modules) built by the nvidia-open package of the Mac/PC kernel build and copied from the kernel donor tree; licence text and source are in legal/extra-licences/nvidia-open and legal-info (reviewed 2026-11-10)
+generated | usr/share/gst-plugins-base/1.0/license-translations.dict | data file of gst1-plugins-base (LGPL-2.1+): source gst-libs/gst/tag/license-translations.dict in the package; absent from the web tree's package file list (reviewed 2026-11-10)
+generated | usr/share/gstreamer-1.0/encoding-profiles/* | encoding profile files installed by gst1-plugins-bad (data/meson.build; LGPL-2.1+, the package has a reviewed row); absent from the web tree's package file list (reviewed 2026-11-10)
 generated | boot/grub/fonts/iyakki-menu.pf2 | menu font made by grub-mkfont from the repository's crates/iyakki-shell/assets/DejaVuSans-Bold.ttf (Bitstream Vera licence with DejaVu public-domain changes, text DEJAVU-LICENSE.txt, legal/assets.txt) since 2026-10-27; the build machine's DejaVu is a fallback for development images only, never for a release image
 generated | boot/grub/fonts/iyakki-term.pf2 | terminal font made by grub-mkfont from the repository's crates/iyakki-shell/assets/DejaVuSansMono.ttf (same licence and record as iyakki-menu.pf2)
 
