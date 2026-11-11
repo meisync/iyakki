@@ -2097,6 +2097,17 @@ impl K3sDev {
                     return "superseded by a newer start or stopped".into();
                 }
                 self.log_line(reason.split("; the end of its log").next().unwrap_or(&reason));
+                // the clock may have jumped after this round's first look and before the exit was seen (the wait for the child's lock is long enough for
+                // that): look again, so "it ended right after the clock moved" is judged on the clock as it is now and not counted as a failure
+                if let Some(c) = &clock {
+                    let (w, m) = (c.wall(), c.mono());
+                    if let Some((pw, pm)) = last_look {
+                        if clock_stepped(pw, pm, w, m, CLOCK_STEP_SECS).is_some() {
+                            last_step_mono = Some(m);
+                        }
+                    }
+                    last_look = Some((w, m));
+                }
                 // the machine moved to another network (the stick travels): k3s ends itself when its node address changes. That is
                 // expected: no failure, no alert, start it again at once so the node takes the new address.
                 let ready_before = was_ready;

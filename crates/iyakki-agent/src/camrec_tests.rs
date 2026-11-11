@@ -489,9 +489,10 @@ fn below_the_free_space_floor_recording_stops_with_a_visible_message_and_resumes
     assert!(r.rec.recording(&id), "it starts again by itself");
     // the disk fills while recording: the worker stops itself
     r.free_mb.store(10, Ordering::SeqCst);
+    // the worker sets the Problem state and then ends; the next tick takes it off the list, so wait for both
     assert!(wait_for(10, || {
         r.rec.tick();
-        matches!(r.rec.status(&r.amy(), &id).unwrap().state, RecState::Problem(_))
+        matches!(r.rec.status(&r.amy(), &id).unwrap().state, RecState::Problem(_)) && !r.rec.recording(&id)
     }), "{:?}", r.rec.status(&r.amy(), &id).unwrap().state);
     assert!(!r.rec.recording(&id));
     let n = r.rec.entries(&id).len();

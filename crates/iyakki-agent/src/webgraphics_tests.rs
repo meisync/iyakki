@@ -183,6 +183,7 @@ fn world(d: &std::path::Path, p: Option<Prev>, log: Vec<(i64, String)>) -> World
 
 #[test]
 fn the_setting_is_saved_versioned_and_changing_it_forgets_the_fall_back() {
+    let _turn = pending_lock(); // apply_with queues a notice in a process-wide list: tests that call it take turns
     let d = data("set");
     assert_eq!(load_mode(&d), (Mode::Automatic, None));
     let w = world(&d, Some(prev(true, 130)), hw_log());
@@ -252,6 +253,7 @@ fn a_damaged_or_newer_setting_file_is_moved_aside_or_left_alone_and_never_overwr
 
 #[test]
 fn try_hardware_again_forgets_one_card_and_keeps_the_judged_session() {
+    let _turn = pending_lock(); // apply_with queues a notice in a process-wide list: tests that call it take turns
     let d = data("retry");
     assert!(try_hardware_again(&d, GPU).is_err(), "nothing to forget");
     let w = world(&d, Some(prev(true, 130)), hw_log());
