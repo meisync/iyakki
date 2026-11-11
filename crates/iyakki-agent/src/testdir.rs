@@ -125,10 +125,12 @@ pub fn find(prefix: &str, tag: &str) -> PathBuf {
 /// (`bind` to port 0 hands those out, and so does every outgoing connection of the other tests in this process): ports below it,
 /// each handed out once per process (8000 of them), probed on all addresses. The process id spreads concurrent test processes.
 pub fn free_port() -> u16 {
-    static NEXT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+    // 32-bit arithmetic: with 16 bits the product and the sum wrapped around for some process ids, and two different calls then got the same
+    // port (a listener restarted on "its" port found it taken by another test). Consecutive calls give 8000 different ports.
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     loop {
         let n = NEXT.fetch_add(1, Ordering::SeqCst);
-        let port = 20_000 + ((std::process::id() % 8_000) as u16).wrapping_mul(37).wrapping_add(n) % 8_000;
+        let port = (20_000 + ((std::process::id() % 8_000) * 37 + n) % 8_000) as u16;
         if std::net::TcpListener::bind(("0.0.0.0", port)).is_ok() {
             return port;
         }
