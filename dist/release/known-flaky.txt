@@ -1,0 +1,2 @@
+# Tests known to fail only when run in parallel (and pass alone). The gate allows no more flaky tests than there are lines here, so the count can only go down.
+# One test name per line. Empty on purpose: every flaky test found so far was fixed at its cause.
