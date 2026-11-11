@@ -317,8 +317,10 @@ fn the_firewall_opening_is_its_own_step_with_local_scope_an_end_time_and_goes_wi
     assert!(r.gate.lock().unwrap().closed.contains(&http));
     assert!(r.notes.lock().unwrap().iter().any(|n| n.starts_with("Domain names: the firewall opening ended")));
     // turning it on again starts on this device only: the old approval does not come back
+    // (new ports: the freed ones may have been taken by another test in this process since, and then the listener would not start at all)
+    let (http, https) = (free_port(), free_port());
     on(&r, http, https);
-    assert!(r.mgr.status().bind == "127.0.0.1" && !r.mgr.settings().firewall);
+    assert!(r.mgr.status().running && r.mgr.status().bind == "127.0.0.1" && !r.mgr.settings().firewall, "{:?}", r.mgr.status());
     // disabling by hand removes the opening too
     r.mgr.set_listener(ListenerChange { firewall: Some(true), ..Default::default() }).unwrap();
     let closed_before = r.gate.lock().unwrap().closed.len();
