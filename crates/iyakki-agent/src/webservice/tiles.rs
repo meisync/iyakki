@@ -104,10 +104,6 @@ impl TileHost {
         lock(&self.defs).clone()
     }
 
-    fn def(&self, id: &str) -> Option<TileDef> {
-        lock(&self.defs).iter().find(|d| d.id == id).cloned()
-    }
-
     pub fn open_sessions(&self) -> usize {
         lock(&self.sessions).len()
     }

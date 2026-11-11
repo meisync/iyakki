@@ -23,7 +23,8 @@ pub(super) fn gb(b: Option<u64>) -> String {
     b.map_or("unknown memory".into(), |b| format!("{:.1} GB", b as f64 / (1u64 << 30) as f64))
 }
 
-/// `MemAvailable` of this machine in bytes.
+/// `MemAvailable` of this machine in bytes (unit tests use a fixed figure instead, see `Manager::free_memory`).
+#[cfg(not(test))]
 pub fn meminfo_available() -> Option<u64> {
     crate::sysinfo::mem_available_bytes()
 }

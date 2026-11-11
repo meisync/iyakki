@@ -615,7 +615,7 @@ mod tests {
     fn routes_cert_and_roles_commands_work_end_to_end() {
         let d = tmp("rcr");
         let mut o = Vec::new();
-        let mut say = |v: &mut Vec<String>, a: &[&str]| run(&args(a), &mut |s| v.push(s.to_string()));
+        let say = |v: &mut Vec<String>, a: &[&str]| run(&args(a), &mut |s| v.push(s.to_string()));
         // routes -> an ingress
         let routes = d.join("routes.json");
         std::fs::write(&routes, r#"{"routes":[{"host":"app.example.org","target":{"service":{"name":"iyakki","port":8080}}}]}"#).unwrap();

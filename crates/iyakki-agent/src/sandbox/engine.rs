@@ -6,7 +6,7 @@ use super::exec::Executor;
 use super::limiter::Limiter;
 use super::output::clean;
 use super::policy::SandboxPolicy;
-use super::spec::{Artifact, SandboxError, SandboxResult, SandboxSpec, Tier};
+use super::spec::{Artifact, SandboxError, SandboxResult, SandboxSpec};
 use crate::tenantconfig::api::ConfigAudit;
 use std::sync::Arc;
 use std::time::Duration;

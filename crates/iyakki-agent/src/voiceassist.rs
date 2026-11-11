@@ -298,15 +298,13 @@ enum After {
     Approval,
     /// Wait for a tap or a key; the microphone stays closed.
     Tap,
-    /// Back to waiting for the agent.
-    Think,
 }
 
 enum Phase {
     Idle,
     Listen { purpose: Purpose, started: u64, deadline: Option<u64>, det: PauseDetector },
     Think { since: u64 },
-    Speak { then: After, loud_ms: u64, last: u64 },
+    Speak { then: After, loud_ms: u64 },
     AwaitTap,
 }
 
@@ -529,7 +527,7 @@ impl Assistant {
         if self.cfg.barge_in && !self.muted && self.p.audio.open().is_err() {
             self.level = 0.0;
         }
-        self.phase = Phase::Speak { then, loud_ms: 0, last: self.now };
+        self.phase = Phase::Speak { then, loud_ms: 0 };
     }
 
     fn say_one(&mut self, line: &str, then: After) {
@@ -547,7 +545,6 @@ impl Assistant {
             After::Confirm => self.start_listen(Purpose::Confirm, Some(CONFIRM_WAIT_MS)),
             After::Approval => self.start_listen(Purpose::Approval, Some(APPROVAL_WAIT_MS)),
             After::Tap => self.phase = Phase::AwaitTap,
-            After::Think => self.phase = Phase::Think { since: self.now },
         }
     }
 

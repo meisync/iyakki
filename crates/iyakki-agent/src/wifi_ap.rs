@@ -217,12 +217,8 @@ pub fn start(client: &str, ssid: &str, passphrase: &str, band_pref: &str, client
     Ok(Up { ifname: AP_IFACE.into(), ifindex, channel, bssid: mac_text })
 }
 
-/// Ask `wpa_supplicant` (its control socket) to do one thing for the client interface; the answer is its one-line reply.
-fn wpa_command(client: &str, cmd: &str) -> Result<String, String> {
-    wpa_command_at("/run", client, cmd)
-}
-
-/// `wpa_command` with the run directory given (`<dir>/wpa_supplicant/<client>` is the supplicant's socket); tests use a scratch directory.
+/// Ask `wpa_supplicant` (its control socket) to do one thing for the client interface; the answer is its one-line reply. The run directory is given
+/// (`<dir>/wpa_supplicant/<client>` is the supplicant's socket); tests use a scratch directory.
 fn wpa_command_at(dir: &str, client: &str, cmd: &str) -> Result<String, String> {
     use std::os::unix::net::UnixDatagram;
     let me = format!("{dir}/iyakki-wpa-{}-{}", std::process::id(), cmd.len());
@@ -357,8 +353,7 @@ mod tests {
     /// A fake wpa_supplicant: answers each datagram with the given reply and reports what it was asked.
     fn fake_supplicant(reply: &'static str) -> (String, std::sync::mpsc::Receiver<String>, std::thread::JoinHandle<()>) {
         use std::os::unix::net::UnixDatagram;
-        let dir = std::env::temp_dir().join(format!("iyakki-wpa-test-{}-{reply}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testdir::short("iyakki-wpa", reply); // short: a Unix socket path must stay under SUN_LEN, whatever TMPDIR is
         std::fs::create_dir_all(dir.join("wpa_supplicant")).unwrap();
         let sock = UnixDatagram::bind(dir.join("wpa_supplicant/wlan0")).unwrap();
         sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
@@ -395,7 +390,7 @@ mod tests {
         assert!(e.contains("FAIL"), "{e}");
         h.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
-        let none = std::env::temp_dir().join(format!("iyakki-wpa-none-{}", std::process::id()));
+        let none = crate::testdir::short("iyakki-wpa", "none"); // short for the same reason: the error must be "no supplicant", not "path too long"
         std::fs::create_dir_all(&none).unwrap();
         assert!(pause_client_at(none.to_str().unwrap(), "wlan0").unwrap_err().contains("wpa_supplicant"));
         let _ = std::fs::remove_dir_all(&none);

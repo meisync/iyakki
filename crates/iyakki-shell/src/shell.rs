@@ -6668,6 +6668,7 @@ mod checkup_tests;
 #[cfg(test)]
 #[path = "shell_devtools_tests.rs"]
 mod devtools_tests;
+#[cfg(test)]
 #[path = "shell_auth_tests.rs"]
 mod auth_tests;
 #[cfg(test)]

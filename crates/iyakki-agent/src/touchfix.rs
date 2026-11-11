@@ -785,7 +785,7 @@ mod tests {
 
     #[test]
     fn rung_two_runs_when_rung_one_cannot_because_no_dp_is_connected() {
-        let mut f = Fake::new();
+        let f = Fake::new();
         f.files.borrow_mut().insert("/sys/class/drm/card0-DP-1/status".into(), "disconnected\n".into());
         run(&f, Path::new(SYS), Path::new(PANEL), FixMode::All);
         assert!(f.ev().iter().any(|x| x.ends_with("unbind=0000:00:14.0")));

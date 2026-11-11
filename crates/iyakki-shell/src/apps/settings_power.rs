@@ -127,7 +127,7 @@ impl SettingsApp {
         let limit = a.y + a.h;
         let mut y = a.y;
         let rh = 62.0 * s;
-        let mut row = |g: &mut Gfx, y: &mut f32, title: &str, help: &str, on: bool, can: bool, key: char| {
+        let row = |g: &mut Gfx, y: &mut f32, title: &str, help: &str, on: bool, can: bool, key: char| {
             if *y + rh > limit {
                 return;
             }
@@ -146,7 +146,7 @@ impl SettingsApp {
             row(g, &mut y, "Try real sleep on this Mac (experimental)", "Sleep and wake are not dependable on Apple T2 Macs. If it does not wake, hold the power button.", cfg.sleep_experimental, admin && caps.sleep, 'x');
         }
         y += 4.0 * s;
-        let mut line = |g: &mut Gfx, y: &mut f32, col: [u8; 4], face: Face, text: &str| {
+        let line = |g: &mut Gfx, y: &mut f32, col: [u8; 4], face: Face, text: &str| {
             for l in g.wrap(13.0 * s, text, face, a.w) {
                 if *y + 13.0 * s * 1.3 > limit {
                     return;

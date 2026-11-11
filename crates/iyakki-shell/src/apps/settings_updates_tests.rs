@@ -368,7 +368,7 @@ fn the_update_list_address_is_checked_before_it_is_saved_and_only_administrators
 fn the_overview_says_how_many_updates_the_last_check_found() {
     let r = rig("chk-over");
     let cx = cx_with_admin_store("upd-chk-over");
-    let mut a = app(&r, &cx);
+    let a = app(&r, &cx);
     assert!(!a.attention(&cx).iter().any(|x| x.title.contains("available")));
     report().save(cx.services.dir()).unwrap();
     let n = a.attention(&cx).into_iter().find(|x| x.title.contains("available")).expect("an Overview line");

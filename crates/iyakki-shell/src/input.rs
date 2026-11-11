@@ -1175,8 +1175,6 @@ mod tests {
         assert!(stop.load(std::sync::atomic::Ordering::Relaxed), "dropping the handle tells the scan thread to stop");
     }
 
-    use super::*;
-
     #[test]
     fn key_translation_with_shift_and_caps() {
         assert_eq!(translate(30, false, false), Some(Key::Char('a')));

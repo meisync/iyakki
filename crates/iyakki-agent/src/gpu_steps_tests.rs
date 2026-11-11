@@ -668,7 +668,7 @@ fn a_lemonade_deployed_after_the_gpu_step_gets_the_gpu_again_unless_the_cpu_was_
 #[test]
 fn the_nvidia_driver_is_not_loaded_on_a_computer_without_an_nvidia_card() {
     // the disk was set up on a computer with an NVIDIA card (the marker and the staged files travel with the install), now it boots on one with only an AMD GPU
-    let mut f = Fake::new("restore-no-nvidia-card");
+    let f = Fake::new("restore-no-nvidia-card");
     f.amd();
     let (root, data) = (f.root.clone(), f.data.clone());
     let l = nv::Layout::new(&data);

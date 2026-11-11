@@ -752,10 +752,6 @@ fn seen(x: &T, u: &str, at: u64) -> usize {
 
 // ---------------------------------------------------------------------------------------------------------------- team integrations, catalog, safety, local hosts
 
-fn codes(w: &[super::safety::Warning]) -> Vec<&'static str> {
-    w.iter().map(|x| x.code).collect()
-}
-
 /// The warnings of an item as a PUT would see them, by validating it (dry run).
 fn dry(x: &T, user: &str, kind: &str, body: Value) -> Value {
     api::validate(&x.env(), &x.who(user), kind, body).unwrap()

@@ -7,10 +7,6 @@ fn tmp(tag: &str) -> PathBuf {
     std::fs::canonicalize(crate::testdir::unique("rf", tag)).unwrap()
 }
 
-fn stop() -> Arc<AtomicBool> {
-    Arc::new(AtomicBool::new(false))
-}
-
 fn pattern(n: usize) -> Vec<u8> {
     (0..n).map(|i| ((i * 31 + i / 251) % 251) as u8).collect()
 }

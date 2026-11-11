@@ -11,7 +11,7 @@ use crate::agenticrag::{MAX_PASSAGE_CHARS, MAX_SEARCHES};
 use crate::agenticrag_tests::Model;
 use crate::kb::{default_embedder, Hit, KnowledgeBase};
 use crate::ragtools::*;
-use iyakki_sec::policy::{Policy, Role};
+use iyakki_sec::policy::Role;
 
 const TOKEN: &str = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
 

@@ -222,10 +222,9 @@ fn make_runs_in_the_background_and_the_page_keeps_drawing_and_refuses_a_second_j
     assert!(a.ench_buttons().is_empty(), "no button while it works");
     // the render loop is not blocked: frames keep coming in far less time than the slow step takes
     let mut frames = 0;
-    let mut text = String::new();
     while a.is_busy() && frames < 1000 {
         let f0 = Instant::now();
-        text = draw_text(&mut a, &cx);
+        let text = draw_text(&mut a, &cx);
         a.handle(&Event::Tick, &cx);
         assert!(f0.elapsed() < Duration::from_millis(1200), "a frame took {:?}", f0.elapsed());
         frames += 1;

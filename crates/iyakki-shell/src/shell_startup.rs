@@ -16,7 +16,7 @@
 //! called "startup status" for `iyakki dev input click`.
 
 use super::*;
-use iyakki_agent::startup::{self, Calm, Line, Phase, Registry, Row, Scope, StartupState};
+use iyakki_agent::startup::{self, Calm, Line, Phase, Registry};
 
 /// Events of the strip and the list (`Event::Tab`).
 pub(super) const TAB_STRIP: usize = 0x4D40;

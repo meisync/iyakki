@@ -75,9 +75,6 @@ impl Rec {
     fn take(&self) -> Vec<String> {
         std::mem::take(&mut *self.0.lock().unwrap())
     }
-    fn last_focus(&self) -> String {
-        self.0.lock().unwrap().iter().rev().find_map(|s| s.strip_prefix("F:").map(str::to_string)).unwrap_or_default()
-    }
 }
 
 fn eff() -> cfg::Effective {

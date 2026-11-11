@@ -2,7 +2,7 @@
 //! whose name, group or keywords contain every word typed ("wifi" finds Network, "volume" finds Sound).
 
 use crate::safeclamp::SafeClamp;
-use crate::gfx::{rgb, Face, Gfx};
+use crate::gfx::{Face, Gfx};
 use crate::ui::{Event, TextField, CARD_HOVER, CARD_SEL, DIM, MUTED, R, TEXT};
 
 /// One page in the list.
@@ -255,6 +255,7 @@ pub fn draw(g: &mut Gfx, r: R, s: f32, entries: &[Entry], selected: usize, scrol
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gfx::rgb;
 
     fn items() -> Vec<Item> {
         vec![

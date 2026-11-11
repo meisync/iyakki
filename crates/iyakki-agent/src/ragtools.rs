@@ -86,10 +86,6 @@ pub fn clean(s: &str) -> String {
     defuse(&crate::credguard::detect(s).map_or_else(|| s.to_string(), |f| f.redacted))
 }
 
-fn fnv(s: &str) -> u64 {
-    s.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
-}
-
 /// What one account may read of the knowledge base.
 pub struct RagAccess {
     kb: Arc<Mutex<KnowledgeBase>>,

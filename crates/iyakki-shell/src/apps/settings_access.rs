@@ -143,7 +143,7 @@ impl SettingsApp {
             bottom = bottom.max(r.y + r.h);
         }
         let mut y = bottom + 12.0 * s;
-        let mut line = |g: &mut Gfx, y: &mut f32, col: [u8; 4], text: &str| {
+        let line = |g: &mut Gfx, y: &mut f32, col: [u8; 4], text: &str| {
             for l in g.wrap(13.0 * s, text, Face::Sans, a.w) {
                 if *y + 13.0 * s * 1.3 > limit {
                     return;

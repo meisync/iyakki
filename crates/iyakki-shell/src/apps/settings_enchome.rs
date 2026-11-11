@@ -10,7 +10,7 @@
 
 use super::*;
 use iyakki_agent::enchome::form::{self as ef, Ctx, Flow, Purpose, Request};
-use iyakki_agent::enchome::{migrate, EncHome, SlotInfo, State};
+use iyakki_agent::enchome::{migrate, EncHome, State};
 use std::sync::Mutex;
 
 /// How a background job gets its lifecycle: the real one when `None`; tests hand in a fake machine.

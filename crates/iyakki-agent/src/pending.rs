@@ -373,7 +373,7 @@ impl Ledger {
         let cap = f.settings.max_wait_secs.saturating_mul(1000);
         let latest = t.started_ms + cap;
         t.deadline_ms = if t.deadline_ms == 0 { latest } else { t.deadline_ms.min(latest) };
-        t.label = crate::bugs::redact(&t.label).chars().take(120).collect();
+        t.label = clip_middle(&crate::bugs::redact(&t.label), 120);
         t.on_done = crate::bugs::redact(&t.on_done).chars().take(240).collect();
         f.tickets.push(t.clone());
         self.save(&f);
@@ -848,4 +848,26 @@ impl Ledger {
         }
         out
     }
+}
+
+/// A long label keeps its start and its END, cut in the middle with an ellipsis: for "wait for file /a/very/deep/path/ready.txt exists" the
+/// end (the file name) is what tells the person which wait it is, so it must survive a long folder path.
+fn clip_middle(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        return s.to_string();
+    }
+    let tail = max * 2 / 3;
+    let head = max - tail - 1;
+    format!("{}…{}", chars[..head].iter().collect::<String>(), chars[chars.len() - tail..].iter().collect::<String>())
+}
+
+#[cfg(test)]
+#[test]
+fn a_long_label_keeps_its_end() {
+    let long = format!("wait for file /{}/ready.txt exists", "deep/".repeat(40));
+    let c = clip_middle(&long, 120);
+    assert_eq!(c.chars().count(), 120);
+    assert!(c.starts_with("wait for file") && c.ends_with("ready.txt exists"), "{c}");
+    assert_eq!(clip_middle("short", 120), "short");
 }

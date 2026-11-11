@@ -748,7 +748,7 @@ const MAX_HELLO: usize = 32 * 1024;
 pub fn client_hello_sni(b: &[u8]) -> Result<Hello, &'static str> {
     let mut joined: Vec<u8> = Vec::new();
     let mut pos = 0usize;
-    let mut hl = 0usize;
+    let mut hl: usize;
     loop {
         let r = &b[pos..];
         if r.first().is_some_and(|t| *t != 0x16) || r.get(1).is_some_and(|v| *v != 3) {

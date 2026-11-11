@@ -204,7 +204,7 @@ impl DevToolsApp {
         let note = self.qr.note.clone();
         let (wifi, open) = (self.qr.preset == qrcode::WIFI, self.qr.security == iyakki_agent::qr::WifiSecurity::Open);
         let m = self.qr.made(&typed);
-        let mut say = |g: &mut Gfx, y: &mut f32, text: &str, c: [u8; 4]| {
+        let say = |g: &mut Gfx, y: &mut f32, text: &str, c: [u8; 4]| {
             for l in g.wrap(fs, text, Face::Sans, w) {
                 g.text(x, *y, fs, c, &l, Face::Sans);
                 *y += g.line_height(fs, Face::Sans);

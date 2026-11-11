@@ -10,8 +10,8 @@ hid-appletb-kbd and hid-appletb-bl from Linux v6.18 (Ronald Tschalar, Kerem Kara
 trackpad patch and the Radeon Pro 5300M fix from https://github.com/t2linux/linux-t2-patches (commits 7a48a744 and
 b3fac289; source and commit in each patch header).
 
-Apache License 2.0 — 300 crates
-MIT License — 69 crates
+Apache License 2.0 — 335 crates
+MIT License — 66 crates
 Unicode License v3 — 19 crates
 ISC License — 18 crates
 BSD 3-Clause "New" or "Revised" License — 7 crates
@@ -3778,7 +3778,6 @@ Used by:
   - rustix 1.1.5
   - rustls 0.23.45
   - scopeguard 1.2.0
-  - send_wrapper 0.4.0
   - simd_cesu8 1.2.0
   - smallvec 1.16.2
   - socket2 0.6.5
@@ -5765,31 +5764,68 @@ limitations under the License.
 ================================================================================
 Apache License 2.0
 Used by:
-  - iyakki-agent 0.1.0-alpha.1
-  - iyakki-core 0.1.0-alpha.1
-  - iyakki-data 0.1.0-alpha.1
-  - iyakki-devctl 0.1.0-alpha.1
-  - iyakki-drivers 0.1.0-alpha.1
-  - iyakki-edit 0.1.0-alpha.1
-  - iyakki-flow 0.1.0-alpha.1
-  - iyakki-hwinfo 0.1.0-alpha.1
-  - iyakki-js 0.1.0-alpha.1
-  - iyakki-ledger 0.1.0-alpha.1
-  - iyakki-mem 0.1.0-alpha.1
-  - iyakki-netscan 0.1.0-alpha.1
-  - iyakki-proxy 0.1.0-alpha.1
-  - iyakki-relcheck 0.1.0-alpha.1
-  - iyakki-remote 0.1.0-alpha.1
-  - iyakki-sec 0.1.0-alpha.1
-  - iyakki-shell 0.1.0-alpha.1
-  - iyakki-storage 0.1.0-alpha.1
-  - iyakki-swarm 0.1.0-alpha.1
-  - iyakki-usb 0.1.0-alpha.1
-  - iyakki-vfs 0.1.0-alpha.1
-  - iyakki-wasm 0.1.0-alpha.1
-  - iyakki-web 0.1.0-alpha.1
-  - iyakki-webview 0.1.0-alpha.1
-  - iyakki-zram 0.1.0-alpha.1
+  - iyakki-agent 0.1.0-alpha.2
+  - iyakki-archive 0.1.0-alpha.2
+  - iyakki-battery 0.1.0-alpha.2
+  - iyakki-bindelta 0.1.0-alpha.2
+  - iyakki-camdetect 0.1.0-alpha.2
+  - iyakki-clock 0.1.0-alpha.2
+  - iyakki-clockfloor 0.1.0-alpha.2
+  - iyakki-core 0.1.0-alpha.2
+  - iyakki-core-api 0.1.0-alpha.2
+  - iyakki-core-fake 0.1.0-alpha.2
+  - iyakki-data 0.1.0-alpha.2
+  - iyakki-devctl 0.1.0-alpha.2
+  - iyakki-diskcrypt 0.1.0-alpha.2
+  - iyakki-drivers 0.1.0-alpha.2
+  - iyakki-edit 0.1.0-alpha.2
+  - iyakki-enchome 0.1.0-alpha.2
+  - iyakki-flow 0.1.0-alpha.2
+  - iyakki-fw 0.1.0-alpha.2
+  - iyakki-hotspot 0.1.0-alpha.2
+  - iyakki-hwinfo 0.1.0-alpha.2
+  - iyakki-js 0.1.0-alpha.2
+  - iyakki-ledger 0.1.0-alpha.2
+  - iyakki-link 0.1.0-alpha.2
+  - iyakki-lint 0.1.0-alpha.2
+  - iyakki-macrecovery 0.1.0-alpha.2
+  - iyakki-mem 0.1.0-alpha.2
+  - iyakki-netscan 0.1.0-alpha.2
+  - iyakki-openpgp 0.1.0-alpha.2
+  - iyakki-pdf 0.1.0-alpha.2
+  - iyakki-proxy 0.1.0-alpha.2
+  - iyakki-qr 0.1.0-alpha.2
+  - iyakki-regex 0.1.0-alpha.2
+  - iyakki-relcheck 0.1.0-alpha.2
+  - iyakki-remote 0.1.0-alpha.2
+  - iyakki-rfb 0.1.0-alpha.2
+  - iyakki-rtsp 0.1.0-alpha.2
+  - iyakki-schema 0.1.0-alpha.2
+  - iyakki-sec 0.1.0-alpha.2
+  - iyakki-shell 0.1.0-alpha.2
+  - iyakki-sshfs 0.1.0-alpha.2
+  - iyakki-stage1 0.1.0-alpha.2
+  - iyakki-storage 0.1.0-alpha.2
+  - iyakki-swarm 0.1.0-alpha.2
+  - iyakki-tile-abi 0.1.0-alpha.2
+  - iyakki-tile-api 0.1.0-alpha.2
+  - iyakki-tile-calendar 0.1.0-alpha.2
+  - iyakki-tile-cameras 0.1.0-alpha.2
+  - iyakki-tile-example 0.1.0-alpha.2
+  - iyakki-tile-host 0.1.0-alpha.2
+  - iyakki-tile-remotefiles 0.1.0-alpha.2
+  - iyakki-tile-usage 0.1.0-alpha.2
+  - iyakki-uikit 0.1.0-alpha.2
+  - iyakki-usb 0.1.0-alpha.2
+  - iyakki-vfs 0.1.0-alpha.2
+  - iyakki-volcrypt 0.1.0-alpha.2
+  - iyakki-vpn 0.1.0-alpha.2
+  - iyakki-wake 0.1.0-alpha.2
+  - iyakki-wasm 0.1.0-alpha.2
+  - iyakki-web 0.1.0-alpha.2
+  - iyakki-webview 0.1.0-alpha.2
+  - iyakki-wordtime 0.1.0-alpha.2
+  - iyakki-zram 0.1.0-alpha.2
   - allocator-api2 0.2.21
   - anyhow 1.0.104
   - async-trait 0.1.92
@@ -5802,7 +5838,6 @@ Used by:
   - fiat-crypto 0.2.9
   - fiat-crypto 0.3.0
   - fontdue 0.9.4
-  - gloo-timers 0.2.6
   - if-watch 3.2.2
   - itoa 1.0.18
   - jni-macros 0.22.4
@@ -6899,37 +6934,6 @@ gen! {
 ================================================================================
 MIT License
 Used by:
-  - libp2p 0.57.0
---------------------------------------------------------------------------------
-// Copyright 2018 Parity Technologies (UK) Ltd.
-//
-// Permission is hereby granted, free of charge, to any person obtaining a
-// copy of this software and associated documentation files (the "Software"),
-// to deal in the Software without restriction, including without limitation
-// the rights to use, copy, modify, merge, publish, distribute, sublicense,
-// and/or sell copies of the Software, and to permit persons to whom the
-// Software is furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
-// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-// DEALINGS IN THE SOFTWARE.
-
-//! Rust-libp2p Tutorials to get started with.
-
-pub mod hole_punching;
-pub mod ping;
-
-
-================================================================================
-MIT License
-Used by:
   - unsigned-varint 0.8.0
 --------------------------------------------------------------------------------
 // Copyright 2018-2019 Parity Technologies (UK) Ltd.
@@ -7444,8 +7448,6 @@ Used by:
   - const-str 0.4.3
   - futures-bounded 0.3.0
   - libm 0.2.16
-  - libp2p-allow-block-list 0.7.0
-  - libp2p-connection-limits 0.7.0
   - libp2p-core 0.44.0
   - libp2p-mdns 0.49.0
   - libp2p-noise 0.47.0
