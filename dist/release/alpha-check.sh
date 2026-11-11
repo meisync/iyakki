@@ -83,7 +83,14 @@ else
   # 7. QEMU smoke tests: only when images exist (none are built here)
   IMGDIR="$ROOT/target/buildroot-libre/images"
   if [ "$QEMU" = 1 ] && [ -f "$IMGDIR/bzImage" ] && [ -f "$IMGDIR/rootfs.cpio.zst" ] && command -v qemu-system-x86_64 >/dev/null; then
-    run "QEMU boot self-test" qemu-boot sh dist/buildroot/qemu-test.sh
+    # an image built before the self-test last changed cannot show the lines it requires: say so, instead of a bare "missing ..."
+    ST="$(git log -1 --format=%ct -- dist/buildroot/qemu-test.sh crates/iyakki-agent/src/pathcheck.rs 2>/dev/null || echo 0)"
+    IM="$(stat -c %Y "$IMGDIR/rootfs.cpio.zst" 2>/dev/null || echo 0)"
+    if [ "${ST:-0}" -gt "$IM" ]; then
+      rec "QEMU boot self-test" FAIL "STALE IMAGE: $IMGDIR was built $(date -u -d @"$IM" +%F), the self-test changed $(date -u -d @"$ST" +%F); rebuild it with ./run.sh build, then run this gate again"
+    else
+      run "QEMU boot self-test" qemu-boot sh dist/buildroot/qemu-test.sh
+    fi
     run "QEMU persistence (data volume survives a reboot)" qemu-persist sh dist/buildroot/qemu-persist-test.sh
     if [ -f "$IMGDIR/iyakki-install-x86_64.img" ]; then
       cargo build -q --locked -p iyakki-usb >/dev/null 2>&1
