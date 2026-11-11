@@ -22,8 +22,21 @@ HERE="$(cd "$(dirname "$0")" && pwd)"; REPO="$(cd "$HERE/../.." && pwd)"
 ROOT="${1:-}"; INITRD="${2:-/boot/initrd}"
 SCAN="${IYAKKI_LOADER_SCAN:-yes}"   # yes (owner 2026-11-04): the loader also lists other systems it finds on the machine under More options (not tried on real hardware yet); no turns it off
 [ -d "$ROOT" ] || { sed -n '2,3p' "$0" >&2; exit 2; }
-EFI="${IYAKKI_BOOT_EFI:-$REPO/iyakki-boot/target/x86_64-unknown-uefi/release/boot-uefi.efi}"
-if [ ! -s "$EFI" ]; then echo "boot-loader-stage: no loader program ($EFI): the image gets no extra boot loader entry" >&2; exit 0; fi
+if [ -n "${IYAKKI_BOOT_EFI:-}" ]; then
+  EFI="$IYAKKI_BOOT_EFI"
+else
+  # build the pinned loader (incremental: a no-op when nothing changed); IYAKKI_LOADER=skip leaves it out, IYAKKI_LOADER_REQUIRED=1 (release builds) makes a failure stop the build
+  EFI="$REPO/iyakki-boot/target/x86_64-unknown-uefi/release/boot-uefi.efi"
+  if [ "${IYAKKI_LOADER:-build}" != skip ]; then
+    if BUILT="$(sh "$HERE/loader-build.sh")"; then EFI="$BUILT"
+    elif [ "${IYAKKI_LOADER_REQUIRED:-0}" = 1 ]; then echo "boot-loader-stage: the boot loader could not be built and IYAKKI_LOADER_REQUIRED=1: stopping" >&2; exit 1
+    else echo "boot-loader-stage: the boot loader could not be built (see above); using an earlier build if there is one" >&2; fi
+  fi
+fi
+if [ ! -s "$EFI" ]; then
+  [ "${IYAKKI_LOADER_REQUIRED:-0}" = 1 ] && { echo "boot-loader-stage: no loader program ($EFI) and IYAKKI_LOADER_REQUIRED=1: stopping" >&2; exit 1; }
+  echo "boot-loader-stage: no loader program ($EFI): the image gets no extra boot loader entry" >&2; exit 0
+fi
 # id | level | title (at most 64 characters) | kernel command line
 ENTRIES='
 iyakki|top|IYAKKI|console=tty0 console=ttyS0,115200 panic=20 quiet loglevel=3 vt.global_cursor_default=0 initcall_blacklist=hpet_init,crb_acpi_driver_init
