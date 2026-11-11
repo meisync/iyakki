@@ -100,7 +100,7 @@ fn the_kernel_is_set_up_for_signed_modules_and_lockdown_on_every_x86_image() {
     assert!(!frag.lines().any(|l| l == "CONFIG_MODULE_SIG_FORCE=y"));
     let def = read("dist/buildroot/configs/iyakki_x86_64_defconfig");
     assert!(def.contains("board/iyakki/patches-sb"));
-    let patch = std::fs::read_dir(root().join("dist/buildroot/board/iyakki/patches-sb/linux/6.12.112")).unwrap().count();
+    let patch = std::fs::read_dir(root().join("dist/buildroot/board/iyakki/patches-sb/linux/6.12.112")).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".patch")).count(); // (linux.hash, the kernel checksum, sits beside it)
     assert_eq!(patch, 1, "exactly the one lockdown patch");
     let test_frag = read("dist/buildroot/board/iyakki/secureboot-test.fragment");
     assert!(test_frag.contains("CONFIG_INTEGRITY_MACHINE_KEYRING=y") && test_frag.contains("CONFIG_EFI_STUB=y"));

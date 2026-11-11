@@ -80,7 +80,7 @@ fn the_mac_variant_carries_the_cdclk_patch_for_the_defconfig_kernel() {
     assert!(def.contains("BR2_GLOBAL_PATCH_DIR=\"$(BR2_EXTERNAL_IYAKKI_PATH)/board/iyakki/patches-sb\""), "the default images carry only the Secure Boot lockdown patch");
     assert!(!def.contains("board/iyakki/patches\""), "the default images do not carry the Mac patches");
     let dir = board().join(format!("board/iyakki/patches/linux/{ver}"));
-    let mut names: Vec<String> = std::fs::read_dir(&dir).unwrap_or_else(|_| panic!("no patches for kernel {ver} in {}", dir.display())).flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    let mut names: Vec<String> = std::fs::read_dir(&dir).unwrap_or_else(|_| panic!("no patches for kernel {ver} in {}", dir.display())).flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.ends_with(".patch")).collect(); // (linux.hash, the kernel checksum, sits beside them)
     names.sort();
     // 0001 is IYAKKI's own (Mac mini 2018); 0002-0004 are small, pinned t2linux / upstream backports for T2 MacBooks
     assert_eq!(names, [
@@ -291,7 +291,9 @@ fn the_first_menu_screen_is_short_and_the_rare_starts_are_in_one_submenu() {
     // shipped any more (owner decision 2026-11-06): no script, theme, config or legal row may mention it.
     let theme = read("board/iyakki/grub/theme.txt");
     assert!(theme.contains("terminal-font: \"DejaVu Sans Mono Regular 24\"") && theme.contains("item_font = \"DejaVu Sans Bold 30\""));
-    for (name, text) in [("theme", &theme), ("grub.cfg", &cfg), ("post-image.sh", &post)] {
+    // post-image.sh may REMOVE the stale file GRUB's own install puts there (the `rm -f` line and the comments above it); nothing may load it
+    let post_code: String = post.lines().filter(|l| !l.trim_start().starts_with('#') && !l.trim_start().starts_with("rm -f")).collect::<Vec<_>>().join("\n");
+    for (name, text) in [("theme", &theme), ("grub.cfg", &cfg), ("post-image.sh", &post_code)] {
         assert!(!text.to_lowercase().contains("unifont") && !text.contains("fonts/unicode.pf2"), "{name} still uses Unifont");
     }
     assert!(post.contains("DejaVu Sans Mono Regular 24") && post.contains("--no-hinting"));
