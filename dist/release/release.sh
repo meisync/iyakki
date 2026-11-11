@@ -3,6 +3,8 @@
 # Collects the built images and the window-mode tarball in target/release-<version>/, adds the release documents, sums and
 # signs everything (SHA256SUMS + .sig, release.json + .sig, index.html) with the release key, and checks the result.
 # Nothing is uploaded or published; this only prepares the folder.
+#   --lean-image=F  release the lean PC image F (made by dist/buildroot/lean-image.sh from the release-profile build) as iyakki-x86_64.img, INSTEAD of the
+#                   libre ISO / install image / ARM64 image (alpha.2 decision: one x86_64 image); IYAKKI_RELEASE_LEAN=F does the same
 #   --with-web      also include the optional web image (target/buildroot-web) as iyakki-web-*; it is big (about 2 GB)
 #   --with-mac      also include the optional Mac image (target/buildroot-mac) as iyakki-mac-*
 #   --with-macweb   also include the optional Mac + web image (target/buildroot-macweb) as iyakki-macweb-*; big (about 2 GB)
@@ -16,8 +18,9 @@
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 cd "$ROOT"
-VER=""; WEB=0; MAC=0; MACWEB=0; WIN=1; STALE=0; DRY=0; SRV=1
+LEAN="${IYAKKI_RELEASE_LEAN:-}"; VER=""; WEB=0; MAC=0; MACWEB=0; WIN=1; STALE=0; DRY=0; SRV=1
 for a in "$@"; do case "$a" in
+  --lean-image=*) LEAN="${a#*=}" ;;
   --with-web) WEB=1 ;; --with-mac) MAC=1 ;; --with-macweb) MACWEB=1 ;; --no-window) WIN=0 ;; --no-store-server) SRV=0 ;; --allow-stale) STALE=1 ;; --dry-run) DRY=1 ;;
   -h|--help) sed -n 2,17p "$0"; exit 0 ;;
   -*) echo "unknown option $a" >&2; exit 2 ;;
@@ -30,11 +33,16 @@ KEY="$HOME/.config/iyakki/release.key"
 trap iyakki_tmp_clean EXIT
 
 # name in the release <- built file
+if [ -n "$LEAN" ]; then
+  [ -f "$LEAN" ] || { echo "release: --lean-image $LEAN does not exist" >&2; exit 1; }
+  declare -a MAP=("iyakki-x86_64.img|$(readlink -f "$LEAN")")
+else
 declare -a MAP=(
   "iyakki-x86_64.iso|$ROOT/target/buildroot-libre/images/iyakki-x86_64.iso"
   "iyakki-install-x86_64.img|$ROOT/target/buildroot-libre/images/iyakki-install-x86_64.img"
   "iyakki-aarch64.img|$ROOT/target/buildroot-libre-aarch64/images/iyakki-aarch64.img"
 )
+fi
 [ "$WEB" = 1 ] && MAP+=("iyakki-web-x86_64.iso|$ROOT/target/buildroot-web/images/iyakki-x86_64.iso" "iyakki-web-install-x86_64.img|$ROOT/target/buildroot-web/images/iyakki-install-x86_64.img")
 [ "$MAC" = 1 ] && MAP+=("iyakki-mac-x86_64.iso|$ROOT/target/buildroot-mac/images/iyakki-x86_64.iso" "iyakki-mac-install-x86_64.img|$ROOT/target/buildroot-mac/images/iyakki-install-x86_64.img")
 
