@@ -2274,7 +2274,7 @@ impl K3sDev {
             if self.state() == Svc::Running && last_disk.elapsed() >= Duration::from_secs(if lock(&self.over).poll.is_some() { 0 } else { 60 }) {
                 last_disk = Instant::now();
                 let h = self.health_now();
-                self.check_disk(&h);
+                self.check_disk_measured(&h);
                 *lock(&self.health) = h;
             }
             if self.state() == Svc::Running && last_exposure.elapsed() >= Duration::from_secs(if lock(&self.over).poll.is_some() { 0 } else { 600 }) {
@@ -2350,6 +2350,16 @@ impl K3sDev {
             self.audit("system", "devcluster.exposure.unexpected", &sig);
             self.alerts_push(Alert::Exposure(r.unexpected.iter().map(|e| e.line()).collect()));
         }
+    }
+
+    /// The alert rule on the disk figure the machine itself reports. Unit tests do not take it: their folders are on the developer's own disk,
+    /// and a disk that happens to be over the limit made every test that expects "no alert" fail (they feed their own figure through
+    /// `check_disk_for_test`).
+    fn check_disk_measured(&self, h: &Health) {
+        #[cfg(not(test))]
+        self.check_disk(h);
+        #[cfg(test)]
+        let _ = h;
     }
 
     fn check_disk(&self, h: &Health) {
@@ -2722,7 +2732,7 @@ impl K3sDev {
     /// Store a fresh health snapshot (the Dev cluster page and SYSTEM call this from a thread now and then).
     pub fn refresh_health(&self) -> Health {
         let h = self.health_now();
-        self.check_disk(&h);
+        self.check_disk_measured(&h);
         *lock(&self.health) = h.clone();
         h
     }

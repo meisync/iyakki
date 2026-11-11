@@ -451,7 +451,11 @@ impl CalendarApp {
         }
         let (cy_, cm, cd) = self.cur;
         let wd = weekday_mon0(cur_days);
-        g.text(px, body.y + 4.0 * s, 20.0 * s, TEXT, &format!("{} {} {}", ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][wd as usize], cd, MONTHS[cm as usize - 1]), Face::Bold);
+        // the long date ("Wednesday 11 November") is wider than the pane at the largest text size on some days: it is fitted to the pane, with an ellipsis
+        // as the last resort, so how wide today's names are never decides whether the heading overflows
+        let long = format!("{} {} {}", ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][wd as usize], cd, MONTHS[cm as usize - 1]);
+        let heading = g.fit(20.0 * s, &long, Face::Bold, pw);
+        g.text(px, body.y + 4.0 * s, 20.0 * s, TEXT, &heading, Face::Bold);
         g.text(px, body.y + 30.0 * s, 13.0 * s, MUTED, &format!("{cy_}{}", if cur_days == today { "  ·  today" } else { "" }), Face::Sans);
         let items = self.items(cx, cur_days);
         self.sel_item = self.sel_item.min(items.len().saturating_sub(1));
