@@ -74,7 +74,16 @@ fn literal_after<'a>(line: &'a str, marker: &str) -> Vec<&'a str> {
 fn spawned(line: &str) -> Vec<String> {
     let mut v: Vec<String> = literal_after(line, "Command::new(\"").iter().map(|s| s.to_string()).collect();
     let owned = |l: &str| l.contains("\".into()") || l.contains("\".to_string()") || l.contains("\".to_owned()");
-    if line.contains(".run(") || line.contains(".run_in(") {
+    // `runner.run(&prog, &["close".into(), ..], None)` passes the program as a variable and the arguments as a literal slice: the literals are
+    // arguments, not a program. Only a call whose FIRST argument is the literal slice starts the program named by its first literal.
+    let slice_is_argv = match line.find(".run(") {
+        Some(i) => {
+            let first = line[i + ".run(".len()..].trim_start();
+            first.starts_with("&[\"") || first.starts_with("[\"")
+        }
+        None => true,
+    };
+    if (line.contains(".run(") || line.contains(".run_in(")) && slice_is_argv {
         for m in ["&[\"", "[\""] {
             for lit in literal_after(line, m) {
                 let after = &line[line.find(&format!("{m}{lit}\"")).unwrap_or(0)..];
@@ -222,6 +231,8 @@ fn the_scan_resolves_programs_named_through_constants() {
     assert_eq!(spawned_constants("let o = Command::new(BIN).arg(\"x\");"), ["BIN"]);
     assert_eq!(spawned_constants("Command::new(&TOOL)"), ["TOOL"]);
     assert_eq!(spawned_constants("let r = runner.run(&[PROG.into(), \"-v\".into()]);"), ["PROG"]);
+    assert!(spawned("let out = self.sys.run(&prog, &[\"close\".into(), name], None)?;").is_empty(), "a slice that is not the first argument holds arguments");
+    assert!(spawned("let r = runner.run(&[\"ip\".into(), \"a\".into()]);").contains(&"ip".to_string()), "a call whose first argument is the literal slice still counts");
     assert_eq!(spawned_constants("let argv = vec![HELPER.to_string(), \"a\".into()];"), ["HELPER"]);
     assert!(spawned_constants("let x = Command::new(path);").is_empty(), "a variable is not a constant");
     assert!(spawned_constants("let n = LIMITS[0];").is_empty());
