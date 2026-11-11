@@ -2,7 +2,7 @@
 # Runs the workspace tests, then runs only the tests that failed again, one at a time, and says which kind of failure each was.
 #   dist/release/test-with-rerun.sh OUT_DIR       writes OUT_DIR/test.log, test-rerun.log, test-flaky.txt (names that failed in parallel and passed alone)
 # Exit 0: everything passed the first time. Exit 3: some tests failed in parallel and passed alone (races or shared state: each is listed and counts as a
-# flaky test; the gate allows no more than the number of names in dist/release/known-flaky.txt). Exit 1: a test also failed alone (a real failure), or the build broke.
+# flaky test; only the names listed in dist/release/known-flaky.txt are tolerated). Exit 1: a test also failed alone (a real failure), or the build broke.
 # A retry never turns a failure into a pass silently: the names are printed and kept.
 set -uo pipefail
 OUT="${1:?usage: test-with-rerun.sh OUT_DIR}"; mkdir -p "$OUT"
@@ -24,7 +24,9 @@ fi
 ran=$(grep -E '^test .* \.\.\. ok$' "$OUT/test-rerun.log" | wc -l)
 if [ "$ran" -lt "${#FAILED[@]}" ]; then echo "test-with-rerun: only $ran of ${#FAILED[@]} failed tests ran again (see $OUT/test-rerun.log)" >&2; exit 1; fi
 printf '%s\n' "${FAILED[@]}" > "$OUT/test-flaky.txt"
-allowed=$(grep -vc '^\(#\|$\)' "$KNOWN" 2>/dev/null || true); allowed=${allowed:-0}
 echo "test-with-rerun: FLAKY (failed in parallel, passed alone; fix the cause):" >&2; printf '  %s\n' "${FAILED[@]}" >&2
-if [ "${#FAILED[@]}" -gt "$allowed" ]; then echo "test-with-rerun: ${#FAILED[@]} flaky test(s), only $allowed allowed by $KNOWN" >&2; exit 1; fi
+# only tests named in the known list are tolerated; a flaky test that is not listed fails the gate
+unknown=()
+for t in "${FAILED[@]}"; do grep -qxF "$t" "$KNOWN" 2>/dev/null || unknown+=("$t"); done
+if [ "${#unknown[@]}" -gt 0 ]; then echo "test-with-rerun: flaky and NOT in $KNOWN (fix it, or list it with a KNOWN-ISSUES entry):" >&2; printf '  %s\n' "${unknown[@]}" >&2; exit 1; fi
 exit 3

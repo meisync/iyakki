@@ -57,7 +57,14 @@ else
   if cargo build --workspace --locked >"$OUT/build.log" 2>&1; then rec "workspace builds (locked)" PASS; else rec "workspace builds (locked)" FAIL "see $OUT/build.log"; fi
   w="$(grep -c '^warning' "$OUT/build.log" || true)"; if [ "${w:-0}" = 0 ]; then rec "zero warnings" PASS; else rec "zero warnings" FAIL "$w warning line(s) in $OUT/build.log"; fi
   if [ "$TESTS" = 1 ]; then
-    if cargo test --workspace --locked >"$OUT/test.log" 2>&1; then rec "workspace tests" PASS "$(grep -h '^test result' "$OUT/test.log" | awk '{p+=$4; i+=$8} END{print p" passed, "i" ignored"}')"; else rec "workspace tests" FAIL "see $OUT/test.log ($(grep -c 'FAILED' "$OUT/test.log") FAILED lines)"; fi
+    # one run, then the failed tests alone (at most two runs); a test that passes only alone is listed as flaky and limited by dist/release/known-flaky.txt
+    dist/release/test-with-rerun.sh "$OUT" >"$OUT/test-summary.log" 2>&1; trc=$?
+    passed="$(grep -h '^test result' "$OUT/test.log" | awk '{p+=$4; i+=$8} END{print p" passed, "i" ignored"}')"
+    case "$trc" in
+      0) rec "workspace tests" PASS "$passed" ;;
+      3) rec "workspace tests" WARN "$passed; FLAKY (passed alone, listed in dist/release/known-flaky.txt): $(tr '\n' ' ' < "$OUT/test-flaky.txt")" ;;
+      *) rec "workspace tests" FAIL "see $OUT/test-summary.log and $OUT/test.log" ;;
+    esac
   else rec "workspace tests" SKIP "--no-tests"; fi
   if cargo build --locked --manifest-path crates/iyakki-gui/Cargo.toml --bin iyakki-desktop >"$OUT/gui-build.log" 2>&1; then
     rec "window (iyakki-gui) builds" PASS "$(crates/iyakki-gui/target/debug/iyakki-desktop --version 2>&1 | head -n1)"
