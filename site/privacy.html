@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IYAKKI privacy and security</title>
+<meta name="description" content="Privacy and security of IYAKKI: this site has no tracking, no cookies and no third-party content, and the security policy says how to report a vulnerability privately.">
+<link rel="canonical" href="https://meisync.github.io/iyakki/privacy.html">
+<link rel="icon" type="image/png" href="img/favicon.png">
+<meta name="color-scheme" content="light dark">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="IYAKKI">
+<meta property="og:title" content="IYAKKI privacy and security">
+<meta property="og:description" content="Privacy and security of IYAKKI: this site has no tracking, no cookies and no third-party content, and the security policy says how to report a vulnerability privately.">
+<meta property="og:url" content="https://meisync.github.io/iyakki/privacy.html">
+<meta property="og:image" content="https://meisync.github.io/iyakki/img/social-card.png">
+<meta property="og:image:alt" content="The IYAKKI emblem, three steel arrow heads with blue circuit light, and the words IYAKKI, An OS for Agents">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="IYAKKI privacy and security">
+<meta name="twitter:description" content="Privacy and security of IYAKKI: this site has no tracking, no cookies and no third-party content, and the security policy says how to report a vulnerability privately.">
+<meta name="twitter:image" content="https://meisync.github.io/iyakki/img/social-card.png">
+<meta name="twitter:image:alt" content="The IYAKKI emblem, three steel arrow heads with blue circuit light, and the words IYAKKI, An OS for Agents">
+<style>:root{--bg:#fff;--fg:#1a1d23;--mut:#4a5260;--card:#f3f5f8;--line:#c9cfd9;--link:#0b5cad;--acc:#0b5cad;--onacc:#fff;
+--done:#1b6e3c;--partial:#8a5a00;--planned:#2b4fa8;--blocked:#a3262a;--deprecated:#5b6270}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1217;--fg:#e6e9ef;--mut:#a9b2c0;--card:#171c24;--line:#303846;--link:#7fbcff;--acc:#7fbcff;--onacc:#0f1217;
+--done:#5fd08a;--partial:#f0b94d;--planned:#8fb0ff;--blocked:#ff8a8d;--deprecated:#a9b2c0}}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:1rem/1.6 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+a{color:var(--link);text-underline-offset:.15em}
+a:focus-visible,summary:focus-visible{outline:3px solid var(--acc);outline-offset:2px;border-radius:3px}
+.skip{position:absolute;left:-999px;top:0;background:var(--acc);color:var(--onacc);padding:.5rem 1rem;z-index:9}
+.skip:focus{left:0}
+header.top,main,footer{max-width:62rem;margin:0 auto;padding-left:16px;padding-right:16px}
+header.top{display:flex;flex-wrap:wrap;gap:.5rem 1.5rem;align-items:center;justify-content:space-between;padding-top:.9rem;padding-bottom:.9rem;border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:.6rem;font-weight:700;color:var(--fg);text-decoration:none;letter-spacing:.04em}
+.brand img{width:44px;height:auto}
+nav ul{display:flex;flex-wrap:wrap;gap:.25rem 1.1rem;list-style:none;margin:0;padding:0}
+nav a{display:inline-block;padding:.35rem .1rem;color:var(--fg)}
+nav a[aria-current=page]{font-weight:700;border-bottom:2px solid var(--acc)}
+h1{font-size:clamp(1.8rem,5vw,2.8rem);line-height:1.15;margin:1.6rem 0 .6rem}
+h2{font-size:1.5rem;margin:2.4rem 0 .6rem;line-height:1.25}
+h3{font-size:1.1rem;margin:1.2rem 0 .3rem}
+.lead{font-size:1.15rem;color:var(--mut);max-width:44rem}
+.note{background:var(--card);border:1px solid var(--line);border-left:5px solid var(--partial);padding:.8rem 1rem;border-radius:6px;margin:1.2rem 0}
+.btns{display:flex;flex-wrap:wrap;gap:.7rem;margin:1.2rem 0}
+.btn{display:inline-block;padding:.65rem 1.1rem;border-radius:6px;border:2px solid var(--acc);text-decoration:none;font-weight:600;color:var(--acc)}
+.btn.primary{background:var(--acc);color:var(--onacc)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(15rem,100%),1fr));gap:1rem;margin:1rem 0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:.9rem 1rem}
+.card h3{margin-top:0}
+.card ul{margin:.3rem 0 0;padding-left:1.1rem}
+.tag{font-size:.8rem;font-weight:700;border:1px solid currentColor;border-radius:4px;padding:0 .35rem;color:var(--partial);white-space:nowrap}
+.tw{overflow-x:auto;margin:.8rem 0}
+table{border-collapse:collapse;width:100%;min-width:30rem}
+caption{text-align:left;color:var(--mut);padding:.3rem 0}
+th,td{border-bottom:1px solid var(--line);padding:.45rem .6rem;text-align:left;vertical-align:top}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+th{background:var(--card)}
+.bar{display:flex;height:1.4rem;border-radius:4px;overflow:hidden;border:1px solid var(--line);margin:.5rem 0 .3rem}
+.bar span{display:block;height:100%}
+.s-done{background:var(--done)}.s-partial{background:var(--partial)}.s-planned{background:var(--planned)}.s-blocked{background:var(--blocked)}.s-deprecated{background:var(--deprecated)}
+.key{display:flex;flex-wrap:wrap;gap:.3rem 1.2rem;list-style:none;padding:0;margin:.3rem 0 1rem}
+.key i{display:inline-block;width:.9rem;height:.9rem;border-radius:2px;margin-right:.35rem;vertical-align:-.1rem}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(7rem,1fr));gap:.8rem;margin:1rem 0}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:.6rem .9rem}
+.stat b{display:block;font-size:1.8rem;line-height:1.2;font-variant-numeric:tabular-nums}
+.shots{border:2px dashed var(--line);border-radius:8px;padding:1rem;color:var(--mut)}
+details{margin:.8rem 0}summary{cursor:pointer;font-weight:600;padding:.3rem 0}
+footer{margin-top:3rem;padding-top:1rem;padding-bottom:2rem;border-top:1px solid var(--line);color:var(--mut);font-size:.92rem}
+code{background:var(--card);padding:.05rem .3rem;border-radius:3px;font-size:.92em;word-break:break-word}
+@media (max-width:520px){h2{font-size:1.3rem}.brand img{width:36px}}</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to the content</a>
+<header class="top">
+<a class="brand" href="index.html"><img src="img/logo.png" alt="IYAKKI emblem" width="44" height="25"><span>IYAKKI</span></a>
+<nav aria-label="Main"><ul><li><a href="index.html">Home</a></li><li><a href="progress.html">Progress</a></li><li><a href="privacy.html" aria-current="page">Privacy and security</a></li><li><a href="https://github.com/meisync/iyakki">Source on GitHub</a></li></ul></nav>
+</header>
+<main id="main">
+
+<h1>Privacy and security</h1>
+<p class="lead">This site does not track you.</p>
+<h2 id="privacy">Privacy of this site</h2>
+<ul>
+<li>No analytics, no cookies, no scripts, no web fonts, no embedded content, nothing loaded from another site. Every page is plain HTML with one small stylesheet inside it.</li>
+<li>The pages are served by GitHub Pages. GitHub, like any web host, sees the requests it serves; its own policies apply to that and this project does not receive that data.</li>
+<li>Links to the repository, the releases and the documents leave this site and go to GitHub.</li>
+</ul>
+<h2 id="software">Privacy of the software</h2>
+<p>IYAKKI talks only to the models and services you connect, and secrets live in encrypted vaults. The assistant is told that a secret exists, never its value.
+Details: <a href="https://github.com/meisync/iyakki/blob/HEAD/SECURITY.md">SECURITY.md</a> and <a href="https://github.com/meisync/iyakki/blob/HEAD/BOUNDARY.md">BOUNDARY.md</a>.</p>
+<h2 id="security">Security</h2>
+<ul>
+<li><strong>Report a vulnerability</strong> privately, with GitHub's private vulnerability reporting on the repository (Security, then Report a vulnerability). Please do not open a public issue for a security problem.
+The policy promises an acknowledgement within 7 days. Read <a href="https://github.com/meisync/iyakki/blob/HEAD/SECURITY.md">SECURITY.md</a> for what to include.</li>
+<li>Agents are treated as untrusted: roles, scopes, budgets and approvals; guests run in a WebAssembly sandbox; network access goes through an allow-listed egress proxy.</li>
+<li>Releases are signed (<code>SHA256SUMS</code>, <code>release.json</code> and their signatures); verify before you write an image.</li>
+</ul>
+<div class="note"><strong>What the alpha does not promise.</strong> No security review by anyone outside the project, no penetration test, no Secure Boot on most real machines, no encryption of the whole data volume
+(vaults and, where switched on, per-person home folders are encrypted), and formats may change between alphas. The full list is in <a href="https://github.com/meisync/iyakki/blob/HEAD/SECURITY.md">SECURITY.md</a>.</div>
+
+</main>
+<footer>
+<p>IYAKKI 0.1.0-alpha.2 is an alpha preview for developers and testers, not for production. Licence: <a href="https://github.com/meisync/iyakki/blob/HEAD/LICENSE">Apache-2.0</a>.
+This site is static: no script, no cookies, no tracking, nothing loaded from another site.</p>
+<p><a href="https://github.com/meisync/iyakki">Source</a> · <a href="https://github.com/meisync/iyakki/releases">Releases</a> · <a href="https://github.com/meisync/iyakki/blob/HEAD/SECURITY.md">Security policy</a> · <a href="https://github.com/meisync/iyakki/blob/HEAD/SUPPORT.md">Support</a></p>
+</footer>
+</body>
+</html>

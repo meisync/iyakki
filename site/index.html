@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IYAKKI: an operating system built for AI agents</title>
+<meta name="description" content="IYAKKI is an AI-first desktop operating system written in Rust and WebAssembly: an assistant that can act on your computer under a permission model, with approvals and a tamper-evident ledger. Apache-2.0 alpha.">
+<link rel="canonical" href="https://meisync.github.io/iyakki/">
+<link rel="icon" type="image/png" href="img/favicon.png">
+<meta name="color-scheme" content="light dark">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="IYAKKI">
+<meta property="og:title" content="IYAKKI: an operating system built for AI agents">
+<meta property="og:description" content="IYAKKI is an AI-first desktop operating system written in Rust and WebAssembly: an assistant that can act on your computer under a permission model, with approvals and a tamper-evident ledger. Apache-2.0 alpha.">
+<meta property="og:url" content="https://meisync.github.io/iyakki/">
+<meta property="og:image" content="https://meisync.github.io/iyakki/img/social-card.png">
+<meta property="og:image:alt" content="The IYAKKI emblem, three steel arrow heads with blue circuit light, and the words IYAKKI, An OS for Agents">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="IYAKKI: an operating system built for AI agents">
+<meta name="twitter:description" content="IYAKKI is an AI-first desktop operating system written in Rust and WebAssembly: an assistant that can act on your computer under a permission model, with approvals and a tamper-evident ledger. Apache-2.0 alpha.">
+<meta name="twitter:image" content="https://meisync.github.io/iyakki/img/social-card.png">
+<meta name="twitter:image:alt" content="The IYAKKI emblem, three steel arrow heads with blue circuit light, and the words IYAKKI, An OS for Agents">
+<style>:root{--bg:#fff;--fg:#1a1d23;--mut:#4a5260;--card:#f3f5f8;--line:#c9cfd9;--link:#0b5cad;--acc:#0b5cad;--onacc:#fff;
+--done:#1b6e3c;--partial:#8a5a00;--planned:#2b4fa8;--blocked:#a3262a;--deprecated:#5b6270}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1217;--fg:#e6e9ef;--mut:#a9b2c0;--card:#171c24;--line:#303846;--link:#7fbcff;--acc:#7fbcff;--onacc:#0f1217;
+--done:#5fd08a;--partial:#f0b94d;--planned:#8fb0ff;--blocked:#ff8a8d;--deprecated:#a9b2c0}}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:1rem/1.6 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+a{color:var(--link);text-underline-offset:.15em}
+a:focus-visible,summary:focus-visible{outline:3px solid var(--acc);outline-offset:2px;border-radius:3px}
+.skip{position:absolute;left:-999px;top:0;background:var(--acc);color:var(--onacc);padding:.5rem 1rem;z-index:9}
+.skip:focus{left:0}
+header.top,main,footer{max-width:62rem;margin:0 auto;padding-left:16px;padding-right:16px}
+header.top{display:flex;flex-wrap:wrap;gap:.5rem 1.5rem;align-items:center;justify-content:space-between;padding-top:.9rem;padding-bottom:.9rem;border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:.6rem;font-weight:700;color:var(--fg);text-decoration:none;letter-spacing:.04em}
+.brand img{width:44px;height:auto}
+nav ul{display:flex;flex-wrap:wrap;gap:.25rem 1.1rem;list-style:none;margin:0;padding:0}
+nav a{display:inline-block;padding:.35rem .1rem;color:var(--fg)}
+nav a[aria-current=page]{font-weight:700;border-bottom:2px solid var(--acc)}
+h1{font-size:clamp(1.8rem,5vw,2.8rem);line-height:1.15;margin:1.6rem 0 .6rem}
+h2{font-size:1.5rem;margin:2.4rem 0 .6rem;line-height:1.25}
+h3{font-size:1.1rem;margin:1.2rem 0 .3rem}
+.lead{font-size:1.15rem;color:var(--mut);max-width:44rem}
+.note{background:var(--card);border:1px solid var(--line);border-left:5px solid var(--partial);padding:.8rem 1rem;border-radius:6px;margin:1.2rem 0}
+.btns{display:flex;flex-wrap:wrap;gap:.7rem;margin:1.2rem 0}
+.btn{display:inline-block;padding:.65rem 1.1rem;border-radius:6px;border:2px solid var(--acc);text-decoration:none;font-weight:600;color:var(--acc)}
+.btn.primary{background:var(--acc);color:var(--onacc)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(15rem,100%),1fr));gap:1rem;margin:1rem 0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:.9rem 1rem}
+.card h3{margin-top:0}
+.card ul{margin:.3rem 0 0;padding-left:1.1rem}
+.tag{font-size:.8rem;font-weight:700;border:1px solid currentColor;border-radius:4px;padding:0 .35rem;color:var(--partial);white-space:nowrap}
+.tw{overflow-x:auto;margin:.8rem 0}
+table{border-collapse:collapse;width:100%;min-width:30rem}
+caption{text-align:left;color:var(--mut);padding:.3rem 0}
+th,td{border-bottom:1px solid var(--line);padding:.45rem .6rem;text-align:left;vertical-align:top}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+th{background:var(--card)}
+.bar{display:flex;height:1.4rem;border-radius:4px;overflow:hidden;border:1px solid var(--line);margin:.5rem 0 .3rem}
+.bar span{display:block;height:100%}
+.s-done{background:var(--done)}.s-partial{background:var(--partial)}.s-planned{background:var(--planned)}.s-blocked{background:var(--blocked)}.s-deprecated{background:var(--deprecated)}
+.key{display:flex;flex-wrap:wrap;gap:.3rem 1.2rem;list-style:none;padding:0;margin:.3rem 0 1rem}
+.key i{display:inline-block;width:.9rem;height:.9rem;border-radius:2px;margin-right:.35rem;vertical-align:-.1rem}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(7rem,1fr));gap:.8rem;margin:1rem 0}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:.6rem .9rem}
+.stat b{display:block;font-size:1.8rem;line-height:1.2;font-variant-numeric:tabular-nums}
+.shots{border:2px dashed var(--line);border-radius:8px;padding:1rem;color:var(--mut)}
+details{margin:.8rem 0}summary{cursor:pointer;font-weight:600;padding:.3rem 0}
+footer{margin-top:3rem;padding-top:1rem;padding-bottom:2rem;border-top:1px solid var(--line);color:var(--mut);font-size:.92rem}
+code{background:var(--card);padding:.05rem .3rem;border-radius:3px;font-size:.92em;word-break:break-word}
+@media (max-width:520px){h2{font-size:1.3rem}.brand img{width:36px}}</style>
+<script type="application/ld+json">{
+ "@context": "https://schema.org",
+ "@type": "SoftwareApplication",
+ "name": "IYAKKI",
+ "alternateName": "IYAKKI, An OS for Agents",
+ "description": "An operating system for AI agents, written in Rust and WebAssembly. Alpha preview for developers and testers.",
+ "applicationCategory": "DeveloperApplication",
+ "operatingSystem": "Linux (x86_64); USB boot image; QEMU virtual machine",
+ "softwareVersion": "0.1.0-alpha.2",
+ "license": "https://www.apache.org/licenses/LICENSE-2.0",
+ "url": "https://meisync.github.io/iyakki/",
+ "codeRepository": "https://github.com/meisync/iyakki",
+ "downloadUrl": "https://github.com/meisync/iyakki/releases",
+ "image": "https://meisync.github.io/iyakki/img/social-card.png",
+ "isAccessibleForFree": true,
+ "offers": {
+  "@type": "Offer",
+  "price": "0",
+  "priceCurrency": "USD"
+ }
+}</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to the content</a>
+<header class="top">
+<a class="brand" href="index.html"><img src="img/logo.png" alt="IYAKKI emblem" width="44" height="25"><span>IYAKKI</span></a>
+<nav aria-label="Main"><ul><li><a href="index.html" aria-current="page">Home</a></li><li><a href="progress.html">Progress</a></li><li><a href="privacy.html">Privacy and security</a></li><li><a href="https://github.com/meisync/iyakki">Source on GitHub</a></li></ul></nav>
+</header>
+<main id="main">
+
+<h1>IYAKKI: an operating system built for AI agents</h1>
+<p class="lead">A small, memory-safe operating system written in Rust and WebAssembly, built around an AI assistant that is allowed to <em>do</em> things:
+safely, visibly and only with your permission.</p>
+<div class="note"><strong>Alpha (0.1.0-alpha.2, 2026-11-10).</strong> A preview for developers and testers, <strong>not for production</strong>. The installer erases the whole drive you pick.
+Many features are partial (851 of 1363 rows in the feature matrix) and data formats are not promised to stay stable.
+Read the <a href="https://github.com/meisync/iyakki/blob/HEAD/KNOWN-ISSUES.md">known issues</a> first.</div>
+<div class="btns">
+<a class="btn primary" href="https://github.com/meisync/iyakki/releases">Get the releases</a>
+<a class="btn" href="https://github.com/meisync/iyakki/blob/HEAD/docs/INSTALL.md">Install guide</a>
+<a class="btn" href="progress.html">See the progress</a>
+</div>
+
+<h2 id="what">What it is</h2>
+<p>Today an AI assistant is usually a chat box inside someone else's operating system. It can talk, but anything it does (read a file, call an API, run a command)
+is either impossible or happens with whatever power the program around it has. IYAKKI turns that around: the operating system is built for the agent.
+The project's aim is to show that an assistant can be useful on a computer (plan your week, read your documents, run <code>kubectl</code> or <code>aws</code>,
+try a Python program in a container, play music) without being trusted blindly.</p>
+
+<h2 id="who">Who it is for</h2>
+<ul>
+<li><strong>Developers and testers</strong> who want to try an assistant that works under a permission model, on their own machine and with the models they choose
+(Ollama on the network, or a cloud provider with their own key in an encrypted vault).</li>
+<li><strong>People who care about auditability.</strong> The code is Apache-2.0 and the dependencies are permissive; the project keeps a tested boundary between its own code and the base operating system.</li>
+<li>Not for production, and not for a machine holding data you cannot lose, while it is alpha.</li>
+</ul>
+
+<h2 id="why">Why it is different</h2>
+<div class="grid">
+<div class="card"><h3>One permission model</h3><p>Each person has a role (administrator, operator, user, guest) and a policy: which apps, folders, network hosts, tools and how many tokens.
+The assistant can never do more than the person it works for.</p></div>
+<div class="card"><h3>Risky things ask first</h3><p>Reading is free. Writing a file, calling an API, running a program or starting a container pauses for
+Allow once, Allow for this session, or Deny. No answer means deny. Every run is recorded in a tamper-evident ledger.</p></div>
+<div class="card"><h3>Untrusted code is sandboxed</h3><p>Plugins, tools and model-generated code run in WebAssembly (wasmtime) with a fuel budget, a memory cap and capability tokens,
+or in a limited container.</p></div>
+<div class="card"><h3>Yours to run</h3><p>It talks only to the models you connect. Nothing is sent anywhere you did not configure.
+One program boots from a USB stick, runs in a virtual machine, as a desktop window, or as a container.</p></div>
+<div class="card"><h3>Built in-house, permissively licensed</h3><p>The editor, browser engine, archive unpacking, Markdown and more are written by the project,
+so the whole stays Apache-2.0 and small enough to audit.</p></div>
+</div>
+
+<h2 id="features">Key features, by group</h2>
+<p>After signing in you get a launcher of tiles, sorted into groups. Each tile is an app, locked or unlocked by your role.
+Status per feature is on the <a href="progress.html">progress page</a>; this is the overview from the README.</p>
+<div class="grid">
+<div class="card"><h3>Ask and create</h3><ul><li>CHAT with an agent mode: tools, each risky call asks first</li><li>RAG: search your documents with citations</li><li>SKILLS, CALENDAR, TALES (story teller), VOICE, LAB</li></ul></div>
+<div class="card"><h3>Build</h3><ul><li>AI IDE: editor, terminal, feature board, Kubernetes view, approved Deploy flow</li><li>GIT, FLOWS (workflows), K8S, EDIT, CLI, MCP, RUNS (history of every agent run)</li></ul></div>
+<div class="card"><h3>Media</h3><ul><li>BROWSER: in-house engine, plus an optional full WebKit engine</li><li>RADIO, MEDIA, CAMERA</li></ul></div>
+<div class="card"><h3>Data</h3><ul><li>DATA: open large CSV/TSV/JSON-lines tables</li><li>DASH: read-only dashboards over Prometheus, Elasticsearch/OpenSearch, ClickHouse and DuckDB</li><li>USAGE: token use per model</li></ul></div>
+<div class="card"><h3>Devices and system</h3><ul><li>SYSTEM, DISKS, NET SCAN, MESH, USERS (roles, limits, audit log), STORE</li><li>Bluetooth written in-house; encrypted home folders; lock screen</li></ul></div>
+<div class="card"><h3>Where it runs</h3><ul><li>Desktop window on Linux</li><li>USB stick on a PC or Mac</li><li>QEMU virtual machine</li><li>Browser front end, Docker, K3s</li></ul></div>
+</div>
+<p>Marked experimental or alpha in the project's own documents: the wake phrase of the My IYAKKI voice session (<span class="tag">experimental</span>, off by default), the Connect a client feature and its window program
+(<span class="tag">experimental</span>), and Linux programs in a sandbox (alpha, untried on a device).</p>
+
+<h2 id="hardware">What has been tried on real hardware</h2>
+<p>From the <a href="https://github.com/meisync/iyakki/blob/HEAD/RELEASE-NOTES-0.1.0-alpha.2.md">release notes</a>: the alpha.2 USB image booted on four real computers (a Mac mini 2018, a MacBook Pro 14,1, an HP laptop and a Lenovo laptop),
+and most of what was tried on real hardware was tried on the Mac mini. Bluetooth pairing, phone sound and tether were tried on the MacBook Pro 14,1. Everything else in the changelog is checked by tests and fakes only;
+the known issues say what is unproven. Secure Boot is verified in QEMU only on most machines.</p>
+
+<h2 id="try">How to try it</h2>
+<ol>
+<li>Download the latest alpha from the <a href="https://github.com/meisync/iyakki/releases">GitHub releases</a> and verify the checksums and signatures that come with it.</li>
+<li>Follow the <a href="https://github.com/meisync/iyakki/blob/HEAD/docs/INSTALL.md">install guide</a>: a desktop window on Linux (<code>./run.sh window</code>, needs the Rust toolchain), a USB stick, or a virtual machine.</li>
+<li>Then the <a href="https://github.com/meisync/iyakki/blob/HEAD/docs/QUICKSTART.md">quickstart</a>. Chat needs a model: Settings, then Models.</li>
+</ol>
+<p><strong>The USB installer erases the drive you choose.</strong> Do not use it on a machine that holds anything you cannot lose.</p>
+
+<h2 id="screens">Screenshots</h2>
+<div class="shots" role="note"><p>Screenshots are added here once they are taken from a real image. This first version of the page has none.</p></div>
+<!-- Screenshot slots (see site/img/README): launcher, chat-approval, ide, boot-menu. None is used yet. -->
+
+<h2 id="more">More</h2>
+<ul>
+<li><a href="https://github.com/meisync/iyakki/blob/HEAD/docs/ARCHITECTURE.md">Architecture</a> · <a href="https://github.com/meisync/iyakki/blob/HEAD/docs/INDEX.md">All documentation</a> · <a href="https://github.com/meisync/iyakki/blob/HEAD/CHANGELOG.md">Changelog</a></li>
+<li><a href="progress.html">Progress and roadmap</a> · <a href="privacy.html">Privacy and security</a> · <a href="https://github.com/meisync/iyakki/blob/HEAD/CONTRIBUTING.md">Contributing</a></li>
+</ul>
+
+</main>
+<footer>
+<p>IYAKKI 0.1.0-alpha.2 is an alpha preview for developers and testers, not for production. Licence: <a href="https://github.com/meisync/iyakki/blob/HEAD/LICENSE">Apache-2.0</a>.
+This site is static: no script, no cookies, no tracking, nothing loaded from another site.</p>
+<p><a href="https://github.com/meisync/iyakki">Source</a> · <a href="https://github.com/meisync/iyakki/releases">Releases</a> · <a href="https://github.com/meisync/iyakki/blob/HEAD/SECURITY.md">Security policy</a> · <a href="https://github.com/meisync/iyakki/blob/HEAD/SUPPORT.md">Support</a></p>
+</footer>
+</body>
+</html>
