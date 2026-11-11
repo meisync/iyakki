@@ -1804,17 +1804,18 @@ pub mod tests {
 
     #[test]
     fn pictures_are_found_by_signature_not_by_name_alone() {
+        // the excluded folder has a name no process id or temp path can contain (the id of the process once contained "2023" and the test failed)
         let dir = std::env::temp_dir().join(format!("iyakki-mediaimg-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("2023")).unwrap();
-        std::fs::write(dir.join("2023/a.png"), b"\x89PNG\r\n\x1a\n0000").unwrap();
+        std::fs::create_dir_all(dir.join("outofscope")).unwrap();
+        std::fs::write(dir.join("outofscope/a.png"), b"\x89PNG\r\n\x1a\n0000").unwrap();
         std::fs::write(dir.join("fake.jpg"), b"not a picture at all").unwrap();
         std::fs::write(dir.join("b.jpeg"), [0xFF, 0xD8, 0xFF, 0xE0, 0, 0]).unwrap();
         std::fs::write(dir.join("notes.txt"), b"x").unwrap();
         let d = dir.to_str().unwrap().to_string();
         let got = scan_images(&[d.clone()], &|_| true, 100);
         assert_eq!(got.len(), 2, "{got:?}");
-        assert!(scan_images(&[d], &|p| !p.contains("2023"), 100).len() == 1, "the read scope decides");
+        assert!(scan_images(&[d], &|p| !p.contains("/outofscope/"), 100).len() == 1, "the read scope decides");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
