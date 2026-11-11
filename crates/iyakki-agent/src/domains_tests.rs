@@ -324,9 +324,14 @@ fn the_firewall_opening_is_its_own_step_with_local_scope_an_end_time_and_goes_wi
     assert!(r.mgr.status().running && r.mgr.status().bind == "127.0.0.1" && !r.mgr.settings().firewall, "{:?}", r.mgr.status());
     // disabling by hand removes the opening too
     r.mgr.set_listener(ListenerChange { firewall: Some(true), ..Default::default() }).unwrap();
+    let mid = r.mgr.status();
+    assert!(mid.running && mid.firewall, "the second opening did not start: {mid:?} (ports {http}/{https})");
     let closed_before = r.gate.lock().unwrap().closed.len();
     r.mgr.set_listener(ListenerChange { enabled: Some(false), ..Default::default() }).unwrap();
-    assert!(r.gate.lock().unwrap().closed.len() > closed_before && !r.mgr.settings().firewall);
+    {
+        let log = r.gate.lock().unwrap();
+        assert!(log.closed.len() > closed_before && !r.mgr.settings().firewall, "closed {:?} (before: {closed_before}), made {:?}, open {:?}, status {:?}", log.closed, log.made, log.open, r.mgr.status());
+    }
 }
 
 #[test]

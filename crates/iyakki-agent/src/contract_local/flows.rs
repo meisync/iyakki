@@ -222,7 +222,11 @@ impl Flows for CoreFlows {
         }
         self.env.engine.decide(&run.0, &a.id, allow, &who(ctx), "").map_err(|m| CallError::new(ErrorCode::NotFound, "flows.no_such_approval", &m))?;
         let node = a.id.clone();
-        self.env.engine.wait_for(&run.0, Duration::from_secs(5), |r| r.nodes.get(&node).is_none_or(|n| n.state != NodeState::Waiting));
+        // the node leaves Waiting first and the run's own status follows a moment later (the engine thread sets it): answer only when the run no longer
+        // reports the question as blocking it, or when it already waits for another one, so the status given back is never the old WaitingApproval
+        self.env.engine.wait_for(&run.0, Duration::from_secs(5), |r| {
+            r.nodes.get(&node).is_none_or(|n| n.state != NodeState::Waiting) && (r.status != EngineStatus::Blocked || open_approval(r).is_some_and(|a| a.id != node))
+        });
         self.catch_up(&mut self.inner.lock().unwrap_or_else(|e| e.into_inner()));
         self.audit.line(ctx, "flows.approve", Risk::AskPerson, if allow { "allowed" } else { "denied" });
         self.status_of(run)

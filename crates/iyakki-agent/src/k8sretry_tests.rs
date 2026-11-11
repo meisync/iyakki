@@ -335,7 +335,7 @@ fn the_feed_keeps_the_last_good_list_then_shows_the_banner_and_recovers() {
     let n = f.fetches();
     t.advance(16_000);
     wait_for("recovery", || f.fetches() > n && f.listing().is_some_and(|l| l.cluster == Cluster::Ok));
-    assert!(!f.status().failing);
+    assert!(!f.status().failing, "{:?} (fetches {}, was {n})", f.status(), f.fetches());
     assert!(!k.overlapped.load(Ordering::SeqCst), "two kubectl calls never ran at once");
 }
 
