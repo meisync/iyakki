@@ -51,7 +51,7 @@ The full list is in [CHANGELOG.md](CHANGELOG.md). In short:
 * **A covered camera shows a bare black picture** with no explanation (a closed shutter on an HP laptop looked like a broken camera) (KI-082).
 * **A driver download with no network spins instead of failing** (KI-083). Cancel and retry once a network is up.
 * Secure Boot is verified in QEMU only on most machines.
-* Most feature rows are still `partial`: the matrix has a priority list and a plan ([docs/development/PARTIALS-PLAN-2026-11-10.md](docs/development/PARTIALS-PLAN-2026-11-10.md)).
+* Most feature rows are still `partial`: the matrix has a priority list and a plan (docs/development/PARTIALS-PLAN-2026-11-10.md).
 
 ## Getting it
 

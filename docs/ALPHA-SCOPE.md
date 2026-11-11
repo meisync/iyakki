@@ -8,7 +8,7 @@ tagged today as a preview for developers and testers, not for production.
 * **First real hardware.** On 2026-10-18/19 the install image (macweb variant) booted on a Mac mini 2018 (Macmini8,1, T2) from a USB SSD. Class B
   checks that passed there: boot and the boot screen, the data volume and persistent `/home`, HDMI and built-in audio (`apple-bce`), a USB
   webcam and the CAMERA app, Quick install (k3s dev cluster, Elasticsearch, DuckDB, Node.js, Python 3.13, `ffmpeg`), Claude Code and Copilot CLI
-  install and sign-in, Lemonade on the LAN, and the full web engine on Google and YouTube. Evidence per item: [ALPHA-GATE.md](../ALPHA-GATE.md) items 46 to 54.
+  install and sign-in, Lemonade on the LAN, and the full web engine on Google and YouTube. Evidence per item: ALPHA-GATE.md items 46 to 54.
 * **Still class B and open, or failing:** Wi-Fi and Bluetooth of the Mac mini 2018 (not working: Apple's firmware and `BCM.hcd` are missing);
   H.264/AAC video (not shipped on purpose); Copilot full tool use, Autopilot with external agents, tile-app publishing against a k3s store,
   the in-cluster registry one-click, Developer mode (all loopback or fakes only); Secure Boot on real hardware (verified in QEMU only); T2

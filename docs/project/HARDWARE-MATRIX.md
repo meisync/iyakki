@@ -6,8 +6,8 @@ the repository or from the coordinator's observations of 2026-10-26/27 on the T2
 Where no evidence exists the cell says `untested` and the evidence column says `none`.
 
 Related: [../HARDWARE.md](../HARDWARE.md) (what is supported, prose), [../../KNOWN-ISSUES.md](../../KNOWN-ISSUES.md),
-[RELEASE-READINESS.md](RELEASE-READINESS.md) (gap table, section 5.3 owner checklist), [BETA-CHECKLIST.md](BETA-CHECKLIST.md) (gates and the proposed
-hardware waivers), [PC-TEST-SHEET.md](PC-TEST-SHEET.md) (tonight's two PCs), [../BETA-PLAN.md](../BETA-PLAN.md) (lab H1 to H9).
+RELEASE-READINESS.md (gap table, section 5.3 owner checklist), BETA-CHECKLIST.md (gates and the proposed
+hardware waivers), [PC-TEST-SHEET.md](PC-TEST-SHEET.md) (tonight's two PCs), ../BETA-PLAN.md (lab H1 to H9).
 
 ## 0. How to read this page
 

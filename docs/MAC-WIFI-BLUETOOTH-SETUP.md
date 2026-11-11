@@ -2,7 +2,7 @@
 
 **For:** the person holding a T2 Mac (tested model: Mac mini 2018, `Macmini8,1`) that runs IYAKKI from a USB stick or disk and has no working Wi-Fi or Bluetooth. **You will get:** the in-product route (IYAKKI menu, Mac drivers: one click downloads or reads Apple's firmware and installs it), the older routes (a script on macOS, a manual route from Linux, a prompt for an AI agent), the checks that show it worked, a numbered real-device test list, and how to undo it.
 
-Decided 2026-10-20 (owner): **IYAKKI ships no Apple or Broadcom firmware.** The files are Apple's; they are copied or downloaded to your own machine at your request and stay there (never uploaded, not part of IYAKKI). The only Apple-related code IYAKKI does ship is the T2 sound driver `apple-bce` (t2linux, GPL-2.0, source in `legal-info`; `LICENSING.md`). Background: [`MAC-HARDWARE.md`](MAC-HARDWARE.md) section 6 (Bluetooth) and section 9 (driver packs); the plan is [`BETA-PLAN.md`](BETA-PLAN.md) (priority 2).
+Decided 2026-10-20 (owner): **IYAKKI ships no Apple or Broadcom firmware.** The files are Apple's; they are copied or downloaded to your own machine at your request and stay there (never uploaded, not part of IYAKKI). The only Apple-related code IYAKKI does ship is the T2 sound driver `apple-bce` (t2linux, GPL-2.0, source in `legal-info`; `LICENSING.md`). Background: [`MAC-HARDWARE.md`](MAC-HARDWARE.md) section 6 (Bluetooth) and section 9 (driver packs); the plan is `BETA-PLAN.md` (priority 2).
 
 ## What is verified and what is not
 
@@ -301,4 +301,4 @@ Store route: STORE, Drivers, the pack, Remove, restart. Direct route: remove the
 
 ## Licence and legal notes
 
-The firmware belongs to Apple and Broadcom. IYAKKI does not include it, host it or download it by itself; the scripts run on your machine at your request, on a machine you own, for that machine. This is not legal advice; the owner has a legal opinion on firmware redistribution as an open item in [`BETA-PLAN.md`](BETA-PLAN.md) section 8.
+The firmware belongs to Apple and Broadcom. IYAKKI does not include it, host it or download it by itself; the scripts run on your machine at your request, on a machine you own, for that machine. This is not legal advice; the owner has a legal opinion on firmware redistribution as an open item in `BETA-PLAN.md` section 8.

@@ -34,7 +34,7 @@ SSD (Samsung T7), with an HDMI monitor, Ethernet, a USB keyboard, mouse and webc
 by `iyakki-usb` (GPT, read-back verified), booting through GRUB on UEFI, the boot screen, the data volume and persistent `/home`, HDMI audio
 and the built-in speaker and headphone jack (through the out-of-tree `apple-bce` driver), software volume and mute, the USB webcam, the
 clock and time zone, the k3s dev cluster and the other Quick install items, Claude Code and GitHub Copilot CLI install and sign-in,
-Lemonade on the LAN, and the full web engine (Google, YouTube with VP9 video). Details: [ALPHA-GATE.md](ALPHA-GATE.md) items 46 to 54.
+Lemonade on the LAN, and the full web engine (Google, YouTube with VP9 video). Details: ALPHA-GATE.md items 46 to 54.
 
 **Machine 2: a 2020 MacBook Pro with the T2 chip (MacBookPro16,2), owner report, not in `ALPHA-GATE.md`.** Booted from a USB SSD (Samsung T7):
 keyboard and trackpad, speaker sound (through `plughw`; the shared mixer is off by default and not run on it), the GPU browser helper, YouTube autoplay and

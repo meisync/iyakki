@@ -57,7 +57,7 @@
 | [`OTHER-BASES.md`](OTHER-BASES.md) | Running on another Linux distribution, as a service, swapping the base OS |
 | [`../SECURITY.md`](../SECURITY.md) | Reporting vulnerabilities; what the alpha does not promise |
 | [`PLATFORM-SERVICES.md`](PLATFORM-SERVICES.md) | Deploying Gitea and the private store into a cluster you pick (Settings, Dev cluster, Platform services): plan, approval, backup, limits |
-| [`OWNER-CHECKLIST.md`](OWNER-CHECKLIST.md) | What only the owner can do before tagging a release, in order |
+| `OWNER-CHECKLIST.md` | What only the owner can do before tagging a release, in order |
 
 ## Build and extend
 
@@ -65,7 +65,7 @@
 |---|---|
 | [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | Build, test, style, the feature matrix and boundary rules, adding tiles/tools/skills/nodes/connectors |
 | [`../CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md) | How we work together |
-| [`PROJECT-TEAM.md`](PROJECT-TEAM.md) | The idea and requirements team, sponsors and hardware testers |
+| `PROJECT-TEAM.md` | The idea and requirements team, sponsors and hardware testers |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | One-page overview, crate map, boot flow, security model, where to extend |
 | [`../BOUNDARY.md`](../BOUNDARY.md) | Every place our code touches the base OS; the rules |
 | [`../FEATURES.md`](../FEATURES.md) | The feature matrix: status, progress and tests per feature |
@@ -102,8 +102,8 @@ hardware) · [`../Agent OS Architecture Specification.md`](<../Agent OS Architec
 | [`RELEASING.md`](RELEASING.md) | How a release is made, signed and checked |
 | [`../SUPPORT.md`](../SUPPORT.md) | Getting help |
 | [`../LICENSE`](../LICENSE) · [`../NOTICE`](../NOTICE) · [`../LICENSING.md`](../LICENSING.md) · [`LICENSES.md`](LICENSES.md) · [`../THIRD_PARTY_LICENSES.txt`](../THIRD_PARTY_LICENSES.txt) | Licences and third-party notices |
-| [`BETA-SCOPE.md`](BETA-SCOPE.md) · [`BETA-PLAN.md`](BETA-PLAN.md) | Every non-done feature row classified for the beta; the plan, risks and owner decisions |
-| [ALPHA-2-PLAN.md](ALPHA-2-PLAN.md) | What goes into 0.1.0-alpha.2: PC image and GPU, power settings, multi-repo clone, Wi-Fi/Bluetooth, fixes |
+| [`BETA-SCOPE.md`](BETA-SCOPE.md) · `BETA-PLAN.md` | Every non-done feature row classified for the beta; the plan, risks and owner decisions |
+| ALPHA-2-PLAN.md | What goes into 0.1.0-alpha.2: PC image and GPU, power settings, multi-repo clone, Wi-Fi/Bluetooth, fixes |
 | [`project/AUDIENCES-AND-SELLING-POINTS.md`](project/AUDIENCES-AND-SELLING-POINTS.md) | Who IYAKKI is for (students, developers, ops, office, home, home automation, internet automation), what each can do today, the gaps, what not to claim, and a video plan |
 | [`development/UI-OS-SPLIT-PLAN.md`](development/UI-OS-SPLIT-PLAN.md) | Approved plan: apps -> IYAKKI core -> kernel layering, `iyakki-core-api` / `-local` / `-fake`, the nine migration steps in detail (1-4 built), and the open decisions |
 | [`development/TILE-TESTING.md`](development/TILE-TESTING.md) | How to test a tile: web-bundle tile by default (scaffold, `tile_test`, `dev push --watch`); the headless `TileHarness` for Rust tiles; the dependency ratchet |

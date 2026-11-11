@@ -1,6 +1,6 @@
 # Beta scope: 1.0.0-beta.1
 
-Derived from `FEATURES.md` on 2026-10-19 (done 286 · partial 205 · planned 53 · blocked 3 · deprecated 1 · total 548). Every one of the 262 rows that is not `done` is classified below, once. The format follows [`ALPHA-SCOPE.md`](ALPHA-SCOPE.md). The plan that uses this list is [`BETA-PLAN.md`](BETA-PLAN.md).
+Derived from `FEATURES.md` on 2026-10-19 (done 286 · partial 205 · planned 53 · blocked 3 · deprecated 1 · total 548). Every one of the 262 rows that is not `done` is classified below, once. The format follows [`ALPHA-SCOPE.md`](ALPHA-SCOPE.md). The plan that uses this list is `BETA-PLAN.md`.
 
 The classification was made from each row's Feature and Notes text. Where a Notes text was long, the work sentence is a short reading of it and the row itself is the authority; whoever picks up a row reads its Notes first. Rows on the lab list as 'live model' run against a local model (qwen3:8b class) unless the row says otherwise.
 
@@ -323,7 +323,7 @@ Hardware and service legend used in class B and C:
 
 ## Owner decisions of 2026-10-20 that change this list
 
-* Beta priorities, in order: (1) boot problems, (2) Wi-Fi and Bluetooth, (3) the store update framework (updates, ratings, comments) and upgrade compatibility. Rows F-BOOT-14, F-BOOT-25/26, F-PKG-11, F-NET-02/05/07/10/11 and F-DRIVERS-03 are the first two; F-APPS-05 (ratings, moved from D to A), F-APPSTORE-23 and F-PKG-06 serve the third. The work that has no row yet (versioned settings schemas, compatibility matrix, migration wizard, `iyakki-usb --update`, update of all package kinds) is workstream (j) of [`BETA-PLAN.md`](BETA-PLAN.md); rows for it are added to FEATURES.md by whoever owns that file.
+* Beta priorities, in order: (1) boot problems, (2) Wi-Fi and Bluetooth, (3) the store update framework (updates, ratings, comments) and upgrade compatibility. Rows F-BOOT-14, F-BOOT-25/26, F-PKG-11, F-NET-02/05/07/10/11 and F-DRIVERS-03 are the first two; F-APPS-05 (ratings, moved from D to A), F-APPSTORE-23 and F-PKG-06 serve the third. The work that has no row yet (versioned settings schemas, compatibility matrix, migration wizard, `iyakki-usb --update`, update of all package kinds) is workstream (j) of `BETA-PLAN.md`; rows for it are added to FEATURES.md by whoever owns that file.
 * H.264/AAC: no codec is shipped; see BETA-PLAN section 10 (F-RADIO-03, F-BROW-50).
 * Private store delete, repair and reinstall went into the alpha; no row of this scope covers it, so no row moved (BETA-PLAN section 9).
 

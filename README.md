@@ -449,7 +449,7 @@ The full, grouped map is [`docs/INDEX.md`](docs/INDEX.md). The core files:
 | [`docs/STORE.md`](docs/STORE.md) · [`docs/APP-AUTHORING.md`](docs/APP-AUTHORING.md) | Signed packages, the private store, several stores and the portal; making and publishing apps |
 | [`docs/ZRAM-AND-INSTALL.md`](docs/ZRAM-AND-INSTALL.md) · [`docs/HARDWARE.md`](docs/HARDWARE.md) | Compressed swap and the on-device installer; which machines run it |
 | [`docs/INSTALLER.md`](docs/INSTALLER.md) | Install next to another system: free space, chosen partitions, dual boot, the plan file, boot-menu install mode, the window installer, recovery |
-| [`docs/OWNER-CHECKLIST.md`](docs/OWNER-CHECKLIST.md) · [`ALPHA-GATE.md`](ALPHA-GATE.md) | What the owner must do before tagging; the release gate with evidence |
+| `docs/OWNER-CHECKLIST.md` · `ALPHA-GATE.md` | What the owner must do before tagging; the release gate with evidence |
 | [`docs/DASHBOARD.md`](docs/DASHBOARD.md) | The DASH tile: connectors, the security model, how to add a connector, why DuckDB runs as a command |
 
 ## Features in more detail
@@ -633,4 +633,4 @@ IYAKKI contributors. You may use, change and redistribute it for any purpose, in
 * Touching the base OS from a new place needs a row in `BOUNDARY.md` in the same change (a test enforces it).
 * A feature is not finished until it has a row in `FEATURES.md` and tests that exercise it.
 * Never write to a drive without the person confirming its name and size; destructive actions always ask first.
-* The people behind the idea, the sponsors and the hardware testers: [`docs/PROJECT-TEAM.md`](docs/PROJECT-TEAM.md).
+* The people behind the idea, the sponsors and the hardware testers: `docs/PROJECT-TEAM.md`.
