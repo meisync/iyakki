@@ -248,10 +248,10 @@ fn the_ide_asks_for_frames_only_while_a_job_runs() {
     assert!(running >= baseline + 15 && running <= baseline + 45, "about one frame in three while a job runs: {running} (baseline {baseline})");
     // stopped: one last frame to draw the result, then back to the baseline
     w.cx.services.jobs.stop(&w.cx.session.user, &id, Duration::from_secs(1)).unwrap();
-    for _ in 0..40 {
-        app.handle(&Event::Tick, &w.cx);
-        let _ = app.wants_redraw();
-        std::thread::sleep(Duration::from_millis(30));
+    // (the last frame and the reading of the result take longer on a busy machine than a fixed pause: wait for a whole quiet second, as after the opening)
+    let settled = Instant::now();
+    while count(&mut app, 30) > 2 {
+        assert!(settled.elapsed() < Duration::from_secs(60), "the IDE never went quiet after the job ended");
     }
     let after = count(&mut app, 90);
     assert!(after <= baseline + 1, "back to the baseline once the job has ended: {after} (baseline {baseline})");
