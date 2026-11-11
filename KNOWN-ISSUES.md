@@ -409,6 +409,7 @@ other USB cameras, sound devices and drives. `docs/BOOT-TEST.md` is the guide an
 * KI-081 **Ctrl+Cmd+Q does not lock the screen in the Mac profile (found 2026-11-10, alpha2c on a Mac).** Ctrl+Cmd+L locks, Ctrl+Cmd+Q does nothing; the unit test passes on a fake key stream. Cause not found (planned: `docs/project/ALPHA-3-PLAN.md`, item 8). Use Ctrl+Cmd+L or the Power menu.
 * KI-082 **A covered camera shows a bare black picture (found 2026-11-10, HP Pavilion 16).** With the laptop's physical privacy shutter closed, the Cameras tile found the camera, opened it and showed a black picture and a crossed-out icon, with no message and nothing in the log. Opening the shutter fixed it. Planned: say why the picture is black (alpha.3 item 11).
 * KI-083 **A driver download with no network spins for a long time instead of failing (found 2026-11-10).** Planned: fail within seconds with a clear message, Retry and Cancel (alpha.3 item 10). Until then, cancel it and retry when the network is up.
+* KI-084 **A "firmware missing" message for Bluetooth on the MacBook Pro 14,1 while Bluetooth works (found 2026-11-10).** Tether and audio work; the message names a missing firmware file that the chip does not need for these. Planned: make the text follow the real state (alpha.3 item 12). Where exactly the message is shown was not recorded; a photo of the screen would help.
 
 ## Appendix: every row that is not done
 
