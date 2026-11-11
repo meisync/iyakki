@@ -137,6 +137,9 @@ def draw_emblem(wall=None):
                 pts_l.append((left, cy + dy))
                 pts_r.append((right, cy + dy))
             window = poly_mask(pts_l + pts_r[::-1])
+            # keep the slot inside its own arrow head, a few pixels in from the edge (it ran over the border near the tips)
+            inside = Image.fromarray((outer * 255).astype(np.uint8)).filter(ImageFilter.MinFilter(9)).filter(ImageFilter.GaussianBlur(1.2))
+            window = window * (np.asarray(inside).astype(np.float32) / 255.0)
             glow_edge = Image.fromarray((window * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(3))
             rim = np.clip(np.asarray(glow_edge).astype(np.float32) / 255.0 - window * 0.6, 0, 1)
             over(canvas, np.full((H, W, 3), 25.0, np.float32), window)  # the dark wall of the slot
