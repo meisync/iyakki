@@ -36,6 +36,9 @@ The full list is in [CHANGELOG.md](CHANGELOG.md). In short:
 | Lock screen from the Power menu | Mac mini 2018 | works; the keyboard chords are not tried |
 | Power menu for a plain user | Mac mini 2018 | works |
 | Two USB cameras live | Mac mini 2018 | works |
+| The final alpha.2 image (build alpha2c, from one T7 stick) | Mac mini 2018, MacBook Pro 14,1, Lenovo laptop, HP Pavilion 16 (owner, 2026-11-10) | runs on all four; the problems found are listed under Known limits |
+| New logo on the boot menu, splash and sign-in screen | Mac mini 2018 (owner saw it) | works |
+| Camera on the HP laptop | HP Pavilion 16 | works; a closed privacy shutter gave a black picture with no explanation (fix planned) |
 | Everything else in the changelog | tests and fakes | see the notes on each row in FEATURES.md |
 
 ## Known limits
@@ -43,6 +46,10 @@ The full list is in [CHANGELOG.md](CHANGELOG.md). In short:
 * The wake phrase has no real-voice measurement; the only model is synthetic. Leave it off.
 * The encrypted home is a first version: whole-disk encryption, TPM sealing and exporting the container are not built.
 * Bluetooth scan results arrive when the scan ends.
+* **Mac profile: Ctrl+Cmd+Q does not lock the screen** (Ctrl+Cmd+L does) (KI-081). Use Ctrl+Cmd+L or the Power menu.
+* **The camera light can stay on after leaving the Cameras tile** (seen on a Lenovo laptop) (KI-080). Sign out or switch off if the light stays on.
+* **A covered camera shows a bare black picture** with no explanation (a closed shutter on an HP laptop looked like a broken camera) (KI-082).
+* **A driver download with no network spins instead of failing** (KI-083). Cancel and retry once a network is up.
 * Secure Boot is verified in QEMU only on most machines.
 * Most feature rows are still `partial`: the matrix has a priority list and a plan ([docs/development/PARTIALS-PLAN-2026-11-10.md](docs/development/PARTIALS-PLAN-2026-11-10.md)).
 
