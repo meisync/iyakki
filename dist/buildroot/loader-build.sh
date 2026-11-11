@@ -27,7 +27,7 @@ if command -v rustup >/dev/null 2>&1 && ! rustup target list --installed 2>/dev/
   rustup target add x86_64-unknown-uefi >&2 || die "could not add the Rust target x86_64-unknown-uefi (rustup target add x86_64-unknown-uefi)"
 fi
 # the config file name is compiled in: boot-loader-stage.sh refuses a loader built without it
-( cd "$SUB" && BOOT_CONFIG_PATH=/EFI/iyakki-boot/boot.cfg cargo build --release --locked -p boot-uefi --target x86_64-unknown-uefi >&2 ) || die "the loader did not build (see the cargo output above)"
+( cd "$SUB" && BOOT_CONFIG_PATH=/EFI/iyakki-boot/boot.cfg cargo build --release --locked -p boot-uefi --target x86_64-unknown-uefi --target-dir "$SUB/target" >&2 ) || die "the loader did not build (see the cargo output above)"
 [ -s "$OUT" ] || die "the build finished but $OUT is missing"
 grep -aq '/EFI/iyakki-boot/boot\.cfg' "$OUT" || die "$OUT was built without BOOT_CONFIG_PATH"
 echo "$OUT"
