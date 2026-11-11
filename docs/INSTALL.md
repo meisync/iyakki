@@ -1,11 +1,11 @@
 # Installing IYAKKI
 
-**For:** anyone who downloaded IYAKKI 0.1.0-alpha.1 and wants to run it.
+**For:** anyone who downloaded IYAKKI (0.1.0-alpha.2) and wants to run it.
 **You will get:** IYAKKI running in one of three ways (a desktop window, a USB stick, a virtual machine), plus the
 upgrade, backup and recovery steps.
 
-> **Alpha.** The USB and VM paths were tested in QEMU only (BIOS and UEFI without Secure Boot). Nothing has been booted
-> on real hardware yet. See [`../KNOWN-ISSUES.md`](../KNOWN-ISSUES.md) and [`BOOT-TEST.md`](BOOT-TEST.md).
+> **Alpha.** The USB and VM paths were tested in QEMU, and the USB image has booted on four real computers (see the
+> README and the release notes for what was tried where). See [`../KNOWN-ISSUES.md`](../KNOWN-ISSUES.md) and [`BOOT-TEST.md`](BOOT-TEST.md).
 > Zram (compressed memory) and the on-device installer are covered in [`ZRAM-AND-INSTALL.md`](ZRAM-AND-INSTALL.md);
 > hardware notes are in [`HARDWARE.md`](HARDWARE.md). Both are written by the release team and may land after this file.
 
@@ -45,7 +45,8 @@ only **virtual disks**, never your real drives.
 **Run**
 
 ```
-git clone <repository> && cd <repository>
+git clone --recursive <repository> && cd <repository>   # --recursive fetches the boot loader (iyakki-boot); only image builds need it
+# already cloned without it?  git submodule update --init
 ./run.sh window            # builds crates/iyakki-gui in release mode and opens the window
 ./run.sh window --real-disks   # also show this computer's real drives in Settings -> Storage (careful)
 ./run.sh disk add 8G | list | rm vda   # make or remove the window's virtual disks
