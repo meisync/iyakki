@@ -7,7 +7,9 @@ and how to report problems. Please read the [Code of Conduct](CODE_OF_CONDUCT.md
 ## Build and test
 
 ```
-cargo build --workspace                 # needs Rust (rustup); libasound2-dev libudev-dev pkg-config for the hardware features
+cargo build --workspace                 # needs Rust (rustup); libasound2-dev libudev-dev pkg-config for the hardware features. Clone with `git clone --recursive`
+                                        # (the boot loader is a submodule). The desktop window (`./run.sh window`, crates/iyakki-gui, a separate workspace) also needs
+                                        # the desktop libraries: Wayland or X11, libxkbcommon and OpenGL (on Debian/Ubuntu: libwayland-dev libxkbcommon-dev libx11-dev libgl1-mesa-dev)
 cargo test --workspace                  # the whole automated suite (a few thousand tests)
 ./run.sh test                           # the same, plus a build of the desktop window (crates/iyakki-gui, a separate workspace)
 cargo deny check licenses sources       # licence audit (also run in crates/iyakki-gui)
