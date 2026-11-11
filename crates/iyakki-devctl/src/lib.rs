@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 
 pub mod bnep;
+mod oscompat;
 pub mod bt_pan;
 pub mod sbc;
 pub mod sbc_design;

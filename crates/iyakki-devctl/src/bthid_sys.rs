@@ -64,7 +64,7 @@ fn new_l2cap() -> io::Result<OwnedFd> {
 /// An L2CAP socket with the given security level (0: none, as the service discovery channel needs; 2: encrypted and authenticated).
 fn new_l2cap_level(level: u8) -> io::Result<OwnedFd> {
     // SAFETY: plain socket call; the descriptor is owned right away
-    let fd = unsafe { libc::socket(AF_BLUETOOTH, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK, BTPROTO_L2CAP) };
+    let fd = unsafe { libc::socket(AF_BLUETOOTH, libc::SOCK_SEQPACKET | crate::oscompat::SOCK_CLOEXEC | crate::oscompat::SOCK_NONBLOCK, BTPROTO_L2CAP) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -217,7 +217,7 @@ impl Listener {
         let mut sa = [0u8; 14];
         let mut len = sa.len() as u32;
         // SAFETY: sa and len are valid for the kernel to fill
-        let fd = unsafe { libc::accept4(self.fd.as_raw_fd(), sa.as_mut_ptr() as *mut libc::sockaddr, &mut len, libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK) };
+        let fd = unsafe { crate::oscompat::accept4(self.fd.as_raw_fd(), sa.as_mut_ptr() as *mut libc::sockaddr, &mut len, crate::oscompat::SOCK_CLOEXEC | crate::oscompat::SOCK_NONBLOCK) };
         if fd < 0 {
             return None;
         }
@@ -308,8 +308,7 @@ impl Source for Mux {
 
 fn random_pin() -> String {
     let mut b = [0u8; 4];
-    // SAFETY: b is valid for 4 bytes
-    unsafe { libc::getrandom(b.as_mut_ptr() as *mut libc::c_void, b.len(), 0) };
+    crate::oscompat::random_bytes(&mut b);
     format!("{:06}", u32::from_le_bytes(b) % 1_000_000)
 }
 

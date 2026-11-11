@@ -24,8 +24,8 @@ use crate::btview::Controller;
 /// The TAP interface of the connection.
 pub const TAP_NAME: &str = crate::BT_PAN_IFACE;
 
-const TUNSETIFF: libc::Ioctl = 0x4004_54ca;
-const SIOCGIFHWADDR: libc::Ioctl = 0x8927;
+const TUNSETIFF: crate::oscompat::Ioctl = 0x4004_54ca;
+const SIOCGIFHWADDR: crate::oscompat::Ioctl = 0x8927;
 const IFF_TAP: i16 = 0x0002;
 const IFF_NO_PI: i16 = 0x1000;
 const CONNECT_SECS: u64 = 15;
@@ -158,7 +158,7 @@ pub fn connect_reason(errno: i32) -> String {
         e if e == libc::EACCES => "The phone does not trust this computer any more. Forget the phone here and forget this computer in the phone's Bluetooth settings, then pair again.".into(),
         e if e == libc::EHOSTUNREACH || e == libc::ETIMEDOUT || e == libc::EHOSTDOWN => "The phone did not answer. Unlock it, switch its Bluetooth on and bring it closer.".into(),
         e if e == libc::ECONNRESET || e == libc::ECONNABORTED => "The phone dropped the connection while connecting. Try again.".into(),
-        e if e == libc::ENETDOWN || e == libc::ENODEV || e == libc::EBADFD || e == libc::ENOPROTOOPT || e == libc::EAFNOSUPPORT => "Bluetooth is off or this computer has no Bluetooth controller. Power the controller on in Settings -> Bluetooth.".into(),
+        e if e == libc::ENETDOWN || e == libc::ENODEV || e == crate::oscompat::EBADFD || e == libc::ENOPROTOOPT || e == libc::EAFNOSUPPORT => "Bluetooth is off or this computer has no Bluetooth controller. Power the controller on in Settings -> Bluetooth.".into(),
         e if e == libc::EPERM => "This needs administrator rights.".into(),
         e => format!("Could not connect to the phone ({}).", io::Error::from_raw_os_error(e)),
     }
@@ -260,7 +260,7 @@ fn hw_address(name: &str) -> Option<Mac> {
     req[..name.len().min(15)].copy_from_slice(&name.as_bytes()[..name.len().min(15)]);
     // SAFETY: a datagram socket used for one request; req is the size of struct ifreq
     unsafe {
-        let s = libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0);
+        let s = libc::socket(libc::AF_INET, libc::SOCK_DGRAM | crate::oscompat::SOCK_CLOEXEC, 0);
         if s < 0 {
             return None;
         }

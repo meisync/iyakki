@@ -239,7 +239,7 @@ fn run_session(mut sig: L2Sock, media_rx: Receiver<L2Sock>, name: &str, stop: &A
             fds.push(libc::pollfd { fd: m.raw(), events: libc::POLLIN, revents: 0 });
         }
         // SAFETY: valid pollfds for their count
-        unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as u64, 250) };
+        unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, 250) };
         if fds[0].revents != 0 {
             // everything that is waiting
             loop {

@@ -94,7 +94,7 @@ pub fn connect_reason(errno: i32) -> String {
             "the device refused: it may have forgotten this computer. Choose Forget, then pair it again".into()
         }
         e if e == libc::ECONNRESET || e == libc::ECONNABORTED => "the device dropped the connection while connecting; try again".into(),
-        e if e == libc::ENETDOWN || e == libc::ENODEV || e == libc::EBADFD || e == libc::ENOPROTOOPT => {
+        e if e == libc::ENETDOWN || e == libc::ENODEV || e == crate::oscompat::EBADFD || e == libc::ENOPROTOOPT => {
             "Bluetooth is off or has no controller: power the controller on in Settings, Bluetooth".into()
         }
         e if e == libc::EPERM => "this needs administrator rights".into(),

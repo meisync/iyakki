@@ -211,7 +211,7 @@ impl ControlSocket {
             channel: u16,
         }
         unsafe {
-            let fd = libc::socket(AF_BLUETOOTH, libc::SOCK_RAW | libc::SOCK_CLOEXEC, BTPROTO_HCI);
+            let fd = libc::socket(AF_BLUETOOTH, libc::SOCK_RAW | crate::oscompat::SOCK_CLOEXEC, BTPROTO_HCI);
             if fd < 0 {
                 return Err(io::Error::last_os_error());
             }
