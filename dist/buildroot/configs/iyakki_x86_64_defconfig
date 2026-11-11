@@ -61,3 +61,10 @@ BR2_ROOTFS_POST_SCRIPT_ARGS="-c $(BR2_EXTERNAL_IYAKKI_PATH)/board/iyakki/genimag
 BR2_PACKAGE_HOST_DOSFSTOOLS=y
 BR2_PACKAGE_HOST_GENIMAGE=y
 BR2_PACKAGE_HOST_MTOOLS=y
+
+# ---- git (F-GIT-01): the Git tile and the boot self-test (crates/iyakki-agent/src/pathcheck.rs) need the git program in EVERY image, not only the web one.
+# A separate GPL-2.0 program run as a process (never linked); HTTPS through git-remote-http(s) (libcurl on OpenSSL); SSH through iyakki-git-ssh.
+BR2_PACKAGE_GIT=y
+BR2_PACKAGE_LIBCURL=y
+BR2_PACKAGE_LIBCURL_OPENSSL=y
+BR2_PACKAGE_IYAKKI_GIT_SSH=y
