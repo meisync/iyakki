@@ -81,7 +81,7 @@ fi
 # 4. one commit
 cd "$OUT"
 git init -q -b main
-if [ -n "${SUB_SHA:-}" ] && [ -f .gitmodules ]; then git update-index --add --cacheinfo "160000,$SUB_SHA,iyakki-boot"; fi
 git -c user.name="$NAME" -c user.email="$EMAIL" add -A
+if [ -n "${SUB_SHA:-}" ] && [ -f .gitmodules ]; then git update-index --add --cacheinfo "160000,$SUB_SHA,iyakki-boot"; fi
 git -c user.name="$NAME" -c user.email="$EMAIL" commit -q -m "$MSG"
 echo "export-public: OK. One commit $(git rev-parse --short HEAD) by $NAME in $OUT. Nothing was pushed."
