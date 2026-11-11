@@ -28,8 +28,9 @@ fn the_files_a_release_needs_exist() {
     }
     let sec = std::fs::read_to_string(root().join("SECURITY.md")).unwrap();
     assert!(sec.contains("Reporting a vulnerability"));
-    // the mailbox is either still the marked placeholder or a real address, never silently empty
-    assert!(sec.contains("OWNER: fill in") || sec.contains('@'));
+    // the way to report is either still the marked placeholder, a real address, or the repository host's private reporting (decided 2026-11-10:
+    // no personal address in the public files), never silently empty
+    assert!(sec.contains("OWNER: fill in") || sec.contains('@') || sec.contains("private vulnerability reporting"));
 }
 
 #[test]
