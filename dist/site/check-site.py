@@ -65,7 +65,7 @@ for l in rows:
     if c[4] == "deprecated":
         continue
     a, b = c[6].split("/")
-    live.append((c[1].split("-")[1], int(a), int(b), c[7]))
+    live.append((c[1].split("-")[1], int(a), int(b), c[7], c[4]))
 n = len(live)
 half = lambda xs: (2 * sum(xs) + n) // (2 * n) if xs is not None else 0
 want = {"impl": half([r[1] for r in live]), "test": half([r[2] for r in live]), "full-impl": sum(r[1] == 100 for r in live), "full-test": sum(r[2] == 100 for r in live),
@@ -83,7 +83,7 @@ for r in live:
 for k, v in areas.items():
     mm = re.search(r'<tr data-area="%s">(.*?)</tr>' % k, prog, re.S)
     got = re.findall(r'<td class="n">(\d+)', mm.group(1)) if mm else None
-    exp = [str(len(v)), str((2 * sum(r[1] for r in v) + len(v)) // (2 * len(v))), str((2 * sum(r[2] for r in v) + len(v)) // (2 * len(v))), str(sum(r[3] == "needed" for r in v)), str(sum(r[3].startswith("passed") for r in v))]
+    exp = [str(len(v)), str(sum(r[4] == "planned" for r in v)), str((2 * sum(r[1] for r in v) + len(v)) // (2 * len(v))), str((2 * sum(r[2] for r in v) + len(v)) // (2 * len(v))), str(sum(r[3] == "needed" for r in v)), str(sum(r[3].startswith("passed") for r in v))]
     ok(got == exp, "area %s row differs: page %s, FEATURES.md %s" % (k, got, exp))
 ok(len(re.findall(r'<tr data-area=', prog)) == len(areas), "progress.html lists a different set of areas")
 ok("<progress" not in prog and "<script" not in prog.replace('application/ld+json', ''), "progress page must stay free of script")

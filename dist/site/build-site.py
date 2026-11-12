@@ -17,6 +17,12 @@ REPO = "https://github.com/meisync/iyakki"
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 SITE = os.path.join(ROOT, "site")
 STATUSES = ["done", "partial", "planned", "blocked", "deprecated"]
+# what a person reads: a planned row has not been started
+SHOWN = {"planned": "not started"}
+
+
+def shown(s):
+    return SHOWN.get(s, s)
 
 
 def read(p):
@@ -335,10 +341,10 @@ def page_progress(ver, rows, rel_file):
         by_phase.setdefault(ph, {s: 0 for s in STATUSES})[st] += 1
         by_area.setdefault(fid.split("-")[1], {s: 0 for s in STATUSES})[st] += 1
     snaps = [snapshot("docs/ALPHA-SCOPE.md", "Derived for alpha.1"), snapshot("docs/BETA-SCOPE.md", "Beta scope")]
-    th = "".join('<th scope="col" class="n">%s</th>' % s for s in STATUSES)
+    th = "".join('<th scope="col" class="n">%s</th>' % shown(s) for s in STATUSES)
     thead = '<tr><th scope="col">%%s</th>%s<th scope="col" class="n">total</th></tr>' % th
-    stats = "".join('<div class="stat"><b data-status="%s">%d</b>%s</div>' % (s, counts[s], s) for s in STATUSES) + '<div class="stat"><b data-status="total">%d</b>total</div>' % total
-    key = "".join('<li><i class="s-%s"></i>%s</li>' % (s, s) for s in STATUSES)
+    stats = "".join('<div class="stat"><b data-status="%s">%d</b>%s</div>' % (s, counts[s], shown(s)) for s in STATUSES) + '<div class="stat"><b data-status="total">%d</b>total</div>' % total
+    key = "".join('<li><i class="s-%s"></i>%s</li>' % (s, shown(s)) for s in STATUSES)
     phase_rows = "".join(status_row("%s %s" % (esc(k), esc(names.get(k, ""))), by_phase[k], sum(by_phase[k].values()), ' data-phase="%s"' % esc(k))
                          for k in sorted(by_phase, key=lambda k: int(k[1:])))
     area_rows = "".join(status_row("<code>%s</code>" % esc(k), v, sum(v.values())) for k, v in sorted(by_area.items()))
@@ -350,8 +356,8 @@ def page_progress(ver, rows, rel_file):
         if r[2] != "deprecated":
             areas.setdefault(r[0].split("-")[1], []).append(r)
     area_impl_rows = "".join(
-        '<tr data-area="%s"><th scope="row"><code>%s</code></th><td class="n">%d</td><td class="n">%d%%</td><td class="n">%d%%</td><td class="n">%d</td><td class="n">%d</td></tr>' % (
-            esc(k), esc(k), len(v), avg([r[3] for r in v]), avg([r[4] for r in v]), sum(1 for r in v if r[5] == "needed"), sum(1 for r in v if r[5].startswith("passed")))
+        '<tr data-area="%s"><th scope="row"><code>%s</code></th><td class="n">%d</td><td class="n">%d</td><td class="n">%d%%</td><td class="n">%d%%</td><td class="n">%d</td><td class="n">%d</td></tr>' % (
+            esc(k), esc(k), len(v), sum(1 for r in v if r[2] == "planned"), avg([r[3] for r in v]), avg([r[4] for r in v]), sum(1 for r in v if r[5] == "needed"), sum(1 for r in v if r[5].startswith("passed")))
         for k, v in sorted(areas.items()))
     n_ki, top = known_issues()
     ki = "".join("<li><strong>%s</strong> %s.</li>" % (esc(a), esc(b)) for a, b in top)
@@ -392,7 +398,7 @@ Most rows are <code>partial</code>: some of it works and the notes in the matrix
 
 <h2 id="areas">By feature area</h2>
 <div class="tw"><table><caption>Averages over the features of each area that are not deprecated. Area codes are the middle part of an ID such as F-CORE-01.</caption>
-<thead><tr><th scope="col">Area</th><th scope="col" class="n">Features</th><th scope="col" class="n">Impl</th><th scope="col" class="n">Test</th><th scope="col" class="n">Manual needed</th><th scope="col" class="n">Manual passed</th></tr></thead>
+<thead><tr><th scope="col">Area</th><th scope="col" class="n">Features</th><th scope="col" class="n">Not started</th><th scope="col" class="n">Impl</th><th scope="col" class="n">Test</th><th scope="col" class="n">Manual needed</th><th scope="col" class="n">Manual passed</th></tr></thead>
 <tbody>%(area_impl_rows)s</tbody></table></div>
 
 <h2 id="now">Status counts now (%(ver)s)</h2>
