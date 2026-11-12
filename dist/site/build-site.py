@@ -8,7 +8,7 @@ docs/ALPHA-SCOPE.md and docs/BETA-SCOPE.md (two earlier snapshots), SECURITY.md.
 stylesheet, no script, no font, no tracker. The social card is drawn with the repository's own logo code (dist/brand/draw-logo.py).
 dist/site/check-site.py proves the page counts equal FEATURES.md.
 """
-import html, importlib.util, json, os, re
+import datetime, html, importlib.util, json, os, re
 
 # ---- the ONE place that names the public address (change here when the real Pages address is known) ----
 BASE = "https://meisync.github.io/iyakki/"
@@ -38,8 +38,24 @@ def parse_features():
         fid, phase, status = c[0], c[2], c[3]
         if status not in STATUSES:
             raise SystemExit("unreadable status in row %s: %s" % (fid, status))
-        rows.append((fid, phase, status))
+        m = re.fullmatch(r"(\d+)/(\d+)", c[5])
+        if not m:
+            raise SystemExit("unreadable Impl/Test in row %s: %s" % (fid, c[5]))
+        rows.append((fid, phase, status, int(m.group(1)), int(m.group(2)), c[6]))
     return rows
+
+
+def avg(vals):
+    """Rounded half up, in integers (check-site.py does the same by its own code)."""
+    return (2 * sum(vals) + len(vals)) // (2 * len(vals)) if vals else 0
+
+
+def metrics(rows):
+    live = [r for r in rows if r[2] != "deprecated"]
+    return dict(live=len(live), impl=avg([r[3] for r in live]), test=avg([r[4] for r in live]),
+                full_impl=sum(1 for r in live if r[3] == 100), full_test=sum(1 for r in live if r[4] == 100),
+                passed=sum(1 for r in live if r[5].startswith("passed")), needed=sum(1 for r in live if r[5] == "needed"),
+                failed=sum(1 for r in live if r[5].startswith("failed")))
 
 
 def phase_names():
@@ -122,6 +138,12 @@ th{background:var(--card)}
 .bar{display:flex;height:1.4rem;border-radius:4px;overflow:hidden;border:1px solid var(--line);margin:.5rem 0 .3rem}
 .bar span{display:block;height:100%}
 .s-done{background:var(--done)}.s-partial{background:var(--partial)}.s-planned{background:var(--planned)}.s-blocked{background:var(--blocked)}.s-deprecated{background:var(--deprecated)}
+.meter{margin:1rem 0}.meter .top{display:flex;justify-content:space-between;gap:1rem;font-weight:700}.meter .top span{font-variant-numeric:tabular-nums}
+.track{height:1.5rem;border-radius:4px;border:1px solid var(--line);background:var(--card);overflow:hidden}
+.fill{display:block;height:100%}.fill.fi{background:var(--planned)}.fill.ft{background:var(--done)}
+.meter p{margin:.3rem 0 0;color:var(--mut);font-size:.95rem}
+dl.legend{display:grid;grid-template-columns:max-content 1fr;gap:.3rem 1rem;margin:.6rem 0}dl.legend dt{font-weight:700}dl.legend dd{margin:0}
+@media (max-width:520px){dl.legend{grid-template-columns:1fr}}
 .key{display:flex;flex-wrap:wrap;gap:.3rem 1.2rem;list-style:none;padding:0;margin:.3rem 0 1rem}
 .key i{display:inline-block;width:.9rem;height:.9rem;border-radius:2px;margin-right:.35rem;vertical-align:-.1rem}
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(7rem,1fr));gap:.8rem;margin:1rem 0}
@@ -193,13 +215,13 @@ EXP = '<span class="tag">experimental</span>'
 
 
 # ---------------------------------------------------------------- index
-def page_index(ver, rel_file, rel_date, counts, total):
+def page_index(ver, rel_file, rel_date, counts, total, mt):
     body = """
 <h1>IYAKKI: an operating system built for AI agents</h1>
 <p class="lead">A small, memory-safe operating system written in Rust and WebAssembly, built around an AI assistant that is allowed to <em>do</em> things:
 safely, visibly and only with your permission.</p>
 <div class="note"><strong>Alpha (%(ver)s%(date)s).</strong> A preview for developers and testers, <strong>not for production</strong>. The installer erases the whole drive you pick.
-Many features are partial (%(partial)d of %(total)d rows in the feature matrix) and data formats are not promised to stay stable.
+Many features are partial (%(partial)d of %(total)d rows in the feature matrix; on average %(impl)d%% is written and %(test)d%% is proven, see the progress page) and data formats are not promised to stay stable.
 Read the <a href="%(repo)s/blob/HEAD/KNOWN-ISSUES.md">known issues</a> first.</div>
 <div class="btns">
 <a class="btn primary" href="%(repo)s/releases">Get the releases</a>
@@ -271,7 +293,7 @@ the known issues say what is unproven. Secure Boot is verified in QEMU only on m
 <li><a href="%(repo)s/blob/HEAD/docs/ARCHITECTURE.md">Architecture</a> · <a href="%(repo)s/blob/HEAD/docs/INDEX.md">All documentation</a> · <a href="%(repo)s/blob/HEAD/CHANGELOG.md">Changelog</a></li>
 <li><a href="progress.html">Progress and roadmap</a> · <a href="privacy.html">Privacy and security</a> · <a href="%(repo)s/blob/HEAD/CONTRIBUTING.md">Contributing</a></li>
 </ul>
-""" % dict(ver=esc(ver), date=(", " + rel_date) if rel_date else "", partial=counts["partial"], total=total, repo=REPO, rel=rel_file, exp=EXP)
+""" % dict(ver=esc(ver), date=(", " + rel_date) if rel_date else "", partial=counts["partial"], total=total, impl=mt["impl"], test=mt["test"], repo=REPO, rel=rel_file, exp=EXP)
     desc = "IYAKKI is an AI-first desktop operating system written in Rust and WebAssembly: an assistant that can act on your computer under a permission model, with approvals and a tamper-evident ledger. Apache-2.0 alpha."
     ld = {
         "@context": "https://schema.org",
@@ -309,7 +331,7 @@ def page_progress(ver, rows, rel_file):
     counts = {s: sum(1 for r in rows if r[2] == s) for s in STATUSES}
     names = phase_names()
     by_phase, by_area = {}, {}
-    for fid, ph, st in rows:
+    for fid, ph, st, *_ in rows:
         by_phase.setdefault(ph, {s: 0 for s in STATUSES})[st] += 1
         by_area.setdefault(fid.split("-")[1], {s: 0 for s in STATUSES})[st] += 1
     snaps = [snapshot("docs/ALPHA-SCOPE.md", "Derived for alpha.1"), snapshot("docs/BETA-SCOPE.md", "Beta scope")]
@@ -322,6 +344,15 @@ def page_progress(ver, rows, rel_file):
     area_rows = "".join(status_row("<code>%s</code>" % esc(k), v, sum(v.values())) for k, v in sorted(by_area.items()))
     snap_rows = "".join(status_row("%s, %s" % (esc(s["label"]), s["date"]), s["counts"], s["total"]) for s in snaps)
     snap_rows += status_row("<strong>Now</strong> (FEATURES.md)", counts, total, ' data-now="1"')
+    mt = metrics(rows)
+    areas = {}
+    for r in rows:
+        if r[2] != "deprecated":
+            areas.setdefault(r[0].split("-")[1], []).append(r)
+    area_impl_rows = "".join(
+        '<tr data-area="%s"><th scope="row"><code>%s</code></th><td class="n">%d</td><td class="n">%d%%</td><td class="n">%d%%</td><td class="n">%d</td><td class="n">%d</td></tr>' % (
+            esc(k), esc(k), len(v), avg([r[3] for r in v]), avg([r[4] for r in v]), sum(1 for r in v if r[5] == "needed"), sum(1 for r in v if r[5].startswith("passed")))
+        for k, v in sorted(areas.items()))
     n_ki, top = known_issues()
     ki = "".join("<li><strong>%s</strong> %s.</li>" % (esc(a), esc(b)) for a, b in top)
     body = """
@@ -329,9 +360,43 @@ def page_progress(ver, rows, rel_file):
 <p class="lead">Generated from the project's feature matrix, <a href="%(repo)s/blob/HEAD/FEATURES.md"><code>FEATURES.md</code></a>: one row per feature, each with a status and the tests that prove it.
 The numbers below are read from that file by <code>dist/site/build-site.py</code>; they are not typed by hand.</p>
 <div class="note">The matrix has no per-release column, so there is no honest count per alpha for each row. The section on earlier snapshots uses the totals the project's own scope documents quote on the date they were written.
-Most rows are <code>partial</code>: some of it works and the notes in the matrix say what is missing. <code>done</code> means code and tests; it does not mean tried on hardware.</div>
+Most rows are <code>partial</code>: some of it works and the notes in the matrix say what is missing. The numbers come from the columns Impl/Test and Manual of the project's working feature matrix as of %(asof)s; the <code>FEATURES.md</code> in this repository catches up with each release. Nothing here is typed by hand.</div>
 
-<h2 id="now">Now (%(ver)s)</h2>
+<h2 id="overall">How far along it is</h2>
+<p>Two separate questions for every feature: how much of it is <em>written</em>, and how much of it is <em>proven to work</em>. Averages over the %(live)d features that are not deprecated.</p>
+<div class="meter"><div class="top"><span>Implementation</span><span data-metric="impl">%(impl)d%%</span></div>
+<div class="track" role="img" aria-label="Implementation, %(impl)d percent"><span class="fill fi" style="width:%(impl)d%%"></span></div>
+<p><b data-metric="full-impl">%(full_impl)d</b> of %(live)d features are fully written.</p></div>
+<div class="meter"><div class="top"><span>Tested</span><span data-metric="test">%(test)d%%</span></div>
+<div class="track" role="img" aria-label="Tested, %(test)d percent"><span class="fill ft" style="width:%(test)d%%"></span></div>
+<p><b data-metric="full-test">%(full_test)d</b> of %(live)d features are fully proven.</p></div>
+<div class="stats">
+<div class="stat"><b data-metric="passed">%(passed)d</b>seen on real hardware (manual test passed)</div>
+<div class="stat"><b data-metric="needed">%(needed)d</b>waiting for a manual test</div>
+<div class="stat"><b data-metric="failed">%(failed)d</b>manual test failed</div>
+</div>
+
+<h2 id="legend">What the numbers mean</h2>
+<dl class="legend">
+<dt>Impl</dt><dd>How much of the feature's behaviour is written, 0 to 100.</dd>
+<dt>Test 0</dt><dd>Nothing is tested yet.</dd>
+<dt>Test 30</dt><dd>Only parts are tested, with fakes or unit tests; or it has not been tried for real.</dd>
+<dt>Test 50</dt><dd>The behaviour is tested end to end, still on fakes.</dd>
+<dt>Test 70</dt><dd>Proven by an integration test, a virtual-machine boot, the browser harness or a script.</dd>
+<dt>Test 100</dt><dd>Also seen working on the real hardware or screen it is for, or a manual test is recorded as passed. Features that need no hardware reach 100 by tests alone.</dd>
+<dt>Manual none</dt><dd>No manual test is needed.</dd>
+<dt>Manual needed</dt><dd>A person, or the test Mac mini or stick, must try it.</dd>
+<dt>Manual passed</dt><dd>Tried by hand with the date and the machine recorded.</dd>
+<dt>Manual failed</dt><dd>Tried and failed; a known issue (KI-number) says what.</dd>
+</dl>
+
+<h2 id="areas">By feature area</h2>
+<div class="tw"><table><caption>Averages over the features of each area that are not deprecated. Area codes are the middle part of an ID such as F-CORE-01.</caption>
+<thead><tr><th scope="col">Area</th><th scope="col" class="n">Features</th><th scope="col" class="n">Impl</th><th scope="col" class="n">Test</th><th scope="col" class="n">Manual needed</th><th scope="col" class="n">Manual passed</th></tr></thead>
+<tbody>%(area_impl_rows)s</tbody></table></div>
+
+<h2 id="now">Status counts now (%(ver)s)</h2>
+<p>A feature is <code>done</code> only when it is fully written, fully proven and needs no open manual test; everything else with some work done is <code>partial</code>.</p>
 <div class="stats">%(stats)s</div>
 %(bar)s
 <ul class="key" aria-label="Colour key">%(key)s</ul>
@@ -372,7 +437,8 @@ Not machine translation; English complete, a pseudo-locale and one small sample 
 </ul>
 <h3>Before 1.0</h3>
 <p>The v1.0.0 gate and the open decisions are in <a href="%(repo)s/blob/HEAD/docs/project/BACKLOG.md">the backlog</a> and <a href="%(repo)s/blob/HEAD/docs/BETA-SCOPE.md">the beta scope</a>.</p>
-""" % dict(repo=REPO, ver=esc(ver), stats=stats, bar=bar(counts, total), key=key, thead_s=thead % "Snapshot", snap_rows=snap_rows,
+""" % dict(asof=datetime.date.today().isoformat(), repo=REPO, ver=esc(ver), area_impl_rows=area_impl_rows, impl=mt["impl"], test=mt["test"], live=mt["live"], full_impl=mt["full_impl"],
+           full_test=mt["full_test"], passed=mt["passed"], needed=mt["needed"], failed=mt["failed"], stats=stats, bar=bar(counts, total), key=key, thead_s=thead % "Snapshot", snap_rows=snap_rows,
            thead_p=thead % "Phase", phase_rows=phase_rows, thead_a=thead % "Area", area_rows=area_rows, n_areas=len(by_area), n_ki=n_ki, ki=ki,
            rel=rel_file, exp=EXP)
     desc = "Progress of IYAKKI, the AI-first operating system: feature counts by status generated from the project's feature matrix (%d rows), known issues in short, and the alpha.3 and alpha.4 roadmap." % total
@@ -464,7 +530,7 @@ def main():
     ver, rel_file, rel_date = latest_release()
     counts = {s: sum(1 for r in rows if r[2] == s) for s in STATUSES}
     draw_images()
-    write("index.html", page_index(ver, rel_file, rel_date, counts, len(rows)))
+    write("index.html", page_index(ver, rel_file, rel_date, counts, len(rows), metrics(rows)))
     write("progress.html", page_progress(ver, rows, rel_file))
     write("privacy.html", page_privacy(ver))
     write("404.html", page_404(ver))

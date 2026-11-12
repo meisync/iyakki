@@ -3,7 +3,7 @@
 
     python3 dist/site/check-site.py
 
-1. site/progress.html counts equal FEATURES.md (parsed again here, by a different method: the summary line and awk-style column reads).
+1. site/progress.html counts (status, Impl/Test averages, Manual, per area) and the home page summary equal FEATURES.md (parsed again here, by a different method: the summary line and awk-style column reads).
 2. Every page has a unique title, a meta description, a canonical URL on the base, Open Graph and Twitter tags; the home page has JSON-LD.
 3. No script tag besides JSON-LD, no external resource (src/href to another site is only a link to the repository), alt text on every image.
 4. The public-hygiene patterns of dist/release/export-public.sh (home paths, private keys, tokens) and e-mail addresses find nothing in site/.
@@ -30,8 +30,9 @@ def rd(p):
 
 # 1. counts
 feat = rd(os.path.join(ROOT, "FEATURES.md"))
-m = re.search(r"<!-- summary:start -->done (\d+) · partial (\d+) · planned (\d+) · blocked (\d+) · deprecated (\d+) · total (\d+)<!-- summary:end -->", feat)
-summary = dict(zip(["done", "partial", "planned", "blocked", "deprecated", "total"], map(int, m.groups())))
+m = re.search(r"<!-- summary:start -->done (\d+) · partial (\d+) \(impl open (\d+) · unproven (\d+)\) · planned (\d+) · blocked (\d+) · deprecated (\d+) · total (\d+)<!-- summary:end -->", feat)
+g = list(map(int, m.groups()))
+summary = dict(zip(["done", "partial", "impl_open", "unproven", "planned", "blocked", "deprecated", "total"], g))
 rows = [l for l in feat.splitlines() if l.startswith("| F-")]
 by = {}
 for l in rows:
@@ -56,6 +57,38 @@ for k, v in ph.items():
     mm = re.search(r'<tr data-phase="%s">(.*?)</tr>' % k, prog, re.S)
     got = [int(x) for x in re.findall(r'<td class="n">(\d+)</td>', mm.group(1))] if mm else None
     ok(got == v + [sum(v)], "phase %s row differs: page %s, FEATURES.md %s" % (k, got, v + [sum(v)]))
+
+# 1b. Impl/Test and Manual numbers, read again here with plain column reads (not the build script's functions)
+live = []
+for l in rows:
+    c = [x.strip() for x in l.split("|")]
+    if c[4] == "deprecated":
+        continue
+    a, b = c[6].split("/")
+    live.append((c[1].split("-")[1], int(a), int(b), c[7]))
+n = len(live)
+half = lambda xs: (2 * sum(xs) + n) // (2 * n) if xs is not None else 0
+want = {"impl": half([r[1] for r in live]), "test": half([r[2] for r in live]), "full-impl": sum(r[1] == 100 for r in live), "full-test": sum(r[2] == 100 for r in live),
+        "passed": sum(r[3].startswith("passed") for r in live), "needed": sum(r[3] == "needed" for r in live), "failed": sum(r[3].startswith("failed") for r in live)}
+for k, v in want.items():
+    mm = re.search(r'data-metric="%s">(\d+)' % k, prog)
+    ok(mm and int(mm.group(1)) == v, "progress.html metric %s = %s, FEATURES.md = %d (run dist/site/build-site.py)" % (k, mm and mm.group(1), v))
+part = [[x.strip() for x in l.split("|")] for l in rows if l.split("|")[4].strip() == "partial"]
+ok(sum(1 for c in part if int(c[6].split("/")[0]) < 100) == summary["impl_open"], "FEATURES.md impl open count disagrees with its rows")
+ok(sum(1 for c in part if int(c[6].split("/")[0]) == 100 and (int(c[6].split("/")[1]) < 100 or c[7] == "needed" or c[7].startswith("failed"))) == summary["unproven"], "FEATURES.md unproven count disagrees with its rows")
+ok(summary["impl_open"] + summary["unproven"] <= summary["partial"], "impl open + unproven exceed partial")
+areas = {}
+for r in live:
+    areas.setdefault(r[0], []).append(r)
+for k, v in areas.items():
+    mm = re.search(r'<tr data-area="%s">(.*?)</tr>' % k, prog, re.S)
+    got = re.findall(r'<td class="n">(\d+)', mm.group(1)) if mm else None
+    exp = [str(len(v)), str((2 * sum(r[1] for r in v) + len(v)) // (2 * len(v))), str((2 * sum(r[2] for r in v) + len(v)) // (2 * len(v))), str(sum(r[3] == "needed" for r in v)), str(sum(r[3].startswith("passed") for r in v))]
+    ok(got == exp, "area %s row differs: page %s, FEATURES.md %s" % (k, got, exp))
+ok(len(re.findall(r'<tr data-area=', prog)) == len(areas), "progress.html lists a different set of areas")
+ok("<progress" not in prog and "<script" not in prog.replace('application/ld+json', ''), "progress page must stay free of script")
+idx = rd(os.path.join(SITE, "index.html"))
+ok(("on average %d%% is written and %d%% is proven" % (want["impl"], want["test"])) in idx, "the home page summary differs from FEATURES.md")
 
 # 2/3. page hygiene
 pages = ["index.html", "progress.html", "privacy.html", "404.html"]

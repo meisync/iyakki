@@ -1,5 +1,6 @@
 name: pages
-# Builds the static site (python3 dist/site/build-site.py, then the check) and deploys site/ to GitHub Pages.
+# Deploys the committed site/ to GitHub Pages. The pages are generated from the project's working feature matrix by dist/site/build-site.py
+# (then checked by dist/site/check-site.py) and committed here; the matrix file in this repository catches up with each release.
 # Runs on pushes to release/** branches and by hand. The site has no script and loads nothing from another site.
 # TODO(pin): the actions below are pinned by major tag, like ci.yml, because a full commit SHA could not be verified offline
 # when this file was written. Replace each tag with its full commit SHA (look it up on the action's releases page) before relying on it.
@@ -19,11 +20,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: '3.12' }
-      - run: pip install pillow numpy
-      - run: python3 dist/site/build-site.py
-      - run: python3 dist/site/check-site.py
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with: { path: site }
