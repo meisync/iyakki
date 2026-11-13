@@ -372,10 +372,10 @@ Most rows are <code>partial</code>: some of it works and the notes in the matrix
 <p>Two separate questions for every feature: how much of it is <em>written</em>, and how much of it is <em>proven to work</em>. Averages over the %(live)d features that are not deprecated.</p>
 <div class="meter"><div class="top"><span>Implementation</span><span data-metric="impl">%(impl)d%%</span></div>
 <div class="track" role="img" aria-label="Implementation, %(impl)d percent"><span class="fill fi" style="width:%(impl)d%%"></span></div>
-<p><b data-metric="full-impl">%(full_impl)d</b> of %(live)d features are fully written.</p></div>
+<p><b data-metric="full-impl">%(full_impl)d</b> of %(live)d features are fully written (code implemented).</p></div>
 <div class="meter"><div class="top"><span>Tested</span><span data-metric="test">%(test)d%%</span></div>
 <div class="track" role="img" aria-label="Tested, %(test)d percent"><span class="fill ft" style="width:%(test)d%%"></span></div>
-<p><b data-metric="full-test">%(full_test)d</b> of %(live)d features are fully proven.</p></div>
+<p><b data-metric="full-test">%(full_test)d</b> of %(live)d features are fully proven (fully tested).</p></div>
 <div class="stats">
 <div class="stat"><b data-metric="passed">%(passed)d</b>seen on real hardware (manual test passed)</div>
 <div class="stat"><b data-metric="needed">%(needed)d</b>waiting for a manual test</div>
@@ -402,7 +402,8 @@ Most rows are <code>partial</code>: some of it works and the notes in the matrix
 <tbody>%(area_impl_rows)s</tbody></table></div>
 
 <h2 id="now">Status counts now (%(ver)s)</h2>
-<p>A feature is <code>done</code> only when it is fully written, fully proven and needs no open manual test; everything else with some work done is <code>partial</code>.</p>
+<p>A feature is <code>done</code> only when it is fully written (code implemented), fully proven (fully tested) and needs no open manual test; everything else with some work done is <code>partial</code>.</p>
+<p>On 2026-11-12 about thirty large features were split: the part that is built stays in its row, and the part that is not built became its own <code>not started</code> row. That is why the total and the not-started count went up; no work was removed.</p>
 <div class="stats">%(stats)s</div>
 %(bar)s
 <ul class="key" aria-label="Colour key">%(key)s</ul>
