@@ -327,6 +327,28 @@ def bar(counts, total):
     return '<div class="bar" role="img" aria-label="%s">%s</div>' % (esc(", ".join("%s %d" % (s, counts[s]) for s in STATUSES)), spans)
 
 
+def stack(kind, rows):
+    """A stacked bar for one question (written / proven): Complete, In progress, Planned, Not taken. rows: (id, phase, status, impl, test, manual)."""
+    idx = 3 if kind == "impl" else 4
+    names = ("Written", "In progress", "Planned", "Not taken") if kind == "impl" else ("Proven", "In progress", "Not tested yet", "Not taken")
+    c = [0, 0, 0, 0]
+    for r in rows:
+        if r[2] == "deprecated":
+            c[3] += 1
+        elif r[idx] >= 100:
+            c[0] += 1
+        elif r[idx] > 0:
+            c[1] += 1
+        else:
+            c[2] += 1
+    tot = sum(c) or 1
+    cls = ("done", "partial", "planned", "deprecated")
+    spans = "".join('<span class="s-%s" style="width:%.3f%%"></span>' % (cls[i], 100.0 * c[i] / tot) for i in range(4) if c[i])
+    label = "%s: %s" % ("Implementation" if kind == "impl" else "Tested", ", ".join("%s %d" % (names[i], c[i]) for i in range(4)))
+    legend = "".join('<li><i class="s-%s"></i><b data-stack="%s-%d">%d</b> %s</li>' % (cls[i], kind, i, c[i], names[i]) for i in range(4))
+    return '<div class="bar" role="img" aria-label="%s">%s</div><ul class="key">%s</ul>' % (esc(label), spans, legend)
+
+
 def status_row(label, counts, total, attr=""):
     cells = "".join('<td class="n">%d</td>' % counts[s] for s in STATUSES)
     return '<tr%s><th scope="row">%s</th>%s<td class="n">%d</td></tr>' % (attr, label, cells, total)
@@ -371,10 +393,10 @@ Most rows are <code>partial</code>: some of it works and the notes in the matrix
 <h2 id="overall">How far along it is</h2>
 <p>Two separate questions for every feature: how much of it is <em>written</em>, and how much of it is <em>proven to work</em>. Averages over the %(live)d features that are not deprecated.</p>
 <div class="meter"><div class="top"><span>Implementation</span><span data-metric="impl">%(impl)d%%</span></div>
-<div class="track" role="img" aria-label="Implementation, %(impl)d percent"><span class="fill fi" style="width:%(impl)d%%"></span></div>
+%(stack_impl)s
 <p><b data-metric="full-impl">%(full_impl)d</b> of %(live)d features are fully written (code implemented).</p></div>
 <div class="meter"><div class="top"><span>Tested</span><span data-metric="test">%(test)d%%</span></div>
-<div class="track" role="img" aria-label="Tested, %(test)d percent"><span class="fill ft" style="width:%(test)d%%"></span></div>
+%(stack_test)s
 <p><b data-metric="full-test">%(full_test)d</b> of %(live)d features are fully proven (fully tested).</p></div>
 <div class="stats">
 <div class="stat"><b data-metric="passed">%(passed)d</b>seen on real hardware (manual test passed)</div>
@@ -444,7 +466,7 @@ Not machine translation; English complete, a pseudo-locale and one small sample 
 </ul>
 <h3>Before 1.0</h3>
 <p>The v1.0.0 gate and the open decisions are in <a href="%(repo)s/blob/HEAD/docs/project/BACKLOG.md">the backlog</a> and <a href="%(repo)s/blob/HEAD/docs/BETA-SCOPE.md">the beta scope</a>.</p>
-""" % dict(asof=datetime.date.today().isoformat(), repo=REPO, ver=esc(ver), area_impl_rows=area_impl_rows, impl=mt["impl"], test=mt["test"], live=mt["live"], full_impl=mt["full_impl"],
+""" % dict(asof=datetime.date.today().isoformat(), repo=REPO, ver=esc(ver), area_impl_rows=area_impl_rows, impl=mt["impl"], test=mt["test"], live=mt["live"], full_impl=mt["full_impl"], stack_impl=stack("impl", rows), stack_test=stack("test", rows),
            full_test=mt["full_test"], passed=mt["passed"], needed=mt["needed"], failed=mt["failed"], stats=stats, bar=bar(counts, total), key=key, thead_s=thead % "Snapshot", snap_rows=snap_rows,
            thead_p=thead % "Phase", phase_rows=phase_rows, thead_a=thead % "Area", area_rows=area_rows, n_areas=len(by_area), n_ki=n_ki, ki=ki,
            rel=rel_file, exp=EXP)
