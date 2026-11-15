@@ -42,6 +42,39 @@ fn jrect(r: &Rect) -> String {
     format!("\"x\":{},\"y\":{},\"w\":{},\"h\":{}", r.x, r.y, r.w, r.h)
 }
 
+fn base64(b: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut o = String::with_capacity(b.len().div_ceil(3) * 4);
+    for c in b.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        o.push(T[(n >> 18) as usize & 63] as char);
+        o.push(T[(n >> 12) as usize & 63] as char);
+        o.push(if c.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
+        o.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
+    }
+    o
+}
+
+/// Like [`to_json`], and the pictures the list names (and only those) go with it as `"images":{"7":{"w":..,"h":..,"rgba":"base64"}}`,
+/// for the browser renderer to draw them.
+pub fn to_json_with_images(list: &DisplayList, width: i32, height: i32, images: &crate::render::ImageTable) -> String {
+    let mut o = to_json(list, width, height);
+    let mut used: Vec<u32> = list.ops.iter().filter_map(|op| if let Op::Image { handle, .. } = op { Some(*handle) } else { None }).collect();
+    used.sort_unstable();
+    used.dedup();
+    let mut parts = Vec::new();
+    for h in used {
+        if let Some(p) = images.get(h) {
+            parts.push(format!("\"{h}\":{{\"w\":{},\"h\":{},\"rgba\":\"{}\"}}", p.w, p.h, base64(&p.rgba)));
+        }
+    }
+    if !parts.is_empty() && o.ends_with('}') {
+        o.pop();
+        o.push_str(&format!(",\"images\":{{{}}}}}", parts.join(",")));
+    }
+    o
+}
+
 /// `{"abi":1,"width":W,"height":H,"ops":[...]}`; text carries its measured width so a browser lays
 /// it out exactly like the device.
 pub fn to_json(list: &DisplayList, width: i32, height: i32) -> String {

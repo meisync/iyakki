@@ -270,7 +270,7 @@ impl PodCache {
     }
 
     pub fn table(&self) -> Arc<PodTable> {
-        self.0.lock().unwrap().table.clone()
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).table.clone()
     }
 
     /// Called on every refresh of the tab. `running`: the cluster is up. Does the reading on another thread.
@@ -284,7 +284,7 @@ impl PodCache {
 
     /// Decide (and mark) whether to read now; a stopped cluster empties the table.
     fn plan(&self, running: bool, now: u64) -> bool {
-        let mut g = self.0.lock().unwrap();
+        let mut g = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if !running {
             g.table = Arc::new(PodTable::empty());
             g.at = None;
@@ -300,7 +300,7 @@ impl PodCache {
     /// Read now, on this thread (the tests, and the thread of [`PodCache::poll`]).
     pub fn refresh_now(&self, kube: &dyn Kubectl, now: u64) {
         let t = fetch_table(kube);
-        let mut g = self.0.lock().unwrap();
+        let mut g = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         g.table = Arc::new(t);
         g.at = Some(now);
         g.busy = false;
@@ -309,7 +309,7 @@ impl PodCache {
     /// Start "what is this pod busy with" on another thread; [`PodCache::answer`] gets the text.
     pub fn ask_busy(&self, kube: Arc<dyn Kubectl>, ns: String, pod: String) {
         {
-            let mut g = self.0.lock().unwrap();
+            let mut g = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if g.asking {
                 return;
             }
@@ -319,19 +319,19 @@ impl PodCache {
         let me = self.clone();
         std::thread::spawn(move || {
             let text = busy_text(&*kube, &ns, &pod);
-            let mut g = me.0.lock().unwrap();
+            let mut g = me.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             g.answer = Some((pod, text));
             g.asking = false;
         });
     }
 
     pub fn asking(&self) -> bool {
-        self.0.lock().unwrap().asking
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).asking
     }
 
     /// Take the finished answer, if any.
     pub fn take_answer(&self) -> Option<(String, String)> {
-        self.0.lock().unwrap().answer.take()
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).answer.take()
     }
 }
 

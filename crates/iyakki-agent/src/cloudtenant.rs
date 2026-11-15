@@ -78,6 +78,10 @@ pub struct TenantConfig {
     /// Default deny.
     #[serde(default)]
     pub media: crate::browsermedia::Allow,
+    /// Where the snapshot keys live (`cloudsnapshot_kms::ProviderSetting`): `file`, `vault` or `kms:<key reference>`. The pod gets it as
+    /// `IYAKKI_SNAPSHOT_KEYS`, and `iyakki cloud snapshot` follows it when no `--keys` is given. Without it the command line decides.
+    #[serde(default)]
+    pub snapshot_keys: Option<String>,
 }
 
 fn default_image() -> String {
@@ -118,6 +122,7 @@ impl TenantConfig {
             isolation: Default::default(),
             vault_url: None,
             media: Default::default(),
+            snapshot_keys: None,
         }
     }
 
@@ -137,6 +142,9 @@ impl TenantConfig {
             return Err(format!("tenant \"{}\": use lower-case letters, digits and - (at most 40, starting with a letter)", self.tenant));
         }
         self.isolation.deployable()?;
+        if let Some(k) = &self.snapshot_keys {
+            crate::cloudsnapshot_kms::ProviderSetting::parse(k).map_err(|e| format!("snapshot_keys: {e}"))?;
+        }
         if let Some(u) = &self.vault_url {
             crate::cloudvault::check_url(u)?;
         }
@@ -321,6 +329,10 @@ pub fn manifests(c: &TenantConfig) -> Result<String, String> {
     // what the browser may supply to the tenant's sessions (the web server of the pod reads it)
     let media = if c.media == crate::browsermedia::Allow::Allow { "allow" } else { "deny" };
     let env = if env.is_empty() { format!("          env:\n            - {{ name: IYAKKI_BROWSER_MEDIA, value: {media} }}\n") } else { format!("{env}            - {{ name: IYAKKI_BROWSER_MEDIA, value: {media} }}\n") };
+    let env = match &c.snapshot_keys {
+        Some(k) => format!("{env}            - {{ name: IYAKKI_SNAPSHOT_KEYS, value: \"{}\" }}\n", crate::cloudsnapshot_kms::ProviderSetting::parse(k).map(|p| p.text()).unwrap_or_default()),
+        None => env,
+    };
     // where the pod reads the tenant's configuration from (`tenantconfig::enforce::data_dir_from_env`): the media policy, the egress policy
     let env = format!("{env}            - {{ name: IYAKKI_TENANT_DATA_DIR, value: /var/lib/iyakki }}\n");
     let mut mounts = "            - { name: data, mountPath: /var/lib/iyakki }\n            - { name: tmp, mountPath: /tmp }\n".to_string();

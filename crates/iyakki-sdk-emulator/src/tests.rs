@@ -362,3 +362,92 @@ fn the_commands_print_the_review_and_exit_with_the_result() {
     assert_eq!(go(&[]).0, 1);
     let _ = std::fs::remove_dir_all(d);
 }
+
+// ------------------------------------------------------------------------------------------------ SDK 1.2 services
+
+use serde_json::json;
+
+fn svc2(cfg: &str, caps: &[&str]) -> (PathBuf, FakeServices) {
+    let d = tmp("svc2");
+    let s = FakeServices::new(d.join("scratch"), Config::parse(cfg).unwrap()).with_caps(caps.iter().map(|c| c.to_string()).collect());
+    (d, s)
+}
+
+fn call(s: &FakeServices, d: &str, m: &str, a: &str) -> Result<serde_json::Value, String> {
+    s.call(d, m, a).map(|r| serde_json::from_str(&r).unwrap())
+}
+
+#[test]
+fn discovery_answers_from_the_bridge_manifest_and_needs_no_permission() {
+    let (_d, s) = svc2("{}", &["markdown", "money.limits"]);
+    let l = call(&s, "sdk", "capabilities", "{}").unwrap();
+    assert_eq!(l["sdk"], iyakki_core_api::sdkbridge::SDK_VERSION);
+    let ready = |name: &str| l["namespaces"].as_array().unwrap().iter().find(|n| n["name"] == name).unwrap()["ready"].clone();
+    assert_eq!((ready("markdown"), ready("money"), ready("k3s")), (json!(true), json!(true), json!(false)));
+    assert_eq!(call(&s, "sdk", "has", r#"{"name":"markdown.render"}"#).unwrap(), json!(true));
+    assert_eq!(call(&s, "sdk", "has", r#"{"name":"k3s"}"#).unwrap(), json!(false));
+    assert_eq!(call(&s, "sdk", "has", r#"{"name":"hologram"}"#).unwrap(), json!(false));
+    assert!(iyakki_tile_host::TileManifest::new("t", &[]).allows("sdk", "has"), "the manifest need not declare discovery");
+    assert!(!iyakki_tile_host::TileManifest::new("t", &[]).allows("money", "limits"));
+}
+
+#[test]
+fn a_name_the_manifest_does_not_know_is_unsupported_and_markdown_is_the_devices_own_analysis() {
+    let (_d, s) = svc2("{}", &["markdown"]);
+    assert!(call(&s, "markdown", "future", "{}").unwrap_err().starts_with("Unsupported:"));
+    assert!(call(&s, "audio", "future", "{}").unwrap_err().starts_with("Unsupported:"));
+    assert!(call(&s, "hologram", "show", "{}").unwrap_err().contains("not emulated"));
+    let r = call(&s, "markdown", "render", r##"{"text":"# Hi [a](https://x.example.com) [b](javascript:1)","extra":1}"##).unwrap();
+    assert_eq!((r["links"].as_array().unwrap().len(), r["blockedLinks"].clone(), r["ignored"].clone()), (1, json!(1), json!(["extra"])));
+    assert!(call(&s, "markdown", "render", "{}").unwrap_err().contains("text"));
+}
+
+#[test]
+fn money_starts_at_nothing_in_the_emulator_too_and_never_pays() {
+    let (_d, s) = svc2("{}", &["money"]);
+    let spend = r#"{"amountMinor":100,"currency":"USD","purpose":"x"}"#;
+    assert!(call(&s, "money", "spend", spend).unwrap_err().starts_with("BudgetStop:"), "default zero");
+    assert_eq!(call(&s, "money", "limits", "{}").unwrap()["perDayMinor"], 0);
+    assert!(call(&s, "money", "requestLimit", r#"{"perDayMinor":1000,"why":"y"}"#).is_ok());
+    assert!(call(&s, "money", "spend", spend).unwrap_err().starts_with("Unavailable:"), "inside the limit, but no provider is set up");
+    let (_d2, p) = svc2(r#"{"sdk":{"money":{"currency":"USD","per_day_minor":300,"provider":true}}}"#, &["money"]);
+    assert_eq!(call(&p, "money", "spend", spend).unwrap()["remainingMinor"], 200);
+    assert!(call(&p, "money", "spend", r#"{"amountMinor":201,"currency":"USD","purpose":"x"}"#).unwrap_err().starts_with("BudgetStop:"));
+    assert!(call(&p, "money", "spend", r#"{"amountMinor":10,"currency":"EUR","purpose":"x"}"#).unwrap_err().starts_with("BudgetStop:"));
+    p.advance(86_400_000);
+    assert_eq!(call(&p, "money", "limits", "{}").unwrap()["spentTodayMinor"], 0, "tomorrow");
+    let log = format!("{:?}", p.prompts());
+    assert!(log.contains("money"), "spending asks the emulated person: {log}");
+}
+
+#[test]
+fn embeds_keep_the_devices_limits_and_the_other_namespaces_answer_from_the_settings() {
+    let (_d, s) = svc2(r#"{"sdk":{"dash":{"sources":["prom"],"rows":5},"flows":["backup"],"k3s":{"objects":{"pods":[{"metadata":{"name":"web-1"}}]}},"heard":"hello"}}"#, &["embed", "dash", "flows", "k3s", "speech"]);
+    let small = r#"{"target":{"x":0,"y":0,"w":50,"h":50},"kind":"markdown"}"#;
+    assert!(call(&s, "embed", "mount", small).unwrap_err().contains("at least 120 x 80"));
+    let ok = r#"{"target":"doc","kind":"markdown"}"#;
+    assert!(call(&s, "embed", "mount", ok).is_ok() && call(&s, "embed", "mount", ok).is_ok());
+    assert!(call(&s, "embed", "mount", ok).unwrap_err().starts_with("QuotaExceeded"));
+    assert_eq!(call(&s, "embed", "list", "{}").unwrap()["items"].as_array().unwrap().len(), 2);
+    assert_eq!(call(&s, "dash", "sources", "{}").unwrap()["items"][0]["name"], "prom");
+    let q = call(&s, "dash", "query", r#"{"source":"prom","query":"up","limit":2}"#).unwrap();
+    assert_eq!((q["rows"].as_array().unwrap().len(), q["truncated"].clone()), (2, json!(true)));
+    assert!(call(&s, "flows", "status", r#"{"run":"x"}"#).unwrap_err().contains("not a run this app started"));
+    let run = call(&s, "flows", "run", r#"{"flow":"backup"}"#).unwrap()["run"].as_str().unwrap().to_string();
+    assert_eq!(call(&s, "flows", "status", &format!(r#"{{"run":"{run}"}}"#)).unwrap()["state"], "succeeded");
+    assert_eq!(call(&s, "k3s", "get", r#"{"kind":"Pods"}"#).unwrap()["items"][0]["metadata"]["name"], "web-1");
+    assert_eq!(call(&s, "speech", "listen", "{}").unwrap()["text"], "hello");
+    assert!(call(&s, "speech", "listen", "{}").unwrap_err().starts_with("QuotaExceeded"), "one at a time");
+}
+
+#[test]
+fn the_review_text_and_the_prompts_follow_the_bridge_manifests_approval_classes() {
+    use crate::project::{cap_sensitive, cap_words, valid_cap};
+    for c in ["money.spend", "money.requestLimit", "k3s.apply", "k3s.restart", "flows.run", "dash.panel.add", "speech.listen", "media.play", "embed.mount", "audio.play"] {
+        assert!(valid_cap(c), "{c}");
+    }
+    assert!(cap_sensitive("money.spend") && cap_sensitive("k3s.apply") && cap_sensitive("flows.run") && cap_sensitive("speech.listen") && cap_sensitive("money"));
+    assert!(!cap_sensitive("markdown.render") && !cap_sensitive("k3s.status") && !cap_sensitive("flows.list") && !cap_sensitive("sdk.has"));
+    assert!(cap_words("money.spend").starts_with("spend money up to a daily limit") && cap_words("k3s.apply").contains("[only apply]"));
+    assert!(!valid_cap("Money.spend") && !valid_cap("money.1bad"));
+}

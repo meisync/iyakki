@@ -480,3 +480,44 @@ fn sftp_by_hand() {
     r.sftp.disable("hand");
     eprintln!("{}", r.audit.lock().unwrap().join("\n"));
 }
+
+const RSA_2048: &str = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC448ukWs1ZMhP37F4Ztd6+h/vzq857/mFldScGAq9DCddJJ2ByJygv2nzs4hbjxZRtV4O3Lq3O6A6g5qeU/XDcHWyAzmS4YRqi1iRS7Aaf3P7XtSexkxbzNIFjO4l/qEOfq7XmEh/1biU0EpjAwSGkAJlnISHnMTIvmYmZ5WKoxL8/nhA+FT0eBVa+hr2nFQzuLbIKW7bBEAYCfzZm3Ri18gNWiBOjJOmheJCu29iaNrAKpByktryhtsC4kouAxi0r3EiuBU6DYM50S4SKwUBoj7+qKFvEdCQD7/dIKNizu39EYvZOJPHExWKNmFpu9HqzaSr8ZpTTOElOsdNT61tx test-rsa";
+const ECDSA_256: &str = "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBLX7vRuzdLKesB61cgH4WZGzytqLndahgAZabLx8y8UQab8F4yh9mZ0MFrl3KBL8N8Yh369V8K36gpzv5fOYPHM= test-ec";
+const ECDSA_384: &str = "ecdsa-sha2-nistp384 AAAAE2VjZHNhLXNoYTItbmlzdHAzODQAAAAIbmlzdHAzODQAAABhBHWfTUH9KHewlZ9vyHK6kCx7552HVnF/NhM24Fe3cCdD6X98myR0u0RU/T1fPle+8ag7j/PCMIyqVRL6IJ+W/AXxZYKcaAkV7pgYWaoa8WAEyyAExdr3dmzP3Ktyr4TNsA== test-ec384";
+const ECDSA_521: &str = "ecdsa-sha2-nistp521 AAAAE2VjZHNhLXNoYTItbmlzdHA1MjEAAAAIbmlzdHA1MjEAAACFBAHjEKNnDEd8yjFWlBvPlkKwyu8RrQUOtiz+8DIiI1el/FGEsoV5WWY2dNHQrKcwRdsy+2zl8TiKpLG49OJ8SEuzUAC40nLV4VdJ7IFom0XX3TFWzSDUyL0UOOKoVLQmx+7VlkjYo1+1xaTHHj+kIgBPHXtV2ZBiQJs0TYtsfLH1jZPazg== test-521";
+const RSA_1024: &str = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAAgQDRf01JyUX7k/MV/Fqc+KgLtNHfitFT6uf9cWr58/PzUQd4sCA71HwSwq0AtgfhWnXIfI6dcj8uYDp4/qJgKSzp8b4Sk1F2j1H9smFr0LmiuqYE15crF4Fsuh7PgcR7OoVhBWBpu1+JBuE/j62irU+EklVyPUNvhqfQkCPsIOgJQw== small";
+
+#[test]
+fn rsa_and_ecdsa_p256_keys_are_stored_listed_and_removed_like_ed25519_ones_and_weak_or_other_keys_are_refused() {
+    let d = tmp("keys-rsa");
+    let f1 = add_key(&d, "amy", RSA_2048).unwrap();
+    let f2 = add_key(&d, "amy", ECDSA_256).unwrap();
+    let f3 = add_key(&d, "amy", &key_line(5, "ed")).unwrap();
+    assert!(f1.starts_with("SHA256:") && f1 != f2 && f2 != f3);
+    // the file keeps each key under its own type and reads back the same blobs
+    let text = std::fs::read_to_string(d.join("sftp/keys/amy.pub")).unwrap();
+    assert!(text.lines().map(|l| l.split(' ').next().unwrap()).collect::<Vec<_>>() == ["ssh-rsa", "ecdsa-sha2-nistp256", "ssh-ed25519"], "{text}");
+    assert_eq!(user_keys(&d, "amy").len(), 3);
+    assert_eq!(add_key(&d, "amy", RSA_2048).unwrap(), f1, "the same key twice is one key");
+    // P-384 (F-FILE-14) is stored and listed like the others
+    let f4 = add_key(&d, "amy", ECDSA_384).unwrap();
+    assert!(f4.starts_with("SHA256:") && ![&f1, &f2, &f3].contains(&&f4));
+    assert_eq!(user_keys(&d, "amy").len(), 4);
+    assert_eq!(remove_key(&d, "amy", &f4).unwrap(), 1);
+    // refused: a 1024-bit RSA key, P-521 (no checker for it), a line whose type and key disagree, DSA
+    for (bad, why) in [(RSA_1024, "RSA keys need 2048"), (ECDSA_521, "only ssh-ed25519"), ("ssh-dss AAAA x", "only ssh-ed25519")] {
+        let e = parse_key_line(bad).unwrap_err();
+        assert!(e.contains(why), "{bad}: {e}");
+    }
+    let mixed = RSA_2048.replacen("ssh-rsa", "ecdsa-sha2-nistp256", 1);
+    assert!(parse_key_line(&mixed).is_err());
+    // the gate lets in exactly the stored blobs
+    assert_eq!(remove_key(&d, "amy", &f1).unwrap(), 1);
+    assert_eq!(user_keys(&d, "amy").len(), 2);
+    // the ECDSA host key is made once and is the same the next time
+    let a = host_key_ec(&d).unwrap();
+    let b = host_key_ec(&d).unwrap();
+    assert_eq!(a.fingerprint(), b.fingerprint());
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(std::fs::metadata(d.join("sftp/host_key_ecdsa")).unwrap().permissions().mode() & 0o777, 0o600);
+}

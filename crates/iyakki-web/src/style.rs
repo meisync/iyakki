@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::css::{split_top, media_matches, parse_color, parse_decls, parse_gradient, parse_length, parse_shadow, parse_sheet, Decl, Gradient, Length, Rgba, Rule, Shadow, Sheet, Viewport};
+use crate::css::{split_top, media_matches, parse_color, parse_decls, parse_gradient, parse_length, parse_shadow, parse_sheet_cached, Decl, Gradient, Length, Rgba, Rule, Shadow, Sheet, Viewport};
 use crate::url::Url;
 use crate::domtree::PseudoEl;
 use crate::html::{NodeKind, Tree};
@@ -104,7 +104,11 @@ pub struct Fx {
     pub pos: Pos,
     /// top, right, bottom, left offsets in pixels (`None`: auto)
     pub off: [Option<f32>; 4],
+    /// The same offsets when they were given as a percentage (of the containing block's width for left and right, of its height for top and bottom).
+    pub off_pct: [Option<f32>; 4],
     pub z: i32,
+    /// `z-index` was given as a whole number (otherwise it is `auto`).
+    pub z_set: bool,
     pub opacity: f32,
     pub shadow: Option<Shadow>,
     pub gradient: Option<Gradient>,
@@ -113,7 +117,7 @@ pub struct Fx {
 
 impl Default for Fx {
     fn default() -> Self {
-        Fx { float: Float::None, clear: Clear::None, pos: Pos::Static, off: [None; 4], z: 0, opacity: 1.0, shadow: None, gradient: None, fit: Fit::Fill }
+        Fx { float: Float::None, clear: Clear::None, pos: Pos::Static, off: [None; 4], off_pct: [None; 4], z: 0, z_set: false, opacity: 1.0, shadow: None, gradient: None, fit: Fit::Fill }
     }
 }
 
@@ -143,9 +147,53 @@ pub enum Justify {
     Around,
 }
 
+/// `line-height`: the font's own spacing, a multiple of the font size (inherited as the number) or a fixed length in pixels.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum LineHeight {
+    #[default]
+    Normal,
+    Mult(f32),
+    Px(f32),
+}
+
+impl LineHeight {
+    /// The height of a line of text of `font_px`; `normal` is `normal_em` times the size.
+    pub fn px(self, font_px: f32, normal_em: f32) -> f32 {
+        match self {
+            LineHeight::Normal => font_px * normal_em,
+            LineHeight::Mult(m) => font_px * m,
+            LineHeight::Px(p) => p,
+        }
+    }
+}
+
+/// Read a `line-height` value: `normal`, a number, a length or a percentage of the element's own font size.
+pub fn parse_line_height(v: &str, font_px: f32, vp: &Viewport) -> Option<LineHeight> {
+    let v = v.trim();
+    if v == "normal" {
+        return Some(LineHeight::Normal);
+    }
+    if let Ok(n) = v.parse::<f32>() {
+        return (n.is_finite() && n >= 0.0).then_some(LineHeight::Mult(n.min(100.0)));
+    }
+    let px = match parse_length(v, font_px, ROOT_PX, vp)? {
+        Length::Px(p) => p,
+        Length::Percent(p) => font_px * p / 100.0,
+        _ => return None,
+    };
+    (px.is_finite() && px >= 0.0).then_some(LineHeight::Px(px.min(10_000.0)))
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Computed {
     pub display: Display,
+    /// The keyword `display` was given as, for the values the layout treats as `block` (`list-item`, `table`, `table-cell` and the like), so a script is told the word the page used.
+    pub display_kw: Option<&'static str>,
+    /// The font size of the root element, the unit of `rem` (16 until the root says otherwise).
+    pub root_px: f32,
+    /// Margins and paddings that were given as a percentage of the containing block's width (top, right, bottom, left); the pixel value is 0 for them.
+    pub margin_pct: [Option<f32>; 4],
+    pub pad_pct: [Option<f32>; 4],
     // inherited
     pub color: Option<Rgba>,
     pub font_px: f32,
@@ -159,6 +207,10 @@ pub struct Computed {
     pub transform: Transform,
     pub list_none: bool,
     pub mono: bool,
+    /// The face is a Times-like serif (a browser's default face is one; `font-family` says otherwise): only the width table of the page-size estimate reads it (inherited).
+    pub serif: bool,
+    /// `line-height` (inherited).
+    pub line_height: LineHeight,
     pub vars: Rc<HashMap<String, String>>,
     // not inherited
     pub bg: Option<Rgba>,
@@ -177,8 +229,12 @@ pub struct Computed {
     pub width: Length,
     pub max_width: Length,
     pub min_width: Length,
+    /// `box-sizing: border-box`: `width` and `height` include the padding and border (not inherited).
+    pub border_box: bool,
     pub height: Length,
     pub min_height: Length,
+    /// `max-height` as written (`Auto` for none); a value of one pixel or less also sets `height`, for the boxes made to be read by a screen reader only.
+    pub max_height: Length,
     pub valign: VAlign,
     /// `white-space: nowrap` (inherited).
     pub nowrap: bool,
@@ -214,6 +270,10 @@ impl Default for Computed {
             display: Display::Default,
             color: None,
             font_px: ROOT_PX,
+            root_px: ROOT_PX,
+            display_kw: None,
+            margin_pct: [None; 4],
+            pad_pct: [None; 4],
             font_set: false,
             bold: None,
             italic: None,
@@ -223,6 +283,8 @@ impl Default for Computed {
             transform: Transform::None,
             list_none: false,
             mono: false,
+            serif: true,
+            line_height: LineHeight::Normal,
             vars: Rc::new(HashMap::new()),
             bg: None,
             hidden: false,
@@ -237,8 +299,10 @@ impl Default for Computed {
             width: Length::Auto,
             max_width: Length::Auto,
             min_width: Length::Auto,
+            border_box: false,
             height: Length::Auto,
             min_height: Length::Auto,
+            max_height: Length::Auto,
             valign: VAlign::Middle,
             nowrap: false,
             hcenter: false,
@@ -268,6 +332,7 @@ impl Computed {
         Computed {
             color: parent.color,
             font_px: parent.font_px,
+            root_px: parent.root_px,
             font_set: parent.font_set,
             bold: parent.bold,
             italic: parent.italic,
@@ -277,6 +342,8 @@ impl Computed {
             transform: parent.transform,
             list_none: parent.list_none,
             mono: parent.mono,
+            serif: parent.serif,
+            line_height: parent.line_height,
             nowrap: parent.nowrap,
             hcenter: parent.hcenter,
             vars: parent.vars.clone(),
@@ -572,6 +639,10 @@ fn element_style(tree: &Tree, n: usize, parent: &Computed, sheets: &StyleSheets,
         c.auto_left = true;
         c.auto_right = true;
     }
+    // the root's font size is what `rem` means below it
+    if tag == "html" {
+        c.root_px = c.font_px;
+    }
     finish(&mut c);
     c
 }
@@ -637,7 +708,7 @@ fn presentational(tree: &Tree, n: usize, tag: &str, parent: &Computed, c: &mut C
     }
     // `width` and `height` of a table part, as pixels or a percentage
     if matches!(tag, "table" | "td" | "th" | "col") {
-        if let Some(l) = attr("width").and_then(|w| parse_length(&if w.chars().all(|ch| ch.is_ascii_digit()) { format!("{w}px") } else { w.to_string() }, c.font_px, ROOT_PX, vp)) {
+        if let Some(l) = attr("width").and_then(|w| parse_length(&if w.chars().all(|ch| ch.is_ascii_digit()) { format!("{w}px") } else { w.to_string() }, c.font_px, c.root_px, vp)) {
             c.width = l;
         }
     }
@@ -760,7 +831,7 @@ fn font_size(v: &str, parent: &Computed, vp: &Viewport) -> Option<f32> {
     if let Some(k) = kw {
         return Some(k);
     }
-    match parse_length(&lv, parent.font_px, ROOT_PX, vp)? {
+    match parse_length(&lv, parent.font_px, parent.root_px, vp)? {
         Length::Px(p) => Some(p),
         Length::Percent(p) => Some(parent.font_px * p / 100.0),
         Length::Auto | Length::Calc { .. } | Length::Pick { .. } => None,
@@ -782,6 +853,11 @@ fn apply_font(c: &mut Computed, parent: &Computed, prop: &str, v: &str, vp: &Vie
     }
     for w in words(&lv) {
         let size_part = w.split('/').next().unwrap_or(w);
+        if let (Some((_, lh)), Some(sz)) = (w.split_once('/'), font_size(size_part, parent, vp)) {
+            if let Some(l) = parse_line_height(lh, sz, vp) {
+                c.line_height = l;
+            }
+        }
         if let Some(sz) = font_size(size_part, parent, vp) {
             if !matches!(w, "normal" | "bold" | "italic" | "bolder" | "lighter" | "oblique") && !w.chars().all(|ch| ch.is_ascii_digit()) {
                 c.font_px = sz.clamp(0.0, 400.0);
@@ -817,6 +893,12 @@ fn px_of(l: Length) -> f32 {
 }
 
 fn set_side(c: &mut Computed, field: &str, side: usize, l: Length) {
+    let pct = if let Length::Percent(p) = l { Some(p) } else { None };
+    if field == "margin" {
+        c.margin_pct[side] = pct;
+    } else {
+        c.pad_pct[side] = pct;
+    }
     match field {
         "margin" => {
             c.margin[side] = px_of(l);
@@ -868,6 +950,21 @@ fn apply(c: &mut Computed, parent: &Computed, prop: &str, raw: &str, vp: &Viewpo
     let initial = lv == "initial" || lv == "unset" && !matches!(prop, "color" | "font-weight" | "font-style" | "text-align" | "text-transform" | "list-style" | "list-style-type" | "text-decoration");
     match prop {
         "display" => {
+            c.display_kw = match lv.split_whitespace().next().unwrap_or("") {
+                "list-item" => Some("list-item"),
+                "table" => Some("table"),
+                "inline-table" => Some("inline-table"),
+                "table-row" => Some("table-row"),
+                "table-cell" => Some("table-cell"),
+                "table-row-group" => Some("table-row-group"),
+                "table-header-group" => Some("table-header-group"),
+                "table-footer-group" => Some("table-footer-group"),
+                "table-caption" => Some("table-caption"),
+                "table-column" => Some("table-column"),
+                "table-column-group" => Some("table-column-group"),
+                "contents" => Some("contents"),
+                _ => None,
+            };
             c.display = match lv.split_whitespace().next().unwrap_or("") {
                 "none" => Display::None,
                 "block" | "list-item" | "flow-root" | "table" => Display::Block,
@@ -903,7 +1000,18 @@ fn apply(c: &mut Computed, parent: &Computed, prop: &str, raw: &str, vp: &Viewpo
                 _ => Clear::None,
             }
         }
-        "z-index" => c.fx.z = lv.trim().parse::<i32>().unwrap_or(0).clamp(-10_000, 10_000),
+        "z-index" => {
+            let n = lv.trim().parse::<i32>().ok();
+            c.fx.z = n.unwrap_or(0).clamp(-10_000, 10_000);
+            c.fx.z_set = n.is_some();
+        }
+        "line-height" => {
+            if let Some(l) = parse_line_height(&lv, c.font_px, vp) {
+                c.line_height = l;
+            } else if inherit {
+                c.line_height = parent.line_height;
+            }
+        }
         "box-shadow" => c.fx.shadow = if inherit || initial { None } else { parse_shadow(&lv, c.font_px, vp) },
         "object-fit" => {
             c.fx.fit = match lv.split_whitespace().next() {
@@ -959,9 +1067,15 @@ fn apply(c: &mut Computed, parent: &Computed, prop: &str, raw: &str, vp: &Viewpo
             if lv.contains("monospace") || lv.contains("courier") {
                 c.mono = true;
             }
+            // the family follows the size (`16px/1.4 Georgia, serif`)
+            let ws: Vec<&str> = lv.split_whitespace().collect();
+            if let Some(i) = ws.iter().position(|w| w.starts_with(|ch: char| ch.is_ascii_digit() || ch == '.') && (w.contains("px") || w.contains("pt") || w.contains("em") || w.contains('%') || w.contains('/'))) {
+                c.serif = serif_face(&ws[i + 1..].join(" "));
+            }
         }
         "font-family" => {
             c.mono = ["monospace", "courier", "consolas", "menlo", "monaco", "mono"].iter().any(|f| lv.contains(f));
+            c.serif = serif_face(&lv);
         }
         "text-decoration" | "text-decoration-line" => {
             if lv.contains("none") {
@@ -1031,6 +1145,10 @@ fn apply(c: &mut Computed, parent: &Computed, prop: &str, raw: &str, vp: &Viewpo
             };
             if let Some(i) = side {
                 c.fx.off[i] = px(&lv, c.font_px, vp);
+                c.fx.off_pct[i] = match parse_length(&lv, c.font_px, c.root_px, vp) {
+                    Some(Length::Percent(p)) => Some(p),
+                    _ => None,
+                };
             }
             if let Some(x) = px(&lv, c.font_px, vp) {
                 if x <= -900.0 {
@@ -1055,7 +1173,7 @@ fn apply(c: &mut Computed, parent: &Computed, prop: &str, raw: &str, vp: &Viewpo
         "margin-top" | "margin-right" | "margin-bottom" | "margin-left" | "padding-top" | "padding-right" | "padding-bottom" | "padding-left" => {
             let (f, side) = prop.split_once('-').unwrap_or((prop, ""));
             let i = ["top", "right", "bottom", "left"].iter().position(|s| *s == side).unwrap_or(0);
-            if let Some(l) = parse_length(&lv, c.font_px, ROOT_PX, vp) {
+            if let Some(l) = parse_length(&lv, c.font_px, c.root_px, vp) {
                 set_side(c, f, i, l);
             }
         }
@@ -1131,18 +1249,22 @@ fn apply(c: &mut Computed, parent: &Computed, prop: &str, raw: &str, vp: &Viewpo
                 c.radius = 999.0;
             }
         }
-        "width" | "inline-size" => c.width = if initial { Length::Auto } else { parse_length(&lv, c.font_px, ROOT_PX, vp).unwrap_or(c.width) },
-        "max-width" | "max-inline-size" => c.max_width = if lv == "none" { Length::Auto } else { parse_length(&lv, c.font_px, ROOT_PX, vp).unwrap_or(c.max_width) },
-        "min-width" => c.min_width = parse_length(&lv, c.font_px, ROOT_PX, vp).unwrap_or(c.min_width),
+        "width" | "inline-size" => c.width = if initial { Length::Auto } else { parse_length(&lv, c.font_px, c.root_px, vp).unwrap_or(c.width) },
+        "max-width" | "max-inline-size" => c.max_width = if lv == "none" { Length::Auto } else { parse_length(&lv, c.font_px, c.root_px, vp).unwrap_or(c.max_width) },
+        "box-sizing" => c.border_box = lv.trim() == "border-box",
+        "min-width" => c.min_width = parse_length(&lv, c.font_px, c.root_px, vp).unwrap_or(c.min_width),
         "height" | "max-height" => {
-            if let Some(l) = parse_length(&lv, c.font_px, ROOT_PX, vp) {
+            if prop == "max-height" {
+                c.max_height = if lv == "none" { Length::Auto } else { parse_length(&lv, c.font_px, c.root_px, vp).unwrap_or(c.max_height) };
+            }
+            if let Some(l) = parse_length(&lv, c.font_px, c.root_px, vp) {
                 if prop == "max-height" && !matches!(l, Length::Px(p) if p <= 1.0) {
                     return;
                 }
                 c.height = l;
             }
         }
-        "min-height" => c.min_height = parse_length(&lv, c.font_px, ROOT_PX, vp).unwrap_or(c.min_height),
+        "min-height" => c.min_height = parse_length(&lv, c.font_px, c.root_px, vp).unwrap_or(c.min_height),
         "white-space" => c.nowrap = matches!(lv.as_str(), "nowrap" | "pre"),
         "vertical-align" => {
             c.valign = match lv.as_str() {
@@ -1184,14 +1306,14 @@ fn apply(c: &mut Computed, parent: &Computed, prop: &str, raw: &str, vp: &Viewpo
                     if let Some(g) = ws.first().and_then(|w| w.parse::<f32>().ok()) {
                         c.grow = g.max(0.0);
                     }
-                    if let Some(b) = ws.iter().find_map(|w| parse_length(w, c.font_px, ROOT_PX, vp).filter(|l| !matches!(l, Length::Auto))) {
+                    if let Some(b) = ws.iter().find_map(|w| parse_length(w, c.font_px, c.root_px, vp).filter(|l| !matches!(l, Length::Auto))) {
                         c.basis = b;
                     }
                 }
             }
         }
         "flex-grow" => c.grow = lv.parse::<f32>().unwrap_or(c.grow).max(0.0),
-        "flex-basis" => c.basis = parse_length(&lv, c.font_px, ROOT_PX, vp).unwrap_or(c.basis),
+        "flex-basis" => c.basis = parse_length(&lv, c.font_px, c.root_px, vp).unwrap_or(c.basis),
         "grid-template-areas" => c.grid_areas = grid_areas(v),
         "grid-area" => c.grid_area = Some(v).filter(|a| !a.is_empty() && !a.contains('/') && *a != "auto").map(Rc::from),
         "grid-template" => {
@@ -1367,7 +1489,7 @@ pub fn collect_sheets(tree: &Tree, base: &Url, vp: &Viewport, get: &(dyn Fn(&Url
         }
         total += text.len();
         let start = order_no;
-        let mut sheet = parse_sheet(&text, vp, &mut order_no);
+        let mut sheet = parse_sheet_cached(&text, vp, &mut order_no);
         // imports come first (a sheet's own rules override what it imports)
         let imports: Vec<Url> = sheet.imports.iter().filter_map(|h| at.join(h).ok()).collect();
         let imported: Vec<Option<String>> = std::thread::scope(|sc| {
@@ -1377,7 +1499,7 @@ pub fn collect_sheets(tree: &Tree, base: &Url, vp: &Viewport, get: &(dyn Fn(&Url
         for t in imported.into_iter().flatten() {
             if t.len() <= MAX_SHEET_BYTES && total + t.len() <= MAX_TOTAL_BYTES {
                 total += t.len();
-                out.push(parse_sheet(&t, vp, &mut order_no));
+                out.push(parse_sheet_cached(&t, vp, &mut order_no));
             }
         }
         // the importing sheet's own rules come after the imported ones in cascade order
@@ -1606,6 +1728,22 @@ mod tests {
     }
 
     #[test]
+    fn line_height_is_read_as_a_number_a_length_or_a_share_and_inherited() {
+        let vp = Viewport::default();
+        assert_eq!(parse_line_height("normal", 16.0, &vp), Some(LineHeight::Normal));
+        assert_eq!(parse_line_height("1.5", 20.0, &vp), Some(LineHeight::Mult(1.5)));
+        assert_eq!(parse_line_height("30px", 20.0, &vp), Some(LineHeight::Px(30.0)));
+        assert_eq!(parse_line_height("150%", 20.0, &vp), Some(LineHeight::Px(30.0)));
+        assert_eq!(parse_line_height("2em", 10.0, &vp), Some(LineHeight::Px(20.0)));
+        assert_eq!(parse_line_height("-1", 10.0, &vp), None);
+        assert_eq!(parse_line_height("big", 10.0, &vp), None);
+        assert_eq!(LineHeight::Mult(1.5).px(20.0, 1.2), 30.0);
+        assert_eq!(LineHeight::Normal.px(20.0, 1.2), 24.0);
+        let parent = Computed { line_height: LineHeight::Mult(2.0), ..Computed::default() };
+        assert_eq!(Computed::inheriting(&parent).line_height, LineHeight::Mult(2.0));
+    }
+
+    #[test]
     fn floats_positions_shadows_gradients_opacity_and_fit_are_computed() {
         let (t, c) = styles(
             "<div id=a></div><div id=b></div><img id=i>",
@@ -1623,4 +1761,10 @@ mod tests {
         assert_eq!(b.fx.opacity, 1.0, "opacity:0 is how pages fade in, so it is ignored");
         assert_eq!(of(&t, &c, "i").fx.fit, Fit::Cover);
     }
+}
+
+/// Is the first family of a `font-family` list a Times-like serif? (Georgia and the web fonts are wider and count with the sans table.)
+fn serif_face(list: &str) -> bool {
+    let first = list.split(',').next().unwrap_or("").trim().trim_matches(|c| c == '\'' || c == '"').trim().to_ascii_lowercase();
+    matches!(first.as_str(), "times new roman" | "times" | "liberation serif" | "nimbus roman" | "serif")
 }

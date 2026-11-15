@@ -13,6 +13,8 @@
 //! | [`admit`] | `choose_tier`, `admit`: every refusal with its reason; approval patterns |
 //! | [`job`] | pure manifest builders: Job, NetworkPolicy, Secret reference, browser Job (golden tests) |
 //! | [`kube`] | the cluster door behind a trait (kubectl for real, a fake in tests) |
+//! | [`binding`] | the team's cluster binding as a `KubeApi`: the vault credential becomes a short-lived 0600 kubeconfig |
+//! | [`frames`] | artifacts from a finished Job: the run wrapper prints framed files on the log, `split` takes them out |
 //! | [`exec`] | `Executor` and its three implementations |
 //! | [`limiter`] | per-person and per-tenant concurrency with a queue (`tenantconfig::fairshare`) |
 //! | [`output`] | caps and credential redaction of what a run printed |
@@ -20,8 +22,10 @@
 //! | [`wiring`] | `run_command` in cloud mode and the flows `cli`/`browser` node adapter |
 
 pub mod admit;
+pub mod binding;
 pub mod engine;
 pub mod exec;
+pub mod frames;
 pub mod job;
 pub mod kube;
 pub mod limiter;

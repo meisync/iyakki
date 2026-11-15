@@ -96,6 +96,7 @@ The helper may receive any shell message at any time after Hello, including befo
 | 0x11 | Script | `u32 id`, `u32 timeout_ms`, `str js` (protocol 1.1) |
 | 0x12 | LeaveFullscreen | (empty; optional, protocol 1.1) |
 | 0x13 | PermissionAnswer | `u32 id`, `bool allow` (optional, protocol 1.1) |
+| 0x16 | Extensions | the extension snapshot bytes (optional; layout in `crates/iyakki-webview/src/ext.rs`, plan in `docs/development/BROWSER-EXTENSIONS-PLAN.md`) |
 
 **Hello.** `version` is the protocol version (1; a helper that does not know it exits with status 2 after writing a line to
 stderr). `w`,`h`: the size of the picture in *device pixels* (the size of the page area on the shell's screen). `scale_pct`: the
@@ -166,6 +167,13 @@ skips it (section 2) and the shell's own timeout ends the wait, so the protocol 
 for the assistant's tab. The shell never logs script text (it may carry a typed secret); a helper must not either. Screenshots need
 no message: the shell keeps the latest Frame.
 
+**Extensions** (optional, 0x16, no protocol version change). The browser extensions' current hooks as one versioned snapshot: `u32 version (1)`, then
+entries, each with an id, a version, the capabilities the broker granted it and a list of hooks (`u32 kind`, `u32 length`, payload bytes). The helper keeps
+the last snapshot, passes it to the web processes (a user message to the running ones, the initialization user data for a new one) and logs a report line
+("extensions: loaded, N header rules: ..."). Today only the kind `request.headers` (1) has code; an unknown kind, a kind without code, a hook without its
+capability and a broken payload are skipped and named in the report; a snapshot of another layout version is refused whole. The snapshot holds header values:
+it is never written to a file and never logged. A helper without the message ignores it.
+
 **LeaveFullscreen** (optional). The person pressed Esc while the page is fullscreen: ask the page to leave (WPE:
 `wpe_view_backend_dispatch_request_exit_fullscreen`, plus `document.exitFullscreen()`). The helper answers with **Fullscreen**(false)
 when the page has left; the shell keeps showing the page fullscreen until then. Ignored when not fullscreen. A helper that does not know it skips it.
@@ -228,6 +236,7 @@ composites it into the same buffers (GStreamer), so nothing special is needed. U
 | 0x90 | DevEvent | `str line` (optional, protocol 1.1) |
 | 0x91 | PermissionRequest | `u32 id`, `u8 kinds`, `str origin` (optional, protocol 1.1) |
 | 0x92 | CaptureState | `u8 kinds` (optional, protocol 1.1) |
+| 0x93 | ResponseHeaders | `str url`, `u32 status`, `str headers` (one `Name: value` line per header, at most 48 000 bytes; optional, protocol 1.1) |
 
 * **Ready**: engine name and version for "about" displays (`WPE WebKit` `2.46.3`). Sent once, after Hello.
 * **Title**: the document title; sent when it changes (an empty title is sent as empty).

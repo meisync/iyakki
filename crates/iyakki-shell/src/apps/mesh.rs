@@ -521,6 +521,11 @@ impl App for MeshApp {
         let mut tx = x;
         for (i, (t, label)) in TABS.iter().enumerate() {
             let tw = g.text_width(15.0 * s, label, Face::Bold) + 30.0 * s;
+            // the tabs that do not fit one row continue on the next
+            if tx > x && tx + tw > x + w {
+                tx = x;
+                y += 40.0 * s;
+            }
             let r = R::new(tx, y, tw, 34.0 * s);
             let on = *t == self.tab;
             crate::fx::row_at(g, r.x, r.y, r.w, r.h, 17.0 * s, on, g.hovered(r), ACCENT);

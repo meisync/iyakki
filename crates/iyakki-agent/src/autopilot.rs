@@ -78,6 +78,8 @@ pub struct Rows {
     pub blocked: usize,
     /// Rows set to done without the harness having seen a verified success (set by hand or forced): shown, not counted.
     pub claimed: usize,
+    /// Of `claimed`: rows that are done although the harness refused that claim earlier (forced); the rest were set by hand in the file or the Table view.
+    pub forced: usize,
     /// Rows the harness parked for the person's OK (work claimed, nothing to check it with): shown, never retried.
     pub review: Vec<(String, String)>,
     /// Bugs (B- rows) that are not done yet: id, title, status. They are fixed along the way, not worked as plan rows.
@@ -117,7 +119,7 @@ impl Rows {
     /// `ignore_deps`: the person allowed rows to start before their dependencies are done.
     pub fn read_with(root: &Path, features: &Path, ignore_deps: bool) -> Rows {
         let tracker = Tracker::new(root, features);
-        let (owned, verified) = (tracker.owned_ids(), tracker.verified_ids());
+        let (owned, verified, refused) = (tracker.owned_ids(), tracker.verified_ids(), tracker.refused_ids());
         let Ok(bf) = BoardFile::load(features) else { return Rows::default() };
         let mut r = Rows::default();
         let all = bf.board.features();
@@ -138,7 +140,10 @@ impl Rows {
                 }
                 "pending" => r.pending.push((f.id.clone(), f.title.clone(), f.depends())),
                 "review" => r.review.push((f.id.clone(), f.title.clone())),
-                "done" => r.claimed += 1,
+                "done" => {
+                    r.claimed += 1;
+                    r.forced += usize::from(refused.contains(&f.id));
+                }
                 "blocked" => r.blocked += 1,
                 "planned" | "partial" => {
                     if let Some(d) = crate::boardtrack::dependency_in(&f.notes, &f.id) {
@@ -220,6 +225,10 @@ pub struct State {
     pub base_step: usize,
     /// New tokens of the last step, for the footer and the step note.
     pub step_tokens: u64,
+    /// What the vendor reported for the whole run so far, in thousandths of a cent (an external agent's steps); kept across a pause and Resume.
+    pub cost_milli: u64,
+    /// The part of `cost_milli` spent before the last (re)start: the cost budget counts from here, the total shown does not.
+    pub cost_base_milli: u64,
     /// running, paused, stopped or finished.
     pub status: String,
     pub reason: String,
@@ -230,11 +239,11 @@ pub struct State {
 
 impl State {
     pub fn new(goal: &str, now: i64) -> State {
-        State { goal: goal.into(), step: 0, started: now, tokens: 0, no_progress: 0, last_sig: String::new(), current_row: String::new(), tries: BTreeMap::new(), verified: false, plan_tries: 0, awaiting_scope: false, revisited: Default::default(), summary: String::new(), step_changed: true, offer_teardown: false, stalls: 0, diagnosis: None, base_step: 0, step_tokens: 0, status: "running".into(), reason: String::new(), waiting: false }
+        State { goal: goal.into(), step: 0, started: now, tokens: 0, no_progress: 0, last_sig: String::new(), current_row: String::new(), tries: BTreeMap::new(), verified: false, plan_tries: 0, awaiting_scope: false, revisited: Default::default(), summary: String::new(), step_changed: true, offer_teardown: false, stalls: 0, diagnosis: None, base_step: 0, step_tokens: 0, cost_milli: 0, cost_base_milli: 0, status: "running".into(), reason: String::new(), waiting: false }
     }
 
     pub fn to_json(&self) -> Value {
-        json!({"goal": self.goal, "step": self.step, "started": self.started, "tokens": self.tokens, "no_progress": self.no_progress, "last_sig": self.last_sig, "current_row": self.current_row, "tries": self.tries, "verified": self.verified, "plan_tries": self.plan_tries, "awaiting_scope": self.awaiting_scope, "stalls": self.stalls, "revisited": self.revisited, "summary": self.summary, "base_step": self.base_step, "step_tokens": self.step_tokens, "status": self.status, "reason": self.reason})
+        json!({"goal": self.goal, "step": self.step, "started": self.started, "tokens": self.tokens, "no_progress": self.no_progress, "last_sig": self.last_sig, "current_row": self.current_row, "tries": self.tries, "verified": self.verified, "plan_tries": self.plan_tries, "awaiting_scope": self.awaiting_scope, "stalls": self.stalls, "revisited": self.revisited, "summary": self.summary, "base_step": self.base_step, "step_tokens": self.step_tokens, "cost_milli": self.cost_milli, "cost_base_milli": self.cost_base_milli, "status": self.status, "reason": self.reason})
     }
 
     pub fn from_json(v: &Value) -> Option<State> {
@@ -259,6 +268,8 @@ impl State {
             summary: s("summary"),
             base_step: n("base_step") as usize,
             step_tokens: n("step_tokens"),
+            cost_milli: n("cost_milli"),
+            cost_base_milli: n("cost_base_milli"),
             revisited: v.get("revisited").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default(),
             status: s("status"),
             reason: s("reason"),
@@ -284,6 +295,22 @@ impl State {
         self.started = now;
         self.base_step = self.step;
         self.no_progress = 0;
+        self.cost_base_milli = self.cost_milli;
+    }
+
+    /// Add what the vendor reported for a step (cents).
+    pub fn add_cost(&mut self, cents: f64) {
+        self.cost_milli += (cents.max(0.0) * 1000.0).round() as u64;
+    }
+
+    /// The whole run's cost so far, in cents.
+    pub fn cost_total_cents(&self) -> f64 {
+        self.cost_milli as f64 / 1000.0
+    }
+
+    /// The cost since the last (re)start, in cents: what the policy's cost budget counts.
+    pub fn cost_this_run_cents(&self) -> f64 {
+        self.cost_milli.saturating_sub(self.cost_base_milli) as f64 / 1000.0
     }
 
     /// Rewrite the running summary from what the harness knows (extractive, no model call): what is done, blocked and pending,
@@ -679,7 +706,24 @@ fn drive(backend: Arc<dyn ChatBackend>, tools: Arc<dyn Tools>, base: Vec<Message
         crate::assign::update(&ctx.notes_root, |d| d.register(&ctx.agent_key, "autopilot", engine, &[], &ctx.session, now()));
     }
     let (own, key, nroot, spath) = (ctx.own_agent, ctx.agent_key.clone(), ctx.notes_root.clone(), ctx.state_path.clone());
+    // Stop on the board: the run lives in the chat, so the board leaves a request in the agents file and this watcher turns it into the
+    // same stop the chat's button gives (the run ends "stopped by the person" and can be resumed)
+    let over = Arc::new(AtomicBool::new(false));
+    if own {
+        let (c2, o2, r2, k2) = (cancel.clone(), over.clone(), nroot.clone(), key.clone());
+        let _ = std::thread::Builder::new().name("autopilot-board-stop".into()).spawn(move || {
+            while !o2.load(Ordering::SeqCst) {
+                if crate::assign::load(&r2).stop_asked(&k2) {
+                    crate::assign::update(&r2, |d| d.clear_stop(&k2));
+                    c2.store(true, Ordering::SeqCst);
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(300));
+            }
+        });
+    }
     drive_run(backend, tools, base, limits, assist, ctx, etx, drx, cancel, pause);
+    over.store(true, Ordering::SeqCst);
     if own {
         let st = State::load(&spath);
         let (state, why) = match st.as_ref().map(|s| s.status.as_str()) {
@@ -805,7 +849,6 @@ fn drive_run(backend: Arc<dyn ChatBackend>, tools: Arc<dyn Tools>, base: Vec<Mes
     let (mut files, mut commands): (Vec<String>, Vec<String>) = (vec![], vec![]);
     let mut tokens_shown = st.tokens;
     // what the vendor reported so far this run, in cents (an external agent's runs; the policy's cost budget stops the run)
-    let mut cost_total = 0.0f64;
     let mut last_error = String::new();
     let mut last_diag = String::new();
     let mut titles: BTreeMap<String, String> = BTreeMap::new();
@@ -932,7 +975,7 @@ fn drive_run(backend: Arc<dyn ChatBackend>, tools: Arc<dyn Tools>, base: Vec<Mes
                         step_tokens = tokens;
                         step_cost = cost_cents;
                         // a vendor-reported run shows the cost of the whole autopilot run so far
-                        emit(RunEvent::Usage { tokens: tokens_shown + tokens, cost_cents: if ctx.executor.is_some() { cost_total + cost_cents } else { cost_cents }, files: f, seconds });
+                        emit(RunEvent::Usage { tokens: tokens_shown + tokens, cost_cents: if ctx.executor.is_some() { st.cost_total_cents() + cost_cents } else { cost_cents }, files: f, seconds });
                     }
                     RunEvent::Timing { .. } => {}
                     RunEvent::Budget { .. } => {}
@@ -1098,10 +1141,10 @@ fn drive_run(backend: Arc<dyn ChatBackend>, tools: Arc<dyn Tools>, base: Vec<Mes
         if !st.verified {
             st.offer_teardown = offer_ok(&ctx, &tools, &commands, &rows, teardown_goal);
         }
-        cost_total += step_cost;
+        st.add_cost(step_cost);
         let mut d = st.after_step(&cfg, end.as_ref().expect("set above"), &rows, step_tokens, now(), denied);
-        if ctx.executor.is_some() && limits.max_cost_cents > 0 && cost_total >= limits.max_cost_cents as f64 && !matches!(d, Decision::Stop(_) | Decision::Finish) {
-            d = Decision::Stop(format!("cost budget used (${:.2} of ${:.2})", cost_total / 100.0, limits.max_cost_cents as f64 / 100.0));
+        if ctx.executor.is_some() && limits.max_cost_cents > 0 && st.cost_this_run_cents() >= limits.max_cost_cents as f64 && !matches!(d, Decision::Stop(_) | Decision::Finish) {
+            d = Decision::Stop(format!("cost budget used (${:.2} of ${:.2})", st.cost_this_run_cents() / 100.0, limits.max_cost_cents as f64 / 100.0));
         }
         if forced_finish {
             d = Decision::Finish;
@@ -1193,7 +1236,7 @@ fn drive_run(backend: Arc<dyn ChatBackend>, tools: Arc<dyn Tools>, base: Vec<Mes
                 st.status = "finished".into();
                 st.save(&ctx.state_path);
                 let mut text = if st.offer_teardown && st.verified { last_text.clone() } else { crate::assistant_guard::strip_closing_question(&last_text) };
-                text.push_str(&format!("\n\nAutopilot finished after {} steps: {} of {} rows done (verified){}{}.", st.step, rows.done, rows.total, if rows.blocked > 0 { format!(", {} blocked (see the board; they need you)", rows.blocked) } else { String::new() }, if rows.claimed > 0 { format!(", {} marked done without a check (claimed, not counted)", rows.claimed) } else { String::new() }));
+                text.push_str(&format!("\n\nAutopilot finished after {} steps: {} of {} rows done (verified){}{}.", st.step, rows.done, rows.total, if rows.blocked > 0 { format!(", {} blocked (see the board; they need you)", rows.blocked) } else { String::new() }, if rows.claimed > 0 { format!(", {} marked done without a check (claimed, not counted{})", rows.claimed, match (rows.claimed - rows.forced, rows.forced) { (h, 0) => format!("; set by you or by hand: {h}"), (0, f) => format!("; done after the harness refused it: {f}"), (h, f) => format!("; set by you or by hand: {h}, done after the harness refused it: {f}") }) } else { String::new() }));
                 if !rows.bugs.is_empty() {
                     text.push_str(&format!("\nOpen bugs (B-): {}", rows.bugs.iter().map(|b| format!("{} {} ({})", b.0, crate::agent::truncate(&b.1, 60), b.2)).collect::<Vec<_>>().join("; ")));
                 }

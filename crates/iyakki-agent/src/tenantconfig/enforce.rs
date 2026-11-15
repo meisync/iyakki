@@ -24,6 +24,17 @@ fn effective(env: &Env, kind: &str, team: Option<&str>, name: &str) -> Option<(&
     Some((spec, eff))
 }
 
+/// Like [`effective`], with the person's own layer as the lowest one (it counts only where the kind allows it and the tenant has the item).
+fn effective_for(env: &Env, kind: &str, team: Option<&str>, name: &str, user: &str) -> Option<(&'static schema::KindSpec, Effective)> {
+    let spec = schema::kind(kind)?;
+    let cfg = Store::new(env.dir).load().ok()?;
+    let entries = cfg.entries();
+    let mut layers = cfg.layers(&entries, kind, team, name);
+    let mine = if layers.is_empty() { vec![] } else { super::person::load(env.dir, user) };
+    layers.extend(super::person::layer_of(&mine, kind, name));
+    Some((spec, resolve(spec, &layers)))
+}
+
 fn strs(eff: &Effective, k: &str) -> Vec<String> {
     eff.values.get(k).and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default()
 }
@@ -55,7 +66,7 @@ pub fn agent_gate(env: &Env, kind: &str, name: &str, team: Option<&str>, user: &
     if !kind.starts_with("agent.") {
         return refuse("not an agent kind");
     }
-    let Some((spec, eff)) = effective(env, kind, team, name) else { return refuse("the tenant configuration cannot be read") };
+    let Some((spec, eff)) = effective_for(env, kind, team, name, user) else { return refuse("the tenant configuration cannot be read") };
     if !eff.exists {
         return refuse("this agent is not switched on for the tenant");
     }
@@ -180,7 +191,14 @@ pub fn media_policy_for(dir: &std::path::Path, team: Option<&str>, user: &str, r
     let Ok(cfg) = Store::new(dir).load() else { return Policy::deny_all() };
     let entries = cfg.entries();
     let Some(spec) = schema::kind("media.policy") else { return fallback };
-    let eff = resolve(spec, &cfg.layers(&entries, "media.policy", team, "default"));
+    let mut layers = cfg.layers(&entries, "media.policy", team, "default");
+    if layers.is_empty() {
+        return fallback;
+    }
+    // the person's own layer can only narrow (and a layer that is off denies)
+    let mine = super::person::load(dir, user);
+    layers.extend(super::person::layer_of(&mine, "media.policy", "default"));
+    let eff = resolve(spec, &layers);
     if !eff.exists {
         return fallback;
     }
@@ -287,6 +305,21 @@ fn approval_params(eff: &Effective, roles: &crate::cloudroles::Roles, team: &str
 pub fn k3s_approval_params(env: &Env, roles: &crate::cloudroles::Roles, team: &str, environment: &str) -> (bool, bool) {
     let last = promotion_order(env).last().is_some_and(|l| l == environment);
     effective(env, "k3s.cluster", Some(team), environment).map_or((true, true), |(_, eff)| approval_params(&eff, roles, team, environment, last))
+}
+
+/// The API address and the credential reference of the Ready, enabled binding of (team, environment), for the sandbox's cluster door
+/// (`sandbox::binding`). `None` when there is no such binding, it is off, frozen, not Ready or its credential is not the team's own.
+pub fn k3s_binding(env: &Env, team: &str, environment: &str) -> Option<(String, SecretRef)> {
+    let (spec, eff) = effective(env, "k3s.cluster", Some(team), environment)?;
+    if !eff.exists || !eff.enabled || eff.values.get("frozen") == Some(&Value::Bool(true)) {
+        return None;
+    }
+    if state_of(spec, &eff, env.vault.as_ref()).0 != State::Ready {
+        return None;
+    }
+    let probe = Item { kind: "k3s.cluster".into(), name: environment.into(), namespace: Some(team.into()), enabled: true, managed: false, values: Default::default() };
+    let credential = text(&eff, "credential").and_then(SecretRef::parse).filter(|r| r.name.starts_with(&k3s_ref_prefix(&probe)))?;
+    Some((text(&eff, "api_server")?.to_string(), credential))
 }
 
 /// May this person deploy to (team, environment)? Allow, needs approval, or deny with the reason. Audited either way.

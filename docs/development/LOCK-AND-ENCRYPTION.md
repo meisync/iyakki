@@ -14,7 +14,7 @@ They are related (the lock screen is what keeps a sealed vault sealed while the 
 | No lock screen. The saver wakes straight into the session; signing out is the only protection | `docs/SCREEN-SAVER.md` "Not built", `docs/development/TOTP-2FA.md` section 2 | GAP |
 | Screens are an enum: HwCheck, Setup, Login, Launcher, App, PowerMenu; the session is `Option<Session>`; `sign_out()` stops flows, shared folders, services, the assistant's browser tab, then shows Login | `crates/iyakki-shell/src/shell.rs` (`enum Screen` line 203, `session` line 317, `sign_out` line 898) | EXISTS |
 | Idle machine with stages Awake, Dim, Saver, Off; inhibitors; the first input only wakes and is not delivered to the app | `crates/iyakki-shell/src/saver.rs` (`Stage`, `IdleMachine`), `shell_saver.rs` | EXISTS |
-| Sign-in password check: Argon2id PHC in `users.json`; throttle in memory only | `crates/iyakki-shell/src/accounts.rs` (`authenticate`, `throttle_left`) | EXISTS |
+| Sign-in password check: Argon2id PHC in `users.json`; throttle in memory only | `crates/iyakki-accounts/src/lib.rs` (`authenticate`, `throttle_left`) | EXISTS |
 | Remote (browser) screens are shells too (`set_remote`) and have their own sign-in on port 8443 | `shell.rs` line 608, `crates/iyakki-remote` | EXISTS |
 | Vault: random 256-bit data key, XChaCha20-Poly1305, key wrapped per slot with Argon2id of that slot's password; files `vault/system.afv`, `vault/users/<user>.afv` | `crates/iyakki-agent/src/vault.rs` (crates `argon2` 0.5, `chacha20poly1305` 0.10, `zeroize`) | EXISTS |
 | The data volume is NOT encrypted ("vaults are encrypted, the volume is not") | `SECURITY.md` ("What the alpha does not promise"), `KNOWN-ISSUES.md` | EXISTS (a stated limit) |

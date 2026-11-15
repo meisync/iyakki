@@ -93,17 +93,24 @@ pub enum Tab {
     Shares,
     Account,
     HomeLayout,
+    /// Settings -> Desktop views: the person's named views, templates, step keys and lock (docs/USER-GUIDE.md).
+    Views,
     Cloud,
     /// Settings -> Cloud access: who is in the cloud tenant and its namespaces, with what role (docs/development/CLOUD-MULTITENANT-PLAN.md, 3a).
     CloudRoles,
     /// Which sources may fill the bell and the inbox (everyone's own choice).
     Notifications,
+    /// Settings -> Apps access: which apps hold which device and system access (camera view in this slice), who approved it, take it away, and the access log
+    /// (docs/development/CORE-ACCESS-MODEL.md sections 5 and 6b).
+    AppAccess,
     /// Settings -> Backup and restore: one file with the person's own data (docs/BACKUP.md).
     Backup,
     /// Settings -> Accessibility: screen reader, high contrast, text size, large pointer, focus ring, reduced motion, sticky and slow keys (docs/ACCESSIBILITY.md).
     Accessibility,
     /// Settings -> Encrypted home: the person's private folder as an encrypted container that opens at sign-in (F-STORE-05).
     EncHome,
+    /// Settings -> Assistant: what the assistant remembers of the work in a workspace (forget it), and the stall limits per model provider (F-ASSIST-47, F-ASSIST-46).
+    Assistant,
 }
 
 impl Tab {
@@ -112,9 +119,9 @@ impl Tab {
         match self {
             Tab::Overview => CATEGORIES[0],
             Tab::Account | Tab::Vault | Tab::SecretProviders | Tab::Notifications | Tab::Backup | Tab::EncHome => CATEGORIES[1],
-            Tab::Models | Tab::Agents | Tab::Skills | Tab::Rag | Tab::Voice | Tab::Browser | Tab::HostAccess => CATEGORIES[2],
+            Tab::Models | Tab::Agents | Tab::Skills | Tab::Rag | Tab::Assistant | Tab::Voice | Tab::Browser | Tab::HostAccess | Tab::AppAccess => CATEGORIES[2],
             Tab::Network | Tab::SshTunnels | Tab::Vpn | Tab::Remote | Tab::Domains | Tab::Firewall | Tab::Shares => CATEGORIES[3],
-            Tab::Display | Tab::Displays | Tab::ScreenSaver | Tab::HomeLayout | Tab::Sound | Tab::SystemSounds | Tab::Accessibility => CATEGORIES[4],
+            Tab::Display | Tab::Displays | Tab::ScreenSaver | Tab::HomeLayout | Tab::Views | Tab::Sound | Tab::SystemSounds | Tab::Accessibility => CATEGORIES[4],
             Tab::Bluetooth | Tab::Keyboard => CATEGORIES[5],
             Tab::Time | Tab::Battery | Tab::Power | Tab::Computer | Tab::HostName | Tab::SessionLog | Tab::Startup | Tab::Memory | Tab::Storage | Tab::Install | Tab::Updates | Tab::Cloud | Tab::CloudRoles => CATEGORIES[6],
             Tab::Developer | Tab::DevCluster | Tab::GitKeys => CATEGORIES[7],
@@ -122,12 +129,12 @@ impl Tab {
     }
 
     /// Where the page sits in the left list: category first, then this order.
-    pub(crate) const ORDER: [Tab; 46] = [
+    pub(crate) const ORDER: [Tab; 49] = [
         Tab::Overview,
         Tab::Account, Tab::Notifications, Tab::Vault, Tab::Backup, Tab::EncHome, Tab::SecretProviders,
-        Tab::Models, Tab::Agents, Tab::Skills, Tab::Rag, Tab::Voice, Tab::Browser, Tab::HostAccess,
+        Tab::Models, Tab::Agents, Tab::Skills, Tab::Rag, Tab::Assistant, Tab::Voice, Tab::Browser, Tab::HostAccess, Tab::AppAccess,
         Tab::Network, Tab::SshTunnels, Tab::Vpn, Tab::Remote, Tab::Domains, Tab::Firewall, Tab::Shares,
-        Tab::Display, Tab::Displays, Tab::ScreenSaver, Tab::HomeLayout, Tab::Sound, Tab::SystemSounds, Tab::Accessibility,
+        Tab::Display, Tab::Displays, Tab::ScreenSaver, Tab::HomeLayout, Tab::Views, Tab::Sound, Tab::SystemSounds, Tab::Accessibility,
         Tab::Bluetooth, Tab::Keyboard,
         Tab::Time, Tab::Battery, Tab::Power, Tab::Computer, Tab::HostName, Tab::SessionLog, Tab::Startup, Tab::Memory, Tab::Storage, Tab::Install, Tab::Updates, Tab::Cloud, Tab::CloudRoles,
         Tab::Developer, Tab::DevCluster, Tab::GitKeys,
@@ -142,7 +149,7 @@ impl Tab {
             Tab::Keyboard => Some("keyboard"),
             Tab::Computer => Some("display"),
             Tab::Bluetooth => Some("bluetooth"),
-            Tab::Overview | Tab::Models | Tab::Agents | Tab::Rag | Tab::Vault | Tab::Skills | Tab::Network | Tab::Browser | Tab::DevCluster | Tab::Storage | Tab::Memory | Tab::Firewall | Tab::SshTunnels | Tab::Domains | Tab::Vpn | Tab::Remote | Tab::Time | Tab::Battery | Tab::Power | Tab::HostName | Tab::SessionLog | Tab::Startup | Tab::Install | Tab::Updates | Tab::Voice | Tab::SecretProviders | Tab::HostAccess | Tab::Developer | Tab::GitKeys | Tab::Shares | Tab::Account | Tab::HomeLayout | Tab::Cloud | Tab::CloudRoles | Tab::Notifications | Tab::Backup | Tab::Accessibility | Tab::EncHome => None,
+            Tab::Overview | Tab::Assistant | Tab::Models | Tab::Agents | Tab::Rag | Tab::Vault | Tab::Skills | Tab::Network | Tab::Browser | Tab::DevCluster | Tab::Storage | Tab::Memory | Tab::Firewall | Tab::SshTunnels | Tab::Domains | Tab::Vpn | Tab::Remote | Tab::Time | Tab::Battery | Tab::Power | Tab::HostName | Tab::SessionLog | Tab::Startup | Tab::Install | Tab::Updates | Tab::Voice | Tab::SecretProviders | Tab::HostAccess | Tab::Developer | Tab::GitKeys | Tab::Shares | Tab::Account | Tab::HomeLayout | Tab::Views | Tab::Cloud | Tab::CloudRoles | Tab::Notifications | Tab::AppAccess | Tab::Backup | Tab::Accessibility | Tab::EncHome => None,
         }
     }
 
@@ -152,6 +159,7 @@ impl Tab {
             Tab::Overview => "overview home start summary attention recommended problems fix status",
             Tab::Models => "ai chat llm model provider openai claude anthropic gemini ollama openrouter api key endpoint",
             Tab::Agents => "claude code copilot github coding agent cli codex gemini aider anthropic external install login api key auto approval",
+            Tab::Assistant => "assistant history memory remember forget workspace chat stall limit think thinking silent silence timeout seconds provider",
             Tab::Rag => "search knowledge documents retrieval chunk overlap results embedding index external qdrant chroma",
             Tab::Vault => "secrets keys passwords tokens encrypted lock",
             Tab::Backup => "backup restore copy save data usb stick drive archive export import recover lost passphrase encrypt bookmarks flows dashboards recordings chats vault",
@@ -163,8 +171,9 @@ impl Tab {
             Tab::Displays => "displays monitors external second screen extend mirror arrangement resolution primary main identify layout panes memory screen features hdmi displayport edp",
             Tab::Sound => "audio volume speaker mute loud quiet card output hdmi displayport usb headphones test sound",
             Tab::Notifications => "notifications bell inbox badge number dot mute quiet off show sources new devices jobs finished flows errors alerts noise too many 99",
+            Tab::AppAccess => "apps access permissions capabilities revoke approved camera view log who used when allowed refused denied audit privacy webcam",
             Tab::SystemSounds => "system sounds chime login logout sign out notification alert job done sound effects cue beep volume quiet preview",
-            Tab::Keyboard => "keyboard fn function keys media keys volume brightness backlight apple macbook touch bar f1 f12 repeat rate delay layout iso option command swap key codes pointer mouse trackpad scroll scrolling wheel speed smooth momentum natural direction",
+            Tab::Keyboard => "keyboard fn function keys media keys volume brightness backlight apple macbook touch bar f1 f12 repeat rate delay layout iso option command swap key codes pointer mouse cursor sensitivity trackpad touchpad scroll scrolling wheel speed faster slower fast slow smooth momentum natural direction",
             Tab::Browser => "web internet browser javascript scripts pictures images styles css cookies privacy sites graphics software hardware gpu freeze safe mode",
             Tab::DevCluster => "clusters multiple several local remote switch active k3s kubernetes cluster kubectl kubeconfig deploy registry namespace podman profile context node bare metal in-cluster service account vault developer",
             Tab::Storage => "disk usb drive data persistence save space format where my data is kept ram power off",
@@ -173,7 +182,7 @@ impl Tab {
             Tab::SshTunnels => "ssh tunnel tunnels bastion jump host port forward socks proxy intranet internal web page behind vpn local forward remote site corp enable disable key fingerprint",
             Tab::Vpn => "vpn wireguard openvpn tunnel private network profile import conf ovpn kill switch full hybrid filter domain url split tunnel fail closed provider server endpoint",
             Tab::Domains => "domain domains name names dns hostname host local mdns store.local route routes reverse proxy listener port nodeport service k3s certificate https websocket wildcard",
-            Tab::Remote => "remote access web service serve browser https port fingerprint certificate address tablet phone another computer pixel stream share desktop sign in vnc rdp",
+            Tab::Remote => "remote access client connect connection web service serve browser https port fingerprint certificate address tablet phone another computer pixel stream share desktop sign in vnc rdp",
             Tab::Time => "clock time date timezone time zone utc 12 24 hour am pm seconds ntp sntp network time server sync 1970 battery wrong",
             Tab::Computer => "this computer computers hardware profile several multiple switch disk usb stick ssd move another mac laptop legion hp sound output display keyboard microphone gpu per computer shared copy reset forget",
             Tab::EncHome => "encrypted encryption encrypt home folder private files lock unlock password recovery key admin slot dm-crypt theft stolen lost drive protect move migrate",
@@ -194,6 +203,7 @@ impl Tab {
             Tab::Account => "password profile sign out user login text size font bigger smaller larger name theme themes dark light colour color contrast appearance look high contrast",
             Tab::CloudRoles => "cloud access roles tenant members namespace owner admin editor viewer member people team invite add remove permission who can audit trail rotate keys",
             Tab::Cloud => "cloud mode server headless remote desktop hide hardware screen sound camera bluetooth keyboard display virtual machine vm no screen auto on off boot parameter iyakki.mode",
+            Tab::Views => "desktop views virtual desktops workspaces switch jump previous next hot keys template work media monitoring lock password pin rename delete order browser style mac style control command page up down",
             Tab::HomeLayout => "home screen layout tiles groups move group rename delete reset launcher chips web media work system custom app",
         }
     }
@@ -204,6 +214,7 @@ impl Tab {
             Tab::Overview => "What needs your attention, and the things people change most.",
             Tab::Models => "The AI services the assistant can talk to, and which one it uses.",
             Tab::Agents => "Claude Code, GitHub Copilot and other coding agents that can answer the chat next to the built-in models.",
+            Tab::Assistant => "What the assistant remembers of the work in a workspace, and how long a model may think or stay silent.",
             Tab::Rag => "How documents are split and searched when the assistant looks things up.",
             Tab::Vault => "Secrets such as API keys, kept encrypted.",
             Tab::Backup => "Save your own data (settings, dashboards, flows, notes, recordings, bookmarks) to one file on a stick or folder you choose, and restore from such a file.",
@@ -215,8 +226,9 @@ impl Tab {
             Tab::Displays => "Several displays: resolution, which is the main one, where the others sit, mirror or extend, and whether layouts are used.",
             Tab::Sound => "Where sound plays (HDMI/DP, USB, speakers), a test chime, volume and mute.",
             Tab::Notifications => "What may reach the bell and the inbox: for each source, show it, keep it quiet (inbox only) or turn it off. Also where to reach you: a Matrix account.",
+            Tab::AppAccess => "Which apps were allowed to use this computer's devices (the camera so far), who approved it, a button to take it away, and the log of who used what and when. The log stays on this computer.",
             Tab::SystemSounds => "Short quiet sounds for signing in and out, new notifications and finished jobs: switches, level and a preview of each.",
-            Tab::Keyboard => "Function keys, volume and brightness keys, key repeat, scrolling (speed, direction, smoothness) and the controls they drive.",
+            Tab::Keyboard => "Function keys, volume and brightness keys, key repeat, mouse and touchpad speed, scrolling (speed, direction, smoothness) and the controls they drive.",
             Tab::Browser => "What the web browser may do: run scripts, show pictures, apply styles, keep cookies.",
             Tab::DevCluster => "The clusters the AI IDE can deploy to, this machine's own k3s, and where images go.",
             Tab::Storage => "Where your accounts, settings and files are kept.",
@@ -246,6 +258,7 @@ impl Tab {
             Tab::Account => "Your account on this computer.",
             Tab::CloudRoles => "Who is in the cloud tenant and its namespaces, with what role: add and remove people and namespaces, and read the audit trail.",
             Tab::Cloud => "For servers, cloud machines and remote-desktop-only computers: hide what needs a local screen, speakers or camera.",
+            Tab::Views => "Several named views on one screen, each with its own apps and panes: make, rename, delete and order them, start from a template, lock a view, and choose the keys that switch.",
             Tab::HomeLayout => "The groups on the home screen and where each tile is listed: make your own groups, move tiles, put everything back.",
         }
     }
@@ -256,6 +269,7 @@ impl Tab {
             Tab::Models => "Models",
             Tab::Agents => "Agents",
             Tab::Rag => "RAG",
+            Tab::Assistant => "Assistant",
             Tab::Vault => "Vault",
             Tab::Backup => "Backup and restore",
             Tab::Skills => "Skills",
@@ -266,6 +280,7 @@ impl Tab {
             Tab::ScreenSaver => "Screen saver",
             Tab::Sound => "Sound",
             Tab::Notifications => "Notifications",
+            Tab::AppAccess => "Apps access",
             Tab::SystemSounds => "System sounds",
             Tab::Keyboard => "Keyboard",
             Tab::Browser => "Browser",
@@ -296,6 +311,7 @@ impl Tab {
             Tab::Shares => "Shared folders",
             Tab::Account => "Account",
             Tab::HomeLayout => "Home layout",
+            Tab::Views => "Desktop views",
             Tab::Cloud => "Cloud mode",
             Tab::CloudRoles => "Cloud access",
         }
@@ -326,6 +342,8 @@ mod vpn_page;
 mod dom_page;
 #[path = "settings_remote.rs"]
 mod remote_page;
+#[path = "settings_link.rs"]
+mod settings_link_mod;
 #[path = "settings_share.rs"]
 mod share_page;
 #[path = "settings_pagescroll.rs"]
@@ -340,6 +358,8 @@ mod overview_page;
 mod vaultstate_page;
 #[path = "settings_crashlog.rs"]
 mod crashlog_page;
+#[path = "settings_wizard.rs"]
+mod wizard_page;
 #[path = "settings_updates.rs"]
 mod updates_page;
 #[path = "settings_startup.rs"]
@@ -351,8 +371,11 @@ use fw_simple::FwAct;
 mod sound;
 #[path = "settings_keyboard.rs"]
 mod kbd_page;
+pub(crate) use kbd_page::apply_keyboard;
 #[path = "settings_battery.rs"]
 mod battery_page;
+#[path = "settings_assistant.rs"]
+mod assistant_page;
 #[path = "settings_power.rs"]
 mod power_page;
 #[path = "settings_computer.rs"]
@@ -363,6 +386,11 @@ mod screensaver_page;
 mod enchome_page;
 #[path = "settings_voicewake.rs"]
 mod voicewake_page;
+#[path = "settings_browsershort.rs"]
+mod settings_browsershort;
+#[cfg(test)]
+#[path = "settings_browsershort_tests.rs"]
+mod settings_browsershort_tests;
 #[path = "settings_browserdev.rs"]
 mod settings_browserdev;
 #[cfg(test)]
@@ -373,8 +401,22 @@ mod browserdevices_page;
 #[cfg(test)]
 #[path = "settings_browserdevices_tests.rs"]
 mod browserdevices_tests;
+#[path = "settings_browsersites.rs"]
+mod browsersites_page;
+#[cfg(test)]
+#[path = "settings_browsersites_tests.rs"]
+mod browsersites_tests;
 #[path = "settings_browserprotect.rs"]
 mod browserprotect_page;
+#[path = "settings_browsercert.rs"]
+mod browsercert_page;
+#[path = "settings_browserchoices.rs"]
+mod browserchoices_page;
+#[path = "settings_ragorder.rs"]
+mod ragorder_page;
+#[cfg(test)]
+#[path = "settings_choices_tests.rs"]
+mod choices_tests;
 #[cfg(test)]
 #[path = "settings_browserprotect_tests.rs"]
 mod browserprotect_tests;
@@ -390,10 +432,16 @@ mod cloud_page;
 mod cloudroles_page;
 #[path = "settings_announce.rs"]
 mod announce_page;
+#[path = "settings_gemini.rs"]
+mod gemini_page;
 #[path = "settings_homelayout.rs"]
 mod homelayout_page;
+#[path = "settings_views.rs"]
+mod views_page;
 #[path = "settings_notifs.rs"]
 mod notifs_page;
+#[path = "settings_appaccess.rs"]
+mod appaccess_page;
 #[path = "settings_time.rs"]
 mod time;
 #[path = "settings_install.rs"]
@@ -416,16 +464,33 @@ pub(crate) mod access_page;
 mod modelhost_page;
 pub use install_page::InstallEnv;
 
+/// One button of the theme card: a built-in theme or a theme file the person can use.
+struct ThemeChoice {
+    label: String,
+    key: char,
+    builtin: Option<crate::theme::ThemeId>,
+    file: Option<String>,
+    chosen: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum FormKind {
+    /// Settings -> Browser: the address of the site whose certificate is shown.
+    BrowserCert,
+    /// A question step of a setup wizard an app brought (F-CORE-24).
+    BundleWizard,
     /// Settings -> System update: the folder to look for an update in.
     UpdateFolder,
+    UpdateBundle,
     /// The address of the system update index an administrator sets (F-UPD-04).
     UpdateSource,
     Provider(Option<String>),
     ProviderKey(String),
     /// The guided NVIDIA NIM setup: only the key is asked for.
     NvidiaQuick,
+    /// Google Gemini (experimental): the setup card, and the consent card the person answers before anything is sent to Google.
+    GeminiSetup,
+    GeminiConsent,
     External(Option<String>),
     NewSecret(bool),
     /// Open the person's own vault with their login password (they signed in without typing one).
@@ -448,10 +513,16 @@ enum FormKind {
     Git(git_page::GitSetting),
     /// Settings → Notifications: the Matrix account.
     Matrix,
+    /// Settings -> Remote access: the SFTP server's accounts and keys.
+    Sftp(remote_page::sftp_page::SftpForm),
+    /// Settings -> Remote access: a machine a flow may run on (F-FLOW-16).
+    Machine(remote_page::machines_page::MachineForm),
     /// Settings → Shared folders.
     Share(shares_page::ShareForm),
     /// The hotspot's Wi-Fi name and password (Share internet page, key n).
     HotspotWifi,
+    /// The country the hotspot asks the radio for.
+    HotspotCountry,
     /// Settings → Backup and restore.
     Backup(backup_page::BackupForm),
     /// Settings -> Remote access: the port.
@@ -466,6 +537,10 @@ enum FormKind {
     WifiJoin(String, iyakki_devctl::wifi::Security),
     /// A WiFi network that does not announce its name.
     WifiHidden,
+    /// The login of a WPA enterprise network found by the scan (name).
+    WifiEnterprise(String),
+    /// The key of a WEP network found by the scan (name); asked with a plain warning.
+    WifiWep(String),
     /// Remove a virtual disk (its name must be typed).
     RemoveVirtualDisk(String),
     /// Settings → Agents: the model of an agent; a custom agent (new, or the id being edited).
@@ -483,6 +558,14 @@ enum FormKind {
     Vpn(vpn_page::VpnForm),
     /// Settings -> Browser -> Custom headers: add or edit a rule.
     BrowserHeader(bh_page::BhForm),
+    /// Settings -> Browser -> Short words: add or change one (true) or remove one (false).
+    BrowserShort(bool),
+    /// Settings -> Browser -> Sites you allowed or blocked: forget one.
+    BrowserSite,
+    /// The sites of the browser data choices: false = never kept, true = left out at sign-out.
+    BrowserSites(bool),
+    /// The name of a reranking model for RAG (empty: none).
+    RagRerankModel,
     /// Settings -> Models: one request option of a model.
     ModelOpt(mo_page::MoForm),
     /// Settings → Time: the time server; Settings → Host name: the new name.
@@ -490,6 +573,8 @@ enum FormKind {
     HostName,
     /// Settings → Home layout: a new group (None) or the new name of this one.
     HomeGroup(Option<String>),
+    /// Settings -> Desktop views: a new view (None) or the new name of this one.
+    View(Option<u32>),
     /// Settings → Install to disk: the questions and the typed confirmation for this disk.
     Install(String),
 }
@@ -499,6 +584,8 @@ const AUTO_TYPE: &str = "Auto-detect (Ollama, Lemonade or OpenAI-compatible)";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PickKind {
+    /// The lines of a site's certificate (read-only).
+    CertView,
     /// A time zone from the list in Settings → Time.
     Zone,
     Chat(String),
@@ -525,6 +612,8 @@ enum PickKind {
     SoundOutput,
     /// Settings → Home layout: the group to move this tile (its layout key) to.
     HomeMove(String),
+    /// Settings -> Desktop views: the template for a new view.
+    ViewTemplate,
     /// Settings → Firewall (simple view): the service to allow.
     FwService,
     /// Settings -> This computer: the other computer to copy settings from, or to forget.
@@ -533,6 +622,13 @@ enum PickKind {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ConfirmKind {
+    /// Settings -> System update: run the checks and data moves of the setup wizard that is open / finish it after the summary (F-CORE-24).
+    WizardRun,
+    WizardFinish,
+    /// Take back the yes to sending audio and text to Google.
+    GeminiRevoke,
+    /// Settings -> Remote access: start the SFTP server / allow account passwords for it.
+    Sftp(remote_page::sftp_page::SftpAct),
     Provider(String),
     External(String),
     Secret(bool, String),
@@ -551,6 +647,11 @@ enum ConfirmKind {
     /// Settings → Home layout: delete this group of the person's own; put every tile back.
     HomeDelete(String),
     HomeReset,
+    /// Settings -> Home layout (administrators): make the shown layout the default for new accounts; clear that default.
+    HomeDefaultSet,
+    HomeDefaultClear,
+    /// Settings -> Desktop views: delete this view.
+    ViewDelete(u32),
     /// Settings → Memory: apply the draft to the running system.
     MemApply,
     /// Settings → Network: change this adapter's MAC address now (the connection drops for a moment).
@@ -563,6 +664,8 @@ enum ConfirmKind {
     ShareOpenFirewall,
     /// Settings -> Shared folders: stop every running share (visitors in the middle of a download are cut off).
     ShareStopAll,
+    /// Settings -> Shared folders: switch the media server on (players on the network can then list and play the shared audio and video).
+    MediaServerOn,
     /// Settings -> Sound: allow the Mac's built-in (T2) microphone until the next restart.
     T2Mic,
     /// Settings → Firewall (simple view): switching to Open, or taking away something that may be how the person is connected.
@@ -590,7 +693,11 @@ enum Modal {
 }
 
 enum JobOut {
+    /// Settings -> Browser -> a site's certificate, as lines (F-BROW-98).
+    Cert(Result<Vec<String>, String>),
     Msg(Result<String, String>),
+    /// A setup wizard's checks and moves came back (F-CORE-24).
+    Wizard(Result<(), String>),
     Wifi(Result<Vec<iyakki_devctl::wifi::Ap>, String>),
     Models { provider: String, models: Vec<String>, ms: u64 },
     Dc(devcluster::DcOut),
@@ -686,9 +793,9 @@ const SLIDER_HW: usize = 7100;
 pub struct SettingsApp {
     tabs: Vec<Tab>,
     tab: usize,
-    sel: [usize; 48],
+    sel: [usize; 49],
     /// Which rows of a long list are on the page, per page (a click leaves them, a key scrolls to the choice, the wheel scrolls).
-    win: [ListWindow; 48],
+    win: [ListWindow; 49],
     /// Network, Display and Sound pages.
     hw: DevicesPane,
     /// The Bluetooth page (its own view model; a popup for pairing).
@@ -703,6 +810,8 @@ pub struct SettingsApp {
     vo_lang: usize,
     vo_scroll: f32,
     vo_max: f32,
+    /// The Voice page's controls take most of its room: the whole page scrolls (decided by the last frame).
+    vo_tight: bool,
     /// Models page, Lemonade list: how far it is scrolled, its longest scroll, the height of its view, where it was drawn, the
     /// scale, whether the arrows scroll it, and its search box (and whether that has the keyboard).
     lem_scroll: f32,
@@ -738,6 +847,9 @@ pub struct SettingsApp {
     wifi: WifiEnv,
     /// The networks the last scan found, in the order the picker shows them (`None`: the extra choices below the list).
     wifi_items: Vec<(String, Option<iyakki_devctl::wifi::Ap>)>,
+    /// The live signal and sign-in line of the joined WiFi network.
+    link: iyakki_agent::wifilink::LinkWatch,
+    link_t0: Option<std::time::Instant>,
     devices: Vec<iyakki_storage::BlockDev>,
     modal: Option<Modal>,
     job: Option<Job>,
@@ -777,8 +889,14 @@ pub struct SettingsApp {
     /// Models -> Model host on your network (a page over the settings).
     mh: modelhost_page::MhPanel,
     kbd: kbd_page::KbdPanel,
+    /// The action buttons under a page when they need more rows than a third of the window: the bar scrolls (wheel, finger, thumb).
+    btn_bar: crate::scrolllist::ScrollList,
+    /// The scroll position of a page that does not scroll itself, and the page it belongs to.
+    body_bar: crate::scrolllist::ScrollList,
+    body_tab: usize,
     /// Settings → Battery (laptops only).
     bat: battery_page::BatPanel,
+    asst: assistant_page::AsstPanel,
     /// Settings -> Power.
     pw: power_page::PwPanel,
     /// Cloud mode as decided for this machine: the hardware pages it hides are not in `tabs`.
@@ -821,6 +939,7 @@ impl SettingsApp {
             tabs.push(Tab::Developer);
             tabs.push(Tab::Cloud);
             tabs.push(Tab::CloudRoles);
+            tabs.push(Tab::AppAccess);
         }
         if admin && !hf_on() && install_page::InstallEnv::real().available() {
             tabs.push(Tab::Install);
@@ -838,7 +957,9 @@ impl SettingsApp {
             tabs.push(Tab::GitKeys);
         }
         tabs.push(Tab::HomeLayout);
+        tabs.push(Tab::Views);
         tabs.push(Tab::Notifications);
+        tabs.push(Tab::Assistant);
         tabs.push(Tab::ScreenSaver);
         tabs.push(Tab::Power);
         tabs.push(Tab::Accessibility);
@@ -855,7 +976,9 @@ impl SettingsApp {
             tabs.push(Tab::EncHome);
         }
         tabs.sort_by_key(|t| Tab::ORDER.iter().position(|o| o == t).unwrap_or(usize::MAX));
-        let mut app = SettingsApp { tabs, tab: 0, sel: [0; 48], win: [ListWindow::default(); 48], hw: DevicesPane::new(DeviceEnv::real()), bt: BtPage::new(DeviceEnv::real()), ticks: 0, tip: Default::default(), test_record_ms: 2000, vo_lang: 0, vo_scroll: 0.0, vo_max: 0.0, lem_scroll: 0.0, lem_max: 0.0, lem_view_h: 0.0, lem_rect: R::new(0.0, 0.0, 0.0, 0.0), lem_s: 1.0, lem_focus: false, lem_query: TextField::new("Search models", false), lem_search: false, lem_texts: Vec::new(), section: if admin { 0 } else { 1 }, share_skills: cx.session.policy.manage_skills, nav_query: TextField::new("Search settings", false), nav_focus: false, nav_scroll: 0.0, narrow: false, show_list: false, nav_seen: usize::MAX, mouse: (0, 0), nav_rect: R::new(0.0, 0.0, 0.0, 0.0), nav_s: 1.0, slider_w: Vec::new(), storage: StorageEnv::real(), wifi: WifiEnv::real(), wifi_items: Vec::new(), devices: vec![], modal: None, job: None, host: Default::default(), crash: Default::default(), backup: Default::default(), upd: Default::default(), status: None, dc: Default::default(), mem: Default::default(), disp: Default::default(), fw: Default::default(), tun: Default::default(), dom: Default::default(), vpn: Default::default(), remote: Default::default(), share: Default::default(), bh: Default::default(), time: Default::default(), hn: Default::default(), inst: Default::default(), devel: Default::default(), git: Default::default(), matrix: Default::default(), shares: Default::default(), mh: Default::default(), kbd: Default::default(), bat: Default::default(), pw: Default::default(), cloud: iyakki_agent::cloudmode::CloudMode::desktop(), roles: Default::default(), ench: Default::default() };
+        let mut app = SettingsApp { tabs, tab: 0, sel: [0; 49], win: [ListWindow::default(); 49], hw: DevicesPane::new(DeviceEnv::real()), bt: BtPage::new(DeviceEnv::real()), ticks: 0, tip: Default::default(), test_record_ms: 2000, vo_lang: 0, vo_tight: false, vo_scroll: 0.0, vo_max: 0.0, lem_scroll: 0.0, lem_max: 0.0, lem_view_h: 0.0, lem_rect: R::new(0.0, 0.0, 0.0, 0.0), lem_s: 1.0, lem_focus: false, lem_query: TextField::new("Search models", false), lem_search: false, lem_texts: Vec::new(), section: if admin { 0 } else { 1 }, share_skills: cx.session.policy.manage_skills, nav_query: TextField::new("Search settings", false), nav_focus: false, nav_scroll: 0.0, narrow: false, show_list: false, nav_seen: usize::MAX, mouse: (0, 0), nav_rect: R::new(0.0, 0.0, 0.0, 0.0), nav_s: 1.0, slider_w: Vec::new(), storage: StorageEnv::real(), wifi: WifiEnv::real(), wifi_items: Vec::new(), link: Default::default(), link_t0: None, devices: vec![], modal: None, job: None, host: Default::default(), crash: Default::default(), backup: Default::default(), upd: Default::default(), status: None, dc: Default::default(), mem: memory::MemPanel::new(cx.os.memory()), disp: Default::default(), fw: Default::default(), tun: Default::default(), dom: Default::default(), vpn: Default::default(), remote: Default::default(), share: Default::default(), bh: Default::default(), time: Default::default(), hn: Default::default(), inst: Default::default(), devel: Default::default(), btn_bar: Default::default(), body_bar: Default::default(), body_tab: 0, git: Default::default(), matrix: Default::default(), shares: Default::default(), mh: Default::default(), kbd: Default::default(), bat: Default::default(), asst: Default::default(), pw: Default::default(), cloud: iyakki_agent::cloudmode::CloudMode::desktop(), roles: Default::default(), ench: Default::default() };
+        // the hardware pages go through the guarded handle: switching a radio or the brightness is asked of the broker
+        app.hw.set_hardware(cx.os.hardware());
         app.bat_sync_tab();
         app.refresh_devices();
         app
@@ -1113,6 +1236,8 @@ impl SettingsApp {
                 self.mem_after_job();
                 self.refresh_devices();
             }
+            JobOut::Wizard(r) => self.wiz_job_done(cx, r),
+            JobOut::Cert(r) => self.cert_job_done(r),
             JobOut::HwCheck(card_id, r) => self.hw_check_done(card_id, r),
             JobOut::Enc(form) => self.ench_finished(cx, *form),
             JobOut::Backup(out) => self.backup_job_done(out),
@@ -1326,7 +1451,11 @@ impl SettingsApp {
         let Some(modal) = self.modal.take() else { return };
         match modal {
             Modal::Form(kind, mut form) => match form.handle_event(ev) {
-                FormEvent::Cancel => {}
+                FormEvent::Cancel => {
+                    if matches!(kind, FormKind::BundleWizard) {
+                        self.wiz_cancel(cx);
+                    }
+                }
                 FormEvent::Changed(1) if matches!(kind, FormKind::Provider(_)) => {
                     // switching type refreshes the URL default unless the user typed their own
                     let old_default: Vec<String> = Kind::ALL.iter().map(|k| k.default_base().unwrap_or("").to_string()).collect();
@@ -1360,7 +1489,17 @@ impl SettingsApp {
 
     /// Returns a modal to keep open (the form again, with an error) when saving failed.
     fn submit_form(&mut self, cx: &AppCx, kind: FormKind, form: &mut Form) -> Option<Modal> {
+        match kind {
+            FormKind::GeminiSetup => return self.gem_submit(cx, form),
+            FormKind::BundleWizard => return self.wiz_submit(cx, form),
+            FormKind::GeminiConsent => {
+                self.gem_consent_submit(cx, form);
+                return None;
+            }
+            _ => {}
+        }
         let result: Result<String, String> = match &kind {
+            FormKind::GeminiSetup | FormKind::GeminiConsent | FormKind::BundleWizard => return None, // answered above
             FormKind::Provider(editing) => {
                 if !self.admin(cx) {
                     return None;
@@ -1485,6 +1624,52 @@ impl SettingsApp {
                     Err(e) => Err(e),
                 }
             }
+            FormKind::WifiEnterprise(ssid) => {
+                if !self.admin(cx) {
+                    return None;
+                }
+                let opt = |s: String| if s.trim().is_empty() { None } else { Some(s.trim().to_string()) };
+                let method = match form.choice_idx(0) {
+                    1 => iyakki_devctl::wifi_ext::EapMethod::Ttls,
+                    2 => iyakki_devctl::wifi_ext::EapMethod::Tls,
+                    _ => iyakki_devctl::wifi_ext::EapMethod::Peap,
+                };
+                let e = iyakki_devctl::wifi_ext::Enterprise {
+                    method,
+                    identity: form.value(1),
+                    password: opt(form.raw(2)),
+                    anonymous_identity: opt(form.value(3)),
+                    inner: None,
+                    ca_cert: form.value(4),
+                    server_name_match: opt(form.value(5)),
+                    client_cert: opt(form.value(6)),
+                    private_key: opt(form.value(7)),
+                    private_key_password: opt(form.raw(8)),
+                };
+                match iyakki_devctl::wifi::Known::new_enterprise(ssid, false, e, iyakki_agent::clock::now_unix()) {
+                    Ok(k) => {
+                        self.join_wifi(cx, k);
+                        Ok("Working… this takes a few seconds.".to_string())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            FormKind::WifiWep(ssid) => {
+                if !self.admin(cx) {
+                    return None;
+                }
+                if form.choice_idx(1) != 1 {
+                    Err(iyakki_devctl::wifi_ext::wep_warning().to_string())
+                } else {
+                match iyakki_devctl::wifi::Known::new_wep(ssid, &form.raw(0), false, iyakki_agent::clock::now_unix()) {
+                    Ok(k) => {
+                        self.join_wifi(cx, k);
+                        Ok("Working… this takes a few seconds.".to_string())
+                    }
+                    Err(e) => Err(e),
+                }
+                }
+            }
             FormKind::WifiHidden => {
                 if !self.admin(cx) {
                     return None;
@@ -1545,8 +1730,11 @@ impl SettingsApp {
             FormKind::Matrix => self.matrix_submit(cx, form),
             FormKind::Share(k) => self.shares_submit(cx, &k, form),
             FormKind::HotspotWifi => self.hotspot_wifi_submit(cx, form),
+            FormKind::HotspotCountry => self.hotspot_country_submit(cx, form),
             FormKind::Backup(k) => self.backup_submit(cx, &k, form),
             FormKind::Remote(k) => self.remote_submit(cx, &k, form),
+            FormKind::Sftp(k) => self.sftp_submit(cx, &k, form),
+            FormKind::Machine(k) => self.machine_submit(cx, &k, form),
             FormKind::ModelHost => self.mh_submit(form),
             FormKind::ModelOpt(f) => self.mo_submit(cx, &f, form),
             FormKind::Mem(f) => self.mem_submit(*f, form),
@@ -1555,10 +1743,17 @@ impl SettingsApp {
             FormKind::Domains(k) => self.dom_submit(cx, &k, form),
             FormKind::Vpn(k) => self.vpn_submit(cx, &k, form),
             FormKind::BrowserHeader(k) => self.bh_submit(cx, &k, form),
+            FormKind::BrowserShort(add) => self.short_submit(cx, *add, form),
+            FormKind::BrowserSite => self.site_forget_submit(cx, form),
+            FormKind::BrowserSites(c) => self.browser_sites_submit(cx, *c, form),
+            FormKind::RagRerankModel => self.rag_rerank_submit(cx, form),
             FormKind::TimeServer => self.time_submit(cx, form),
             FormKind::HomeGroup(id) => self.hl_submit(cx, id, form),
+            FormKind::View(id) => self.vw_submit(cx, id, form),
             FormKind::HostName => self.host_name_submit(cx, form),
+            FormKind::BrowserCert => self.browser_cert_submit(cx, form),
             FormKind::UpdateFolder => self.upd_folder_submit(form),
+            FormKind::UpdateBundle => self.upd_bundle_submit(form, cx),
             FormKind::UpdateSource => self.upd_source_submit(cx, form),
             FormKind::Install(d) => self.inst_submit(cx, d, form),
             FormKind::AgentModel(_) | FormKind::AgentCustom(_) => match self.agents_submit(cx, &kind, form) {
@@ -1599,7 +1794,7 @@ impl SettingsApp {
                     Err("The new passwords don't match.".into())
                 } else {
                     let user = cx.session.user.clone();
-                    let r = cx.store.lock().map_err(|_| "store busy".to_string()).and_then(|mut s| s.set_password(&cx.session, &user, Some(&old), &new).map_err(|e| match e {
+                    let r = Ok::<_, String>(cx.store.lock().unwrap_or_else(std::sync::PoisonError::into_inner)).and_then(|mut s| s.set_password(&cx.session, &user, Some(&old), &new).map_err(|e| match e {
                         AccountError::Forbidden => "The current password is wrong.".to_string(),
                         other => other.to_string(),
                     }));
@@ -1627,6 +1822,12 @@ impl SettingsApp {
         // the home layout is everyone's own, not an administrator's setting
         if let PickKind::HomeMove(key) = &kind {
             return self.hl_pick(cx, key, item);
+        }
+        if matches!(kind, PickKind::CertView) {
+            return;
+        }
+        if matches!(kind, PickKind::ViewTemplate) {
+            return self.vw_pick(cx, item);
         }
         if !self.admin(cx) {
             return;
@@ -1657,8 +1858,24 @@ impl SettingsApp {
                 let chosen = self.wifi_items.iter().find(|(t, _)| t == item).cloned();
                 match chosen {
                     Some((_, Some(ap))) => {
-                        if !ap.security.joinable() {
-                            return self.fail(format!("{} networks ({}) cannot be joined from here.", ap.security.label(), ap.ssid));
+                        if ap.security == iyakki_devctl::wifi::Security::Enterprise {
+                            let f = Form::new(&format!("Join {} (enterprise)", ap.ssid))
+                                .choice("Method", &["PEAP", "TTLS", "TLS (certificate)"], 0)
+                                .text("User name", "", "your login at the school or company")
+                                .secret("Password", "not for TLS")
+                                .text("Outer name", "", "only if the network asks for one")
+                                .text("Server certificate file", "", "full path of the authority file that checks the network (required)")
+                                .text("Server name", "", "for example radius.example.edu (advised)")
+                                .text("Your certificate file", "", "TLS only: full path")
+                                .text("Your key file", "", "TLS only: full path")
+                                .secret("Key password", "if the key file has one");
+                            self.open_form(FormKind::WifiEnterprise(ap.ssid.clone()), f);
+                            return;
+                        }
+                        if ap.security == iyakki_devctl::wifi::Security::Wep {
+                            let f = Form::new(&format!("Join {} (WEP: not safe)", ap.ssid)).secret("WEP key", "5 or 13 characters, or 10 or 26 hexadecimal digits").choice("WEP can be broken in minutes", &["No, do not join", "Yes, I understand"], 0);
+                            self.open_form(FormKind::WifiWep(ap.ssid.clone()), f);
+                            return;
                         }
                         if ap.security == iyakki_devctl::wifi::Security::Open {
                             match iyakki_devctl::wifi::Known::new(&ap.ssid, "", ap.security, false, iyakki_agent::clock::now_unix()) {
@@ -1745,6 +1962,7 @@ impl SettingsApp {
         }
         let (r, what, provider) = match &kind {
             PickKind::Zone => return,
+            PickKind::CertView => return,
             PickKind::Vision => return,
             PickKind::Tidy => return,
             PickKind::Chat(p) => (
@@ -1757,7 +1975,7 @@ impl SettingsApp {
                 "chat",
                 p,
             ),
-            PickKind::Wifi | PickKind::WifiForget | PickKind::Options(_) | PickKind::AgentKey(_) | PickKind::AgentModel(_) | PickKind::MacMode(_) | PickKind::Lemonade(_) | PickKind::SoundOutput | PickKind::HomeMove(_) | PickKind::FwService | PickKind::Computer(_) => return,
+            PickKind::Wifi | PickKind::WifiForget | PickKind::Options(_) | PickKind::AgentKey(_) | PickKind::AgentModel(_) | PickKind::MacMode(_) | PickKind::Lemonade(_) | PickKind::SoundOutput | PickKind::HomeMove(_) | PickKind::ViewTemplate | PickKind::FwService | PickKind::Computer(_) => return,
             PickKind::Embed(p) => {
                 let choice = if item.starts_with("(built-in") { None } else { Some(ModelChoice { provider: p.clone(), model: item.into() }) };
                 (Self::svc(cx).settings.lock().unwrap().set_embedding(choice), "embedding", p)
@@ -1774,11 +1992,23 @@ impl SettingsApp {
     }
 
     fn apply_confirm(&mut self, cx: &AppCx, kind: ConfirmKind) {
+        if matches!(kind, ConfirmKind::WizardRun | ConfirmKind::WizardFinish) {
+            return self.wiz_confirm(cx, kind);
+        }
+        if matches!(kind, ConfirmKind::GeminiRevoke) {
+            return self.gem_revoke(cx);
+        }
         if matches!(kind, ConfirmKind::EncMove | ConfirmKind::EncRemovePlain) {
             return self.ench_confirm(cx, kind);
         }
-        if matches!(kind, ConfirmKind::HomeDelete(_) | ConfirmKind::HomeReset) {
+        if matches!(kind, ConfirmKind::HomeDelete(_) | ConfirmKind::HomeReset | ConfirmKind::HomeDefaultSet | ConfirmKind::HomeDefaultClear) {
             return self.hl_confirm(cx, &kind);
+        }
+        if let ConfirmKind::ViewDelete(id) = kind {
+            return self.vw_confirm(cx, id);
+        }
+        if let ConfirmKind::Sftp(a) = kind {
+            return self.sftp_confirm(cx, a);
         }
         if let ConfirmKind::Dc(a) = kind {
             return self.dc_confirm(cx, a);
@@ -1794,6 +2024,9 @@ impl SettingsApp {
         }
         if let ConfirmKind::ShareStopAll = kind {
             return self.shares_stop_all();
+        }
+        if let ConfirmKind::MediaServerOn = kind {
+            return self.media_server_start(cx);
         }
         if let ConfirmKind::T2Mic = kind {
             return self.sound_t2_mic_apply(cx, true);
@@ -1886,6 +2119,8 @@ impl SettingsApp {
             Some(SpeechEngine::Browser) => (2, String::new(), String::new(), String::new(), String::new(), false),
             // an engine of this computer is chosen on the page itself (Engine, Voice); here it is a command that runs it
             Some(SpeechEngine::Host { .. }) => (0, "http://127.0.0.1:8000/v1/audio/speech".into(), String::new(), String::new(), String::new(), false),
+            // Google Gemini is set up on Settings -> Models (key g); saving this form replaces it with the endpoint typed here
+            Some(SpeechEngine::Gemini { .. }) => (0, "http://127.0.0.1:8080/v1/audio/transcriptions".into(), String::new(), String::new(), String::new(), false),
             None => (0, if stt { "http://127.0.0.1:8080/v1/audio/transcriptions".into() } else { "http://127.0.0.1:8000/v1/audio/speech".into() }, String::new(), String::new(), String::new(), false),
         };
         let hint = if stt { "whisper-cli -m model.bin -f {wav} -nt -np" } else { "piper -m voice.onnx -f {out}" };
@@ -1969,6 +2204,8 @@ impl SettingsApp {
             },
             Key::Char('M') if self.admin(cx) => self.vo_wake_toggle(cx),
             Key::Char('N') if self.admin(cx) => self.vo_wake_sens(cx),
+            Key::Char('A') if self.admin(cx) => self.vo_spoken_toggle(cx),
+            Key::Char('E') if self.admin(cx) => self.vo_echo_toggle(cx),
             Key::Char('r') if self.admin(cx) => match toggle(cx, &|v| v.speak_replies = !v.speak_replies) {
                 Ok(()) => self.ok("Read replies aloud toggled."),
                 Err(e) => self.fail(e.to_string()),
@@ -2272,6 +2509,11 @@ impl SettingsApp {
     }
 
     fn render_voice(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
+        // everything is kept inside the page's room: when the controls take most of it (a narrow window, big text) the whole page scrolls
+        g.clipped(a, |g| self.render_voice_inner(g, a, s, cx));
+    }
+
+    fn render_voice_inner(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
         let svc = Self::svc(cx);
         let v = svc.voice_settings();
         let admin = cx.session.policy.manage_settings;
@@ -2288,7 +2530,10 @@ impl SettingsApp {
             (None, _) if svc.host_tts.scanning() || (svc.host_tts.is_enabled() && report.is_none()) => ("Looking for speech engines on this computer…".to_string(), MUTED),
             (_, other) => (st::status_text(&other), ERR),
         };
-        let mut y = a.y;
+        // when the controls left too little room for the lists below them, the controls scroll away with the lists
+        let tight = self.vo_tight;
+        let off = if tight { self.vo_scroll } else { 0.0 };
+        let mut y = a.y - off;
         for l in g.wrap(15.0 * s, &status, Face::Bold, a.w).into_iter().take(2) {
             g.text(a.x, y, 15.0 * s, col, &l, Face::Bold);
             y += 20.0 * s;
@@ -2335,7 +2580,9 @@ impl SettingsApp {
         y += 8.0 * s;
         // ---- the rest scrolls
         let rest = R::new(a.x, y, a.w, (a.y + a.h - y).max(40.0 * s));
-        let mut yy = rest.y - self.vo_scroll;
+        let controls_h = y + off - a.y;
+        self.vo_tight = a.y + a.h - (y + off) < 160.0 * s;
+        let mut yy = if tight { rest.y } else { rest.y - self.vo_scroll };
         let mut used = 0.0f32;
         let put = |g: &mut Gfx, yy: &mut f32, used: &mut f32, text: &str, size: f32, col: [u8; 4], face: Face, gap: f32| {
             for l in g.wrap(size, text, face, rest.w) {
@@ -2346,7 +2593,7 @@ impl SettingsApp {
             *yy += gap;
             *used += gap;
         };
-        g.clipped(rest, |g| {
+        g.clipped(if tight { a } else { rest }, |g| {
             put(g, &mut yy, &mut used, "Speech engines found on this computer", 15.0 * s, TEXT, Face::Bold, 2.0 * s);
             match &report {
                 None if svc.host_tts.is_enabled() => put(g, &mut yy, &mut used, "Looking… (this runs once in the background)", fs, MUTED, Face::Sans, 6.0 * s),
@@ -2372,7 +2619,7 @@ impl SettingsApp {
                 (true, _) => "estimated (no speech-to-text server on this computer or allowed)".to_string(),
             };
             let wake_rows = Self::vo_wake_rows(cx);
-            let lines: [(&str, String, [u8; 4]); 12] = [
+            let lines: [(&str, String, [u8; 4]); 14] = [
                 ("Speech-to-text", v.stt.as_ref().map_or("not set up".into(), |e| e.label()), if v.stt.is_some() { OK } else { MUTED }),
                 ("Text-to-speech", match &v.tts {
                     Some(e) => e.label(),
@@ -2388,9 +2635,15 @@ impl SettingsApp {
                 ("Word timing", timing, TEXT),
                 wake_rows[0].clone(),
                 wake_rows[1].clone(),
+                Self::vo_spoken_row(cx),
+                Self::vo_echo_row(cx),
             ];
             yy += 8.0 * s;
             for (k, val, col) in lines.iter() {
+                if *k == "Echo cancellation" && admin {
+                    // the row is a switch for a finger too: a tap sends the key
+                    g.hit(R::new(rest.x, yy - 3.0 * s, rest.w, 26.0 * s), Event::Key(Key::Char('E')), "echo cancellation");
+                }
                 g.text(rest.x, yy, fs, MUTED, k, Face::Sans);
                 let val = g.fit(15.0 * s, val, Face::Mono, rest.w - 190.0 * s);
                 g.text(rest.x + 180.0 * s, yy, 15.0 * s, *col, &val, Face::Mono);
@@ -2408,7 +2661,7 @@ impl SettingsApp {
                 put(g, &mut yy, &mut used, n, 13.0 * s, DIM, Face::Sans, 4.0 * s);
             }
         });
-        self.vo_max = (used + 60.0 * s - rest.h).max(0.0);
+        self.vo_max = if tight { (controls_h + used + 60.0 * s - a.h).max(0.0) } else { (used + 60.0 * s - rest.h).max(0.0) };
         self.vo_scroll = self.vo_scroll.clamp_safe(0.0, self.vo_max);
     }
 
@@ -2419,6 +2672,7 @@ impl SettingsApp {
             Tab::Models => Self::providers(cx).len(),
             Tab::Agents => Self::agent_ids(cx).len(),
             Tab::Rag => Self::externals(cx).len(),
+            Tab::Assistant => self.asst_rows(cx).len(),
             Tab::Vault => self.secret_names(cx).map_or(0, |n| n.len()),
             Tab::Backup => self.backup_len(),
             Tab::SecretProviders => Self::secret_providers(cx).len(),
@@ -2439,8 +2693,10 @@ impl SettingsApp {
             Tab::Updates => self.upd_len(),
             Tab::Keyboard => crate::fnkeys::KEYS.len(),
             Tab::HomeLayout => Self::hl_len(cx),
+            Tab::Views => Self::vw_len(cx),
             Tab::SystemSounds => sysnd::ROWS,
             Tab::Notifications => Self::notif_len(cx),
+            Tab::AppAccess => Self::appaccess_len(cx),
             Tab::Displays => self.disp_len(),
             Tab::ScreenSaver => Self::ss_len(cx),
             Tab::Browser if self.bh.open => self.bh_len(cx),
@@ -2730,7 +2986,7 @@ impl SettingsApp {
         if !self.admin(cx) {
             return self.fail("Only administrators can change the network.");
         }
-        let Some(iface) = self.wifi.iface() else { return self.fail("This computer has no WiFi adapter.") };
+        let Some(iface) = self.wifi.iface() else { return self.fail(if iyakki_devctl::broadcom_wifi_without_driver(&self.wifi.roots) { iyakki_devctl::BROADCOM_NO_DRIVER_TEXT } else { "This computer has no WiFi adapter." }) };
         let w = self.wifi.wifi.clone();
         cx.audit.record(&cx.session.user, "settings.wifi.scan", &iface);
         self.start("looking for WiFi networks", move || JobOut::Wifi(w.scan(&iface)));
@@ -2757,27 +3013,13 @@ impl SettingsApp {
 
     /// Remember a network and make the machine use it, in the background.
     fn join_wifi(&mut self, cx: &AppCx, k: iyakki_devctl::wifi::Known) {
-        let Some(iface) = self.wifi.iface() else { return self.fail("This computer has no WiFi adapter.") };
+        let Some(iface) = self.wifi.iface() else { return self.fail(if iyakki_devctl::broadcom_wifi_without_driver(&self.wifi.roots) { iyakki_devctl::BROADCOM_NO_DRIVER_TEXT } else { "This computer has no WiFi adapter." }) };
         let (w, store) = (self.wifi.wifi.clone(), self.wifi.known.clone());
         let mac = iyakki_devctl::mac::MacEnv { roots: self.wifi.roots.clone(), ..self.hw.mac().clone() };
         cx.audit.record(&cx.session.user, "settings.wifi.join", &k.ssid);
         let ssid = k.ssid.clone();
-        self.start("joining the network", move || {
-            JobOut::Msg((|| {
-                store.add(k)?;
-                // the private address for this network (when one is chosen) before anything is sent from the adapter
-                let mode = mac.config().mode_for(iyakki_devctl::LinkKind::Wifi, &iface, Some(&ssid));
-                let (mut changed, mut note) = (false, String::new());
-                if !mac.host_managed && (mode.is_private() || mac.infos().iter().any(|i| i.iface == iface && i.private)) {
-                    match mac.apply_now(&iface, Some(&ssid), true) {
-                        Ok(m) => changed = !m.contains("already has"),
-                        Err(e) => note = format!(" Private MAC address not applied ({e}); the adapter keeps the address it has."),
-                    }
-                }
-                w.apply_with(&iface, &store.list(), mode, changed)?;
-                Ok(format!("Joining {ssid}. It is remembered and tried first the next time.{note}"))
-            })())
-        });
+        let _ = ssid;
+        self.start("joining the network", move || JobOut::Msg(iyakki_devctl::wifi::join_now(&w, &store, &mac, &iface, k)));
     }
 
     /// Bigger (`u`) or smaller (`U`) text and buttons, kept for this person.
@@ -2796,18 +3038,32 @@ impl SettingsApp {
     /// Choose the theme for this person (`1` Dark, `2` Light, `3` High contrast, `t` next, `T` previous): kept with their other
     /// display settings and applied at once, so the page shows it as a live preview.
     fn change_theme(&mut self, key: char, cx: &AppCx) {
-        use crate::theme::{current_id, save, set_current, ALL};
-        let at = ALL.iter().position(|t| *t == current_id()).unwrap_or(0);
+        let choices = Self::theme_choices(cx);
+        let at = choices.iter().position(|c| c.chosen).unwrap_or(0);
         let next = match key {
-            '1' => 0,
-            '2' => 1,
-            '3' => 2,
-            't' => (at + 1) % ALL.len(),
-            _ => (at + ALL.len() - 1) % ALL.len(),
+            't' => (at + 1) % choices.len(),
+            'T' => (at + choices.len() - 1) % choices.len(),
+            d => (d as usize).saturating_sub('1' as usize),
         };
-        save(cx.services.dir(), &cx.session.user, ALL[next]);
-        set_current(ALL[next]);
-        self.ok(format!("Theme: {}.", ALL[next].name()));
+        let Some(c) = choices.get(next) else {
+            return self.fail("There is no theme under that number.".to_string());
+        };
+        let (dir, user) = (cx.services.dir(), &cx.session.user);
+        match (&c.builtin, &c.file) {
+            (Some(id), _) => {
+                crate::theme::save(dir, user, *id);
+                crate::theme::apply(Some(*id));
+                self.ok(format!("Theme: {}.", id.name()));
+            }
+            (None, Some(f)) => match iyakki_uikit::usertheme::choose(dir, user, f) {
+                Ok(name) => {
+                    cx.audit.record(user, "settings.display.theme", &format!("file {f}"));
+                    self.ok(format!("Theme: {name}."));
+                }
+                Err(e) => self.fail(format!("That theme cannot be used: {e}")),
+            },
+            _ => {}
+        }
     }
 
     /// A heartbeat on the Bluetooth page: the model reads the machine and the outcomes go to the system log.
@@ -2848,7 +3104,7 @@ impl SettingsApp {
             Key::Enter | Key::Char(' ') if tab == DevTab::Network && matches!(self.selected_target(), Some(Target::Mac(..))) => self.choose_mac_mode(cx),
             Key::Char('u') if tab == DevTab::Display => self.change_ui_size(true, cx),
             Key::Char('U') if tab == DevTab::Display => self.change_ui_size(false, cx),
-            Key::Char(c @ ('t' | 'T' | '1' | '2' | '3')) if tab == DevTab::Display => self.change_theme(*c, cx),
+            Key::Char(c @ ('t' | 'T' | '1'..='9')) if tab == DevTab::Display => self.change_theme(*c, cx),
             Key::Up => self.move_sel(-1, len),
             Key::Down => self.move_sel(1, len),
             Key::Char('r') => {
@@ -2884,7 +3140,14 @@ impl SettingsApp {
         if self.tab() == Tab::Network && self.share.open {
             return self.render_share(g, a, s, cx);
         }
-        let announce = if self.tab() == Tab::Network { self.announce_line(cx) } else { String::new() };
+        let announce = if self.tab() == Tab::Network {
+            match self.link.line() {
+                Some(l) => format!("WiFi: {l}  ·  {}", self.announce_line(cx)),
+                None => self.announce_line(cx),
+            }
+        } else {
+            String::new()
+        };
         let note = match self.tab() {
             Tab::Network => announce.as_str(),
             Tab::Display => "The desktop uses the screen's best mode. Resolution, arrangement and mirroring of several displays are in Settings, Displays.",
@@ -2898,9 +3161,9 @@ impl SettingsApp {
         let mut y = a.y;
         if self.tab() == Tab::Display {
             // a small page: the cards drop their hint line so the rows and the help line below keep their room
-            let compact = Self::cards_need_compact(g, a.w, s, a.h - 130.0 * s);
+            let compact = Self::cards_need_compact(g, a.w, s, a.h - 130.0 * s, cx);
             y += self.render_ui_size_card(g, R::new(a.x, y, a.w, 74.0 * s), s, cx, compact) + 10.0 * s;
-            y += self.render_theme_card(g, R::new(a.x, y, a.w, 74.0 * s), s, compact) + 10.0 * s;
+            y += self.render_theme_card(g, R::new(a.x, y, a.w, 74.0 * s), s, compact, cx) + 10.0 * s;
         }
         let notes: Vec<String> = Vec::new();
         let low = a.y + a.h - 70.0 * s - if notes.is_empty() { 0.0 } else { (notes.len() as f32 - 1.0) * 17.0 * s };
@@ -2945,17 +3208,20 @@ impl SettingsApp {
                 y += 64.0 * s;
             }
         }
+        // the help line sits at the bottom of the room; when the cards and rows above it take more than the room (a small window, big
+        // text) it follows them instead, and the page scrolls
+        let bottom = (a.y + a.h).max(y + 46.0 * s);
         // the keyboard's way to the tooltip: the whole text of the selected row when its line was cut, above the help line
         if let Some(full) = cut.filter(|_| notes.is_empty()) {
             let one = full.replace('\n', " · ");
             let one = crate::tooltip::fit_keep_ip(g, 13.0 * s, &one, Face::Sans, a.w);
-            g.text(a.x, a.y + a.h - 42.0 * s, 13.0 * s, TEXT, &one, Face::Sans);
+            g.text(a.x, bottom - 42.0 * s, 13.0 * s, TEXT, &one, Face::Sans);
         }
         if notes.is_empty() {
             // a page squeezed to almost nothing has no room for the help line: it would land on the text above the page
             if a.h >= 40.0 * s {
                 let note = g.fit(13.0 * s, note, Face::Sans, a.w);
-                g.text(a.x, a.y + a.h - 22.0 * s, 13.0 * s, DIM, &note, Face::Sans);
+                g.text(a.x, bottom - 22.0 * s, 13.0 * s, DIM, &note, Face::Sans);
             }
         } else {
             let top = a.y + a.h - 22.0 * s - (notes.len() as f32 - 1.0) * 17.0 * s;
@@ -3007,7 +3273,10 @@ impl SettingsApp {
         if self.handle_browser_headers(k, cx) {
             return;
         }
-        if self.handle_browser_graphics(k, cx) || self.handle_browser_speed(k, cx) || self.handle_browser_block(k, cx) || self.handle_browser_protect(k, cx) || self.handle_browser_devices(k, cx) {
+        if self.browser_scroll_key(k) {
+            return;
+        }
+        if self.handle_browser_short(k, cx) || self.handle_browser_graphics(k, cx) || self.handle_browser_speed(k, cx) || self.handle_browser_block(k, cx) || self.handle_browser_protect(k, cx) || self.handle_browser_cert(k, cx) || self.handle_browser_choices(k, cx) || self.handle_browser_devices(k, cx) || self.handle_browser_sites(k, cx) {
             return;
         }
         let mut c = super::browser_config::load(cx);
@@ -3062,6 +3331,19 @@ impl SettingsApp {
         if self.bh.open {
             return self.render_browser_headers(g, a, s, cx);
         }
+        // the page is longer than a small window: it scrolls (wheel, finger, arrows, Page keys) and everything in it is cut to the
+        // window, so nothing under the buttons is hit; the body is laid out with all the room it wants
+        self.bh.max = self.bh.max.max(0.0);
+        self.bh.scroll = self.bh.scroll.clamp_safe(0.0, self.bh.max);
+        let top = a.y - self.bh.scroll;
+        let tall = R::new(a.x, top, a.w, 20000.0 * s);
+        self.bh.page_h = a.h;
+        let end = g.clipped(a, |g| self.render_browser_body(g, tall, s, cx));
+        self.bh.max = (end - top + 12.0 * s - a.h).max(0.0);
+    }
+
+    /// The whole Browser page from the top of the rectangle down; returns where it ends.
+    fn render_browser_body(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) -> f32 {
         let c = super::browser_config::load(cx);
         let (gap, rh) = (10.0 * s, 70.0 * s);
         let two = a.w > 820.0 * s;
@@ -3090,9 +3372,12 @@ impl SettingsApp {
         y += self.render_browser_devices(g, a, y, s, cx);
         y += controls::section_title(g, a.x, y, s, "Search");
         let ebw0 = g.text_width(15.0 * s, "Change (e)", Face::Bold) + 15.0 * s * 1.7;
-        controls::info_row(g, R::new(a.x, y, a.w - ebw0 - 10.0 * s, 44.0 * s), s, c.search.name(), "words typed in the address bar are searched here (Google, Bing and DuckDuckGo ask for checks this browser cannot pass)");
+        // the person's short words (`yt cats`): Add (w) and Remove (W) sit beside the search engine's button when the window is wide enough
+        let short_w = self.short_buttons_width(g, a, s);
+        controls::info_row(g, R::new(a.x, y, a.w - ebw0 - short_w - 10.0 * s, 44.0 * s), s, c.search.name(), &format!("words typed in the address bar are searched here (Google, Bing and DuckDuckGo ask for checks this browser cannot pass). {}", Self::short_help(&c)));
         let ebw = g.text_width(15.0 * s, "Change (e)", Face::Bold) + 15.0 * s * 1.7;
         g.button(a.x + a.w - ebw, y + 6.0 * s, 15.0 * s, "Change (e)", ACCENT, Event::Key(Key::Char('e')));
+        self.render_short_buttons(g, a.x + a.w - ebw - 8.0 * s, y + 6.0 * s, s, short_w);
         y += 54.0 * s;
         y += controls::section_title(g, a.x, y, s, "The assistant in your browser");
         {
@@ -3117,12 +3402,15 @@ impl SettingsApp {
             y += 22.0 * s;
         }
         y += self.render_browser_protect(g, a, y, s, cx);
+        y += self.render_browser_cert(g, a, y, s, cx);
+        y += self.render_browser_choices(g, a, y, s, cx);
         if y + 60.0 * s > a.y + a.h {
-            return;
+            return y;
         }
         y += controls::section_title(g, a.x, y, s, "Sites allowed to run scripts");
         if c.js_sites.is_empty() {
             g.text(a.x + 4.0 * s, y, 14.0 * s, DIM, if c.js_all { "None needed: scripts run everywhere." } else { "None yet. Press j on a page in the browser to allow one." }, Face::Sans);
+            y += 26.0 * s;
         }
         for h in c.js_sites.iter().take(8) {
             if y + 38.0 * s > a.y + a.h {
@@ -3131,6 +3419,11 @@ impl SettingsApp {
             controls::info_row(g, R::new(a.x, y, a.w, 38.0 * s), s, h, "scripts allowed");
             y += 44.0 * s;
         }
+        // at the end of the page, so the switches and lists above keep their places: the sites allowed for camera, microphone and screen,
+        // and the audio and video add-on
+        y += self.render_browser_sites(g, a, y, s, cx);
+        y += self.render_browser_addon(g, a, y, s, cx);
+        y
     }
 
     fn handle_skills(&mut self, k: &Key, cx: &AppCx) {
@@ -3289,6 +3582,23 @@ impl SettingsApp {
                 }
             }
             Key::Char('f') if self.admin(cx) => self.detect_servers(cx),
+            // the chosen provider's models write PDF files themselves: the assistant's pdf_create is not offered (docs/PDF.md)
+            Key::Char('P') if self.admin(cx) && cur.is_some() => {
+                let id = cur.as_ref().map(|p| p.id.clone()).unwrap_or_default();
+                let to = !cur.as_ref().is_some_and(|p| p.native_pdf_output);
+                let r = Self::svc(cx).settings.lock().unwrap().update(|s| {
+                    if let Some(p) = s.providers.iter_mut().find(|p| p.id == id) {
+                        p.native_pdf_output = to;
+                    }
+                });
+                match r {
+                    Ok(()) => {
+                        cx.audit.record(&cx.session.user, "settings.native_pdf_output", &format!("{id} {}", if to { "on" } else { "off" }));
+                        self.ok(if to { format!("{id} is marked as writing PDF files itself: the assistant's pdf_create is not offered with it.") } else { format!("{id} is offered the assistant's pdf_create again.") });
+                    }
+                    Err(e) => self.fail(e.to_string()),
+                }
+            }
             Key::Char(c @ ('L' | 'E')) if self.admin(cx) && cur.as_ref().is_some_and(|p| p.kind != Kind::Lemonade) => {
                 let p = cur.expect("checked");
                 self.mo_list(cx, &p, *c == 'E');
@@ -3297,6 +3607,9 @@ impl SettingsApp {
                 let p = cur.expect("checked");
                 self.mo_options(cx, &p);
             }
+            Key::Char('g') if self.admin(cx) => self.gem_open_setup(cx),
+            Key::Char('C') => self.gem_consent_key(cx),
+            Key::Char('t') if cur.as_ref().is_some_and(|p| p.id == iyakki_agent::gemini::PROVIDER_ID) => self.gem_test(cx),
             Key::Char('H') if self.admin(cx) => self.mh_open(cx, true),
             Key::Char('G') if self.admin(cx) && cur.as_ref().is_some_and(|p| p.kind == Kind::Lemonade) => {
                 use iyakki_agent::lemonadecomputetools::{Backend, RealBackend};
@@ -3382,6 +3695,7 @@ impl SettingsApp {
             Key::Char(',') if self.admin(cx) => result = Some(tweak(cx, &|r| r.overlap = r.overlap.saturating_sub(20))),
             Key::Char('.') if self.admin(cx) => result = Some(tweak(cx, &|r| r.overlap += 20)),
             Key::Char('u') if self.admin(cx) => result = Some(tweak(cx, &|r| r.use_external = !r.use_external)),
+            Key::Char('o' | 'O' | 'g') if self.admin(cx) => self.handle_rag_order(k, cx),
             Key::Char('a') if self.admin(cx) => {
                 let f = Self::external_form(None);
                 self.open_form(FormKind::External(None), f);
@@ -3536,13 +3850,22 @@ impl SettingsApp {
             }
             Key::Char('u') => self.change_ui_size(true, cx),
             Key::Char('U') => self.change_ui_size(false, cx),
-            Key::Char(c @ ('t' | 'T' | '1' | '2' | '3')) => self.change_theme(*c, cx),
+            Key::Char(c @ ('t' | 'T' | '1'..='9')) => self.change_theme(*c, cx),
             _ => {}
         }
     }
 }
 
 impl App for SettingsApp {
+    /// A form, a list to pick from or a question drawn over Settings, in the words it shows (F-A11Y-02): the screen reader says it once when it opens.
+    fn dialog_title(&self) -> Option<String> {
+        Some(match self.modal.as_ref()? {
+            Modal::Form(_, f) => f.title.clone(),
+            Modal::Pick(_, p) => p.title.clone(),
+            Modal::Confirm(_, text) => text.clone(),
+        })
+    }
+
     fn title(&self) -> &'static str {
         "Settings"
     }
@@ -3561,9 +3884,10 @@ impl App for SettingsApp {
         }
         match self.tab() {
             Tab::Overview => "Up/Down choose · Enter open the page that fixes it · / find a setting",
-            Tab::Models => "a add · N add NVIDIA NIM (free key) · f detect Ollama/Lemonade · H Mac or GPU host · e edit · d delete · t test · m chat model · v vision model · y tidy model (dictation wording) · b embeddings · k key · x on/off · c test chat · l Lemonade models",
+            Tab::Models => "a add · N add NVIDIA NIM (free key) · g Google Gemini (experimental) · C its consent · f detect Ollama/Lemonade · H Mac or GPU host · e edit · d delete · t test · m chat model · v vision model · y tidy model (dictation wording) · b embeddings · k key · x on/off · c test chat · l Lemonade models",
             Tab::Agents => "d detect · i install · l login · o logout · k API key · m model · a Auto · u use for new chats · t test · n add custom · e edit · x hide/show",
-            Tab::Rag => "a add backend · t test · r reindex · i ingest documents · / find a page",
+            Tab::Assistant => "h remember on/off · f forget the selected history (press twice) · o show chats · t/T think limit up/down · q/Q silence limit up/down · 0 default",
+            Tab::Rag => "a add backend · t test · r reindex · i ingest documents · o order passages · O reranking model · g Graph RAG · / find a page",
             Tab::Backup => "b back up · o open a backup file · Space include/leave out or choose/skip · r restore the chosen things · c close the file · k look again · Up/Down choose",
             Tab::Vault => "n new · d delete · Tab system/personal · l lock · f key file · u unlock my vault",
             Tab::Skills => "c add from clipboard · a quick create · i import file · d delete",
@@ -3571,18 +3895,19 @@ impl App for SettingsApp {
             Tab::Bluetooth => "Up/Down choose · Enter does the main action (pair, connect) · e Bluetooth on/off · s scan or stop · / search · t phone tethering · u forget · a Advanced · r look again",
             Tab::Display => "u bigger text · U smaller text · + brighter · − dimmer · r look again",
             Tab::Sound => "o output · t test sound · + louder · − quieter · m mute · Enter use the selected output · A advanced · M mixer · r look again",
-            Tab::Keyboard => "f function keys mode · i ISO layout · o swap Option/Command · d repeat delay · r repeat rate · s scroll speed · y wheel lines · w wheel direction · n trackpad direction · g smooth scrolling · m momentum · b test screen · k test keyboard light · t test sound · Up/Down scroll the key table",
-            Tab::Notifications => "Up/Down choose a source · s show · q quiet (inbox only) · o off · Enter next level · a Matrix account · t test message · x remove it",
+            Tab::Keyboard => "f function keys mode · i ISO layout · o swap Option/Command · d repeat delay · r repeat rate · [ ] mouse speed · , . touchpad speed · { } < > speed presets · s scroll speed · y wheel lines · w wheel direction · n trackpad direction · g smooth scrolling · m momentum · b test screen · k test keyboard light · t test sound · Up/Down scroll the key table",
+            Tab::AppAccess => "Up/Down choose an access · r take it away (asks again at the next install) · c clear the log",
+            Tab::Notifications => "Up/Down choose a source · s show · q quiet (inbox only) · o off · Enter next level · v describe camera alerts · a Matrix account · t test message · x remove it",
             Tab::SystemSounds => "Up/Down choose · Enter or Space switch on or off · p preview · + louder · − quieter",
             Tab::Cloud => "c change the mode: Automatic, On, Off",
             Tab::CloudRoles => "Up/Down choose · m add person · n new namespace · a add to namespace · j join · x remove person · d delete namespace",
-            Tab::Computer => "s sound · d display · k keyboard and pointer · m microphone · g GPU · p power: per computer or shared · c copy settings from another computer · r reset this computer · f forget a computer (administrators)",
+            Tab::Computer => "s sound · d display · k keyboard and pointer · m microphone · g GPU · p power: per computer or shared · c copy settings from another computer · r reset this computer · f forget a computer · e b n v w startup disk (administrators)",
             Tab::EncHome => "c make my home encrypted · m move my existing files · u open · r open with the recovery key · l lock now · k new recovery key · a administrator slot · s close with the screen lock · x remove the old plain copy",
             Tab::Accessibility => "r screen reader · t test the voice · n speak notices · c high contrast · u/U bigger/smaller text · p large pointer · f big focus ring · m reduce motion · k sticky keys · w slow keys",
             Tab::Power => "e performance · b balanced · v power saver · s sleep after idle (next time) · w sleep while busy (administrators)",
             Tab::Battery => "p percentage in the top bar · w low battery warnings · s shut down at the critical level (administrators)",
             Tab::Browser if self.bh.open => "a add · e edit · x or Enter enable/disable · d delete · b or Esc back · Up/Down choose",
-            Tab::Browser => "g graphics (automatic, software, hardware) · t try the graphics card again · H custom headers · a scripts everywhere · i pictures · s styles · c cookies · m smooth pages · d developer tools for the chat agent · P protect browser data · X reset it · f forget the allowed sites",
+            Tab::Browser => "Up/Down/PageUp/PageDown/Home/End scroll · g graphics (automatic, software, hardware) · t try the graphics card again · H custom headers · a scripts everywhere · i pictures · s styles · c cookies · m smooth pages · d developer tools for the chat agent · P protect browser data · X reset it · f forget the allowed sites",
             Tab::DevCluster => "t test · d my default · w workspace default · k next workspace · h hide/show · x disconnect · g registry · P platform services (Gitea, private store) · C clusters (several, local and remote) · v vault profile · r look again · s set up · b/o/e start/stop/restart · l logs",
             Tab::Storage if self.storage.virtual_disks.is_some() => "n new virtual disk · x delete it · m make this disk the data disk (erases it) · r rescan",
             Tab::Storage => "m make this disk the data disk (erases it) · d DISKS tile · o drives at sign-out · u compatible USB mode (no UAS) · r rescan · b reboot",
@@ -3595,20 +3920,21 @@ impl App for SettingsApp {
             Tab::SessionLog => "Up/Down/PageUp/PageDown/Home/End scroll · p other boot (crash, before, this one) · y I have seen it · r read again",
             Tab::GitKeys => "a connect Git or Gitea · T test · e edit · m make default · R remove a connection · n generate a key · i import · c copy the public key · u unlock · d delete · h host → key · t token · x remove a rule · f forget a known host · Up/Down choose",
             Tab::Developer if self.devel.usb_open => "r check again · z authorize · p pair (type the code, Enter) · s speed · c copy diagnostics · f fixed addresses · m allow more · u back · Up/Down scroll",
-            Tab::Developer => "Click or tap anything, or: e on/off · h switch-off time · p pair a computer · C copy the code · c cancel it · Up/Down choose · x revoke · l activity log · u USB-C",
+            Tab::Developer => "Click or tap anything, or: e on/off · h switch-off time · p pair a computer · C copy the code · c cancel it · Up/Down choose · x revoke · l activity log · u USB-C · W WASM tiles (experimental)",
             Tab::Updates => "Up/Down choose an update · i install · r roll back to the kept version · y yes, do it · n no · f choose a folder · s look again · c check for updates now · m how often to check · u address of the update list (administrators)",
             Tab::Install => "Up/Down choose a disk · i install (erases it) · p show the plan · t partition table (Auto/GPT/MBR) · r look again · b restart",
-            Tab::Voice => "s speech-to-text · v text-to-speech · c commands · m mic test · p speaker test · t STT test · y test voice · e engine · g voice · l language · f speed · k re-check · o voice helper",
+            Tab::Voice => "E echo cancellation · s speech-to-text · v text-to-speech · c commands · m mic test · p speaker test · t STT test · y test voice · e engine · g voice · l language · f speed · k re-check · o voice helper",
             Tab::SecretProviders => "a add · t test · d delete",
             Tab::HostAccess => "a share a folder · o options · m read-only/read-write · c convert to a copy · u unlink · i import files · l audit trail",
             Tab::Firewall if !self.fw.advanced => "1 Standard · 2 Open · a add something to allow · d remove · Up/Down choose · A advanced · k keep · v undo",
             Tab::Firewall => "A simple view · a add rule · e edit · x allow on/off · d delete · p presets · y apply (then k keep or v revert within 60 s) · o firewall on/off · u discard changes · r look names up · c copy rules · i import · b clear log · z disable now",
-            Tab::Remote => "e or Enter serve/stop · p change the port · Up/Down scroll",
+            Tab::Remote => "e or Enter serve/stop · p change the port · F start/stop SFTP · U K R W T C SFTP accounts, add key, remove key, password login, time limit, copy fingerprint · Up/Down scroll",
             Tab::Vpn => "i import a file · p import the clipboard · x or Enter enable/disable · m mode and filters · d delete · r retry · Up/Down choose",
             Tab::Domains => "a add route · e edit · d delete · x listener on/off · p ports · f firewall opening · t trial certificate · i import certificate · r look at the cluster again · Up/Down choose",
             Tab::SshTunnels => "a add · e edit · x enable/disable · d delete · T test · r retry · c copy the address · k copy the public key · Up/Down choose",
-            Tab::Shares => "n new share · s start/stop · c copy the link · q QR code · e edit · t new secret for the link · d delete · x stop all sharing · Up/Down choose",
+            Tab::Shares => "n new share · s start/stop · c copy the link · q QR code · e edit · t new secret for the link · d delete · x stop all sharing · m media server (TVs and players) on/off · Up/Down choose",
             Tab::Account => "p change password · u bigger text · U smaller text",
+            Tab::Views => "Up/Down choose · n new view · t from a template · r rename · x delete · [ ] put in order · l lock on/off (asks for your password to switch) · k step keys · o after the lock",
             Tab::HomeLayout => "Up/Down choose · n new group · r rename · x delete group · [ ] put your groups in order · m move the tile · p put it back · z reset layout",
         }
         .into()
@@ -3648,6 +3974,7 @@ impl App for SettingsApp {
                 "storage" => Some(Tab::Storage),
                 "time" => Some(Tab::Time),
                 "battery" => Some(Tab::Battery),
+                "assistant" | "history" | "forget" | "stall" => Some(Tab::Assistant),
                 "power" => Some(Tab::Power),
                 "accessibility" | "screenreader" | "access" => Some(Tab::Accessibility),
                 "encryptedhome" | "encrypted" | "encryption" | "enchome" => Some(Tab::EncHome),
@@ -3658,6 +3985,7 @@ impl App for SettingsApp {
                 "updates" | "update" => Some(Tab::Updates),
                 "models" => Some(Tab::Models),
                 "homelayout" => Some(Tab::HomeLayout),
+                "views" | "desktopviews" => Some(Tab::Views),
                 "cloud" => Some(Tab::Cloud),
                 "cloudaccess" | "roles" => Some(Tab::CloudRoles),
                 "developer" => Some(Tab::Developer),
@@ -3671,6 +3999,7 @@ impl App for SettingsApp {
                 "browser" => Some(Tab::Browser),
                 "devcluster" => Some(Tab::DevCluster),
                 "notifications" => Some(Tab::Notifications),
+                "appaccess" | "permissions" => Some(Tab::AppAccess),
                 _ => None,
             };
             if let Some(i) = want.and_then(|t| self.tabs.iter().position(|x| *x == t)) {
@@ -3725,7 +4054,17 @@ impl App for SettingsApp {
         let over_nav = self.nav_rect.contains(self.mouse.0, self.mouse.1);
         let notches = px as f32 / crate::scrolleng::NOTCH_PX;
         let before = (self.kbd.test.offset, self.lem_scroll, self.vo_scroll, self.nav_scroll, self.remote.scroll, self.share.scroll, self.crash.scroll);
+        let over_body = self.body_bar.scrolls() && self.body_bar.view.contains(self.mouse.0, self.mouse.1);
+        let over_bar = self.btn_bar.scrolls() && self.btn_bar.view.contains(self.mouse.0, self.mouse.1);
         let taken = match self.tab() {
+            _ if over_body => {
+                self.body_bar.pointer = Some(self.mouse);
+                self.body_bar.wheel_px(px)
+            }
+            _ if over_bar => {
+                self.btn_bar.pointer = Some(self.mouse);
+                self.btn_bar.wheel_px(px)
+            }
             Tab::Keyboard if !over_nav => self.kbd_test_px(px),
             Tab::Models if !over_nav && self.lem_max > 0.0 && self.lem_rect.contains(self.mouse.0, self.mouse.1) => {
                 self.lem_focus = true;
@@ -3756,6 +4095,7 @@ impl App for SettingsApp {
         if matches!(ev, Event::Tick) {
             self.ticks += 1;
             self.poll(cx);
+            self.link_tick(cx);
             self.host_dialog_event(ev);
             if self.tab() == Tab::DevCluster {
                 self.dc_overlay_event(ev, cx);
@@ -3806,6 +4146,12 @@ impl App for SettingsApp {
         if self.mh_event(ev, cx) {
             return Flow::Stay;
         }
+        if self.body_bar.scrolls() && self.body_event(ev) {
+            return Flow::Stay;
+        }
+        if self.btn_bar.scrolls() && self.bar_event(ev) {
+            return Flow::Stay;
+        }
         if self.tab() == Tab::Keyboard && self.kbd_test_event(ev) {
             return Flow::Stay;
         }
@@ -3848,6 +4194,7 @@ impl App for SettingsApp {
             }
             Event::Sub(row, Key::Char(c @ ('U' | 'D'))) if self.tab() == Tab::Network && self.share.open => self.share_pick(*row as usize, *c),
             Event::Sub(row, Key::Char(c)) if self.tab() == Tab::Notifications => self.notif_sub(*row as usize, *c, cx),
+            Event::Sub(row, Key::Char(c)) if self.tab() == Tab::AppAccess => self.appaccess_sub(*row as usize, *c, cx),
             Event::Sub(row, Key::Char(c)) if self.tab() == Tab::SystemSounds => self.sysnd_sub(*row as usize, *c, cx),
             Event::Sub(row, Key::Char(c)) if self.tab() == Tab::ScreenSaver => self.ss_sub(*row as usize, *c, cx),
             Event::Sub(row, k) if self.tab() == Tab::Developer => self.dev_sub(*row, k, cx),
@@ -3916,6 +4263,7 @@ impl App for SettingsApp {
                 Tab::Models => self.handle_models(other, cx),
                 Tab::Agents => self.handle_agents(other, cx),
                 Tab::Rag => self.handle_rag(other, cx),
+                Tab::Assistant => self.handle_assistant(other, cx),
                 Tab::Vault => self.handle_vault(other, cx),
                 Tab::Backup => self.handle_backup(other, cx),
                 Tab::Skills => self.handle_skills(other, cx),
@@ -3926,6 +4274,7 @@ impl App for SettingsApp {
                     Tab::SecretProviders => self.handle_secret_providers(other, cx),
                 Tab::Account => self.handle_account(other, cx),
                 Tab::HomeLayout => self.handle_homelayout(other, cx),
+                Tab::Views => self.handle_views(other, cx),
                 Tab::Browser => self.handle_browser(other, cx),
                 Tab::DevCluster => self.handle_devcluster(other, cx),
                 Tab::HostAccess => self.handle_host(other, cx),
@@ -3936,6 +4285,7 @@ impl App for SettingsApp {
                 Tab::Keyboard => self.handle_keyboard(other, cx),
                 Tab::SystemSounds => self.handle_sysnd(other, cx),
                 Tab::Notifications => self.handle_notifs(other, cx),
+                Tab::AppAccess => self.handle_appaccess(other, cx),
                 Tab::Cloud => self.handle_cloud(other, cx),
                 Tab::CloudRoles => self.handle_cloudroles(other, cx),
                 Tab::Battery => self.handle_battery(other, cx),
@@ -3965,7 +4315,8 @@ impl App for SettingsApp {
     fn render(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx, tick: u64) {
         // left: search and the list of pages; right: the page
         // below about 900 px the window is one column: the page list, or one page with a Back button to the list
-        let narrow = area.w < NARROW_PX;
+        // bigger text takes the room of a bigger window: at Larger and Huge the list and the page no longer fit side by side
+        let narrow = area.w < narrow_px();
         self.narrow = narrow;
         let show_nav = !narrow || self.show_list;
         let show_page = !narrow || !self.show_list;
@@ -4019,7 +4370,11 @@ impl App for SettingsApp {
             let ticks = self.ticks;
             self.hw.prime(ticks);
         }
-        let rows_of_buttons = self.measured_button_rows(g, w, s, admin);
+        let rows_all = self.measured_button_rows(g, w, s, admin);
+        // at big text or a small window the buttons would take the whole window and push the page under the header: the bar keeps to a
+        // third of the window and scrolls
+        let rows_cap = ((area.h / 3.0) / (BTN_PITCH * s)).floor().max(1.0) as usize;
+        let rows_of_buttons = rows_all.min(rows_cap);
         let btn_h = rows_of_buttons as f32 * BTN_PITCH * s;
         self.slider_w.clear();
         let body = R::new(x, area.y + bar_h, w, area.h - bar_h - 40.0 * s - btn_h);
@@ -4028,54 +4383,47 @@ impl App for SettingsApp {
             // not a whole page under a "Nothing matches" message
             g.text(body.x, body.y + 10.0 * s, 16.0 * s, MUTED, "No page matches the search.", Face::Sans);
             g.text(body.x, body.y + 38.0 * s, 14.0 * s, DIM, "Press Esc to clear it and use the page keys.", Face::Sans);
-        } else { match self.tab() {
-            Tab::Overview => self.render_overview(g, body, s, cx),
-            Tab::Models => self.render_models(g, body, s, cx),
-            Tab::Agents => self.render_agents(g, body, s, cx),
-            Tab::Rag => self.render_rag(g, body, s, cx),
-            Tab::Vault => self.render_vault(g, body, s, cx),
-            Tab::Backup => self.render_backup(g, body, s, cx),
-            Tab::Skills => self.render_skills(g, body, s, cx),
-            Tab::Storage => self.render_storage(g, body, s, cx),
-            Tab::Network | Tab::Display | Tab::Sound => self.render_hw(g, body, s, cx),
-            Tab::Bluetooth => self.bt.render(g, body, s),
-            Tab::Voice => self.render_voice(g, body, s, cx),
-            Tab::SecretProviders => self.render_secret_providers(g, body, s, cx),
-            Tab::Account => self.render_account(g, body, s, cx),
-            Tab::HomeLayout => self.render_homelayout(g, body, s, cx),
-            Tab::Browser => self.render_browser(g, body, s, cx),
-            Tab::DevCluster => self.render_devcluster(g, body, s, cx),
-            Tab::HostAccess => self.render_host(g, body, s, cx),
-            Tab::Memory => self.render_memory(g, body, s, cx),
-            Tab::Displays => self.render_displays(g, body, s, cx),
-            Tab::ScreenSaver => self.render_screensaver(g, body, s, cx),
-            Tab::Time => self.render_time(g, body, s, cx),
-            Tab::Keyboard => self.render_keyboard(g, body, s, cx),
-            Tab::SystemSounds => self.render_sysnd(g, body, s, cx),
-            Tab::Notifications => self.render_notifs(g, body, s, cx),
-            Tab::Cloud => self.render_cloud(g, body, s, cx),
-            Tab::CloudRoles => self.render_cloudroles(g, body, s, cx),
-            Tab::Battery => self.render_battery(g, body, s, cx),
-            Tab::Power => self.render_power(g, body, s, cx),
-            Tab::Accessibility => self.render_access(g, body, s, cx),
-            Tab::EncHome => self.render_ench(g, body, s, cx),
-            Tab::Computer => self.render_computer(g, body, s, cx),
-            Tab::HostName => self.render_host_name(g, body, s, cx),
-            Tab::SessionLog => self.render_crash(g, body, s, cx),
-            Tab::Startup => self.render_startup(g, body, s, cx),
-            Tab::Developer => self.render_developer(g, body, s, cx),
-            Tab::GitKeys => self.render_git(g, body, s, cx),
-            Tab::Shares => self.render_shares(g, body, s, cx),
-            Tab::Firewall => self.render_firewall(g, body, s, cx),
-            Tab::SshTunnels => self.render_tun(g, body, s, cx),
-            Tab::Domains => self.render_dom(g, body, s, cx),
-            Tab::Vpn => self.render_vpn(g, body, s, cx),
-            Tab::Remote => self.render_remote(g, body, s, cx),
-            Tab::Install => self.render_install(g, body, s),
-            Tab::Updates => self.render_updates(g, body, s, cx),
-        } }
+        } else {
+            // (the Browser page scrolls itself, by `bh`; a second bar over it would take the wheel whenever the font made its ink taller than the room)
+            // a page that does not scroll itself gets a scroll bar when it is taller than its room (big text, a small window)
+            let generic = !(matches!(self.tab(), Tab::Developer | Tab::Remote | Tab::Voice | Tab::SessionLog | Tab::Keyboard | Tab::DevCluster | Tab::Bluetooth) || (self.tab() == Tab::Network && self.share.open) || (self.tab() == Tab::Browser && !self.bh.open));
+            if generic {
+                if self.body_tab != self.tab {
+                    self.body_tab = self.tab;
+                    self.body_bar.to_top();
+                }
+                let off = self.body_bar.offset;
+                let shifted = R::new(body.x, body.y - off, body.w, body.h + off);
+                let saved = std::mem::replace(&mut g.ink_bottom, 0.0);
+                g.clipped(body, |g| self.render_page(g, shifted, s, cx));
+                let ink = std::mem::replace(&mut g.ink_bottom, saved);
+                // the content's height from where it started (the end of the last text or click region, and a little room)
+                let content_h = if ink > 0.0 { ink - shifted.y + 8.0 * s } else { 0.0 };
+                // the scroll bar sits in the margin to the right of the page
+                self.body_bar.layout(R::new(body.x, body.y, body.w + 16.0 * s, body.h), content_h, 48.0 * s, s);
+                self.body_bar.draw_bar(g, s, BODY_BAR, ACCENT);
+            } else if matches!(self.tab(), Tab::Keyboard | Tab::Voice | Tab::Remote | Tab::SessionLog) {
+                // these scroll inside their room already; nothing of them is drawn over the button bar under it
+                self.body_bar.layout(R::new(0.0, 0.0, 0.0, 0.0), 0.0, 48.0 * s, s);
+                g.clipped(body, |g| self.render_page(g, body, s, cx));
+            } else {
+                self.body_bar.layout(R::new(0.0, 0.0, 0.0, 0.0), 0.0, 48.0 * s, s);
+                self.render_page(g, body, s, cx);
+            }
+        }
         if !no_match {
-            self.render_buttons(g, x, area.y + area.h - 36.0 * s - btn_h + 4.0 * s, w, s, admin);
+            let view = R::new(x, area.y + area.h - 36.0 * s - btn_h + 4.0 * s, w, btn_h);
+            if rows_all > rows_of_buttons {
+                // the scroll bar sits in the margin to the right of the buttons
+                self.btn_bar.layout(R::new(view.x, view.y, view.w + 16.0 * s, view.h), rows_all as f32 * BTN_PITCH * s, BTN_PITCH * s, s);
+                let off = self.btn_bar.offset;
+                let this = &*self;
+                g.clipped(view, |g| this.render_buttons(g, x, view.y - off, w, s, admin));
+                self.btn_bar.draw_bar(g, s, BTN_BAR, ACCENT);
+            } else {
+                self.btn_bar.layout(R::new(0.0, 0.0, 0.0, 0.0), 0.0, BTN_PITCH * s, s);
+                self.render_buttons(g, x, view.y, w, s, admin);
+            }
         }
         // status line
         let y = area.y + area.h - 30.0 * s;
@@ -4109,7 +4457,71 @@ impl App for SettingsApp {
 // ---------------------------------------------------------------------- rendering
 
 /// Below this window width (pixels) the Settings window is one column.
+impl SettingsApp {
+    fn render_page(&mut self, g: &mut Gfx, body: R, s: f32, cx: &AppCx) {
+        match self.tab() {
+            Tab::Overview => self.render_overview(g, body, s, cx),
+            Tab::Models => self.render_models(g, body, s, cx),
+            Tab::Agents => self.render_agents(g, body, s, cx),
+            Tab::Rag => self.render_rag(g, body, s, cx),
+            Tab::Assistant => self.render_assistant(g, body, s, cx),
+            Tab::Vault => self.render_vault(g, body, s, cx),
+            Tab::Backup => self.render_backup(g, body, s, cx),
+            Tab::Skills => self.render_skills(g, body, s, cx),
+            Tab::Storage => self.render_storage(g, body, s, cx),
+            Tab::Network | Tab::Display | Tab::Sound => self.render_hw(g, body, s, cx),
+            Tab::Bluetooth => self.bt.render(g, body, s),
+            Tab::Voice => self.render_voice(g, body, s, cx),
+            Tab::SecretProviders => self.render_secret_providers(g, body, s, cx),
+            Tab::Account => self.render_account(g, body, s, cx),
+            Tab::HomeLayout => self.render_homelayout(g, body, s, cx),
+            Tab::Views => self.render_views(g, body, s, cx),
+            Tab::Browser => self.render_browser(g, body, s, cx),
+            Tab::DevCluster => self.render_devcluster(g, body, s, cx),
+            Tab::HostAccess => self.render_host(g, body, s, cx),
+            Tab::Memory => self.render_memory(g, body, s, cx),
+            Tab::Displays => self.render_displays(g, body, s, cx),
+            Tab::ScreenSaver => self.render_screensaver(g, body, s, cx),
+            Tab::Time => self.render_time(g, body, s, cx),
+            Tab::Keyboard => self.render_keyboard(g, body, s, cx),
+            Tab::SystemSounds => self.render_sysnd(g, body, s, cx),
+            Tab::Notifications => self.render_notifs(g, body, s, cx),
+            Tab::AppAccess => self.render_appaccess(g, body, s, cx),
+            Tab::Cloud => self.render_cloud(g, body, s, cx),
+            Tab::CloudRoles => self.render_cloudroles(g, body, s, cx),
+            Tab::Battery => self.render_battery(g, body, s, cx),
+            Tab::Power => self.render_power(g, body, s, cx),
+            Tab::Accessibility => self.render_access(g, body, s, cx),
+            Tab::EncHome => self.render_ench(g, body, s, cx),
+            Tab::Computer => self.render_computer(g, body, s, cx),
+            Tab::HostName => self.render_host_name(g, body, s, cx),
+            Tab::SessionLog => self.render_crash(g, body, s, cx),
+            Tab::Startup => self.render_startup(g, body, s, cx),
+            Tab::Developer => self.render_developer(g, body, s, cx),
+            Tab::GitKeys => self.render_git(g, body, s, cx),
+            Tab::Shares => self.render_shares(g, body, s, cx),
+            Tab::Firewall => self.render_firewall(g, body, s, cx),
+            Tab::SshTunnels => self.render_tun(g, body, s, cx),
+            Tab::Domains => self.render_dom(g, body, s, cx),
+            Tab::Vpn => self.render_vpn(g, body, s, cx),
+            Tab::Remote => self.render_remote(g, body, s, cx),
+            Tab::Install => self.render_install(g, body, s),
+            Tab::Updates => self.render_updates(g, body, s, cx),
+        }
+    }
+}
+
+/// The scroll bar of the action buttons under a page.
+const BTN_BAR: usize = 9730;
+/// The scroll bar of a page body that is taller than its room.
+const BODY_BAR: usize = 9731;
+
 const NARROW_PX: f32 = 900.0;
+
+/// [`NARROW_PX`] grows with the person's text size above Normal (200% text: one column below 1800 px).
+fn narrow_px() -> f32 {
+    NARROW_PX
+}
 
 type Btn = (&'static str, [u8; 4], char);
 
@@ -4158,8 +4570,8 @@ impl SettingsApp {
         }
         match (self.tab(), admin) {
             (Tab::Overview, _) => vec![],
-            (Tab::Models, true) => vec![("Add", acc, 'a'), ("NVIDIA NIM", acc, 'N'), ("Detect", acc, 'f'), ("Mac / GPU host", acc, 'H'), ("Edit", mut_, 'e'), ("Delete", err, 'd'), ("Test", mut_, 't'), ("Lemonade GPU/CPU", mut_, 'G'), ("Chat model", mut_, 'm'), ("Vision model", mut_, 'v'), ("Embeddings", mut_, 'b'), ("Set key", mut_, 'k'), ("On/Off", mut_, 'x'), ("Agent price", mut_, 'p'), ("Tool routing", mut_, 'T'), ("Test chat", mut_, 'c')],
-            (Tab::Models, false) => vec![("Test", mut_, 't'), ("Test chat", mut_, 'c')],
+            (Tab::Models, true) => vec![("Add", acc, 'a'), ("NVIDIA NIM", acc, 'N'), ("Google Gemini", acc, 'g'), ("Gemini consent", mut_, 'C'), ("Detect", acc, 'f'), ("Mac / GPU host", acc, 'H'), ("Edit", mut_, 'e'), ("Delete", err, 'd'), ("Test", mut_, 't'), ("Lemonade GPU/CPU", mut_, 'G'), ("Chat model", mut_, 'm'), ("Vision model", mut_, 'v'), ("Embeddings", mut_, 'b'), ("Set key", mut_, 'k'), ("On/Off", mut_, 'x'), ("Agent price", mut_, 'p'), ("Tool routing", mut_, 'T'), ("Test chat", mut_, 'c')],
+            (Tab::Models, false) => vec![("Test", mut_, 't'), ("Test chat", mut_, 'c'), ("Gemini consent", mut_, 'C')],
             (Tab::Agents, _) => vec![("Detect", acc, 'd'), ("Install", mut_, 'i'), ("Login", OK, 'l'), ("Logout", mut_, 'o'), ("API key", mut_, 'k'), ("Model", mut_, 'm'), ("Auto", mut_, 'a'), ("Use for new chats", mut_, 'u'), ("Test", mut_, 't'), ("Hide/show", mut_, 'x'), ("Add custom", mut_, 'n'), ("Edit", mut_, 'e'), ("Remove", err, 'R')],
             (Tab::Rag, true) => vec![("Add backend", acc, 'a'), ("Edit", mut_, 'e'), ("Delete", err, 'd'), ("Test", mut_, 't'), ("On/Off", mut_, 'x'), ("Reindex", mut_, 'r'), ("Ingest docs", mut_, 'i')],
             (Tab::Rag, false) => vec![("Reindex", mut_, 'r'), ("Ingest my docs", acc, 'i'), ("Test backend", mut_, 't')],
@@ -4187,6 +4599,7 @@ impl SettingsApp {
             }
             (Tab::SecretProviders, _) => vec![("Add provider", acc, 'a'), ("Test", mut_, 't'), ("Delete", err, 'd')],
             (Tab::HomeLayout, _) => self.homelayout_buttons(),
+            (Tab::Views, _) => self.views_buttons(),
             (Tab::Account, _) => vec![("Change password", acc, 'p'), ("Bigger text", mut_, 'u'), ("Smaller text", mut_, 'U')],
             (Tab::Browser, _) if self.bh.open => self.bh_buttons(),
             (Tab::Browser, _) => vec![("Custom headers", acc, 'H'), ("Forget sites", err, 'f'), ("Protect data", acc, 'P'), ("Reset data", err, 'X')],
@@ -4200,9 +4613,11 @@ impl SettingsApp {
             (Tab::Keyboard, _) => self.keyboard_buttons(),
             (Tab::SystemSounds, _) => self.sysnd_buttons(),
             (Tab::Notifications, _) => self.notifs_buttons(),
+            (Tab::AppAccess, _) => self.appaccess_buttons(),
             (Tab::Cloud, _) => vec![("Change mode", ACCENT, 'c'), ("Show all AI tools", mut_, 'a')],
             (Tab::CloudRoles, _) => self.roles_buttons(),
             (Tab::Battery, _) => self.battery_buttons(),
+            (Tab::Assistant, _) => self.assistant_buttons(),
             (Tab::Power, _) => self.power_buttons(),
             (Tab::Accessibility, _) => self.access_buttons(),
             (Tab::EncHome, _) => self.ench_buttons(),
@@ -4236,7 +4651,7 @@ impl SettingsApp {
             if self.fw.advanced { 4 } else { 2 }
         } else if self.tab() == Tab::Shares {
             3
-        } else if (self.tab() == Tab::Voice && admin) || self.tab() == Tab::Agents || self.tab() == Tab::Memory || self.tab() == Tab::Displays || self.tab() == Tab::Time || self.tab() == Tab::Sound || self.tab() == Tab::SystemSounds || self.tab() == Tab::Keyboard || self.tab() == Tab::GitKeys || self.tab() == Tab::HomeLayout || self.tab() == Tab::Notifications || (self.tab() == Tab::Models && admin) {
+        } else if (self.tab() == Tab::Voice && admin) || self.tab() == Tab::Agents || self.tab() == Tab::Memory || self.tab() == Tab::Displays || self.tab() == Tab::Time || self.tab() == Tab::Sound || self.tab() == Tab::SystemSounds || self.tab() == Tab::Keyboard || self.tab() == Tab::GitKeys || self.tab() == Tab::HomeLayout || self.tab() == Tab::Views || self.tab() == Tab::Notifications || (self.tab() == Tab::Models && admin) {
             2
         } else {
             1
@@ -4252,7 +4667,8 @@ impl SettingsApp {
         }
         let (mut rows, mut bx) = (0usize, 0.0f32);
         for (label, _, _) in self.buttons_for(admin) {
-            let bw = g.text_width(14.0 * s, label, Face::Bold) + 14.0 * s * 1.7;
+            // a button wider than the whole row is cut to the row (see `render_buttons`)
+            let bw = (g.text_width(14.0 * s, label, Face::Bold) + 14.0 * s * 1.7).min(w);
             if rows == 0 || bx + bw > w {
                 rows += 1;
                 bx = 0.0;
@@ -4262,9 +4678,47 @@ impl SettingsApp {
         rows.max(own)
     }
 
+    /// The pointer events of the scrolling button bar (the wheel over it, its scroll bar). True when it took the event.
+    fn bar_event(&mut self, ev: &Event) -> bool {
+        match ev {
+            Event::Scroll(_) if self.btn_bar.view.contains(self.mouse.0, self.mouse.1) => {
+                self.btn_bar.pointer = Some(self.mouse);
+                self.btn_bar.event(ev, BTN_BAR)
+            }
+            Event::MouseMove(..) | Event::MouseUp(..) => self.btn_bar.event(ev, BTN_BAR),
+            Event::AreaAt(id, ..) if *id == BTN_BAR => self.btn_bar.event(ev, BTN_BAR),
+            _ => false,
+        }
+    }
+
+    /// The pointer events of a page body that scrolls by this app's own bar. True when it took the event.
+    fn body_event(&mut self, ev: &Event) -> bool {
+        match ev {
+            Event::Scroll(_) if self.body_bar.view.contains(self.mouse.0, self.mouse.1) && !self.modal_open_for_scroll() => {
+                self.body_bar.pointer = Some(self.mouse);
+                self.body_bar.event(ev, BODY_BAR)
+            }
+            Event::MouseMove(..) | Event::MouseUp(..) => self.body_bar.event(ev, BODY_BAR),
+            Event::AreaAt(id, ..) if *id == BODY_BAR => self.body_bar.event(ev, BODY_BAR),
+            _ => false,
+        }
+    }
+
+    fn modal_open_for_scroll(&self) -> bool {
+        self.modal.is_some() || self.mh.open || self.host_dialog_open() || self.dc_has_overlay() || self.dc_platform_open() || self.git_wizard_open()
+    }
+
     fn render_buttons(&self, g: &mut Gfx, x: f32, y: f32, w: f32, s: f32, admin: bool) {
         let (mut bx, mut by) = (x, y);
         for (label, col, key) in self.buttons_for(admin) {
+            // a label wider than the whole row (a narrow window) is cut with an ellipsis instead of running out of the page
+            let fitted;
+            let label = if g.text_width(14.0 * s, label, Face::Bold) + 14.0 * s * 1.7 > w {
+                fitted = g.fit(14.0 * s, label, Face::Bold, (w - 14.0 * s * 1.7).max(40.0 * s));
+                fitted.as_str()
+            } else {
+                label
+            };
             let bw = g.text_width(14.0 * s, label, Face::Bold) + 14.0 * s * 1.7;
             if bx + bw > x + w {
                 bx = x;
@@ -4286,10 +4740,13 @@ fn row(g: &mut Gfx, tip: &mut Tooltip, idx: usize, x: f32, y: f32, w: f32, h: f3
     if selected {
         g.rect(x, y + 10.0 * s, 4.0 * s, h - 20.0 * s, ACCENT);
     }
-    g.text(x + 18.0 * s, y + 8.0 * s, 17.0 * s, TEXT, title, Face::Bold);
+    // the title keeps to the room left of the chips (a narrow window cut it with an ellipsis instead of running past the card)
+    let chips_w: f32 = chips.iter().map(|(l, _)| g.text_width(12.0 * s, l, Face::Bold) + 24.0 * s).sum();
+    let shown_title = g.fit(17.0 * s, title, Face::Bold, (w - 36.0 * s - chips_w).max(80.0 * s));
+    g.text(x + 18.0 * s, y + 8.0 * s, 17.0 * s, TEXT, &shown_title, Face::Bold);
     let shown = crate::tooltip::fit_keep_ip(g, 13.0 * s, sub, Face::Mono, w - 36.0 * s - 150.0 * s);
     g.text(x + 18.0 * s, y + 34.0 * s, 13.0 * s, MUTED, &shown, Face::Mono);
-    let full = (shown != sub).then(|| format!("{title}\n{sub}"));
+    let full = (shown != sub || shown_title != title).then(|| format!("{title}\n{sub}"));
     if let Some(f) = &full {
         tip.offer(g, R::new(x, y, w, h), selected, f);
     }
@@ -4312,20 +4769,24 @@ impl SettingsApp {
         let admin = cx.session.policy.manage_settings;
         let fmt = |c: &Option<ModelChoice>, none: &str| c.as_ref().map_or(none.to_string(), |c| format!("{} · {}", c.provider, c.model));
         g.text(a.x, a.y, 15.0 * s, MUTED, "Chat model", Face::Sans);
-        g.text(a.x + 150.0 * s, a.y, 15.0 * s, if chat.is_some() { OK } else { ERR }, &fmt(&chat, "none selected"), Face::Bold);
+        // the chat model's name keeps to the room right of the label (a long name or a narrow window cut it with an ellipsis)
+        let chat_text = g.fit(15.0 * s, &fmt(&chat, "none selected"), Face::Bold, (a.w - 150.0 * s).max(40.0 * s));
+        g.text(a.x + 150.0 * s, a.y, 15.0 * s, if chat.is_some() { OK } else { ERR }, &chat_text, Face::Bold);
         // the tidy model (key y) sits on the chat model's row, only when one is set: the page keeps its height
         if let Some(t) = &tidy {
-            let cw = g.text_width(15.0 * s, &fmt(&chat, "none selected"), Face::Bold);
+            let cw = g.text_width(15.0 * s, &chat_text, Face::Bold);
             let tx = a.x + 150.0 * s + cw + 18.0 * s;
             let line = g.fit(15.0 * s, &format!("tidy: {} · {}  [y]", t.provider, t.model), Face::Bold, (a.x + a.w - tx).max(40.0));
             g.text(tx, a.y, 15.0 * s, MUTED, &line, Face::Bold);
             g.hit(R::new(tx, a.y - 2.0 * s, (a.x + a.w - tx).max(40.0), 22.0 * s), Event::Tick, &format!("Tidy model: {} · {}", t.provider, t.model));
         }
         g.text(a.x, a.y + 24.0 * s, 15.0 * s, MUTED, "Embeddings", Face::Sans);
-        g.text(a.x + 150.0 * s, a.y + 24.0 * s, 15.0 * s, TEXT, &fmt(&emb, "built-in (hashing, no model needed)"), Face::Bold);
+        let emb_text = g.fit(15.0 * s, &fmt(&emb, "built-in (hashing, no model needed)"), Face::Bold, (a.w - 150.0 * s).max(40.0 * s));
+        g.text(a.x + 150.0 * s, a.y + 24.0 * s, 15.0 * s, TEXT, &emb_text, Face::Bold);
         let price = cx.services.settings.lock().unwrap().get().token_price_cents_per_mtok;
         g.text(a.x, a.y + 48.0 * s, 15.0 * s, MUTED, "Agent price", Face::Sans);
-        g.text(a.x + 150.0 * s, a.y + 48.0 * s, 15.0 * s, TEXT, &if price == 0 { "not set (cost budgets are not enforced)".to_string() } else { format!("{price} cents per million tokens  [p]") }, Face::Bold);
+        let price_text = g.fit(15.0 * s, &if price == 0 { "not set (cost budgets are not enforced)".to_string() } else { format!("{price} cents per million tokens  [p]") }, Face::Bold, (a.w - 150.0 * s).max(40.0 * s));
+        g.text(a.x + 150.0 * s, a.y + 48.0 * s, 15.0 * s, TEXT, &price_text, Face::Bold);
         let vision_line = {
             let set = cx.services.settings.lock().unwrap().get().vision.clone();
             match (cx.services.vision_model(None), set) {
@@ -4362,7 +4823,9 @@ impl SettingsApp {
             crate::fx::empty_state(g, R::new(a.x, y, a.w, 220.0 * s), s, Icon::Settings, "No model providers yet", msg, ACCENT);
         }
         for (i, p) in provs.iter().enumerate() {
-            if y > a.y + a.h - 70.0 * s {
+            // a window too short for the list gets the page's scroll bar (the generic one), not a list cut short: the chosen provider's
+            // buttons and the option buttons under it stay reachable at any size and with any font
+            if i >= 40 {
                 break;
             }
             let key_ok = match &p.key_ref {
@@ -4375,7 +4838,12 @@ impl SettingsApp {
             let url = if admin { p.base_url.clone().unwrap_or_else(|| p.kind.default_base().unwrap_or("").to_string()) } else { String::new() };
             let sub = format!("{}{}{}", url, if url.is_empty() { "" } else { "  ·  " }, Self::models_summary(cx, p));
             let active = chat.as_ref().is_some_and(|c| c.provider == p.id);
-            let chips: Vec<(&str, [u8; 4])> = [Some((p.kind.label(), ACCENT)), Some(key_ok), if active { Some(("chat", OK)) } else { None }, if p.enabled { None } else { Some(("off", ERR)) }].into_iter().flatten().collect();
+            let chips: Vec<(&str, [u8; 4])> = [Some((p.kind.label(), ACCENT)), Some(key_ok), if active { Some(("chat", OK)) } else { None }, if p.enabled { None } else { Some(("off", ERR)) }, if p.native_pdf_output { Some(("writes PDFs", DIM)) } else { None }].into_iter().flatten().collect();
+            let mut chips = chips;
+            if p.id == iyakki_agent::gemini::PROVIDER_ID {
+                chips.push(("experimental", ERR));
+                chips.push(Self::gem_chip(cx));
+            }
             let selected = i == self.sel();
             let rh = if selected { 108.0 * s } else { 62.0 * s };
             row(g, &mut self.tip, i, a.x, y, a.w, rh, s, selected, &p.id, &sub, &chips);
@@ -4386,6 +4854,12 @@ impl SettingsApp {
                 let mut acts: Vec<(&str, [u8; 4], char)> = if admin { vec![("Edit", TEXT, 'e'), ("Delete", ERR, 'd'), ("Models", ACCENT, 'm'), ("Test", TEXT, 't'), ("Key", TEXT, 'k'), (if p.enabled { "Turn off" } else { "Turn on" }, TEXT, 'x')] } else { vec![("Test", ACCENT, 't')] };
                 if p.kind == Kind::Lemonade {
                     acts.insert(if admin { 2 } else { 1 }, ("All models", ACCENT, 'l'));
+                }
+                if p.id == iyakki_agent::gemini::PROVIDER_ID {
+                    if admin {
+                        acts.push(("Gemini setup", ACCENT, 'g'));
+                    }
+                    acts.push(("Consent", ACCENT, 'C'));
                 }
                 for (label, col, key) in acts {
                     let bw = g.text_width(13.0 * s, label, Face::Bold) + 13.0 * s * 1.7;
@@ -4469,6 +4943,7 @@ impl SettingsApp {
             controls::switch_row(g, R::new(a.x, row_y, a.w, 66.0 * s), s, "Search external backends", "Also ask the backends listed below, not only the local documents.", rag.use_external, can, Event::Key(Key::Char('u')), ACCENT);
             row_y += 66.0 * s + gap;
         }
+        row_y += self.render_rag_order(g, R::new(a.x, row_y, a.w, 0.0), s, cx, can, two);
         let embed_note = if Self::svc(cx).is_reindexing() { format!("{embed_id} — updating documents in the background…") } else { embed_id.clone() };
         controls::info_row(g, R::new(a.x, row_y, a.w, 44.0 * s), s, "Embedding", &embed_note);
         let mut y = row_y + 44.0 * s + 16.0 * s;
@@ -4614,7 +5089,7 @@ impl SettingsApp {
         let (mut x, mut row) = (left + title_w + 14.0 * s, 0usize);
         let mut at = Vec::new();
         for bw in widths {
-            if x > left && x + bw > right && (row > 0 || x > left + title_w + 14.0 * s) {
+            if x > left && x + bw > right {
                 row += 1;
                 x = left;
             }
@@ -4625,8 +5100,8 @@ impl SettingsApp {
     }
 
     /// Whether the two cards must be drawn compact to fit under each other in `avail` pixels.
-    fn cards_need_compact(g: &mut Gfx, w: f32, s: f32, avail: f32) -> bool {
-        Self::size_card_height(g, w, s, false) + Self::theme_card_height(g, w, s, false) + 10.0 * s > avail
+    fn cards_need_compact(g: &mut Gfx, w: f32, s: f32, avail: f32, cx: &AppCx) -> bool {
+        Self::size_card_height(g, w, s, false) + Self::theme_card_height(g, w, s, false, cx) + 10.0 * s > avail
     }
 
     const SIZE_CARD_NOTE: &'static str = "Applies to you at every sign-in. u makes it bigger, Shift+U smaller.";
@@ -4714,17 +5189,28 @@ impl SettingsApp {
             "If an administrator resets your password, your personal vault cannot be recovered: that is on purpose, so nobody else can read it.".into(),
         ];
         // the text size card sits at the bottom of the page; the text above it is cut off rather than run into it
-        let compact = Self::cards_need_compact(g, a.w, s, a.h);
+        let compact = Self::cards_need_compact(g, a.w, s, a.h, cx);
         let card_h = Self::size_card_height(g, a.w, s, compact);
-        let theme_h = Self::theme_card_height(g, a.w, s, compact);
-        let theme_card = R::new(a.x, (a.y + a.h - card_h - theme_h - 10.0 * s).max(a.y), a.w, theme_h);
-        let card = R::new(a.x, (a.y + a.h - card_h).max(a.y), a.w, card_h);
+        let theme_h = Self::theme_card_height(g, a.w, s, compact, cx);
+        // the height of the text above the cards (each line may take up to three rows)
+        let text_h: f32 = lines.iter().enumerate().map(|(i, l)| {
+            let face = if i < 5 { Face::Mono } else { Face::Sans };
+            g.wrap(15.0 * s, l, face, a.w).len().min(3) as f32 * 22.0 * s + if l.is_empty() { 10.0 * s } else { 0.0 }
+        }).sum();
+        // in a small window or at big text the text and the two cards do not fit under each other: they follow each other and the page scrolls
+        let flow = text_h + 12.0 * s + theme_h + 10.0 * s + card_h > a.h;
+        let (theme_card, card) = if flow {
+            let ty = a.y + text_h + 12.0 * s;
+            (R::new(a.x, ty, a.w, theme_h), R::new(a.x, ty + theme_h + 10.0 * s, a.w, card_h))
+        } else {
+            (R::new(a.x, (a.y + a.h - card_h - theme_h - 10.0 * s).max(a.y), a.w, theme_h), R::new(a.x, (a.y + a.h - card_h).max(a.y), a.w, card_h))
+        };
         let mut y = a.y;
         'text: for (i, l) in lines.iter().enumerate() {
             let col = if i < 5 { TEXT } else { MUTED };
             let face = if i < 5 { Face::Mono } else { Face::Sans };
             for w in g.wrap(15.0 * s, l, face, a.w).iter().take(3) {
-                if y + 22.0 * s > theme_card.y - 6.0 * s {
+                if !flow && y + 22.0 * s > theme_card.y - 6.0 * s {
                     break 'text;
                 }
                 g.text(a.x, y, 15.0 * s, col, w, face);
@@ -4734,26 +5220,40 @@ impl SettingsApp {
                 y += 10.0 * s;
             }
         }
-        self.render_theme_card(g, theme_card, s, compact);
+        self.render_theme_card(g, theme_card, s, compact, cx);
         self.render_ui_size_card(g, card, s, cx, compact);
     }
 
     // ---- the theme card: Dark, Light, High contrast (the choice is the person's own, applied at once)
 
-    const THEME_CARD_NOTE: &'static str = "Applies at once and at every sign-in. t picks the next, Shift+T the previous.";
+    const THEME_CARD_NOTE: &'static str = "Applies at once and at every sign-in. t picks the next, Shift+T the previous. Your own theme files (themes folder) are listed after the three.";
 
     /// The theme card's buttons: (label, key that chooses it, width). The chosen one carries a tick, so it does not rely on colour.
-    fn theme_card_buttons(g: &mut Gfx, s: f32) -> Vec<(String, char, f32)> {
-        let cur = crate::theme::current_id();
-        crate::theme::ALL.iter().enumerate().map(|(i, t)| {
-            let label = if *t == cur { format!("\u{2713} {}", t.name()) } else { t.name().to_string() };
+    fn theme_card_buttons(g: &mut Gfx, s: f32, cx: &AppCx) -> Vec<(String, char, f32)> {
+        Self::theme_choices(cx).into_iter().map(|c| {
+            let label = if c.chosen { format!("\u{2713} {}", c.label) } else { c.label.clone() };
             let w = g.text_width(13.0 * s, &label, Face::Bold) + 13.0 * s * 1.7;
-            (label, (b'1' + i as u8) as char, w)
+            (label, c.key, w)
         }).collect()
     }
 
-    fn theme_card_height(g: &mut Gfx, w: f32, s: f32, compact: bool) -> f32 {
-        let btns = Self::theme_card_buttons(g, s);
+    /// Every theme the person can pick: the three built-in ones (keys 1 to 3), then the theme files that can be used (keys 4 to 9, at most
+    /// six), the chosen one marked. A file that cannot be used is not offered (the chat tool `display_themes` says why).
+    fn theme_choices(cx: &AppCx) -> Vec<ThemeChoice> {
+        let (dir, user) = (cx.services.dir(), &cx.session.user);
+        let custom = if crate::theme::is_custom() { crate::theme::load_choice(dir, user).and_then(|c| c.strip_prefix(iyakki_uikit::usertheme::CHOICE_PREFIX).map(String::from)) } else { None };
+        let mut v: Vec<ThemeChoice> = crate::theme::ALL.iter().enumerate().map(|(i, t)| ThemeChoice { label: t.name().to_string(), key: (b'1' + i as u8) as char, builtin: Some(*t), file: None, chosen: custom.is_none() && *t == crate::theme::current_id() }).collect();
+        for (k, r) in iyakki_uikit::usertheme::available(dir, user).into_iter().filter(|(_, r)| r.is_ok()).take(6) {
+            if let Ok(u) = r {
+                let n = v.len();
+                v.push(ThemeChoice { label: u.name, key: (b'1' + n as u8) as char, builtin: None, chosen: custom.as_deref() == Some(k.as_str()), file: Some(k) });
+            }
+        }
+        v
+    }
+
+    fn theme_card_height(g: &mut Gfx, w: f32, s: f32, compact: bool, cx: &AppCx) -> f32 {
+        let btns = Self::theme_card_buttons(g, s, cx);
         if compact {
             let tw = g.text_width(16.0 * s, "Theme", Face::Bold);
             return Self::compact_card_layout(tw, &btns.iter().map(|b| b.2).collect::<Vec<_>>(), w, s).1;
@@ -4774,13 +5274,13 @@ impl SettingsApp {
         64.0 * s + rows as f32 * 34.0 * s
     }
 
-    fn render_theme_card(&mut self, g: &mut Gfx, card: R, s: f32, compact: bool) -> f32 {
-        let card = R::new(card.x, card.y, card.w, Self::theme_card_height(g, card.w, s, compact));
+    fn render_theme_card(&mut self, g: &mut Gfx, card: R, s: f32, compact: bool, cx: &AppCx) -> f32 {
+        let card = R::new(card.x, card.y, card.w, Self::theme_card_height(g, card.w, s, compact, cx));
         crate::fx::glass(g, card.x, card.y, card.w, card.h, 14.0 * s, ACCENT);
         let title = g.fit(16.0 * s, "Theme", Face::Bold, card.w - 36.0 * s);
         g.text(card.x + 18.0 * s, card.y + 10.0 * s, 16.0 * s, TEXT, &title, Face::Bold);
         if compact {
-            let btns = Self::theme_card_buttons(g, s);
+            let btns = Self::theme_card_buttons(g, s, cx);
             let tw = g.text_width(16.0 * s, "Theme", Face::Bold);
             let (at, _) = Self::compact_card_layout(tw, &btns.iter().map(|b| b.2).collect::<Vec<_>>(), card.w, s);
             for ((label, k, _), (ox, oy)) in btns.iter().zip(at) {
@@ -4791,7 +5291,7 @@ impl SettingsApp {
         }
         let note = g.fit(13.0 * s, Self::THEME_CARD_NOTE, Face::Sans, card.w - 36.0 * s);
         g.text(card.x + 18.0 * s, card.y + 34.0 * s, 13.0 * s, MUTED, &note, Face::Sans);
-        let btns = Self::theme_card_buttons(g, s);
+        let btns = Self::theme_card_buttons(g, s, cx);
         let one_row = card.h <= 74.0 * s + 0.5;
         let (mut bx, mut by) = if one_row { (card.x + card.w - 18.0 * s, card.y + 20.0 * s) } else { (card.x + 18.0 * s, card.y + 62.0 * s) };
         let ordered: Vec<&(String, char, f32)> = if one_row { btns.iter().rev().collect() } else { btns.iter().collect() };
@@ -4921,6 +5421,51 @@ mod tests {
         assert_eq!((p.len(), p[0].id.as_str(), p[0].kind, p[0].key_ref.as_deref()), (1, "nvidia", Kind::Nvidia, Some("vault:nvidia-key")));
         assert!(!format!("{p:?}").contains("nvapi-ABCDEF"), "the key itself is never in the settings");
         assert!(cx.audit.recent(20).iter().any(|l| l.contains("settings.provider.save") && l.contains("nvidia")));
+    }
+
+    #[test]
+    fn the_settings_test_and_test_chat_results_tell_a_failure_in_plain_words_without_keys_or_ids() {
+        let mode = Arc::new(Mutex::new(401u16));
+        let m2 = mode.clone();
+        let mut cx = cx_with_admin_store("set-plainerr");
+        let d = temp_dir("set-plainerr-svc");
+        cx.services = services_in(&d, Arc::new(Mock {
+            calls: Default::default(),
+            reply: Box::new(move |_, _| match *m2.lock().unwrap() {
+                401 => (401, r#"{"error":{"message":"Incorrect API key provided: sk-abcdef1234567890"}}"#.into()),
+                404 => (404, "404 page not found".into()),
+                n => (n, "overloaded".into()),
+            }),
+        }));
+        cx.services.on_login("root", "rootpass12", true);
+        let mut a = SettingsApp::new(&cx).on(Tab::Models);
+        key(&mut a, &cx, Key::Char('a'));
+        typ(&mut a, &cx, "local");
+        for _ in 0..5 {
+            key(&mut a, &cx, Key::Enter);
+        }
+        assert!(!a.has_modal(), "{}", status(&a));
+        cx.services.settings.lock().unwrap().update(|s| s.chat = Some(iyakki_agent::settings::ModelChoice { provider: "local".into(), model: "qwen3:32b".into() })).unwrap();
+        let ok = |a: &SettingsApp| a.status().map(|s| s.1);
+        // a refused key points at Settings and never prints the key
+        key(&mut a, &cx, Key::Char('t'));
+        settle(&mut a, &cx);
+        assert!(status(&a).starts_with("local: local refused the key") && status(&a).contains("Settings -> Models") && !status(&a).contains("sk-abcdef"), "{}", status(&a));
+        assert_eq!(ok(&a), Some(false), "shown as a failure");
+        key(&mut a, &cx, Key::Char('c'));
+        settle(&mut a, &cx);
+        assert!(status(&a).starts_with("local: local refused the key") && !status(&a).contains("sk-abcdef"), "{}", status(&a));
+        // a wrong address is told apart from a missing model
+        *mode.lock().unwrap() = 404;
+        key(&mut a, &cx, Key::Char('t'));
+        settle(&mut a, &cx);
+        assert!(status(&a).contains("did not find that address") && !status(&a).contains("HTTP 404: 404 page not found\n"), "{}", status(&a));
+        // trouble at the other end
+        *mode.lock().unwrap() = 503;
+        key(&mut a, &cx, Key::Char('c'));
+        settle(&mut a, &cx);
+        assert!(status(&a).contains("having trouble right now"), "{}", status(&a));
+        assert_eq!(ok(&a), Some(false));
     }
 
     #[test]
@@ -5073,7 +5618,7 @@ mod tests {
     fn non_admins_cannot_change_system_settings_and_it_is_audited() {
         let cx = user("set4");
         let mut a = SettingsApp::new(&cx).on(Tab::Models);
-        assert_eq!(a.tabs(), &[Tab::Overview, Tab::Account, Tab::Notifications, Tab::Vault, Tab::Backup, Tab::EncHome, Tab::Models, Tab::Skills, Tab::Rag, Tab::Voice, Tab::Browser, Tab::HostAccess, Tab::Shares, Tab::ScreenSaver, Tab::HomeLayout, Tab::Accessibility, Tab::Time, Tab::Power, Tab::Computer, Tab::GitKeys], "no secret-provider tab for users; everyone has Notifications, Screen saver, Time, Power, Accessibility, This computer and Home layout; whoever has the AI IDE has Git and SSH keys");
+        assert_eq!(a.tabs(), &[Tab::Overview, Tab::Account, Tab::Notifications, Tab::Vault, Tab::Backup, Tab::EncHome, Tab::Models, Tab::Skills, Tab::Rag, Tab::Assistant, Tab::Voice, Tab::Browser, Tab::HostAccess, Tab::Shares, Tab::ScreenSaver, Tab::HomeLayout, Tab::Views, Tab::Accessibility, Tab::Time, Tab::Power, Tab::Computer, Tab::GitKeys], "no secret-provider tab for users; everyone has Notifications, Screen saver, Time, Power, Accessibility, This computer and Home layout; whoever has the AI IDE has Git and SSH keys");
         for k in ['a', 'e', 'd', 'k', 'x'] {
             key(&mut a, &cx, Key::Char(k));
             assert!(!a.has_modal(), "{k}");
@@ -5487,6 +6032,30 @@ mod tests {
         key(&mut b, &no_voice, Key::Char('m'));
         assert!(!b.is_busy() && status(&b).contains("not enabled"));
         assert!(no_voice.audit.recent(10).iter().any(|l| l.contains("voice.denied")));
+    }
+
+    /// The voice test plays through the stand-in player, and no test in this binary leaves a real `aplay` child of the test process (stand-in scripts of other tests do not count).
+    #[test]
+    fn the_voice_test_never_opens_the_real_sound_device() {
+        let aplay_children = || -> Vec<u32> {
+            let me = std::process::id();
+            std::fs::read_dir("/proc").into_iter().flatten().flatten().filter_map(|e| {
+                let pid = e.file_name().to_string_lossy().parse::<u32>().ok()?;
+                let stat = std::fs::read_to_string(e.path().join("stat")).ok()?;
+                let ppid = stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse::<u32>().ok()?;
+                let comm = std::fs::read_to_string(e.path().join("comm")).ok()?;
+                // Other tests in this binary run stand-in players: shell scripts named `aplay`, whose process name is also "aplay" but
+                // whose program file is the shell. Only a process running the real `aplay` program counts.
+                let exe = std::fs::read_link(e.path().join("exe")).ok()?;
+                (ppid == me && comm.trim() == "aplay" && exe.file_name().is_some_and(|n| n == "aplay")).then_some(pid)
+            }).collect()
+        };
+        let cx = user("sv-noaplay");
+        let mut a = SettingsApp::new(&cx);
+        goto(&mut a, &cx, Tab::Voice);
+        key(&mut a, &cx, Key::Char('p'));
+        settle(&mut a, &cx);
+        assert!(aplay_children().is_empty(), "a test started the real aplay: {:?}", aplay_children());
     }
 
     // ------------------------------------------------------------------ skills tab
@@ -6650,6 +7219,45 @@ mod tests {
     }
 
     #[test]
+    fn enterprise_and_wep_networks_ask_their_own_questions_and_are_written_into_the_supplicant_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let (env, d) = wifi_world("ent");
+        let iw = d.join("bin/iw");
+        std::fs::write(&iw, "#!/bin/sh\nprintf 'BSS aa:bb:cc:00:00:03(on wlan0)\\n\\tfreq: 2437.0\\n\\tcapability: ESS Privacy (0x0411)\\n\\tsignal: -50.00 dBm\\n\\tSSID: Campus\\n\\tRSN:\\t * Version: 1\\n\\t\\t * Authentication suites: IEEE 802.1X\\nBSS aa:bb:cc:00:00:04(on wlan0)\\n\\tfreq: 2412.0\\n\\tcapability: ESS Privacy (0x0411)\\n\\tsignal: -70.00 dBm\\n\\tSSID: OldAP\\n'\n").unwrap();
+        std::fs::set_permissions(&iw, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (cx, _) = admin("wifi3");
+        let mut a = SettingsApp::new(&cx).with_wifi(env.clone());
+        goto(&mut a, &cx, Tab::Network);
+        key(&mut a, &cx, Key::Char('w'));
+        settle(&mut a, &cx);
+        let items: Vec<String> = a.wifi_items.iter().map(|(t, _)| t.clone()).collect();
+        assert!(items[0].starts_with("Campus") && items[0].contains("enterprise"), "{items:?}");
+        assert!(items[1].starts_with("OldAP") && items[1].contains("WEP"), "{items:?}");
+        // WEP: refused until the warning is accepted
+        typ(&mut a, &cx, "OldAP");
+        key(&mut a, &cx, Key::Enter);
+        assert!(matches!(&a.modal, Some(Modal::Form(FormKind::WifiWep(n), _)) if n == "OldAP"));
+        typ(&mut a, &cx, "abcde");
+        key(&mut a, &cx, Key::Enter);
+        assert!(a.has_modal(), "without the yes the form stays open with the warning");
+        assert!(env.known.list().is_empty());
+        // enterprise: a missing certificate file keeps the form open; filling it joins
+        key(&mut a, &cx, Key::Esc);
+        key(&mut a, &cx, Key::Char('w'));
+        settle(&mut a, &cx);
+        typ(&mut a, &cx, "Campus");
+        key(&mut a, &cx, Key::Enter);
+        assert!(matches!(&a.modal, Some(Modal::Form(FormKind::WifiEnterprise(n), _)) if n == "Campus"));
+        key(&mut a, &cx, Key::Tab);
+        typ(&mut a, &cx, "bob");
+        key(&mut a, &cx, Key::Tab);
+        typ(&mut a, &cx, "hunter22");
+        key(&mut a, &cx, Key::Enter);
+        assert!(a.has_modal() && env.known.list().is_empty(), "the server certificate file is required");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn a_hidden_network_a_missing_adapter_and_an_ordinary_account_are_handled() {
         let (env, d) = wifi_world("hidden");
         let (cx, _) = admin("wifi2");
@@ -6672,6 +7280,15 @@ mod tests {
         goto(&mut b, &cx, Tab::Network);
         key(&mut b, &cx, Key::Char('w'));
         assert!(status(&b).contains("no WiFi adapter"), "{}", status(&b));
+        // a Broadcom 4360-family card with no driver: said with the way out (KI-094)
+        let bcm = d.join("bcm");
+        std::fs::create_dir_all(bcm.join("sys/bus/pci/devices/0000:03:00.0")).unwrap();
+        std::fs::write(bcm.join("sys/bus/pci/devices/0000:03:00.0/vendor"), "0x14e4\n").unwrap();
+        std::fs::write(bcm.join("sys/bus/pci/devices/0000:03:00.0/device"), "0x43a0\n").unwrap();
+        let mut c = SettingsApp::new(&cx).with_wifi(WifiEnv { roots: iyakki_devctl::Roots { sys: bcm.join("sys"), proc_: bcm.join("proc") }, ..env.clone() });
+        goto(&mut c, &cx, Tab::Network);
+        key(&mut c, &cx, Key::Char('w'));
+        assert!(status(&c).contains("Broadcom BCM43xx") && status(&c).contains("USB Wi-Fi adapter"), "{}", status(&c));
         // an ordinary account has no Network page at all
         let mut cx2 = cx.clone();
         cx2.session.role = Role::User;
@@ -6723,6 +7340,9 @@ mod install_tests;
 #[path = "settings_mac_tests.rs"]
 mod mac_tests;
 #[cfg(test)]
+#[path = "settings_gemini_tests.rs"]
+mod gemini_tests;
+#[cfg(test)]
 #[path = "settings_announce_tests.rs"]
 mod announce_tests;
 #[cfg(test)]
@@ -6733,11 +7353,20 @@ mod lemonade_tests;
 #[path = "settings_sounds_tests.rs"]
 mod sysnd_tests;
 #[cfg(test)]
+#[path = "settings_sftp_tests.rs"]
+mod settings_sftp_tests;
+#[cfg(test)]
+#[path = "settings_machines_tests.rs"]
+mod settings_machines_tests;
+#[cfg(test)]
 #[path = "settings_matrix_tests.rs"]
 mod matrix_tests;
 #[cfg(test)]
 #[path = "settings_notifs_tests.rs"]
 mod notifs_tests;
+#[cfg(test)]
+#[path = "settings_appaccess_tests.rs"]
+mod appaccess_tests;
 #[cfg(test)]
 #[path = "settings_sound_tests.rs"]
 mod sound_tests;
@@ -6753,6 +7382,9 @@ mod cloudroles_tests;
 #[cfg(test)]
 #[path = "settings_battery_tests.rs"]
 mod battery_tests;
+#[cfg(test)]
+#[path = "settings_assistant_tests.rs"]
+mod assistant_tests;
 #[cfg(test)]
 #[path = "settings_power_tests.rs"]
 mod power_tests;
@@ -6823,3 +7455,7 @@ mod aihw_tests;
 #[cfg(test)]
 #[path = "settings_domains_tests.rs"]
 mod dom_tests;
+
+#[cfg(test)]
+#[path = "settings_views_tests.rs"]
+mod views_tests;

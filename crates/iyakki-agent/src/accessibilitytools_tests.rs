@@ -84,6 +84,19 @@ fn a_change_is_saved_audited_and_shown_before_and_after() {
 }
 
 #[test]
+fn typing_echo_is_on_by_default_old_files_keep_it_and_the_tool_can_switch_it() {
+    let (t, f) = rig(true);
+    assert!(f.access().typing_echo);
+    assert!(Access::default().describe().contains("typing echo on"));
+    let d = temp("echo");
+    std::fs::write(d.join("access-ann.json"), "{\"screen_reader\": true}").unwrap();
+    assert!(acc::load(&d, "ann").typing_echo, "a file from before the switch keeps the echo on");
+    t.call(SET_TOOL, &json!({"typing_echo": false})).unwrap();
+    assert!(!f.access().typing_echo);
+    assert!(t.call(SET_TOOL, &json!({"typing_echo": "no"})).is_err());
+}
+
+#[test]
 fn bad_values_and_empty_calls_are_refused_with_the_reason() {
     let (t, f) = rig(true);
     assert!(t.refusal(SET_TOOL, &json!({})).unwrap().contains("say what to change"));

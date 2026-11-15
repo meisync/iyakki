@@ -741,44 +741,35 @@ fn overflow_cases() -> Vec<(String, Option<PApp>, bool, usize)> {
 /// the list (the test prints the ones that did not show).
 #[rustfmt::skip]
 const KNOWN_OVERFLOWS: &[(&str, &str)] = &[
-    ("launcher", "800x480"), ("launcher", "360x740"), ("chat", "800x480"), ("chat", "1366x768"), ("rag", "360x740"),
-    ("mcp", "360x740"), ("users", "360x740"), ("users", "800x480"), ("users", "1366x768"),
-    ("settings/Overview", "360x740"), ("settings/Account", "360x740"), ("settings/Account", "800x480"), ("settings/Notifications", "360x740"),
-    ("settings/Notifications", "800x480"), ("settings/Vault", "360x740"), ("settings/Vault", "800x480"), 
-    ("settings/Secret providers", "360x740"), ("settings/Secret providers", "800x480"), ("settings/Models", "360x740"),
-    ("settings/Models", "800x480"), ("settings/Models", "1366x768"), ("settings/Agents", "360x740"), ("settings/Agents", "800x480"),
-    ("settings/Agents", "1366x768"), ("settings/Skills", "360x740"), ("settings/Skills", "800x480"), ("settings/RAG", "360x740"), ("settings/RAG", "800x480"), ("settings/RAG", "1366x768"), ("settings/Voice", "360x740"),
-    ("settings/Voice", "800x480"), ("settings/Voice", "1366x768"), ("settings/Browser", "360x740"), ("settings/Browser", "800x480"),
-    ("settings/Browser", "1366x768"), ("settings/Host access", "360x740"), ("settings/Network", "360x740"), ("settings/Network", "800x480"),
-    ("settings/Firewall", "360x740"), ("settings/Shared folders", "360x740"), ("settings/Shared folders", "800x480"), ("settings/Display", "360x740"), ("settings/Display", "800x480"), ("settings/Displays", "360x740"), ("settings/Displays", "800x480"),
-    ("settings/Screen saver", "360x740"), ("settings/Home layout", "360x740"), ("settings/Home layout", "800x480"), ("settings/Sound", "360x740"),
-    ("settings/System sounds", "360x740"), ("settings/Bluetooth", "360x740"), ("settings/Bluetooth", "800x480"), ("settings/Keyboard", "360x740"),
-    ("settings/Keyboard", "800x480"), ("settings/Keyboard", "1366x768"), ("settings/Time", "360x740"), ("settings/Time", "800x480"),
-    ("settings/Time", "1366x768"), ("settings/Host name", "360x740"), ("settings/Host name", "800x480"), ("settings/Last session log", "360x740"),
-    ("settings/Startup", "360x740"), ("settings/Memory", "360x740"), ("settings/Memory", "800x480"),
-    ("settings/Storage", "360x740"), ("settings/Storage", "800x480"), ("settings/Cloud mode", "360x740"), ("settings/Cloud mode", "800x480"), ("settings/Cloud access", "360x740"),
-    ("settings/Developer mode", "360x740"), ("settings/Developer mode", "800x480"), ("settings/Developer mode", "1366x768"), ("mesh", "360x740"),
-    ("radio", "360x740"), ("radio", "800x480"), ("scan", "360x740"), ("scan", "800x480"),
-    ("skills", "360x740"), ("usage", "360x740"),
-    ("usage", "800x480"), ("usage", "1366x768"), ("calendar", "360x740"), ("system", "360x740"),
-    ("system", "800x480"), ("system", "1366x768"), ("media", "360x740"), ("media", "800x480"),
-    ("inbox", "800x480"), ("tales", "800x480"), ("dash", "360x740"),
-    ("camera", "360x740"), ("camera", "1366x768"), ("lab", "360x740"), ("lab", "800x480"),
-    ("lab", "1366x768"),
+    ("launcher", "800x480"), ("chat", "800x480"), ("chat", "1366x768"),
+    ("media", "800x480"), ("camera", "1366x768"),
     // pages the test did not reach before the list was keyed by name (the old loop stopped at 31 pages): not new breakage
-    ("settings/Clusters", "360x740"), ("settings/Clusters", "800x480"), ("settings/Clusters", "1366x768"),
-    ("settings/Git and SSH keys", "360x740"), ("settings/Git and SSH keys", "800x480"), ("settings/Git and SSH keys", "1366x768"),
     // the left page list takes the width at 360: the same cause as every other Settings page at this size
-    ("settings/SSH tunnels", "360x740"), ("settings/VPN", "360x740"), ("settings/Remote access", "360x740"),
-    ("settings/Backup and restore", "360x740"), ("settings/System update", "360x740"),
-];
+    ];
 
 /// Known findings at the other window and text sizes (KNOWN-ISSUES.md KI-015): (case name, "WxH@N%").
 #[rustfmt::skip]
+/// What the ignored full matrix (every size at every text size) still finds, from the 2026-11-14 run; each is a real overflow still to fix (KI-015).
 const KNOWN_OVERFLOWS_MATRIX: &[(&str, &str)] = &[
-    ("settings/Models", "1280x720@150%"), ("settings/Agents", "1280x720@150%"), ("settings/RAG", "1280x720@150%"), ("settings/Voice", "1280x720@150%"),
-    ("settings/Keyboard", "1280x720@150%"),
-];
+    ("skills", "360x740@85%"),
+    ("media", "360x740@85%"),
+    ("dash", "360x740@85%"),
+    ("skills", "360x740@100%"),
+    ("media", "360x740@100%"),
+    ("dash", "360x740@100%"),
+    ("radio", "360x740@125%"),
+    ("scan", "360x740@125%"),
+    ("ide", "1280x720@125%"),
+    ("camera", "800x480@125%"),
+    ("scan", "360x740@150%"),
+    ("usage", "360x740@150%"),
+    ("calendar", "360x740@150%"),
+    ("media", "360x740@150%"),
+    ("tales", "800x480@150%"),
+    ("camera", "360x740@150%"),
+    ("tales", "1280x720"),
+    ("media", "360x740@125%"),
+    ];
 
 /// The name a window size and text size are listed under: "WxH" at the largest text size (the original list), "WxH@100%" otherwise.
 fn overflow_size_name(size: (u32, u32), text: f32) -> String {
@@ -805,6 +796,8 @@ fn overflow_matrix(sizes: &[(u32, u32)], texts: &[f32]) -> Vec<(String, String, 
             if only.as_deref().is_some_and(|o| o != name) {
                 continue;
             }
+            // the System tile is judged with the longest host name a person may give (63 characters allowed; 40 is a long real one), not this computer's own
+            crate::hostname::set_test_name(if name == "system" { Some("a-rather-long-host-name-for-the-overflow-test") } else { None });
             for (si, size) in sizes.iter().copied().enumerate() {
                 let t0 = std::time::Instant::now();
                 // the Time page prints what the last time-server probe said, kept for the whole process: other tests that ask a (fake) server leave their words there
@@ -821,6 +814,7 @@ fn overflow_matrix(sizes: &[(u32, u32)], texts: &[f32]) -> Vec<(String, String, 
             }
         }
     }
+    crate::hostname::set_test_name(None);
     crate::ui::set_ui_size(1.0);
     all
 }

@@ -273,7 +273,7 @@ fn config_changes_only_whitelisted_typed_settings_for_administrators_and_never_s
     assert!(run(&h, &["config", "list"]).unwrap_err().contains("config scope"));
     f.dm.set_scope(&admin(), "root", "laptop", Scope::Config, true).unwrap();
     let list = run(&h, &["config", "list"]).unwrap().join("\n");
-    for k in ["sound.volume", "time.zone", "keyboard.fn_mode", "system.hostname", "display.size", "firewall.enabled", "cloud.mode"] {
+    for k in ["sound.volume", "time.zone", "keyboard.fn_mode", "system.hostname", "display.size", "firewall.enabled", "cloud.mode", "pointer.speed", "pointer.touchpad_speed"] {
         assert!(list.contains(k), "{k} in the whitelist: {list}");
     }
     // typed changes land in the real settings
@@ -283,13 +283,17 @@ fn config_changes_only_whitelisted_typed_settings_for_administrators_and_never_s
     run(&h, &["config", "set", "time.hour12", "on"]).unwrap();
     run(&h, &["config", "set", "cloud.mode", "off"]).unwrap();
     run(&h, &["config", "set", "voice.speed_pct", "150"]).unwrap();
+    run(&h, &["config", "set", "pointer.speed", "150"]).unwrap();
+    run(&h, &["config", "set", "pointer.touchpad_speed", "60"]).unwrap();
+    assert_eq!(settings(&f).keyboard.pointer_speeds(), (150, 60));
+    assert_eq!(run(&h, &["config", "get", "pointer.speed"]).unwrap()[0], "pointer.speed = 150");
     let s = settings(&f);
     assert_eq!((s.sound.volume_pct, s.sound.muted, s.keyboard.fn_mode.as_str(), s.time.hour12, s.voice.speed_pct), (35, true, "fkeys", true, 150));
     assert_eq!(s.cloud, iyakki_agent::cloudmode::Setting::Off);
     assert_eq!(run(&h, &["config", "get", "sound.volume"]).unwrap()[0], "sound.volume = 35");
     // refusals change nothing: unknown key, wrong type, out of range, bad enum, control characters
     let before = serde_json::to_string(&settings(&f)).unwrap();
-    for (k, v) in [("vault.lock_on_admin_logout", "false"), ("providers", "[]"), ("sound.volume", "loud"), ("sound.volume", "101"), ("sound.volume", "-1"), ("keyboard.fn_mode", "bogus"), ("time.ntp_server", "bad host!"), ("sound.output", "a b"), ("model.chat", "nosuch/model"), ("agents", "x"), ("../etc", "1")] {
+    for (k, v) in [("vault.lock_on_admin_logout", "false"), ("providers", "[]"), ("sound.volume", "loud"), ("sound.volume", "101"), ("sound.volume", "-1"), ("pointer.speed", "24"), ("pointer.speed", "301"), ("keyboard.fn_mode", "bogus"), ("time.ntp_server", "bad host!"), ("sound.output", "a b"), ("model.chat", "nosuch/model"), ("agents", "x"), ("../etc", "1")] {
         assert!(run(&h, &["config", "set", k, v]).is_err(), "{k}={v}");
     }
     assert_eq!(before, serde_json::to_string(&settings(&f)).unwrap(), "refused changes leave the settings alone");
@@ -859,4 +863,51 @@ fn a_system_update_goes_through_plan_stage_and_apply_over_tls_with_the_scope_and
     // revoked: the next call fails
     f.dm.set_scope(&admin(), "root", "laptop", Scope::Update, false).unwrap();
     assert!(run(&h, &["update", "--status"]).is_err());
+}
+
+#[test]
+fn the_compat_report_names_the_paired_computer_on_dev_info_and_in_the_updates_tool_reading_and_the_bundle() {
+    use iyakki_agent::updatestools::{Backend, RealBackend};
+    let f = fx("compat3");
+    f.dm.enable(&admin(), "root", 0).unwrap();
+    let (h, _c) = paired(&f, "laptop", "root");
+    f.dm.set_scope(&admin(), "root", "laptop", Scope::Debug, true).unwrap();
+    // 1. `iyakki dev info` over TLS prints the report, the paired computer among the peers
+    let info = run(&h, &["info"]).unwrap();
+    let compat: Vec<&String> = info.iter().filter(|l| l.trim_start().starts_with("compat")).collect();
+    assert!(compat.iter().any(|l| l.contains("core ") && l.contains("contract ")), "{compat:?}");
+    assert!(compat.iter().any(|l| l.contains("peer ") && l.contains("laptop")), "{compat:?}");
+    // 2. the reading the `updates_status` chat tool shows is built from the same paired keys
+    let backend = RealBackend { svc: f.env.services.clone(), policy: admin(), user: "root".into(), audit: Arc::new(|_, _| {}) };
+    let tool = backend.compat_lines();
+    assert!(tool.iter().any(|l| l.contains("peer ") && l.contains("laptop")), "{tool:?}");
+    // 3. the support bundle's Compatibility section carries those lines, redacted like the rest
+    let bundle = iyakki_agent::diagshare::build(&iyakki_agent::diagshare::Inputs { compat: tool.clone(), ..Default::default() });
+    let sec = bundle.sections.iter().find(|s| s.title == "Compatibility").expect("a Compatibility section");
+    assert!(sec.lines.iter().any(|l| l.contains("laptop")) && sec.lines.iter().any(|l| l.starts_with("core ")), "{:?}", sec.lines);
+    // the three agree on the stable lines (the idle time of a peer moves between the calls)
+    let stable = |v: &[String]| v.iter().filter(|l| !l.contains("heard")).cloned().collect::<Vec<_>>();
+    let from_info: Vec<String> = compat.iter().map(|l| l.trim_start().trim_start_matches("compat").trim().to_string()).collect();
+    assert_eq!(stable(&from_info), stable(&tool));
+    assert_eq!(stable(&sec.lines), stable(&tool));
+    // an account that is not an administrator sees a count, never the names
+    let user = RealBackend { svc: f.env.services.clone(), policy: Role::User.template(), user: "bob".into(), audit: Arc::new(|_, _| {}) };
+    assert!(user.compat_lines().iter().all(|l| !l.contains("laptop")), "{:?}", user.compat_lines());
+}
+
+#[test]
+fn dev_doctor_prints_the_devices_report_over_tls_needs_the_debug_scope_and_detail_never_prints_less() {
+    let f = fx("doctorcli");
+    f.dm.enable(&admin(), "root", 0).unwrap();
+    let (h, _c) = paired(&f, "laptop", "root");
+    // a new computer holds only install: the report is refused with the scope named
+    let e = run(&h, &["doctor"]).unwrap_err();
+    assert!(e.contains("does not hold the") && e.contains("scope"), "{e}");
+    f.dm.set_scope(&admin(), "root", "laptop", Scope::Debug, true).unwrap();
+    let plain = run(&h, &["doctor"]).unwrap();
+    assert!(!plain.is_empty(), "the command prints a report");
+    let detail = run(&h, &["doctor", "--detail"]).unwrap();
+    assert!(detail.len() >= plain.len(), "--detail never prints less than the short report:\n{plain:?}\n{detail:?}");
+    // the same report as the route gives, line for line the first one is the summary
+    assert_eq!(plain[0], detail[0], "the summary line is the same with and without --detail");
 }

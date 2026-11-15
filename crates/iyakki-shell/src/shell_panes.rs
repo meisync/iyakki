@@ -5,6 +5,7 @@
 //! workspace and swap with the focused one when focus changes. Each pane draws into its own surface only when it is dirty, and the
 //! surfaces are copied into the frame; click regions are translated from the pane's surface to the display.
 
+use crate::stale_stats::mark_stale;
 use crate::safeclamp::SafeClamp;
 use super::*;
 use crate::apps::card::{Action, Card, Tone};
@@ -90,6 +91,24 @@ pub(super) struct Workspace {
     redraws: u64,
     /// The display's size at the last frame.
     disp: (u32, u32),
+}
+
+impl Shell {
+    /// The screen locks with the person's browser data sealed: every app the shell holds (the focused one and the panes') may let go of
+    /// what it holds on the open profile first (F-VAULT-08, KI-742).
+    pub(super) fn apps_let_go_for_lock(&mut self) {
+        let Some(cx) = self.cx() else { return };
+        if let Screen::App(app, _) = &mut self.screen {
+            app.on_lock(&cx);
+        }
+        if let Some(ws) = &mut self.panes.ws {
+            for p in ws.panes.iter_mut() {
+                if let Some((app, _)) = &mut p.content {
+                    app.on_lock(&cx);
+                }
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -218,6 +237,11 @@ impl Shell {
 
     // ------------------------------------------------------------------ the workspace
 
+    /// Whether a pane other than the focused one holds `app` (the focused pane's app is the shell's `screen`).
+    pub(super) fn panes_hold(&self, app: PApp) -> bool {
+        self.panes.ws.as_ref().is_some_and(|ws| ws.panes.iter().any(|p| matches!(&p.content, Some((_, a)) if *a == app)))
+    }
+
     pub(super) fn ws_active(&self) -> bool {
         self.panes.ws.is_some() && matches!(self.screen, Screen::Launcher | Screen::App(..))
     }
@@ -254,7 +278,54 @@ impl Shell {
             self.ctx = None;
         }
         self.panes.ws = Some(ws);
-        self.stale = true;
+        mark_stale!(self);
+    }
+
+    /// Desktop views (`shell_views.rs`): take the workspace of the view that is being left, with whatever was half done in it
+    /// (the picker, the memory card, a pane being moved) dropped. The focused pane's app is the shell's `screen`, taken by the caller.
+    pub(super) fn panes_take_for_view(&mut self) -> Option<Workspace> {
+        self.panes.picker = None;
+        self.panes.card = None;
+        self.panes.wish = None;
+        self.panes.d.move_src = None;
+        self.panes.ws.take()
+    }
+
+    /// Desktop views: the window arrangement as data: the layout id, the app in each pane in pane order ("" is a launcher) and the focused pane.
+    /// `screen` is the focused pane's app (it is the shell's `screen`, not in the workspace). With no workspace it is one window.
+    pub(super) fn panes_describe(ws: Option<&Workspace>, screen: &Screen) -> Option<iyakki_agent::views::SavedLayout> {
+        let id_of = |p: Option<PApp>| p.map(|p| p.id().to_string()).unwrap_or_default();
+        let on_screen = match screen {
+            Screen::App(_, p) => Some(*p),
+            _ => None,
+        };
+        let (layout, apps, focus) = match ws {
+            None => ("single".to_string(), vec![id_of(on_screen)], 0),
+            Some(ws) => {
+                let apps = ws.panes.iter().enumerate().map(|(i, p)| id_of(if i == ws.focus { on_screen } else { p.content.as_ref().map(|c| c.1) })).collect();
+                (ws.layout.id.clone(), apps, ws.focus)
+            }
+        };
+        let l = iyakki_agent::views::SavedLayout { layout, apps, focus, extra: Default::default() };
+        // one launcher pane and nothing else is the default: nothing to remember
+        (l.is_valid() && !(l.layout == "single" && l.apps == [String::new()])).then_some(l)
+    }
+
+    /// Does this workspace hold `app` in a pane other than the focused one? (the focused pane's app is the shell's `screen`).
+    pub(super) fn panes_pane_of(ws: &Workspace, app: PApp) -> Option<usize> {
+        ws.panes.iter().enumerate().find(|(i, p)| *i != ws.focus && p.content.as_ref().is_some_and(|c| c.1 == app)).map(|(i, _)| i)
+    }
+
+    /// Desktop views: install the workspace of the view that is shown now (None: a single screen).
+    pub(super) fn panes_put_for_view(&mut self, ws: Option<Workspace>) {
+        self.panes.ws = ws;
+        self.ws_mark_all_dirty();
+        self.refresh_gate_light();
+    }
+
+    /// Whether the pane layouts are switched on (an administrator can switch screen features off).
+    pub(super) fn panes_switch_on(&self) -> bool {
+        self.panes.switch != Switch::Off
     }
 
     fn ws_mark_all_dirty(&mut self) {
@@ -354,7 +425,7 @@ impl Shell {
             self.panes.ws = Some(ws);
         }
         self.ctx = None;
-        self.stale = true;
+        mark_stale!(self);
         if !closed.is_empty() && !quiet {
             self.say_info(format!("Closed for the smaller layout: {}", closed.join(", ")));
         } else if !quiet {
@@ -405,7 +476,7 @@ impl Shell {
         ws.panes[nf].dirty = true;
         self.panes.ws = Some(ws);
         self.ctx = None;
-        self.stale = true;
+        mark_stale!(self);
     }
 
     fn ws_close(&mut self, i: usize) {
@@ -429,6 +500,11 @@ impl Shell {
     // ------------------------------------------------------------------ keys and clicks
 
     pub(super) fn panes_key(&mut self, k: LayoutKey) {
+        // desktop views have their own keys and are not a pane feature: they work whatever the screen features switch says
+        if matches!(k, LayoutKey::View(_) | LayoutKey::ViewStep { .. }) {
+            self.views_key(k);
+            return;
+        }
         let sw = self.panes.switch;
         if matches!(k, LayoutKey::Picker) {
             self.open_picker();
@@ -473,7 +549,7 @@ impl Shell {
                 if let Some(ws) = self.panes.ws.as_mut() {
                     if ws.layout.nudge(area, gap, ws.focus, side, 0.05, &mins) {
                         self.ws_mark_all_dirty();
-                        self.stale = true;
+                        mark_stale!(self);
                     }
                 }
             }
@@ -492,7 +568,7 @@ impl Shell {
                     self.say_info("Only one display is connected");
                 }
             }
-            LayoutKey::Picker => {}
+            LayoutKey::Picker | LayoutKey::View(_) | LayoutKey::ViewStep { .. } => {}
         }
     }
 
@@ -529,7 +605,7 @@ impl Shell {
         let cur = self.panes.ws.as_ref().map_or("single", |ws| ws.layout.id.as_str()).to_string();
         let idx = TEMPLATES.iter().position(|t| t.id == cur).unwrap_or(0);
         self.panes.picker = Some(idx);
-        self.stale = true;
+        mark_stale!(self);
     }
 
     fn picker_choose(&mut self, idx: usize) {
@@ -579,7 +655,7 @@ impl Shell {
             Event::Tab(t) if (PICK..PICK + n).contains(t) => self.picker_choose(t - PICK),
             _ => {}
         }
-        self.stale = true;
+        mark_stale!(self);
     }
 
     fn picker_switch(&mut self) {
@@ -604,7 +680,7 @@ impl Shell {
                 self.panes.card = None;
             }
         }
-        self.stale = true;
+        mark_stale!(self);
     }
 
     pub(super) fn panes_tab(&mut self, n: usize) {
@@ -650,7 +726,7 @@ impl Shell {
                 self.ws_mark_all_dirty_if_needed();
             }
         }
-        self.stale = true;
+        mark_stale!(self);
     }
 
     fn ws_mark_all_dirty_if_needed(&mut self) {
@@ -688,7 +764,7 @@ impl Shell {
                 // a click on another display makes it the working display, and goes on to what is under the pointer
                 let k = self.panes.d.pointer;
                 self.focus_display(k);
-                self.stale = true;
+                mark_stale!(self);
                 // the display is the working one now: the press is handled like any press on it (a divider grab, and the pane
                 // under the pointer takes the focus), otherwise the click would reach the pane that had the focus last time
                 // on that display, at coordinates that are not its own
@@ -857,13 +933,13 @@ impl Shell {
                         p.dirty = true;
                     }
                 }
-                Err(_) => crashed.push((i, app.title())),
+                Err(_) => crashed.push((i, app.title(), pa)),
             }
         }
-        for (i, name) in crashed {
+        for (i, name, pa) in crashed {
             ws.panes[i].content = None;
             ws.panes[i].dirty = true;
-            self.app_crashed(name);
+            self.app_crashed_with(name, Some(pa));
         }
         self.panes.ws = Some(ws);
         self.tick_other_displays(&cx);
@@ -918,7 +994,14 @@ impl Shell {
     pub(super) fn panes_reset(&mut self) {
         // which displays there are does not depend on who is signed in
         let list = std::mem::take(&mut self.panes.d.list);
+        // a test that says how much memory there is keeps saying it across a sign-out and the next sign-in
+        #[cfg(test)]
+        let mem = self.panes.mem;
         self.panes = PanesUi::default();
+        #[cfg(test)]
+        {
+            self.panes.mem = mem;
+        }
         let n = list.len();
         self.panes.d.list = list;
         if n >= 2 {
@@ -1001,7 +1084,7 @@ impl Shell {
 
     fn draw_bar(&mut self, g: &mut Gfx, w: u32, s: f32) {
         let bh = BAR_H * s;
-        g.rect(0.0, 0.0, w as f32, bh, [8, 11, 24, 235]);
+        g.rect(0.0, 0.0, w as f32, bh, crate::fx::panel_alpha(235));
         g.rect(0.0, bh - 1.0, w as f32, 1.0, [120, 150, 255, 30]);
         let name_w = g.text_width(18.0 * s, "IYAKKI", Face::Bold);
         let nb = R::new(10.0 * s, 4.0 * s, name_w + 20.0 * s, bh - 8.0 * s);

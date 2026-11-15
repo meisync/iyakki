@@ -85,3 +85,19 @@ fn the_engine_gets_a_share_of_the_available_memory_and_a_cache_model_from_the_ch
     let env = engine_env(CacheSize::Auto, &Machine { mem_total: gb(8), mem_available: gb(6), disk_free: gb(20), cores: 4 });
     assert_eq!(env, vec![("IYAKKI_WEBVIEW_MEM_MB".to_string(), "2048".to_string()), ("IYAKKI_WEBVIEW_CACHE_MODEL".to_string(), "browser".to_string())]);
 }
+
+#[test]
+fn the_machine_is_read_through_the_core_api_so_a_fake_machine_decides_the_budget() {
+    use iyakki_core_fake::{Canned, FakeOs};
+    use iyakki_core_api::MemInfo;
+    let os = FakeOs::with(Canned { meminfo: Some(MemInfo { total_kb: 2_000_000, free_kb: 500_000, available_kb: 1_000_000, swap_total_kb: 0, swap_free_kb: 0 }), space: Some((7_000_000_000, 64_000_000_000)), cpu_count: Some(6), ..Canned::default() });
+    let m = machine_os(&os, std::path::Path::new("/var/lib/iyakki"));
+    assert_eq!((m.mem_total, m.mem_available, m.disk_free, m.cores), (2_000_000 * 1024, 1_000_000 * 1024, 7_000_000_000, 6));
+    assert_eq!(os.calls(), ["meminfo", "cmdline", "space(/var/lib/iyakki)", "cpu_count"]);
+    // a machine that cannot say anything: unknown memory and disk, two cores, no panic
+    let none = FakeOs::with(Canned { meminfo: None, space: None, cpu_count: None, ..Canned::default() });
+    let m = machine_os(&none, std::path::Path::new("/"));
+    assert_eq!((m.mem_total, m.disk_free, m.cores), (0, 0, 2));
+    // the few-processors rule uses the fake's count
+    assert!(preload_workers(&machine_os(&FakeOs::with(Canned { cpu_count: Some(1), ..Canned::default() }), std::path::Path::new("/"))) >= 3);
+}

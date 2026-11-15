@@ -11,9 +11,9 @@ use crate::chat::ToolSpec;
 use crate::tasks::{split_plan, Manager, NewTask, PlanStep, Split, MAX_PER_CALL};
 
 /// One line for the lead assistant's system prompt.
-pub const PROMPT_RULE: &str = "\nPARALLEL TASKS: for independent pieces of work (\"do these three things in parallel\") call task_spawn: each task runs in its own isolated copy of the workspace and the person reviews and merges the result in the Tasks tab. Tasks cannot see this chat, so write each goal completely. task_status shows how they are doing and, when all have finished, what each did, the conflicts and what to merge. For a plan with several steps call task_plan with each step's title, goal, the files it changes and which steps it depends on: independent steps with separate files run in parallel, the rest follow after a merge. You cannot merge or discard them.";
+pub const PROMPT_RULE: &str = "\nPARALLEL TASKS: for independent pieces of work (\"do these three things in parallel\") call task_spawn: each task runs in its own isolated copy of the workspace and the person reviews and merges the result in the Tasks tab. Tasks cannot see this chat, so write each goal completely. task_bring_changes copies the persons uncommitted files into a stopped task. task_status shows how they are doing and, when all have finished, what each did, the conflicts and what to merge. For a plan with several steps call task_plan with each step's title, goal, the files it changes and which steps it depends on: independent steps with separate files run in parallel, the rest follow after a merge. You cannot merge or discard them.";
 
-pub const TASK_TOOLS: [&str; 3] = ["task_spawn", "task_status", "task_plan"];
+pub const TASK_TOOLS: [&str; 4] = ["task_spawn", "task_status", "task_plan", "task_bring_changes"];
 
 pub struct TaskTools {
     inner: Arc<dyn Tools>,
@@ -109,11 +109,27 @@ impl TaskTools {
     }
 }
 
+impl TaskTools {
+    fn task_for(&self, args: &Value) -> Result<crate::tasks::Task, String> {
+        let id = clean_id(args.get("id").and_then(Value::as_str).unwrap_or(""));
+        if id.is_empty() {
+            return Err("give the task id (see task_status)".into());
+        }
+        self.mgr.get(&id).ok_or_else(|| format!("there is no task {id}"))
+    }
+}
+
 fn agent_is_default(a: &str) -> bool {
     a.trim().is_empty()
 }
 
 impl Tools for TaskTools {
+
+    fn inner_tools(&self) -> Option<&dyn Tools> {
+
+        Some(&*self.inner)
+
+    }
     fn defs(&self) -> Vec<ToolDef> {
         let mut v = self.inner.defs();
         v.retain(|d| !is_task_tool(&d.spec.name));
@@ -150,6 +166,15 @@ impl Tools for TaskTools {
             risk: Risk::Ask,
             untrusted: false,
         });
+        v.push(ToolDef {
+            spec: ToolSpec {
+                name: "task_bring_changes".into(),
+                description: "Copy the person's uncommitted files from the main workspace into one task that is not running (queued, paused, interrupted or failed), so the task starts from what the person has now. The files overwrite the task's copies. The person approves every call.".into(),
+                schema: json!({"type":"object","properties":{"id":{"type":"string","description":"The task id (from task_status)."}},"required":["id"]}),
+            },
+            risk: Risk::Ask,
+            untrusted: false,
+        });
         v.push(ToolDef { spec: ToolSpec { name: "task_status".into(), description: "List the parallel tasks with their status, progress and last event.".into(), schema: json!({"type":"object","properties":{}}) }, risk: Risk::Safe, untrusted: false });
         v
     }
@@ -177,6 +202,10 @@ impl Tools for TaskTools {
                 Ok(format!("Started {} task(s): {}\n{}\nLater waves start by themselves after the person merges the wave before. Read progress with task_status.", ids.len(), ids.join(", "), Self::plan_text(&steps, &split)))
             }
             "task_status" => Ok(self.status_text()),
+            "task_bring_changes" => {
+                let t = self.task_for(args)?;
+                crate::taskenv::bring_my_changes(&self.mgr, &t)
+            }
             _ => self.inner.call(name, args),
         }
     }
@@ -197,6 +226,12 @@ impl Tools for TaskTools {
         if name == "task_status" {
             return "List the parallel tasks".into();
         }
+        if name == "task_bring_changes" {
+            return match self.task_for(args) {
+                Ok(t) => format!("Copy your uncommitted files into the task \"{}\"", crate::agent::truncate(&t.title, 50)),
+                Err(e) => format!("task_bring_changes (invalid: {e})"),
+            };
+        }
         self.inner.describe(name, args)
     }
 
@@ -204,6 +239,11 @@ impl Tools for TaskTools {
         if name == "task_spawn" {
             let l = self.requested(args).ok()?;
             return Some(l.iter().map(|t| format!("• {} [{}]{}\n  {}", t.title, t.agent, if t.rows.is_empty() { String::new() } else { format!(" rows {}", t.rows.join(", ")) }, crate::agent::truncate(&t.goal, 300))).collect::<Vec<_>>().join("\n"));
+        }
+        if name == "task_bring_changes" {
+            let t = self.task_for(args).ok()?;
+            let files = crate::taskenv::uncommitted_in_main(self.mgr.root());
+            return Some(format!("Task \"{}\" ({}). {} uncommitted file(s) would be copied into it, overwriting its copies:\n{}", t.title, t.status.label(), files.len(), files.iter().take(30).map(|f| format!("• {f}")).collect::<Vec<_>>().join("\n")));
         }
         if name == "task_plan" {
             let steps = self.plan_steps(args).ok()?;
@@ -220,6 +260,9 @@ impl Tools for TaskTools {
                 Ok(_) => None,
                 Err(e) => Some(e),
             };
+        }
+        if name == "task_bring_changes" {
+            return self.task_for(args).and_then(|t| if matches!(t.status, crate::tasks::Status::Queued | crate::tasks::Status::Paused | crate::tasks::Status::Interrupted | crate::tasks::Status::Failed) { Ok(()) } else { Err("the task is not stopped: your changes can be brought in while it is queued, paused, interrupted or failed".into()) }).err();
         }
         if name == "task_plan" {
             return match self.plan_steps(args).and_then(|s| split_plan(&s).map(|_| ())) {

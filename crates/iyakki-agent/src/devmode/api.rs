@@ -38,6 +38,8 @@ pub const ROUTES: &[(&str, &str, Option<Scope>)] = &[
     ("GET", "/v1/dev/state", Some(Scope::Debug)),
     ("GET", "/v1/dev/inbox", Some(Scope::Debug)),
     ("GET", "/v1/dev/diag", Some(Scope::Debug)),
+    ("GET", "/v1/dev/doctor", Some(Scope::Debug)),
+    ("GET", "/v1/dev/flows/assist", Some(Scope::Debug)),
     ("POST", "/v1/dev/kube", Some(Scope::Kube)),
     ("POST", "/v1/dev/click", Some(Scope::Input)),
     ("GET", "/v1/dev/files/ls", Some(Scope::Files)),
@@ -70,6 +72,7 @@ pub const ROUTES: &[(&str, &str, Option<Scope>)] = &[
     ("GET", "/v1/dev/shell/read", Some(Scope::Shell)),
     ("POST", "/v1/dev/shell/stdin", Some(Scope::Shell)),
     ("POST", "/v1/dev/shell/signal", Some(Scope::Shell)),
+    ("POST", "/v1/dev/shell/resize", Some(Scope::Shell)),
     ("POST", "/v1/dev/shell/close", Some(Scope::Shell)),
     ("POST", "/v1/dev/forward/start", Some(Scope::Forward)),
     ("POST", "/v1/dev/forward/connect", Some(Scope::Forward)),
@@ -201,7 +204,13 @@ pub fn handle(cx: &Ctx, method: &str, path: &str, q: &dyn Fn(&str) -> String, bo
             Some(Out::json(200, &json!({ "received": body.len() })))
         }
         "/v1/dev/info" => {
-            let v = debug::info(cx.paths, cx.hostname);
+            let mut v = debug::info(cx.paths, cx.hostname);
+            // the compat report (F-CORE-19): which versions of what are here, who is connected, which deprecated names were used
+            let admin = cx.admin();
+            let rep = crate::compatreport::report(if admin { crate::compatreport::peers(cx.dm.data_dir(), &cx.dm.keys(), cx.dm.now()) } else { vec![] });
+            let mut lines = rep.lines(admin);
+            lines.extend(crate::twophase::status_lines(cx.dm.data_dir()));
+            v["compat"] = serde_json::json!({ "lines": lines, "report": rep });
             cx.log(&action, "", true);
             Some(Out::json(200, &v))
         }
@@ -240,7 +249,7 @@ pub fn handle(cx: &Ctx, method: &str, path: &str, q: &dyn Fn(&str) -> String, bo
             cx.log(&action, "", true);
             Some(Out::json(200, &v))
         }
-        "/v1/dev/state" | "/v1/dev/inbox" | "/v1/dev/diag" | "/v1/dev/kube" | "/v1/dev/click" => Some(super::api_diag::route(cx, &action, path, q, body)),
+        "/v1/dev/state" | "/v1/dev/inbox" | "/v1/dev/diag" | "/v1/dev/doctor" | "/v1/dev/flows/assist" | "/v1/dev/kube" | "/v1/dev/click" => Some(super::api_diag::route(cx, &action, path, q, body)),
         p if p.starts_with("/v1/dev/files/") => Some(files_route(cx, &action, p, q, body)),
         "/v1/dev/input" => Some(input_route(cx, &action, body)),
         "/v1/dev/grant/ask" => Some(grant_route(cx, &action, body)),
@@ -337,6 +346,9 @@ fn input_route(cx: &Ctx, action: &str, body: &[u8]) -> Out {
     };
     if let Err(e) = input::validate(&ev) {
         return Out::err(422, &e);
+    }
+    if input::approval_card(cx.dm.data_dir()) {
+        return cx.refuse(action, input::APPROVAL_SENTENCE);
     }
     if input::secret_focus(cx.dm.data_dir()) && !(cx.key.has(Scope::InputPassword) && scopes::check(cx.key, cx.policy, Scope::InputPassword).is_ok()) {
         return cx.refuse(action, "a password field has focus on the device: input is refused unless the computer holds the input:password scope");
@@ -493,18 +505,21 @@ fn shell_route(cx: &Ctx, action: &str, path: &str, q: &dyn Fn(&str) -> String, b
         }
         "/v1/dev/shell/exec" => {
             let line = String::from_utf8_lossy(body).to_string();
-            match super::shellexec::exec(cx.dm, sid, comp, &line) {
+            // `tty=1`: on a terminal of `rows` by `cols` (F-DEV-16); an empty line then means an interactive shell
+            let tty = q("tty") == "1";
+            let started = if tty { super::shellexec::exec_tty(cx.dm, sid, comp, &line, num("rows").unwrap_or(0), num("cols").unwrap_or(0), &q("term")) } else { super::shellexec::exec(cx.dm, sid, comp, &line) };
+            match started {
                 Ok((id, cwd)) => {
                     // the command line is the audit record; a credential in it is hidden
                     let shown = debug::scrub(&line.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>());
-                    cx.did(action, &format!("session {sid} in {}: {shown}", cwd.display()));
+                    cx.did(action, &format!("session {sid} in {}{}: {}", cwd.display(), if tty { " (terminal)" } else { "" }, if tty && shown.trim().is_empty() { "interactive shell".to_string() } else { shown }));
                     Out::json(200, &json!({ "id": id, "cwd": cwd.display().to_string() }))
                 }
                 Err(e) => fail(e),
             }
         }
         "/v1/dev/shell/read" => match super::shellexec::read(cx.dm, sid, comp, num("id").unwrap_or(0), num("since").unwrap_or(0), num("wait").unwrap_or(0)) {
-            Ok((bytes, next, lost, done, code)) => Out::json(200, &json!({ "text": String::from_utf8_lossy(&bytes), "next": next, "lost": lost, "done": done, "code": code, "cwd": super::shellexec::cwd(cx.dm, sid, comp).map(|p| p.display().to_string()).unwrap_or_default() })),
+            Ok((bytes, next, lost, done, code)) => Out::json(200, &json!({ "text": String::from_utf8_lossy(&bytes), "b64": if q("enc") == "b64" { crate::sshkey::b64(&bytes) } else { String::new() }, "next": next, "lost": lost, "done": done, "code": code, "cwd": super::shellexec::cwd(cx.dm, sid, comp).map(|p| p.display().to_string()).unwrap_or_default() })),
             Err(e) => Out::err(409, &e),
         },
         "/v1/dev/shell/stdin" => match super::shellexec::write_stdin(cx.dm, sid, comp, num("id").unwrap_or(0), body, q("eof") == "1") {
@@ -516,6 +531,10 @@ fn shell_route(cx: &Ctx, action: &str, path: &str, q: &dyn Fn(&str) -> String, b
                 cx.log(action, &format!("session {sid} command {} <- {}", q("id"), q("sig")), true);
                 Out::json(200, &json!({ "ok": true }))
             }
+            Err(e) => Out::err(409, &e),
+        },
+        "/v1/dev/shell/resize" => match super::shellexec::resize(cx.dm, sid, comp, num("id").unwrap_or(0), num("rows").unwrap_or(0), num("cols").unwrap_or(0)) {
+            Ok(()) => Out::json(200, &json!({ "ok": true })),
             Err(e) => Out::err(409, &e),
         },
         "/v1/dev/shell/close" => match super::shellexec::close(cx.dm, sid, comp) {
@@ -583,15 +602,35 @@ fn forward_route(cx: &Ctx, action: &str, path: &str, q: &dyn Fn(&str) -> String,
 
 /// Restart or switch off. Needs an approved grant (any kind) unless... never: the device's screen is asked every time.
 fn power_route(cx: &Ctx, action: &str, path: &str) -> Out {
-    let Some(g) = cx.dm.shell_grant(&cx.key.name) else {
+    let reboot = path.ends_with("reboot");
+    let what = if reboot { "restart" } else { "switch off" };
+    // an approved grant (a card at the screen) first; else the administrator's standing restart grant, which needs no card and so also
+    // works while the sign-in screen shows. Restart and switch-off only, and only for an administrator account.
+    let by = if let Some(g) = cx.dm.shell_grant(&cx.key.name) {
+        if !cx.policy.manage_settings {
+            return cx.refuse(action, "restart and switch-off are for administrator accounts");
+        }
+        cx.dm.power_used(&cx.key.name);
+        format!("approved by {}", g.by)
+    } else if cx.dm.restart_grant_active(&cx.key.name) {
+        if !cx.policy.manage_settings {
+            return cx.refuse(action, "restart and switch-off are for administrator accounts");
+        }
+        match cx.dm.restart_grant_use(&cx.key.name, what) {
+            Ok(by) => format!("standing restart grant of {by}"),
+            Err(e) => return Out::err(403, &e),
+        }
+    } else {
         return cx.refuse(action, "not approved: ask for the approval first (the administrator confirms on the device's screen)");
     };
-    if !cx.policy.manage_settings {
-        return cx.refuse(action, "restart and switch-off are for administrator accounts");
+    cx.did(action, &format!("{what} requested ({by})"));
+    if reboot {
+        // a dual-boot computer would otherwise start the other system: with the setting on, IYAKKI is set as the one-time next boot
+        let on = cx.svc.is_some_and(|s| s.startup_reboot_into_iyakki());
+        if let Some(m) = crate::startupdisk::before_dev_reboot(on, &crate::startupdisk::Env::real()) {
+            cx.did("dev.power.boot_next", &m);
+        }
     }
-    let reboot = path.ends_with("reboot");
-    cx.did(action, &format!("{} requested (approved by {})", if reboot { "restart" } else { "switch off" }, g.by));
-    cx.dm.power_used(&cx.key.name);
     (cx.power)(reboot);
     Out::json(200, &json!({ "message": if reboot { "the device is restarting" } else { "the device is switching off" } }))
 }

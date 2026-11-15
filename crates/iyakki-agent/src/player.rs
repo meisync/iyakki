@@ -91,13 +91,17 @@ pub struct Config {
     pub max_fps: f64,
     /// Seconds of sound the pipe and the card hold ahead of what is heard.
     pub audio_lag: f64,
+    /// The mixer, when Settings -> Sound has it on: the sound then goes in as a low-latency Media source (so it is shared with the
+    /// radio, ducked by speech and cues, and under the one master volume) and the clock follows what the mixer says was heard.
+    /// `None`, or a mixer that cannot take the source: the speaker command above, as before.
+    pub mixer: Option<&'static crate::mixer::Mixer>,
 }
 
 impl Config {
     /// The real thing: `ffmpeg` from the catalogue or the system, the speaker through IYAKKI's sound device.
     pub fn system() -> Option<Config> {
         let ffmpeg = find_program("ffmpeg").filter(|p| runs(p))?;
-        Some(Config { ffmpeg, audio_cmd: speaker_command(), max_fps: 30.0, audio_lag: 0.45 })
+        Some(Config { ffmpeg, audio_cmd: speaker_command(), max_fps: 30.0, audio_lag: 0.45, mixer: crate::audiosink::mixer_if_on() })
     }
 }
 
@@ -335,6 +339,8 @@ struct Shared {
     st: Mutex<State>,
     kids: Mutex<Vec<Child>>,
     seq: AtomicU64,
+    /// The mixer source of the sound now playing (mixer route only): its heard position is the clock.
+    heard: Mutex<Option<crate::mixer::SourceWriter>>,
 }
 
 impl Shared {
@@ -342,7 +348,13 @@ impl Shared {
         if let Some(f) = s.frozen {
             return f;
         }
-        let p = if s.audio_active { s.start + s.audio_bytes as f64 / BYTES_PER_SECOND - self.cfg.audio_lag } else { s.anchor_pos + s.anchor_at.elapsed().as_secs_f64() };
+        let heard = if s.audio_active { self.heard.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|w| w.played_ms()) } else { None };
+        let p = if let Some(ms) = heard {
+            // through the mixer: what was HEARD (its own model of the lead and the card), not what was handed over
+            s.start + ms as f64 / 1000.0
+        } else if s.audio_active {
+            s.start + s.audio_bytes as f64 / BYTES_PER_SECOND - self.cfg.audio_lag
+        } else { s.anchor_pos + s.anchor_at.elapsed().as_secs_f64() };
         let p = p.max(s.start);
         match self.info.duration {
             Some(d) => p.min(d),
@@ -350,6 +362,10 @@ impl Shared {
         }
     }
     fn kill_all(&self) {
+        if let Some(w) = self.heard.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            w.flush();
+            w.finish();
+        }
         let mut g = self.kids.lock().unwrap_or_else(|e| e.into_inner());
         for c in g.iter_mut() {
             crate::voice::kill_child(c);
@@ -403,6 +419,7 @@ impl Player {
             st: Mutex::new(State { gen: 0, paused: false, frozen: None, start: 0.0, audio_active: false, audio_bytes: 0, anchor_pos: 0.0, anchor_at: Instant::now(), video_done: false, audio_done: false, has_video: false, has_audio, ended: false, error: None, frame: None, size }),
             kids: Mutex::new(Vec::new()),
             seq: AtomicU64::new(0),
+            heard: Mutex::new(None),
         });
         let p = Player { sh };
         p.restart(start);
@@ -431,7 +448,7 @@ impl Player {
             s.video_done = false;
             s.audio_done = false;
             s.has_video = sh.info.video.is_some() && s.size.0 > 0;
-            s.has_audio = sh.info.audio.is_some() && !sh.cfg.audio_cmd.is_empty();
+            s.has_audio = sh.info.audio.is_some() && (!sh.cfg.audio_cmd.is_empty() || sh.cfg.mixer.is_some());
             s.audio_active = s.has_audio;
             s.ended = false;
             s.error = None;
@@ -490,6 +507,10 @@ impl Player {
             let p = self.sh.position_locked(&s);
             s.frozen = Some(p);
             s.paused = true;
+            drop(s);
+            if let Some(w) = self.sh.heard.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                w.set_paused(true);
+            }
         }
     }
 
@@ -500,6 +521,10 @@ impl Player {
             if let Some(p) = s.frozen.take() {
                 s.anchor_pos = p;
                 s.anchor_at = Instant::now();
+            }
+            drop(s);
+            if let Some(w) = self.sh.heard.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                w.set_paused(false);
             }
         }
     }
@@ -612,7 +637,16 @@ fn video_thread(sh: Arc<Shared>, gen: u64, out: Option<std::process::ChildStdout
 
 fn audio_thread(sh: Arc<Shared>, gen: u64, out: Option<std::process::ChildStdout>, err: Option<Arc<Mutex<String>>>) {
     let Some(mut out) = out else { return sh.finish_part(gen, false, Some("no output from ffmpeg".into())) };
+    if let Some(m) = sh.cfg.mixer {
+        match m.open_live_source(crate::mixer::SourceKind::Media, 48_000, 2, "Video") {
+            Ok(src) => return mixed_audio(&sh, gen, out, err, src),
+            Err(e) => log::info!("sound: the mixer did not take the video's sound ({e}); using the speaker command"),
+        }
+    }
     let cmd = sh.cfg.audio_cmd.clone();
+    if cmd.is_empty() {
+        return no_sound(&sh, gen, &mut out);
+    }
     let mut sink = match spawn(&cmd[0], &cmd[1..], true) {
         Ok(c) => c,
         Err(_) => return no_sound(&sh, gen, &mut out),
@@ -688,6 +722,85 @@ fn audio_thread(sh: Arc<Shared>, gen: u64, out: Option<std::process::ChildStdout
     sh.finish_part(gen, false, why);
 }
 
+/// The sound goes into the mixer as a live Media source. The decoder is paced by the mixer (a write waits for room), pause holds the
+/// source, a restart (seek, new size) or a stop flushes it (`kill_all`), and the clock is what the mixer reports as heard.
+fn mixed_audio(sh: &Arc<Shared>, gen: u64, mut out: std::process::ChildStdout, err: Option<Arc<Mutex<String>>>, src: crate::mixer::SourceWriter) {
+    {
+        let mut g = sh.heard.lock().unwrap_or_else(|e| e.into_inner());
+        if !sh.is_current(gen) {
+            src.finish();
+            return;
+        }
+        if let Some(old) = g.replace(src.clone_handle()) {
+            old.flush();
+            old.finish();
+        }
+    }
+    if sh.st.lock().unwrap_or_else(|e| e.into_inner()).paused {
+        src.set_paused(true);
+    }
+    let mut buf = vec![0u8; CHUNK];
+    let mut got_any = false;
+    let mut carry: Option<u8> = None;
+    loop {
+        let n = match out.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        got_any = true;
+        while sh.is_current(gen) && sh.st.lock().unwrap_or_else(|e| e.into_inner()).paused {
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        if !sh.is_current(gen) {
+            return;
+        }
+        let mut bytes = Vec::with_capacity(n + 1);
+        bytes.extend(carry.take());
+        bytes.extend_from_slice(&buf[..n]);
+        if bytes.len() % 2 == 1 {
+            carry = bytes.pop();
+        }
+        let pcm: Vec<i16> = bytes.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
+        if src.write_i16_wait(&pcm, Duration::from_secs(30)).is_err() {
+            // the mixer let the source go (a more important sound took its place, or it was shut down): the clock goes on alone
+            let mut s = sh.st.lock().unwrap_or_else(|e| e.into_inner());
+            if s.gen == gen && s.audio_active {
+                let p = sh.position_locked(&s);
+                s.audio_active = false;
+                s.anchor_pos = p;
+                s.anchor_at = Instant::now();
+            }
+            break;
+        }
+        sh.st.lock().unwrap_or_else(|e| e.into_inner()).audio_bytes += n as u64;
+    }
+    if !sh.is_current(gen) {
+        return;
+    }
+    src.finish();
+    let why = if !got_any { tail(&err) } else { None };
+    if why.is_none() {
+        // what is queued plays to its end; the clock follows it until then
+        let until = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < until && sh.is_current(gen) && !src.is_done() {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    if !sh.is_current(gen) {
+        return;
+    }
+    {
+        let mut s = sh.st.lock().unwrap_or_else(|e| e.into_inner());
+        if s.gen == gen && s.audio_active {
+            let p = sh.position_locked(&s);
+            s.audio_active = false;
+            s.anchor_pos = p;
+            s.anchor_at = Instant::now();
+        }
+    }
+    sh.finish_part(gen, false, why);
+}
+
 /// The speaker command could not start: play without sound, on the wall clock.
 fn no_sound(sh: &Arc<Shared>, gen: u64, out: &mut std::process::ChildStdout) {
     {
@@ -740,7 +853,8 @@ mod tests {
         script(
             &p,
             &format!(
-                r#"echo "$@" >> "$0.log"
+                r#"LC_ALL=C; export LC_ALL
+echo "$@" >> "$0.log"
 case "$*" in
   *rawvideo*)
     for a in "$@"; do case "$a" in *scale=*) wh=${{a#*scale=}};; esac; done
@@ -764,7 +878,7 @@ esac
     }
 
     fn cfg(d: &PathBuf) -> Config {
-        Config { ffmpeg: fake_ffmpeg(d), audio_cmd: fake_speaker(d), max_fps: 30.0, audio_lag: 0.9 }
+        Config { ffmpeg: fake_ffmpeg(d), audio_cmd: fake_speaker(d), max_fps: 30.0, audio_lag: 0.9, mixer: None }
     }
 
     fn wait_for(what: &str, f: impl Fn() -> bool) {
@@ -892,7 +1006,7 @@ esac
         let e = Player::start(c, "/media/x.bin", 0.0, (64, 64)).err().unwrap();
         assert!(e.contains("Invalid data"), "{e}");
         // no ffmpeg at all
-        assert!(Player::start(Config { ffmpeg: "/nonexistent/ffmpeg".into(), audio_cmd: vec![], max_fps: 30.0, audio_lag: 0.4 }, "x", 0.0, (8, 8)).is_err());
+        assert!(Player::start(Config { ffmpeg: "/nonexistent/ffmpeg".into(), audio_cmd: vec![], max_fps: 30.0, audio_lag: 0.4, mixer: None }, "x", 0.0, (8, 8)).is_err());
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -909,7 +1023,7 @@ esac
         // a speaker that takes the sound at real-time speed, as the sound card does
         let slow = d.join("slow-aplay");
         script(&slow, "while true; do n=$(dd bs=19200 count=1 2>/dev/null | wc -c); [ \"$n\" -gt 0 ] || break; sleep 0.1; done\n");
-        let c = Config { ffmpeg: ff, audio_cmd: vec![slow.display().to_string()], max_fps: 30.0, audio_lag: 0.45 };
+        let c = Config { ffmpeg: ff, audio_cmd: vec![slow.display().to_string()], max_fps: 30.0, audio_lag: 0.45, mixer: None };
         let t0 = Instant::now();
         let p = Player::start(c, &avi.display().to_string(), 0.0, (640, 360)).unwrap();
         assert_eq!(p.info().video.as_ref().map(|v| (v.w, v.h)), Some((320, 240)));
@@ -933,6 +1047,105 @@ esac
         register_dir(d.clone());
         assert_eq!(find_program("ffmpeg").filter(|p| p.starts_with(&d.display().to_string())), Some(d.join("ffmpeg").display().to_string()));
         assert!(find_program("no-such-program-xyz").is_none());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // ---- the sound through the mixer (F-SND-12) ----
+
+    /// A fake ffmpeg whose sound is a steady non-zero value (0x4040), so what reaches the sink can be told from silence.
+    fn loud_ffmpeg(d: &PathBuf) -> String {
+        let p = fake_ffmpeg(d);
+        let t = std::fs::read_to_string(&p).unwrap().replace("*s16le*) head -c 192000 /dev/zero ;;", "*s16le*) head -c 192000 /dev/zero | tr '\\0' '\\100' ;;");
+        std::fs::write(&p, t).unwrap();
+        p
+    }
+
+    /// The same, with twenty seconds of sound: enough that it is still playing when a test pauses it.
+    fn long_loud_ffmpeg(d: &PathBuf) -> String {
+        let p = loud_ffmpeg(d);
+        let t = std::fs::read_to_string(&p).unwrap().replace("head -c 192000 /dev/zero | tr", "head -c 3840000 /dev/zero | tr");
+        std::fs::write(&p, t).unwrap();
+        p
+    }
+
+    fn test_mixer(sink: &crate::mixer::FakeSink) -> &'static crate::mixer::Mixer {
+        use crate::mixer::{EngineCfg, Mixer, MixerCfg};
+        let m = Mixer::start(MixerCfg { raise_priority: false, realtime: false, idle_ms: 5000, engine: EngineCfg::default().no_prefill(), ..MixerCfg::default() }, Box::new(sink.clone()));
+        Box::leak(Box::new(m))
+    }
+
+    fn loud_samples(sink: &crate::mixer::FakeSink) -> usize {
+        sink.lock().samples.iter().filter(|s| **s != 0).count()
+    }
+
+    #[test]
+    fn while_mixing_the_sound_goes_to_the_mixer_not_to_the_speaker_command_and_the_clock_follows_what_was_heard() {
+        let d = dir("mixed");
+        let sink = crate::mixer::FakeSink::new();
+        let c = Config { ffmpeg: loud_ffmpeg(&d), audio_cmd: fake_speaker(&d), max_fps: 30.0, audio_lag: 0.9, mixer: Some(test_mixer(&sink)) };
+        let p = Player::start(c, "/media/cam.avi", 0.0, (64, 64)).unwrap();
+        wait_for("sound in the mixer", || loud_samples(&sink) > 0);
+        // the clock is the mixer's heard position: never ahead of the sound the sink was given (48000 frames a second)
+        let heard_frames = loud_samples(&sink) as f64 / 2.0;
+        assert!(p.status().position <= heard_frames / 48_000.0 + 0.15, "position {} with {} frames played", p.status().position, heard_frames);
+        wait_for("the end", || p.status().ended);
+        let st = p.status();
+        assert!(st.error.is_none(), "{st:?}");
+        wait_for("all of the sound", || loud_samples(&sink) >= 95_000);
+        assert!(!d.join("aplay.out").exists() && !d.join("aplay.log").exists(), "the speaker command was not started");
+        assert_eq!(sink.lock().rate, 48_000);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn pausing_holds_the_sound_in_the_mixer_and_stopping_lets_the_source_go() {
+        let d = dir("mixed-pause");
+        let sink = crate::mixer::FakeSink::new();
+        let m = test_mixer(&sink);
+        let c = Config { ffmpeg: long_loud_ffmpeg(&d), audio_cmd: Vec::new(), max_fps: 30.0, audio_lag: 0.9, mixer: Some(m) };
+        let p = Player::start(c, "/media/cam.avi", 0.0, (64, 64)).unwrap();
+        wait_for("sound in the mixer", || loud_samples(&sink) > 0);
+        assert_eq!(m.sources().len(), 1, "one source, kind Media");
+        p.pause();
+        std::thread::sleep(Duration::from_millis(150));
+        let a = loud_samples(&sink);
+        std::thread::sleep(Duration::from_millis(400));
+        let b = loud_samples(&sink);
+        assert!(b - a <= 960 * 2 * 2, "paused: {a} then {b} sounding samples");
+        let pos = p.status().position;
+        std::thread::sleep(Duration::from_millis(200));
+        assert!((p.status().position - pos).abs() < 0.01, "the clock stands still while paused");
+        p.resume();
+        wait_for("sound after resume", || loud_samples(&sink) > b + 960);
+        p.stop();
+        wait_for("the source to go", || m.sources().is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_mixer_that_will_not_take_the_source_leaves_the_speaker_command_in_charge() {
+        let d = dir("mixed-refused");
+        let sink = crate::mixer::FakeSink::new();
+        let m = test_mixer(&sink);
+        m.set_enabled(false);
+        let c = Config { ffmpeg: fake_ffmpeg(&d), audio_cmd: fake_speaker(&d), max_fps: 30.0, audio_lag: 0.9, mixer: Some(m) };
+        let p = Player::start(c, "/media/cam.avi", 0.0, (64, 64)).unwrap();
+        wait_for("the end", || p.status().ended);
+        assert!(p.status().error.is_none());
+        wait_for("the sound in the speaker command", || std::fs::metadata(d.join("aplay.out")).map(|m| m.len()).unwrap_or(0) == 192000);
+        assert!(sink.lock().samples.is_empty(), "nothing went to the mixer");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_mixer_and_no_speaker_command_still_play_the_sound() {
+        // an image without aplay: before, a file with sound played silently; through the mixer it has sound
+        let d = dir("mixed-noaplay");
+        let sink = crate::mixer::FakeSink::new();
+        let c = Config { ffmpeg: loud_ffmpeg(&d), audio_cmd: Vec::new(), max_fps: 30.0, audio_lag: 0.9, mixer: Some(test_mixer(&sink)) };
+        let p = Player::start(c, "/media/cam.avi", 0.0, (64, 64)).unwrap();
+        wait_for("sound in the mixer", || loud_samples(&sink) > 0);
+        p.stop();
         let _ = std::fs::remove_dir_all(&d);
     }
 }

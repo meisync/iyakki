@@ -26,6 +26,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+use iyakki_core_api::appcaps::MemoryBook;
+use iyakki_core_api::broker::{Broker, Call, Caller, CallerKind, NoCard, NullSink};
 use iyakki_rtsp as rtsp;
 use iyakki_rtsp::rtp::AccessUnit;
 use iyakki_rtsp::url::scrub;
@@ -102,6 +104,8 @@ pub enum Status {
     NeedsAddon(String),
     Busy(String),
     NeedsPassword(String),
+    /// Pictures arrive but have been black for a few seconds: the camera may be covered or its privacy shutter closed (KI-082).
+    Dark(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -263,6 +267,10 @@ struct St {
     last_big: Option<Instant>,
     /// The last time a person (not the motion watcher) asked for a picture.
     viewed: Option<Instant>,
+    /// The last look from the computer's own screen (the CAMERAS tile), and the last look from any other holder (a connected client,
+    /// the assistant's camera tools). Leaving the screen drops only the first: a stream another holder still looks at goes on (KI-093).
+    screen_at: Option<Instant>,
+    other_at: Option<Instant>,
 }
 
 struct Shared {
@@ -276,6 +284,15 @@ impl Shared {
     }
 }
 
+/// Who the hub says it is when it asks the broker.
+#[derive(Clone)]
+struct Gate {
+    broker: Arc<Broker>,
+    device: String,
+    app: String,
+    kind: CallerKind,
+}
+
 type TapSlot = Arc<Mutex<Option<Arc<dyn FrameTap>>>>;
 
 pub struct Hub {
@@ -283,11 +300,23 @@ pub struct Hub {
     streams: Mutex<HashMap<String, Arc<Shared>>>,
     last_view: Mutex<HashMap<(String, String), Instant>>,
     tap: TapSlot,
+    /// Decides every use of this computer's own cameras (capability `camera.view`, docs/development/CORE-ACCESS-MODEL.md) and writes the access log.
+    gate: Mutex<Gate>,
+    gate_set: AtomicBool,
 }
 
 fn registry() -> &'static Mutex<HashMap<PathBuf, Arc<Hub>>> {
     static R: OnceLock<Mutex<HashMap<PathBuf, Arc<Hub>>>> = OnceLock::new();
     R.get_or_init(Default::default)
+}
+
+/// The screen of the installation at `data` does not show the cameras in `shown` (all of them when empty): its own cameras close now.
+/// A hub that was never made has nothing to close.
+pub fn release_screen_at(data: &Path, shown: &[String]) {
+    let hub = registry().lock().unwrap_or_else(|e| e.into_inner()).get(data).cloned();
+    if let Some(h) = hub {
+        h.release_screen_except(shown);
+    }
 }
 
 /// The installation's hub (made with the first caller's environment, shared afterwards).
@@ -337,7 +366,36 @@ pub fn shrink(w: u32, h: u32, rgba: &[u8], max_w: u32) -> (u32, u32, Vec<u8>) {
 
 impl Hub {
     pub fn new(env: Env) -> Hub {
-        Hub { env, streams: Mutex::new(HashMap::new()), last_view: Mutex::new(HashMap::new()), tap: Arc::new(Mutex::new(None)) }
+        // until a real broker is set, the built-in table decides (the Cameras app holds camera.view) and nothing is logged
+        let gate = Gate { broker: Arc::new(Broker::new(Arc::new(MemoryBook::default()), Arc::new(NoCard), Arc::new(NullSink), Arc::new(crate::clock::now_unix))), device: "this computer".into(), app: "cameras".into(), kind: CallerKind::Builtin };
+        Hub { env, streams: Mutex::new(HashMap::new()), last_view: Mutex::new(HashMap::new()), tap: Arc::new(Mutex::new(None)), gate: Mutex::new(gate), gate_set: AtomicBool::new(false) }
+    }
+
+    /// Whether a broker was set (the shell sets the local one once, when it makes the hub).
+    pub fn has_broker(&self) -> bool {
+        self.gate_set.load(Ordering::SeqCst)
+    }
+
+    /// Use this broker (with the machine's name for the access log) for every use of this computer's own cameras.
+    pub fn set_broker(&self, broker: Arc<Broker>, device: &str) {
+        self.set_broker_as(broker, device, "cameras", CallerKind::Builtin);
+    }
+
+    /// As [`Hub::set_broker`], naming the caller (the Cameras app is a built-in; a store app that is given the hub would be a `CallerKind::Store`).
+    pub fn set_broker_as(&self, broker: Arc<Broker>, device: &str, app: &str, kind: CallerKind) {
+        self.gate_set.store(true, Ordering::SeqCst);
+        *self.gate.lock().unwrap_or_else(|e| e.into_inner()) = Gate { broker, device: device.to_string(), app: app.to_string(), kind };
+    }
+
+    /// The broker's answer for a use of camera `id` by the Cameras app for this person. Only this computer's own cameras go through it in this
+    /// slice (network cameras are `net.connect` and keep their own list of people). A refusal is a plain message, code first.
+    fn broker_allows(&self, who: &Who, id: &str) -> Result<(), String> {
+        if !id.starts_with("usb:") {
+            return Ok(());
+        }
+        let g = self.gate.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let caller = Caller { app: g.app, kind: g.kind, person: who.user.clone(), device: g.device };
+        g.broker.decide_with(&Call { caller: &caller, capability: "camera.view", unit: Some(id), label: id }, &|| self.name_of(id)).map_err(|d| d.to_string())
     }
 
     fn file(&self) -> PathBuf {
@@ -451,11 +509,35 @@ impl Hub {
 
     /// The newest picture of a camera. Asking starts the stream when none runs and keeps it alive for [`IDLE_STOP`].
     pub fn view(&self, who: &Who, id: &str, big: bool) -> Result<Option<Frame>, String> {
-        let spec = self.watchable(who, id)?;
+        self.view_as(who, id, big, false)
+    }
+
+    /// The same look, taken by the computer's own screen (the CAMERAS tile). It is the holder that [`Hub::release_screen`] lets go of.
+    pub fn view_on_screen(&self, who: &Who, id: &str, big: bool) -> Result<Option<Frame>, String> {
+        self.view_as(who, id, big, true)
+    }
+
+    fn view_as(&self, who: &Who, id: &str, big: bool, screen: bool) -> Result<Option<Frame>, String> {
+        let checked = self.watchable(who, id).and_then(|spec| self.broker_allows(who, id).map(|_| spec));
+        let spec = match checked {
+            Ok(s) => s,
+            Err(e) => {
+                // the right was taken away (the camera was unplugged, the broker said no): a stream already running stops with the look
+                if screen {
+                    self.release_screen_where(|i| i == id);
+                }
+                return Err(e);
+            }
+        };
         let sh = self.stream_for(id, spec, big);
         sh.st().viewed = Some(Instant::now());
         let mut st = sh.st();
         st.touched = Instant::now();
+        if screen {
+            st.screen_at = Some(Instant::now());
+        } else {
+            st.other_at = Some(Instant::now());
+        }
         st.want_big = big;
         let f = if big { st.big.clone().or_else(|| st.small.clone()) } else { st.small.clone() };
         drop(st);
@@ -470,6 +552,21 @@ impl Hub {
         Ok(f)
     }
 
+    /// The newest small picture as a JPEG for a viewer that is not on this screen (a connected client, `clientmedia::HubFeed`): `None` while no
+    /// picture newer than `after` exists. It looks through [`Hub::view`], so the one capture the hub runs is shared with every other viewer
+    /// (the machine's own view keeps going), the broker decides and the viewer counts as watching.
+    pub fn view_jpeg(&self, who: &Who, id: &str, after: u64) -> Result<Option<(u64, Vec<u8>)>, String> {
+        let Some(f) = self.view(who, id, false)? else { return Ok(None) };
+        if f.seq <= after {
+            return Ok(None);
+        }
+        let jpeg = (self.env.encode)(f.width, f.height, &f.rgba);
+        if jpeg.len() < 4 {
+            return Err("the picture could not be encoded".into());
+        }
+        Ok(Some((f.seq, jpeg)))
+    }
+
     fn stream_for(&self, id: &str, spec: Option<Spec>, big: bool) -> Arc<Shared> {
         let mut m = self.streams();
         m.retain(|_, s| !s.stop.load(Ordering::SeqCst));
@@ -477,7 +574,7 @@ impl Hub {
             Some(s) => s.clone(),
             None => {
                 let s = Arc::new(Shared {
-                    st: Mutex::new(St { status: Status::Connecting, seq: 0, small: None, big: None, latest: None, fps: 0.0, size: (0, 0), touched: Instant::now(), want_big: big, last_small: None, last_big: None, viewed: None }),
+                    st: Mutex::new(St { status: Status::Connecting, seq: 0, small: None, big: None, latest: None, fps: 0.0, size: (0, 0), touched: Instant::now(), want_big: big, last_small: None, last_big: None, viewed: None, screen_at: None, other_at: None }),
                     stop: AtomicBool::new(false),
                 });
                 m.insert(id.to_string(), s.clone());
@@ -508,7 +605,7 @@ impl Hub {
 
     /// Whether the camera's stream is up and delivering pictures right now.
     pub fn is_live(&self, id: &str) -> bool {
-        self.streams().get(id).is_some_and(|s| s.st().status == Status::Live)
+        self.streams().get(id).is_some_and(|s| s.st().status == Status::Live || s.st().status == Status::Dark(DARK_MESSAGE.into()))
     }
 
     /// Install the one picture tap (motion watching).
@@ -534,6 +631,42 @@ impl Hub {
         }
     }
 
+    /// Stop the streams of this computer's own cameras now (the person left the tile); each thread drops its device within a tick, so the
+    /// light goes off. A stream another holder (a client, the assistant) looked at within the idle time keeps running for that holder.
+    pub fn release_usb(&self) {
+        self.release_screen_where(|_| true);
+    }
+
+    /// The screen shows only the cameras in `shown` now (a page, a layout or a view without the others): the computer's own cameras not
+    /// in the list are let go of at once, as in [`Hub::release_usb`].
+    pub fn release_screen_except(&self, shown: &[String]) {
+        self.release_screen_where(|id| !shown.iter().any(|s| s == id));
+    }
+
+    fn release_screen_where(&self, pick: impl Fn(&str) -> bool) {
+        let idle = self.env.idle;
+        let mut m = self.streams();
+        m.retain(|id, s| {
+            if !id.starts_with("usb:") || !pick(id) {
+                return true;
+            }
+            let mut st = s.st();
+            st.screen_at = None;
+            match st.other_at.filter(|t| t.elapsed() < idle) {
+                // another holder still looks: the stream stays, alive for that holder's look only
+                Some(t) => {
+                    st.touched = t;
+                    true
+                }
+                None => {
+                    drop(st);
+                    s.stop.store(true, Ordering::SeqCst);
+                    false
+                }
+            }
+        });
+    }
+
     pub fn running(&self) -> usize {
         self.streams().values().filter(|s| !s.stop.load(Ordering::SeqCst)).count()
     }
@@ -555,6 +688,7 @@ impl Hub {
 
     fn snapshot_inner(&self, who: &Who, id: &str) -> Result<PathBuf, String> {
         self.watchable(who, id)?;
+        self.broker_allows(who, id)?;
         let pic = {
             let m = self.streams();
             m.get(id).and_then(|s| s.st().latest.clone())
@@ -836,7 +970,9 @@ fn connect(env: &StreamEnv, id: &str, spec: Option<&Spec>) -> Result<Box<dyn Fee
     match url.scheme {
         rtsp::url::Scheme::Rtsp => {
             let t = tcp(&url.host, url.port)?;
-            let client = rtsp::client::Client::open(t, &url, creds).map_err(map_err)?;
+            // a camera that refuses video over the same connection is asked for UDP, from the address the connection runs to
+            let peer = t.peer_addr().ok().map(|a| a.ip());
+            let client = rtsp::client::Client::open_with(t, &url, creds, peer).map_err(map_err)?;
             let dec = match &client.codec {
                 rtsp::sdp::Codec::H264 { .. } => match env.h264.decoder() {
                     Some(d) => Some(d),
@@ -861,6 +997,50 @@ fn sleep_unless_stopped(sh: &Shared, idle: Duration, total: Duration) {
             return;
         }
         std::thread::sleep(Duration::from_millis(50).min(end.saturating_duration_since(Instant::now())));
+    }
+}
+
+/// What the tile says when the picture stays black. A question, because a genuinely dark room looks the same.
+pub const DARK_MESSAGE: &str = "The picture is black. Is the camera covered or the privacy shutter closed?";
+/// A picture counts as black when nearly every sampled pixel is darker than this brightness (0-255) ...
+const DARK_LEVEL: u32 = 12;
+/// ... and it must stay that way, picture after picture, for this long before the message appears.
+pub const DARK_AFTER: Duration = Duration::from_secs(6);
+
+/// Whether a straight RGBA picture is black or near-uniform dark: about 99 in 100 sampled pixels are below [`DARK_LEVEL`].
+/// A dim room still shows some noise or light above that level, so it does not count.
+pub(crate) fn is_black(rgba: &[u8]) -> bool {
+    let px = rgba.len() / 4;
+    if px == 0 {
+        return false;
+    }
+    let step = (px / 1500).max(1);
+    let (mut seen, mut dim) = (0u32, 0u32);
+    for i in (0..px).step_by(step) {
+        let p = &rgba[i * 4..i * 4 + 3];
+        let y = (p[0] as u32 * 54 + p[1] as u32 * 183 + p[2] as u32 * 19) >> 8;
+        seen += 1;
+        if y < DARK_LEVEL {
+            dim += 1;
+        }
+    }
+    dim * 100 >= seen * 99
+}
+
+/// Tells whether pictures have been black for [`DARK_AFTER`] without a break; one lit picture resets it.
+#[derive(Default)]
+pub(crate) struct DarkWatch {
+    since: Option<Instant>,
+}
+
+impl DarkWatch {
+    pub(crate) fn observe(&mut self, now: Instant, rgba: &[u8]) -> bool {
+        if !is_black(rgba) {
+            self.since = None;
+            return false;
+        }
+        let t = *self.since.get_or_insert(now);
+        now.duration_since(t) >= DARK_AFTER
     }
 }
 
@@ -918,6 +1098,7 @@ fn run_stream(sh: Arc<Shared>, env: StreamEnv, id: String, spec: Option<Spec>) {
             }
         };
         let (mut count, mut window) = (0u32, Instant::now());
+        let mut dark = DarkWatch::default();
         loop {
             if sh.stop.load(Ordering::SeqCst) || sh.st().touched.elapsed() > env.idle {
                 break 'outer;
@@ -960,6 +1141,7 @@ fn run_stream(sh: Arc<Shared>, env: StreamEnv, id: String, spec: Option<Spec>) {
                                 if !big_due {
                                     st.size = (s.0, s.1);
                                 }
+                                st.status = if dark.observe(Instant::now(), &s.2) { Status::Dark(DARK_MESSAGE.into()) } else { Status::Live };
                                 let f = mk(s);
                                 tap_frame = Some(f.clone());
                                 st.small = Some(f);

@@ -119,6 +119,41 @@ mod tests {
         assert!(parse_diskutil_list("nonsense\nmore").is_empty());
     }
 
+    /// The parsers on what this Mac's real `diskutil` prints (read only: `list physical` and `info`, nothing is written or unmounted).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_parsers_read_the_output_of_the_real_diskutil_and_the_internal_drive_is_never_a_target() {
+        let out = |args: &[&str]| String::from_utf8_lossy(&std::process::Command::new("diskutil").args(args).output().expect("diskutil").stdout).into_owned();
+        let all = out(&["list", "physical"]);
+        let disks = parse_diskutil_list(&all);
+        assert!(!disks.is_empty(), "the real listing has at least the internal disk: {all}");
+        for (id, size) in &disks {
+            assert!(id.starts_with("disk") && *size > 1_000_000, "{id} {size}");
+            // the size in the listing agrees with the exact byte count that `info` prints in brackets
+            let info = out(&["info", id]);
+            let exact: u64 = info.lines().find(|l| l.trim_start().starts_with("Disk Size:")).and_then(|l| l.split('(').nth(1)).and_then(|t| t.split_whitespace().next()).and_then(|n| n.parse().ok()).unwrap_or(0);
+            assert!(exact > 0 && (*size as f64 - exact as f64).abs() / (exact as f64) < 0.06, "{id}: listing {size}, info {exact}\n{info}");
+            let (model, removable, writable) = parse_diskutil_info(&info);
+            assert!(!model.is_empty() && model != "disk", "a real media name for {id}: {info}");
+            let _ = (removable, writable);
+        }
+        // the machine's own disk is internal and fixed: not removable, and not in the list of drives the writer may offer
+        let internal: Vec<&(String, u64)> = disks.iter().filter(|(id, _)| out(&["info", id]).lines().any(|l| l.trim_start().starts_with("Device Location:") && l.trim_end().ends_with("Internal"))).collect();
+        assert!(!internal.is_empty(), "the internal drive is among the physical disks");
+        for (id, _) in &internal {
+            let (_, removable, writable) = parse_diskutil_info(&out(&["info", id]));
+            assert!(!removable && writable);
+        }
+        let offered = list_drives().expect("diskutil answers");
+        for d in &offered {
+            assert!(d.path.starts_with("/dev/rdisk") && d.usb && d.size_bytes > 0, "{d:?}");
+            assert!(!internal.iter().any(|(id, _)| *id == d.name), "the internal drive {} must not be offered: {d:?}", d.name);
+        }
+        // the mount table is read the same way
+        let mounts = parse_bsd_mount(&String::from_utf8_lossy(&std::process::Command::new("mount").output().unwrap().stdout));
+        assert!(mounts.iter().any(|(_, mp)| mp == "/"), "the root volume is mounted: {mounts:?}");
+    }
+
     #[test]
     fn diskutil_info_gives_name_removable_and_writable() {
         let info = "   Device Identifier:         disk4\n   Device / Media Name:       SanDisk Cruzer\n   Removable Media:           Removable\n   Media Read-Only:           No\n   Protocol:                  USB\n";

@@ -419,24 +419,34 @@ fn text(v: &mut Vec<Prim>, x: f32, y: f32, size: f32, c: [u8; 4], face: Face, t:
 }
 
 fn layout_user(g: &mut Gfx, t: &str, _idx: usize, w: f32, s: f32) -> BlockLayout {
+    // a turn the person spoke to My IYAKKI is kept with a text mark (F-VOICE-40): shown as a small label, not as raw text
+    let (spoken, t) = match t.strip_prefix(iyakki_agent::voiceassist::SPOKEN_MARK) {
+        Some(rest) => (true, rest),
+        None => (false, t),
+    };
     let size = 16.0 * s;
     let lh = g.line_height(size, Face::Sans) * 1.22;
     let (px, py) = (14.0 * s, 11.0 * s);
+    let tag_h = if spoken { 17.0 * s } else { 0.0 };
     let mut lines = g.wrap(size, t.trim_end(), Face::Sans, w - 2.0 * px);
     let extra = lines.len().saturating_sub(40);
     lines.truncate(40);
     let mut prims = Vec::new();
     let rows = lines.len() + usize::from(extra > 0);
-    let h = rows as f32 * lh + 2.0 * py;
+    let h = rows as f32 * lh + 2.0 * py + tag_h;
     prims.push(Prim::Fill { x: 0.0, y: 0.0, w, h, r: 10.0 * s, c: USER_BG });
     prims.push(Prim::Stroke { x: 0.0, y: 0.0, w, h, r: 10.0 * s, bw: 1.0 * s, c: USER_LINE });
+    if spoken {
+        text(&mut prims, px, py * 0.7, 12.0 * s, DIM, Face::Sans, "Spoken: may hold recognition mistakes".to_string());
+    }
     let mut sel = Vec::new();
     for (i, l) in lines.iter().enumerate() {
-        text(&mut prims, px, py + i as f32 * lh, size, TEXT, Face::Sans, l.clone());
-        sel.push(sel_line(g, px, py + i as f32 * lh, lh, size, Face::Sans, l, 0));
+        let y = py + tag_h + i as f32 * lh;
+        text(&mut prims, px, y, size, TEXT, Face::Sans, l.clone());
+        sel.push(sel_line(g, px, y, lh, size, Face::Sans, l, 0));
     }
     if extra > 0 {
-        text(&mut prims, px, py + lines.len() as f32 * lh, size * 0.85, DIM, Face::Sans, format!("… {extra} more lines"));
+        text(&mut prims, px, py + tag_h + lines.len() as f32 * lh, size * 0.85, DIM, Face::Sans, format!("… {extra} more lines"));
     }
     let rows = [RowSpec { lines: (0..lines.len()).collect(), sep: 1, full: lines.join(" ") }];
     let links = row_links(&sel, &rows);
@@ -610,6 +620,10 @@ fn chunk_cols(t: &str, cols: usize) -> Vec<String> {
 #[allow(clippy::too_many_arguments)]
 fn layout_tool(g: &mut Gfx, name: &str, status: ToolStatus, input: &str, input_full: &str, output: Option<&str>, hidden: bool, expanded: bool, w: f32, s: f32) -> BlockLayout {
     let mut prims = Vec::new();
+    // the answer of a table tool is drawn as a table (aligned columns, a rule under the header); the button below reads the original text
+    let original = output;
+    let gridded = output.filter(|_| name.starts_with("data_")).map(table_grid);
+    let output = gridded.as_deref().or(output);
     let nsz = 15.0 * s;
     let nlh = g.line_height(nsz, Face::Bold);
     text(&mut prims, 0.0, 0.0, nsz, TEXT, Face::Bold, name);
@@ -732,7 +746,7 @@ fn layout_tool(g: &mut Gfx, name: &str, status: ToolStatus, input: &str, input_f
     }
     y += box_h;
     // a table the assistant opened can be looked at whole in the DATA app: one click
-    if let (false, Some(path)) = (dim, output.and_then(|o| table_path_of(name, o))) {
+    if let (false, Some(path)) = (dim, original.and_then(|o| table_path_of(name, o))) {
         let label = "Open in Data viewer";
         let fsz = 12.0 * s;
         let (fh, fw) = (g.line_height(fsz, Face::Sans), g.text_width(fsz, label, Face::Sans));
@@ -745,13 +759,58 @@ fn layout_tool(g: &mut Gfx, name: &str, status: ToolStatus, input: &str, input_f
     BlockLayout { h: y + 8.0 * s, dot: Some((nlh / 2.0, dot)), prims, toggle: Some(String::new()), sel, zones: vec![], links }
 }
 
+/// Markdown tables in a tool's answer as aligned columns: cells padded to the widest in their column (at most 28 characters, longer cells are
+/// cut with an ellipsis), ` │ ` between columns and a rule under the header. Other lines stay as they are.
+pub(crate) fn table_grid(out: &str) -> String {
+    const MAX_CELL: usize = 28;
+    let is_row = |l: &str| {
+        let t = l.trim();
+        t.len() > 2 && t.starts_with('|') && t.ends_with('|')
+    };
+    let cells = |l: &str| -> Vec<String> { l.trim().trim_matches('|').split('|').map(|c| c.trim().to_string()).collect() };
+    let is_rule = |c: &[String]| c.iter().all(|x| !x.is_empty() && x.chars().all(|ch| matches!(ch, '-' | ':')));
+    let lines: Vec<&str> = out.lines().collect();
+    let mut res: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if !is_row(lines[i]) {
+            res.push(lines[i].to_string());
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < lines.len() && is_row(lines[i]) {
+            i += 1;
+        }
+        let rows: Vec<Vec<String>> = lines[start..i].iter().map(|l| cells(l)).collect();
+        let body: Vec<&Vec<String>> = rows.iter().filter(|r| !is_rule(r)).collect();
+        let ncols = body.iter().map(|r| r.len()).max().unwrap_or(0);
+        let clip = |c: &str| -> String { if c.chars().count() > MAX_CELL { c.chars().take(MAX_CELL - 1).collect::<String>() + "…" } else { c.to_string() } };
+        let mut w = vec![0usize; ncols];
+        for r in &body {
+            for (k, c) in r.iter().enumerate() {
+                w[k] = w[k].max(clip(c).chars().count());
+            }
+        }
+        for (n, r) in body.iter().enumerate() {
+            let line: Vec<String> = (0..ncols).map(|k| format!("{:<width$}", clip(r.get(k).map(String::as_str).unwrap_or("")), width = w[k])).collect();
+            res.push(line.join(" │ ").trim_end().to_string());
+            if n == 0 && rows.iter().any(|r| is_rule(r)) {
+                res.push(w.iter().map(|&x| "─".repeat(x)).collect::<Vec<_>>().join("─┼─"));
+            }
+        }
+    }
+    res.join("\n")
+}
+
 /// The table file a `data_open` result names ("Opened /path/x.csv as d1: ..."), when it can be opened by a link.
 fn table_path_of(tool: &str, out: &str) -> Option<String> {
-    if tool != "data_open" {
-        return None;
-    }
-    let first = out.lines().next()?.strip_prefix("Opened ")?;
-    let (path, _) = first.rsplit_once(" as ")?;
+    let path = match tool {
+        "data_open" => out.lines().next()?.strip_prefix("Opened ")?.rsplit_once(" as ")?.0,
+        // a query names the file its table came from on its last line
+        "data_query" => out.lines().rev().find_map(|l| l.strip_prefix("Source: "))?,
+        _ => return None,
+    };
     let low = path.to_ascii_lowercase();
     ((low.ends_with(".csv") || low.ends_with(".tsv")) && path.starts_with('/') && !path.contains(char::is_whitespace)).then(|| path.to_string())
 }
@@ -1989,6 +2048,26 @@ mod tests {
         r.draw(0.0, 0);
         assert_eq!(r.g.hits.iter().filter(|h| h.label == "text area").count(), 1, "the transcript is one area for selecting text");
         assert!(r.v.dots().is_empty(), "plain answers have no timeline dot");
+    }
+
+    #[test]
+    fn a_spoken_turn_is_shown_with_a_label_and_without_the_raw_mark_and_a_typed_one_is_unchanged() {
+        let mut r = Rig::new();
+        let spoken = format!("{}what is the weather", iyakki_agent::voiceassist::SPOKEN_MARK);
+        let a = layout_user(&mut r.g, &spoken, 0, 600.0, 1.0);
+        let b = layout_user(&mut r.g, "what is the weather", 0, 600.0, 1.0);
+        let texts = a.texts().join(" | ");
+        assert!(texts.contains("what is the weather") && texts.contains("Spoken: may hold recognition mistakes"), "{texts}");
+        assert!(!texts.contains("(spoken)"), "the raw mark is not shown: {texts}");
+        assert!(a.h > b.h, "the label takes a row");
+        assert!(!b.texts().join(" ").contains("Spoken"), "a typed turn has no label");
+        // what is selected and copied is the words, not the mark
+        assert!(a.zones[0].text == "what is the weather" && a.sel.iter().all(|l| !l.text.contains("(spoken)")));
+        // through the transcript: the turn the person spoke keeps its mark in the saved thread (the model sees it) and is drawn with the label
+        let msgs = vec![Message::system("sys"), Message::user(&spoken), Message::assistant("Sunny.".to_string()), Message::user("and tomorrow?")];
+        let turns = build_turns(&msgs, &Ctx { tool_ok: &HashMap::new(), approval: None, busy: false, open: &HashSet::new(), live: "", thinking: "", think_secs: 0 });
+        assert_eq!(turns[0].user.as_ref().unwrap().1, spoken, "the saved text keeps the mark");
+        assert_eq!(turns[1].user.as_ref().unwrap().1, "and tomorrow?");
     }
 
     #[test]

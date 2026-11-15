@@ -101,7 +101,7 @@ fn do_mount(src: Option<&Path>, dir: &Path, fs: Option<&str>, flags: libc::c_ulo
     let d = cstr(dir)?;
     let f = fs.map(|f| std::ffi::CString::new(f).unwrap_or_default());
     // SAFETY: every pointer is a valid NUL-terminated string that outlives the call (or null where the kernel allows it).
-    let rc = unsafe { libc::mount(s.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()), d.as_ptr(), f.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()), flags, std::ptr::null()) };
+    let rc = unsafe { crate::oscompat::mount(s.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()), d.as_ptr(), f.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()), flags, std::ptr::null()) };
     if rc == 0 { Ok(()) } else { Err(format!("mount {}: {}", dir.display(), std::io::Error::last_os_error())) }
 }
 
@@ -110,7 +110,7 @@ fn do_umount(dir: &Path) {
         // SAFETY: a valid NUL-terminated path.
         unsafe {
             libc::sync();
-            libc::umount(d.as_ptr());
+            crate::oscompat::umount(d.as_ptr());
         }
     }
 }
@@ -118,14 +118,14 @@ fn do_umount(dir: &Path) {
 impl BootMount for SysBoot {
     fn open(&self, write: bool) -> Result<BootVol, String> {
         let loc = self.locate()?;
-        let base = libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
+        let base = crate::oscompat::MS_NOSUID | crate::oscompat::MS_NODEV | crate::oscompat::MS_NOEXEC;
         let (dir, restore): (PathBuf, Option<Box<dyn FnOnce() + Send>>) = match loc.mounted {
             Some((dir, was_ro)) => {
                 if write && was_ro {
-                    do_mount(None, &dir, None, libc::MS_REMOUNT | base)?;
+                    do_mount(None, &dir, None, crate::oscompat::MS_REMOUNT | base)?;
                     let d2 = dir.clone();
                     (dir, Some(Box::new(move || {
-                        let _ = do_mount(None, &d2, None, libc::MS_REMOUNT | libc::MS_RDONLY | base);
+                        let _ = do_mount(None, &d2, None, crate::oscompat::MS_REMOUNT | crate::oscompat::MS_RDONLY | base);
                     })))
                 } else {
                     (dir, None)
@@ -133,7 +133,7 @@ impl BootMount for SysBoot {
             }
             None => {
                 std::fs::create_dir_all(&self.mnt).map_err(|e| format!("{}: {e}", self.mnt.display()))?;
-                do_mount(Some(&loc.node), &self.mnt, Some("vfat"), base | if write { 0 } else { libc::MS_RDONLY })?;
+                do_mount(Some(&loc.node), &self.mnt, Some("vfat"), base | if write { 0 } else { crate::oscompat::MS_RDONLY })?;
                 let d2 = self.mnt.clone();
                 (self.mnt.clone(), Some(Box::new(move || do_umount(&d2))))
             }

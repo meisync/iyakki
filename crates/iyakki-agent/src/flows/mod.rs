@@ -7,13 +7,17 @@ pub mod assist;
 pub mod browser;
 pub mod camera;
 pub mod channel_switch;
+pub mod channel_policy;
 pub mod failfix;
+pub mod failnote;
 pub mod hookenv;
 pub mod hookstore;
 pub mod host;
 pub mod permission;
 pub mod notify_matrix;
+pub mod machines;
 pub mod programs;
+pub mod remote;
 pub mod tools;
 pub mod webhook;
 
@@ -109,6 +113,15 @@ pub static CLOUD_NOTIFY: OnceLock<CloudNotify> = OnceLock::new();
 pub type CloudSecret = Arc<dyn Fn(&str, &iyakki_flow::host::RunSecretCx, &str) -> Option<Result<String, String>> + Send + Sync>;
 pub static CLOUD_SECRET: OnceLock<CloudSecret> = OnceLock::new();
 
+/// Cloud tenants: issues the token of a run when it is created (see `cloudflows::identity::RunTokens`); the engine presents it with
+/// each secret the run asks for. Without a hook (a desktop) no token exists.
+pub type CloudRunToken = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+pub static CLOUD_RUN_TOKEN: OnceLock<CloudRunToken> = OnceLock::new();
+
+/// Cloud tenants: the run ended, its token is revoked (the same tokens as [`CLOUD_RUN_TOKEN`]).
+pub type CloudRunEnd = Arc<dyn Fn(&str) + Send + Sync>;
+pub static CLOUD_RUN_END: OnceLock<CloudRunEnd> = OnceLock::new();
+
 /// Cloud tenants: where a flow's `cli` and `browser` steps run (the sandbox) instead of on the pod. In a tenant pod without one they are refused.
 pub type CloudExec = Arc<dyn Fn(&str, &iyakki_flow::host::ExecRequest) -> Result<iyakki_flow::host::ExecResult, iyakki_flow::NodeError> + Send + Sync>;
 pub type CloudBrowser = Arc<dyn Fn(&str, &iyakki_flow::host::BrowserRequest) -> Result<iyakki_flow::host::BrowserResult, iyakki_flow::NodeError> + Send + Sync>;
@@ -169,7 +182,7 @@ impl FlowEnv {
         if !allowed(policy) {
             return false;
         }
-        let dir = crate::scope::home_root(user, svc.dir()).join("Flows");
+        let dir = crate::scope::home_root_for_writes(user, svc.dir()).join("Flows");
         let any = std::fs::read_dir(&dir).map(|rd| rd.flatten().any(|e| e.path().join("flow.json").is_file())).unwrap_or(false);
         if !any {
             return false;
@@ -206,7 +219,7 @@ impl FlowEnv {
 
     /// Make an environment (tests build their own, with the engine not ticking by itself).
     pub fn build(svc: &Arc<Services>, user: &str, policy: &Policy, auto_tick: bool) -> FlowEnv {
-        FlowEnv::build_in(svc, user, policy, auto_tick, &crate::scope::home_root(user, svc.dir()))
+        FlowEnv::build_in(svc, user, policy, auto_tick, &crate::scope::home_root_for_writes(user, svc.dir()))
     }
 
     /// Like `build`, with the account's home folder given (the flows live in `<home>/Flows`).
@@ -874,9 +887,14 @@ pub fn clear_last_flow(svc: &Services, user: &str) {
 
 /// (id, name) of the flow last open in FLOWS, when it is recent and still exists (a deleted flow clears the record).
 pub fn last_flow(env: &FlowEnv) -> Option<(String, String)> {
+    last_flow_at(env, crate::clock::now_unix())
+}
+
+/// [`last_flow`] as of `now` (seconds), so the end of the record after [`LAST_FLOW_TTL_SECS`] can be tested without waiting.
+pub fn last_flow_at(env: &FlowEnv, now: i64) -> Option<(String, String)> {
     let key = last_key(&env.svc, &env.user);
     let (id, name, at) = last_slot().lock().unwrap_or_else(|e| e.into_inner()).get(&key).cloned()?;
-    if crate::clock::now_unix() - at > LAST_FLOW_TTL_SECS || env.store.get_draft(&id).is_none() {
+    if now - at > LAST_FLOW_TTL_SECS || env.store.get_draft(&id).is_none() {
         last_slot().lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
         return None;
     }
@@ -947,5 +965,9 @@ mod browser_tests;
 mod camera_tests;
 #[cfg(test)]
 mod assist_tests;
+#[cfg(test)]
+mod live_tests;
+#[cfg(test)]
+mod failnote_tests;
 #[cfg(test)]
 mod notify_matrix_tests;

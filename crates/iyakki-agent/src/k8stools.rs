@@ -26,7 +26,7 @@ use crate::devcluster::{ClusterProfile, Kc};
 use crate::k8s::{self, Target};
 use crate::wsexec::{Out, Runner, Sink};
 
-pub const TOOLS: [&str; 18] = ["k8s_status", "k8s_get", "k8s_describe", "k8s_logs", "k8s_events", "k8s_apply", "k8s_delete", "k8s_rollout_restart", "deploy_build", "deploy_load", "deploy_status", "deploy_run_job", "registry_setup_help", "cluster_setup_plan", "k8s_stop_env", "k8s_teardown", "k8s_registry_cleanup", "registry_setup"];
+pub const TOOLS: [&str; 20] = ["k8s_status", "k8s_get", "k8s_describe", "k8s_logs", "k8s_events", "k8s_apply", "k8s_port_forward", "k8s_port_forwards", "k8s_delete", "k8s_rollout_restart", "deploy_build", "deploy_load", "deploy_status", "deploy_run_job", "registry_setup_help", "cluster_setup_plan", "k8s_stop_env", "k8s_teardown", "k8s_registry_cleanup", "registry_setup"];
 pub const REGISTRY: &str = "localhost:5000";
 mod podfix;
 mod teardown;
@@ -106,6 +106,8 @@ pub struct K8sTools {
     /// Test hook for callers outside this crate (the real probe is `netprobe`, whose fake is private to the agent's own tests): when set,
     /// it answers "is the system registry up" instead of the network.
     pub registry_probe: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// The port-forwards started through `k8s_port_forward` (a field so tests can use a fake `kubectl`).
+    pub forwards: crate::k8sforward::Forwards,
     state: Mutex<State>,
 }
 
@@ -197,7 +199,8 @@ pub fn content_tag(dir: &Path) -> String {
 
 impl K8sTools {
     pub fn new(run: Arc<dyn Runner>, profile: ClusterProfile, ns: &str, ws: &str, root: &Path, audit: Arc<dyn Fn(&str, &str) + Send + Sync>) -> K8sTools {
-        K8sTools { run, profile, ns: ns.into(), ws: ws.into(), root: root.into(), audit, registries_yaml: "/etc/rancher/k3s/registries.yaml".into(), cluster_phrase: String::new(), registry_setting: String::new(), registry_pull: String::new(), registry_kind: String::new(), registry_probe: None, state: Mutex::new(State::default()) }
+        let forwards = crate::k8sforward::Forwards::real(&profile.kubeconfig, &profile.context);
+        K8sTools { forwards, run, profile, ns: ns.into(), ws: ws.into(), root: root.into(), audit, registries_yaml: "/etc/rancher/k3s/registries.yaml".into(), cluster_phrase: String::new(), registry_setting: String::new(), registry_pull: String::new(), registry_kind: String::new(), registry_probe: None, state: Mutex::new(State::default()) }
     }
 
     pub fn handles(name: &str) -> bool {
@@ -277,6 +280,8 @@ impl K8sTools {
             t("k8s_logs", "The log of a pod (read-only): `pod`, optional `container`, `tail` lines (default 100, most 500), `previous` for the last crashed run.".into(), obj(json!({"pod": {"type": "string"}, "container": {"type": "string"}, "tail": {"type": "integer"}, "previous": {"type": "boolean"}, "namespace": {"type": "string"}}), &["pod"]), Risk::Safe, true),
             t("k8s_events", "The latest events in the namespace (read-only), oldest first: why pods are not starting.".into(), obj(json!({"namespace": {"type": "string"}}), &[]), Risk::Safe, true),
             t("k8s_apply", format!("Apply a manifest to namespace \"{ns}\": `manifest_path` (a YAML file in the workspace, such as deploy/app.yaml) or `yaml` (text, saved to deploy/). It is checked first (no privileged containers, hostPath, host networking, added capabilities, cluster-scoped kinds or other namespaces; `imagePullPolicy: IfNotPresent` is set for images you loaded with deploy_load). The person sees the check and `kubectl diff` and approves. Creates the namespace on the first apply."), obj(json!({"manifest_path": {"type": "string"}, "yaml": {"type": "string"}}), &[]), Risk::Ask, false),
+            t("k8s_port_forward", format!("Start or stop a port-forward from this machine to namespace \"{ns}\": `action` start (`kind` pod, svc or deployment, `name`, `port` on the object, optional `local_port` of 1024 or more, otherwise a free one is chosen) or stop (`id` from k8s_port_forwards). Only 127.0.0.1 is opened, so nothing else on the network can use it; at most {} run at once and all stop when the session ends. The person approves.", crate::k8sforward::MAX_FORWARDS), obj(json!({"action": {"type": "string"}, "kind": {"type": "string"}, "name": {"type": "string"}, "port": {"type": "integer"}, "local_port": {"type": "integer"}, "id": {"type": "integer"}}), &["action"]), Risk::Ask, false),
+            t("k8s_port_forwards", "List the port-forwards this session started (read-only): number, local address, object and port.".into(), obj(json!({}), &[]), Risk::Safe, false),
             t("k8s_delete", format!("Delete one object in namespace \"{ns}\" by `kind` and `name` (never a whole namespace or --all). The person approves."), obj(json!({"kind": {"type": "string"}, "name": {"type": "string"}}), &["kind", "name"]), Risk::Ask, false),
             t("k8s_rollout_restart", format!("Restart a deployment in namespace \"{ns}\" (rolling): `name`, optional `kind` (deployment, statefulset, daemonset). The person approves."), obj(json!({"name": {"type": "string"}, "kind": {"type": "string"}}), &["name"]), Risk::Ask, false),
             t("deploy_build", "Build a container image from a folder of the workspace with podman (docker if podman is not installed): `dir` (holds a Dockerfile or Containerfile AND the files it COPYs, such as package.json and the app: keep them in one folder; a COPY that matches no file is refused before any build), `image` name (lowercase, no registry), optional `tag` (default a hash of the files, so every change rolls out). Optional `target` builds one stage of a multi-stage Dockerfile (`--target`); a test target (a stage named test, unit-test…) builds the UNIT-TEST image `<image>-<target>:<tag>`, which runs the tests and coverage while building: the result is \"TEST BUILD (not for deploy)\" with the pass/fail counts, the coverage % and the last test output, a failing test returns the failing output as the error, and that image is never passed to deploy_load. Optional `build_args` (object) become `--build-arg`. Returns the image reference to use. The person approves the command.".into(), obj(json!({"dir": {"type": "string"}, "image": {"type": "string"}, "tag": {"type": "string"}, "dockerfile": {"type": "string"}, "target": {"type": "string"}, "build_args": {"type": "object"}}), &["dir", "image"]), Risk::Ask, false),
@@ -310,6 +315,11 @@ impl K8sTools {
                 format!("apply {src} to {ctx}{ro}")
             }
             "k8s_delete" => format!("DELETE {} {} from {ctx}{ro}", s("kind"), s("name")),
+            "k8s_port_forward" => match arg(args, "action") {
+                "stop" => format!("stop port-forward #{}", args.get("id").and_then(Value::as_u64).unwrap_or(0)),
+                _ => format!("forward 127.0.0.1:{} to {} {}:{} in {ctx}{ro}", args.get("local_port").and_then(Value::as_u64).map(|p| p.to_string()).unwrap_or_else(|| "(a free port)".into()), s("kind"), s("name"), args.get("port").and_then(Value::as_u64).unwrap_or(0)),
+            },
+            "k8s_port_forwards" => "list the port-forwards".into(),
             "k8s_rollout_restart" => format!("restart {} {} in {ctx}{ro}", if arg(args, "kind").is_empty() { "deployment" } else { arg(args, "kind") }, s("name")),
             "deploy_build" => {
                 let (engine, argv) = match self.build_plan(args) {
@@ -360,6 +370,7 @@ impl K8sTools {
                 Ok(p) => crate::regsetup::preview(&p),
                 Err(e) => format!("this would be refused: {e}"),
             }),
+            "k8s_port_forward" => Some(self.forward_preview(args)),
             "k8s_delete" => Some(format!("kubectl delete {} {} -n {} (context {})", arg(args, "kind"), arg(args, "name"), self.ns, self.profile.context)),
             _ => None,
         }
@@ -385,6 +396,8 @@ impl K8sTools {
             "k8s_apply" => self.apply(args),
             "k8s_delete" => self.delete(args),
             "k8s_rollout_restart" => self.restart(args),
+            "k8s_port_forward" => self.port_forward(args),
+            "k8s_port_forwards" => Ok(self.forward_list()),
             "deploy_build" => self.build(args),
             "deploy_load" => self.load(args),
             "deploy_status" => self.deploy_status(args),
@@ -1023,6 +1036,58 @@ impl K8sTools {
         if o.ok() { Ok(format!("{}\nWatch it with deploy_status name={name}.", o.stdout.trim())) } else { Err(cut(&Self::out_text(&o), 2000)) }
     }
 
+    // -------------------------------------------------------------------------------------------- port-forward
+
+    fn forward_request(&self, args: &Value) -> Result<(crate::k8sforward::Target, String, u16, Option<u16>), String> {
+        let kind = crate::k8sforward::Target::parse(arg(args, "kind")).ok_or("`kind` is pod, svc or deployment")?;
+        let port = |k: &str| args.get(k).and_then(Value::as_u64);
+        let remote = port("port").filter(|p| (1..=65535).contains(p)).ok_or("`port` is the port on the object (1 to 65535)")? as u16;
+        let local = match port("local_port") {
+            None | Some(0) => None,
+            Some(p) if (1..=65535).contains(&p) => Some(p as u16),
+            Some(_) => return Err("`local_port` is 1024 to 65535".into()),
+        };
+        let name = arg(args, "name").to_string();
+        crate::k8sforward::command(&self.ns, kind, &name, remote, local)?;
+        Ok((kind, name, remote, local))
+    }
+
+    fn forward_preview(&self, args: &Value) -> String {
+        if arg(args, "action") == "stop" {
+            return "stops the forward; its local port closes".into();
+        }
+        match self.forward_request(args) {
+            Ok((k, n, r, l)) => format!("kubectl port-forward --address=127.0.0.1 --namespace={} {}/{n} {}:{r}\nOnly this machine can use the forward; it stays until stopped or the session ends.", self.ns, k.prefix(), l.map(|p| p.to_string()).unwrap_or_default()),
+            Err(e) => format!("this would be refused: {e}"),
+        }
+    }
+
+    fn forward_list(&self) -> String {
+        let v = self.forwards.list();
+        if v.is_empty() {
+            return "No port-forward is running.".into();
+        }
+        v.iter().map(crate::k8sforward::Info::line).collect::<Vec<_>>().join("\n")
+    }
+
+    fn port_forward(&self, args: &Value) -> Result<String, String> {
+        match arg(args, "action") {
+            "stop" => {
+                let id = args.get("id").and_then(Value::as_u64).ok_or("`id` is the number k8s_port_forwards shows")?;
+                if u32::try_from(id).is_ok_and(|id| self.forwards.stop(id)) { Ok(format!("Stopped port-forward #{id}.")) } else { Err(format!("there is no port-forward #{id}; k8s_port_forwards lists them")) }
+            }
+            "start" => {
+                if let Some(e) = self.read_only() {
+                    return Err(e);
+                }
+                let (kind, name, remote, local) = self.forward_request(args)?;
+                let i = self.forwards.start(&self.ns, kind, &name, remote, local)?;
+                Ok(format!("Forwarding: {}\nOpen http://127.0.0.1:{}/ for a web page. Stop it with k8s_port_forward action stop id {}.", i.line(), i.local, i.id))
+            }
+            other => Err(format!("`action` is start or stop, not `{other}`")),
+        }
+    }
+
     // -------------------------------------------------------------------------------------------- build and load
 
     /// (engine, argv, build directory, tag)
@@ -1473,12 +1538,59 @@ mod tests {
     }
 
     #[test]
+    fn port_forward_asks_binds_only_the_loopback_lists_and_stops() {
+        use crate::cloudlisten::pod::{Proc, Spawn};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct P(Arc<AtomicBool>);
+        impl Proc for P {
+            fn alive(&mut self) -> bool {
+                !self.0.load(Ordering::SeqCst)
+            }
+            fn kill(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let mut g = rig("pf", true);
+        let args_seen = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+        let dead = Arc::new(AtomicBool::new(false));
+        let (a2, d2) = (args_seen.clone(), dead.clone());
+        let spawn: Spawn = Box::new(move |a: &[String]| {
+            a2.lock().unwrap().push(a.to_vec());
+            let (tx, rx) = std::sync::mpsc::channel();
+            tx.send("Forwarding from 127.0.0.1:43111 -> 80".to_string()).unwrap();
+            std::mem::forget(tx);
+            Ok((Box::new(P(d2.clone())) as Box<dyn Proc>, rx))
+        });
+        g.t.forwards = crate::k8sforward::Forwards::with_spawn(spawn, Duration::from_secs(1));
+        let defs = g.t.defs();
+        assert_eq!(defs.iter().find(|d| d.spec.name == "k8s_port_forward").unwrap().risk, Risk::Ask);
+        assert_eq!(defs.iter().find(|d| d.spec.name == "k8s_port_forwards").unwrap().risk, Risk::Safe);
+        let args = json!({"action": "start", "kind": "svc", "name": "web", "port": 80});
+        assert!(g.t.describe("k8s_port_forward", &args).contains("forward 127.0.0.1:(a free port) to svc web:80"));
+        let pv = g.t.preview("k8s_port_forward", &args).unwrap();
+        assert!(pv.contains("--address=127.0.0.1 --namespace=shop-dev svc/web :80"), "{pv}");
+        assert_eq!(g.t.call("k8s_port_forwards", &json!({})).unwrap(), "No port-forward is running.");
+        let out = g.t.call("k8s_port_forward", &args).unwrap();
+        assert!(out.contains("#1 127.0.0.1:43111 -> shop-dev/svc/web:80") && out.contains("http://127.0.0.1:43111/"), "{out}");
+        assert_eq!(args_seen.lock().unwrap()[0], ["port-forward", "--address=127.0.0.1", "--namespace=shop-dev", "svc/web", ":80"]);
+        assert!(g.t.call("k8s_port_forwards", &json!({})).unwrap().contains("#1"));
+        assert!(g.audited.lock().unwrap().iter().any(|l| l.starts_with("k8s.k8s_port_forward ") && l.contains(":ok ")));
+        for bad in [json!({"action": "start", "kind": "node", "name": "web", "port": 80}), json!({"action": "start", "kind": "pod", "name": "web", "port": 0}), json!({"action": "start", "kind": "pod", "name": "a b", "port": 80}), json!({"action": "start", "kind": "pod", "name": "web", "port": 80, "local_port": 22}), json!({"action": "pause"})] {
+            assert!(g.t.call("k8s_port_forward", &bad).is_err(), "{bad}");
+        }
+        assert!(g.t.call("k8s_port_forward", &json!({"action": "stop", "id": 9})).unwrap_err().contains("no port-forward #9"));
+        assert!(g.t.call("k8s_port_forward", &json!({"action": "stop", "id": 1})).unwrap().contains("Stopped"));
+        assert!(dead.load(Ordering::SeqCst));
+        assert_eq!(g.t.call("k8s_port_forwards", &json!({})).unwrap(), "No port-forward is running.");
+    }
+
+    #[test]
     fn the_tools_are_registered_with_the_right_risks() {
         let g = rig("defs", true);
         let defs = g.t.defs();
         assert_eq!(defs.iter().map(|d| d.spec.name.as_str()).collect::<Vec<_>>(), TOOLS.to_vec());
         for d in &defs {
-            let writes = matches!(d.spec.name.as_str(), "k8s_apply" | "k8s_delete" | "k8s_rollout_restart" | "deploy_build" | "deploy_load" | "deploy_run_job" | "registry_setup" | "k8s_stop_env" | "k8s_teardown" | "k8s_registry_cleanup");
+            let writes = matches!(d.spec.name.as_str(), "k8s_apply" | "k8s_delete" | "k8s_rollout_restart" | "k8s_port_forward" | "deploy_build" | "deploy_load" | "deploy_run_job" | "registry_setup" | "k8s_stop_env" | "k8s_teardown" | "k8s_registry_cleanup");
             assert_eq!(d.risk, if writes { Risk::Ask } else { Risk::Safe }, "{}", d.spec.name);
         }
         assert!(defs[0].spec.description.contains("never start, install or stop k3s"));

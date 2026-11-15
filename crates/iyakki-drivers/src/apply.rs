@@ -34,11 +34,14 @@ pub struct Fs {
     pub modprobe_d: PathBuf,
     pub proc: PathBuf,
     pub lib_modules: PathBuf,
+    /// The kernel's lockdown file (`/sys/kernel/security/lockdown`). A sandbox has its own, so what the host runs under (Secure Boot or not)
+    /// never decides what a test or a desktop window sees.
+    pub lockdown: PathBuf,
 }
 
 impl Fs {
     pub fn real() -> Fs {
-        Fs { data: "/var/lib/iyakki".into(), fw_root: "/lib/firmware".into(), modprobe_d: "/etc/modprobe.d".into(), proc: "/proc".into(), lib_modules: "/lib/modules".into() }
+        Fs { data: "/var/lib/iyakki".into(), fw_root: "/lib/firmware".into(), modprobe_d: "/etc/modprobe.d".into(), proc: "/proc".into(), lib_modules: "/lib/modules".into(), lockdown: PathBuf::from("/sys").join("kernel/security/lockdown") }
     }
 
     /// The file system for a data folder. On the device image (it has `/etc/iyakki`) that is the real `/lib/firmware`,
@@ -49,12 +52,12 @@ impl Fs {
             (Fs { data: data.to_path_buf(), ..Fs::real() }, true)
         } else {
             let root = data.join("sysroot");
-            (Fs { data: data.to_path_buf(), fw_root: root.join("lib/firmware"), modprobe_d: root.join("etc/modprobe.d"), proc: PathBuf::from("/proc"), lib_modules: root.join("lib/modules") }, false)
+            (Fs { data: data.to_path_buf(), fw_root: root.join("lib/firmware"), modprobe_d: root.join("etc/modprobe.d"), proc: PathBuf::from("/proc"), lib_modules: root.join("lib/modules"), lockdown: root.join("sys/kernel/security/lockdown") }, false)
         }
     }
 
     pub fn under(root: &Path) -> Fs {
-        Fs { data: root.join("data"), fw_root: root.join("lib/firmware"), modprobe_d: root.join("etc/modprobe.d"), proc: root.join("proc"), lib_modules: root.join("lib/modules") }
+        Fs { data: root.join("data"), fw_root: root.join("lib/firmware"), modprobe_d: root.join("etc/modprobe.d"), proc: root.join("proc"), lib_modules: root.join("lib/modules"), lockdown: root.join("sys/kernel/security/lockdown") }
     }
 
     pub fn pack_dir(&self, id: &str) -> PathBuf {
@@ -90,6 +93,12 @@ impl Fs {
         let dir = self.lib_modules.join(self.release());
         let ko = first_ko(&dir, 6)?;
         modinfo::parse(&std::fs::read(ko).ok()?).ok().map(|m| m.vermagic)
+    }
+
+    /// The kernel's lockdown text (`none [integrity] confidentiality`), empty where it cannot be read. In a sandbox it is the sandbox's own
+    /// file (`lockdown`), absent unless a test puts one there.
+    pub fn lockdown_text(&self) -> String {
+        std::fs::read_to_string(&self.lockdown).unwrap_or_default()
     }
 
     fn loaded_modules(&self) -> Vec<String> {
@@ -160,6 +169,7 @@ pub fn install_pack(fs: &Fs, run: &dyn Runner, id: &str, version: &str, license:
                 return Err(format!("module {} is for kernel {} but this system runs {}. Nothing was installed.", m.name, m.kernel, if release.is_empty() { "an unknown release" } else { &release }));
             }
             let info = modinfo::check(&bytes, &release, reference.as_deref()).map_err(|e| format!("module {}: {e} Nothing was installed.", m.name))?;
+            modinfo::refuse_unsigned_under_lockdown(&m.name, &bytes, &fs.lockdown_text()).map_err(|e| format!("{e} Nothing was installed."))?;
             kos.push((m.name.clone(), bytes, info));
         }
     }
@@ -269,7 +279,9 @@ pub fn activate(fs: &Fs, run: &dyn Runner, id: &str) -> Result<Report, String> {
     for name in &rec.modules {
         let path = fs.pack_dir(id).join("modules").join(format!("{name}.ko"));
         let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let locked = modinfo::refuse_unsigned_under_lockdown(name, &bytes, &fs.lockdown_text());
         match modinfo::check(&bytes, &release, reference.as_deref()) {
+            Ok(_) if locked.is_err() => rep.lines.push(locked.unwrap_err()),
             Ok(_) if !level_may_bring_modules(&rec.level) => rep.lines.push(format!("module {name} skipped: the pack is {} now", rec.level)),
             Ok(_) if fs.loaded_modules().iter().any(|l| l == name) => rep.lines.push(format!("module {name} is loaded already")),
             Ok(info) => {
@@ -659,6 +671,39 @@ mod tests {
         // the pack says one kernel and the module another: also refused
         let e = install_pack(&f, &run, "wl-pack", "1.0.0", "x", "usb", "official", &modpack("6.12.100 SMP mod_unload ", "6.12.112")).unwrap_err();
         assert!(e.contains("6.12.100"), "{e}");
+    }
+
+    #[test]
+    fn a_sandbox_has_its_own_lockdown_file_and_never_reads_the_hosts() {
+        let d = std::env::temp_dir().join(format!("iyakki-lockfs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let (f, real) = Fs::for_data(&d);
+        if real {
+            let _ = std::fs::remove_dir_all(&d);
+            return; // the device image: the real file is the right one
+        }
+        assert_eq!(f.lockdown_text(), "", "whatever the host runs under, a sandbox starts with no lockdown");
+        std::fs::create_dir_all(f.lockdown.parent().unwrap()).unwrap();
+        std::fs::write(&f.lockdown, "none [integrity] confidentiality\n").unwrap();
+        assert!(f.lockdown_text().contains("[integrity]"));
+        assert!(f.lockdown.starts_with(&d), "{}", f.lockdown.display());
+        assert_eq!(Fs::real().lockdown, std::path::Path::new("/sys/kernel/security/lockdown"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn under_secure_boot_an_unsigned_module_is_refused_early_and_nothing_is_written() {
+        let (f, _) = fs("lock");
+        let run = Recorder::default();
+        let lock = f.lockdown.clone();
+        std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+        std::fs::write(&lock, "none [integrity] confidentiality\n").unwrap();
+        let e = install_pack(&f, &run, "wl-pack", "1.0.0", "x", "usb", "official", &modpack("6.12.112 SMP mod_unload ", "6.12.112")).unwrap_err();
+        assert!(e.contains("not signed") && e.contains("Secure Boot") && e.contains("Nothing was installed"), "{e}");
+        assert!(!f.pack_dir("wl-pack").exists() && run.calls.lock().unwrap().is_empty());
+        std::fs::write(&lock, "[none] integrity confidentiality\n").unwrap();
+        assert!(install_pack(&f, &run, "wl-pack", "1.0.0", "x", "usb", "official", &modpack("6.12.112 SMP mod_unload ", "6.12.112")).is_ok());
     }
 
     #[test]

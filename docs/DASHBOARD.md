@@ -88,6 +88,7 @@ changes.
     Index names are letters, digits and `-_.*,:+`.
   * Prometheus: only the query, series, label, targets, metadata, rules and alerts calls; never `/api/v1/admin/*` or `/-/*`.
   * Neo4j (Cypher): one query per request, sent through the Query API as a read transaction (`accessMode: Read`, the server refuses writes) after a text check that refuses CREATE, MERGE, DELETE, SET, REMOVE, CALL, LOAD, FOREACH, DROP, USE and user or server commands. The graph database of Store -> Setup is added as the source `Cluster graph database`.
+  * Object storage (S3-compatible, `s3.rs`): the buckets, and the keys under a bucket and prefix, as tables with sizes and ages. The query is `bucket/prefix` (empty lists the buckets). Only `GET` list requests are ever built; requests are signed with AWS Signature Version 4 (checked against the AWS documentation's worked examples), the access key and the secret key are vault references. Run against fakes only so far (F-DASH-19).
   * DuckDB: a database file is opened `-readonly`; every file path inside the SQL must be absolute, free of `..`, and inside
     the account's readable folders (`FileRoots`); network addresses are refused.
   * The servers are asked to enforce it too where they can (ClickHouse `readonly=2`).
@@ -364,7 +365,7 @@ own key, apart from the ordinary chat.
 ## Files
 
 `crates/iyakki-agent/src/dash/`: `connector.rs` (seam, errors, HTTP), `frame.rs`, `readonly.rs`, `prom.rs`, `es.rs`,
-`clickhouse.rs`, `duckdb.rs`, `neo4j.rs`, `kube.rs` (the local cluster, with `kube_fixtures/` and `kube_tests.rs`), `seed.rs` (default dashboards, once per administrator), `share.rs` (sharing, view only, with `share_tests.rs`), `registry.rs`, `model.rs`, `engine.rs`, `multi.rs` (queries in parallel, the shared cache, partial results), `expr.rs` (the expression stage), `templates.rs`, `store.rs`, `session.rs` (the open
+`clickhouse.rs`, `duckdb.rs`, `neo4j.rs`, `s3.rs`, `kube.rs` (the local cluster, with `kube_fixtures/` and `kube_tests.rs`), `seed.rs` (default dashboards, once per administrator), `share.rs` (sharing, view only, with `share_tests.rs`), `registry.rs`, `model.rs`, `engine.rs`, `multi.rs` (queries in parallel, the shared cache, partial results), `expr.rs` (the expression stage), `templates.rs`, `store.rs`, `session.rs` (the open
 dashboard, undo, the context), `explain.rs`, `tools.rs`. `crates/iyakki-shell/src/apps/`: `dash.rs` (the app),
 `dash_charts.rs` (renderers and the maths under them), `dash_query.rs` (query box), `dash_tests.rs`.
 

@@ -368,3 +368,30 @@ fn a_card_that_allows_two_channels_still_puts_the_access_point_on_the_clients_ch
     w.sta_channel_freq = None;
     assert_eq!(can_host_ap(&caps, &w).unwrap().channel, 6, "client channel unknown: the usual pick");
 }
+
+#[test]
+fn the_reason_there_is_no_hotspot_is_said_in_words_and_a_usable_card_says_nothing() {
+    // no radio at all, and a device without firmware
+    assert!(hotspot_unavailable(&[], "US", false).unwrap().contains("plug in a Wi-Fi adapter"));
+    assert!(hotspot_unavailable(&[], "US", true).unwrap().contains("firmware"));
+    // a card with no access point mode, and one that cannot also be a client
+    let r = hotspot_unavailable(&[one(no_ap_card())], "DE", false).unwrap();
+    assert!(r.contains("cannot work as an access point"), "{r}");
+    // a card that runs everything itself and takes no passphrase: named as not supported yet
+    let r = hotspot_unavailable(&[one(brcmfmac())], "US", false).unwrap();
+    assert!(r.contains("does not take a passphrase") && r.contains("not supported yet"), "{r}");
+    // the same card with the passphrase hand-over feature is usable: no reason
+    let mut s = brcmfmac();
+    s.ext_bits = vec![EXT_4WAY_HANDSHAKE_AP_PSK];
+    assert_eq!(hotspot_unavailable(&[one(s)], "US", false), None);
+    // one usable radio among others is enough; the unusable ones are not mentioned
+    let mut ok = brcmfmac();
+    ok.ext_bits = vec![EXT_4WAY_HANDSHAKE_AP_PSK];
+    assert_eq!(hotspot_unavailable(&[one(no_ap_card()), one(ok)], "US", false), None);
+    // two unusable radios give at most two distinct sentences, joined
+    let r = hotspot_unavailable(&[one(no_ap_card()), one(brcmfmac()), one(no_ap_card())], "US", false).unwrap();
+    assert!(r.contains("cannot work as an access point") && r.contains("passphrase"), "{r}");
+    // the software-handshake card (Intel here) is a card of its own only: said so
+    let r = hotspot_unavailable(&[one(intel_world())], "US", false).unwrap();
+    assert!(r.contains("handshake") || r.contains("same time"), "{r}");
+}

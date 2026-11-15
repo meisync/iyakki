@@ -8,6 +8,8 @@
 pub mod container;
 pub mod header;
 pub mod kw;
+pub mod luks1;
+pub mod luks2;
 pub mod mac;
 pub mod recovery;
 pub mod xts;
@@ -18,6 +20,10 @@ mod container_tests;
 mod header_tests;
 #[cfg(test)]
 mod kw_tests;
+#[cfg(test)]
+mod luks1_tests;
+#[cfg(test)]
+mod luks2_tests;
 #[cfg(test)]
 mod mac_tests;
 #[cfg(test)]

@@ -11,6 +11,7 @@ pub const USAGE: &str = "  kube get|describe|logs|top|events|api-resources|versi
   state [--json]                      what the screen shows: app, page, focused field, texts and the buttons (scope debug; secret fields hidden)
   input click \"LABEL\"                 press the button called LABEL (scope input; never over a secret field)
   inbox [--bodies] [--json]           the inbox: counts by kind and source, titles (bodies need the scope files:system)
+  flows assist [--flow ID] [--json]   what the flow-fixing agent did: switches, suggestions waiting, the watched version, counters, the Activity log (scope debug)
   diag [-o FILE]                      one bundle: version, uptime, memory, disks, network, cluster, audit tail, recent errors, sound (scope debug)";
 
 /// `args` raw (`kube` and what follows, without `--device X` / `--home X`, which belong to the CLI itself).
@@ -35,6 +36,10 @@ pub(super) fn run(cmd: &str, raw: &[String], args: &Args, connect: &dyn Fn() -> 
         "state" => connect().and_then(|c| state(&c, args, out)),
         "inbox" => connect().and_then(|c| inbox(&c, args, out)),
         "diag" => connect().and_then(|c| diag(&c, args, out)),
+        "flows" => match args.pos.get(1).map(String::as_str) {
+            Some("assist") => connect().and_then(|c| flows_assist(&c, args, out)),
+            _ => Err("usage: iyakki dev flows assist [--flow ID] [--json]".into()),
+        },
         _ => return None,
     })
 }
@@ -92,6 +97,36 @@ fn inbox(c: &DevClient, args: &Args, out: &mut dyn FnMut(&str)) -> Result<(), St
         out(&format!("(the newest {} are shown)", v["shown"]));
     }
     Ok(())
+}
+
+fn flows_assist(c: &DevClient, args: &Args, out: &mut dyn FnMut(&str)) -> Result<(), String> {
+    let v = c.call("GET", "/v1/dev/flows/assist", &[("flow", args.get("--flow").unwrap_or(""))], b"")?;
+    if args.has("--json") {
+        out(&serde_json::to_string_pretty(&v).unwrap_or_default());
+        return Ok(());
+    }
+    out(&assist_text(&v));
+    Ok(())
+}
+
+/// The readout as plain lines.
+pub fn assist_text(v: &serde_json::Value) -> String {
+    let mut l = vec![format!(
+        "Assist is {} for the account; {} of {} automatic publishes used today; Matrix notice {}; agent: {}",
+        if v["enabled"] == true { "ON" } else { "STOPPED" },
+        v["publishes_today"], v["max_publish_per_day"], if v["matrix"] == true { "on" } else { "off" }, v["profile"].as_str().unwrap_or("")
+    )];
+    for f in v["flows"].as_array().into_iter().flatten() {
+        let n = |k: &str| f["counters"][k].as_u64().unwrap_or(0);
+        l.push(format!("{} ({}) mode {}{}{}: {} waiting, {} approved, {} auto-published, {} rejected, {} rolled back; today {} publishes, {} drafts, {} cents", f["name"].as_str().unwrap_or(""), f["flow"].as_str().unwrap_or(""), f["mode"].as_str().unwrap_or("off"), if f["paused"] == true { ", PAUSED" } else { "" }, if f["cooling"] == true { ", cooling down" } else { "" }, f["waiting"].as_array().map_or(0, Vec::len), n("approved"), n("auto_published"), n("rejected"), n("rolled_back"), n("publishes_today"), n("drafts_today"), n("cents_today")));
+        if !f["watch"].is_null() {
+            l.push(format!("  watching version {} (before: {})", f["watch"]["version"], f["watch"]["previous"]));
+        }
+        for x in f["last"].as_array().into_iter().flatten() {
+            l.push(format!("  {}", x.as_str().unwrap_or("")));
+        }
+    }
+    l.join("\n")
 }
 
 fn diag(c: &DevClient, args: &Args, out: &mut dyn FnMut(&str)) -> Result<(), String> {

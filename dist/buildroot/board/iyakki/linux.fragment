@@ -457,6 +457,8 @@ CONFIG_NF_TABLES=m
 CONFIG_NF_TABLES_INET=y
 CONFIG_NF_TABLES_IPV4=y
 CONFIG_NF_TABLES_IPV6=y
+# the bridge family, for the table that keeps the phones of a Bluetooth access point apart (sharing, F-HOTSPOT-11)
+CONFIG_NF_TABLES_BRIDGE=m
 CONFIG_NFT_CT=m
 CONFIG_NFT_LOG=m
 CONFIG_NFT_LIMIT=m
@@ -493,3 +495,7 @@ CONFIG_INTEGRITY_ASYMMETRIC_KEYS=y
 CONFIG_INTEGRITY_PLATFORM_KEYRING=y
 CONFIG_INTEGRITY_MACHINE_KEYRING=y
 CONFIG_LOAD_UEFI_KEYS=y
+
+# fanotify: the boot-order recorder (crates/iyakki-core/src/bootprefetch.rs, iyakki.bootrecord=1) watches the opens of the first 90 seconds through it;
+# without it recording fails with "Function not implemented" (found 2026-11-14 by dist/qemu/boot-prefetch-test.sh). Small (no access-permission hooks).
+CONFIG_FANOTIFY=y

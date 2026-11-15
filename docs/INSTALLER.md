@@ -109,6 +109,10 @@ Each rule is in `planner.rs` / `apply.rs` and pinned by a test in `planner_tests
     directory entry last, and refuses if `EFI/IYAKKI` exists already. After writing, every file that was on the volume is compared.
 13. **UEFI boot entry**: only our entry ("IYAKKI") is ever created or replaced; it is appended to `BootOrder` so the other system
     stays the default. No `efibootmgr`: [`efi.rs`](../crates/iyakki-usb/src/efi.rs) writes the variables through `efivarfs`.
+    A stick that boots through the removable-media path (`EFI/BOOT/BOOTX64.EFI`) has no entry at all until a person asks for one:
+    `iyakki startup-disk register` makes the entry "IYAKKI" for the boot volume the system is running from (appended to `BootOrder`),
+    `first` also puts it first (the old order is saved; `revert` restores it), `next` starts IYAKKI at the next restart only (`BootNext`, the order stays).
+    Settings -> Startup disk and the chat tools `startup_disk_*` do the same, each change after a confirmation. Needs root and a writable `efivarfs`.
 
 ## The plan
 
@@ -190,7 +194,16 @@ Partition) and `b` on a bigger FAT32 partition. On the command line (`--keep-esp
 
 BIOS (legacy) boot: `whole-disk` installs GRUB for BIOS exactly as before. On a *shared* disk (free space, reuse, keep-ESP)
 legacy BIOS boot is **not** set up: rewriting the first sector of a disk that belongs to another system is not done silently.
-Planned: an explicit `--bios` option for MBR disks with an empty gap (the old boot code is saved first).
+Legacy BIOS boot of a shared disk is an explicit option, `--bios --bios-save <file>` (and `--bios-replace-boot-code` when sector 0 holds another
+system's boot code). The plan checks the disk's own first sectors (`crates/iyakki-usb/src/biosshared.rs`): 512-byte sectors, a valid table, an empty
+gap behind sector 0 (MBR) or an empty BIOS boot partition (GPT) big enough for GRUB's core image, and boot code that is empty, GRUB's own, or
+explicitly allowed to be replaced. If it cannot be done the plan is **refused with the reason**, never silently skipped. The save file must be an
+absolute path that does not exist yet (choose a different disk than the target); it receives sector 0 and the area GRUB takes, checksummed, and is
+read back before anything else is written. Then the core image is written first, the 440 bytes of boot code into sector 0 last (the disk signature
+and the partition table stay as they are), everything is read back, and if anything differs the saved sectors are put back at once. The save is taken
+after the install's own partition entries are in sector 0, so putting it back returns the old boot code and keeps the new partitions. Tested on
+disk image files (`planner_tests::the_bios_option_*`). Not done: the window installer has no switch for it yet, GRUB's menu does not chainload the other
+system, and it has not been tried on a real legacy-BIOS machine or in a BIOS virtual machine.
 
 ## Window installer
 

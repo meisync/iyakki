@@ -14,7 +14,13 @@ LIBGPG_ERROR_POST_CONFIGURE_HOOKS += IYAKKI_LIBGPG_ERROR_FIX_LOCK_OBJ
 # host-mesa3d (built for iris/crocus: it makes mesa_clc and the other build tools) links the HOST LLVM, which Buildroot builds without
 # RTTI, and Mesa's meson.build refuses to build when its own RTTI setting differs from LLVM's ("LLVM was built without RTTI, so Mesa must
 # also disable RTTI"). Buildroot's host-mesa3d does not pass the switch (the target package does, from BR2_PACKAGE_LLVM_RTTI).
+# On a tree where RTTI is on from the start (iris: BR2_PACKAGE_LLVM_RTTI=y, selected by Mesa), Buildroot builds the HOST LLVM with RTTI too, and Mesa must then
+# build with it (found 2026-11-13, fresh WEB_IRIS=1 build: "LLVM was built with RTTI, cannot build Mesa with RTTI disabled").
+ifeq ($(BR2_PACKAGE_LLVM_RTTI),y)
+HOST_MESA3D_CONF_OPTS += -Dcpp_rtti=true
+else
 HOST_MESA3D_CONF_OPTS += -Dcpp_rtti=false
+endif
 
 # The target Mesa asks `llvm-config --has-rtti`; the llvm-config in the staging tree is the HOST llvm's (built before RTTI was switched on for
 # iris, and Buildroot does not rebuild host-llvm for that), so it answers NO although the target LLVM libraries are built with RTTI (the

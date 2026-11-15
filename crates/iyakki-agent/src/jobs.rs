@@ -1220,4 +1220,48 @@ mod tests {
         assert_eq!(fmt_duration(192), "3m 12s");
         assert_eq!(fmt_duration(3900), "1h 05m");
     }
+
+    /// Process liveness through `/proc` (Linux) or `ps` (macOS): runs on whichever system the tests run on, so the macOS fallbacks are
+    /// exercised on a Mac and the `/proc` readers on Linux (F-SHELL-20).
+    #[test]
+    fn a_real_child_is_seen_alive_with_a_stable_start_and_a_dead_one_is_not() {
+        let mut child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id();
+        assert!(process_exists(pid));
+        // between fork and exec the child still carries its parent thread name: wait for the exec to show
+        let t0 = std::time::Instant::now();
+        while process_name(pid).as_deref() != Some("sleep") && t0.elapsed() < std::time::Duration::from_secs(10) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(process_name(pid).as_deref(), Some("sleep"));
+        let (state, start) = proc_stat(pid).expect("the child has a state");
+        assert!(state != 'Z' && start != 0, "{state} {start}");
+        assert_eq!(proc_stat(pid).map(|x| x.1), Some(start), "the start stays the same while it lives");
+        assert!(alive(pid, start) && alive(pid, 0));
+        assert!(!alive(pid, start.wrapping_add(1)), "another start time means another process with a reused pid");
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!alive(pid, start), "a finished and reaped child is gone");
+        assert!(!process_exists(pid));
+        assert_eq!(process_name(pid), None);
+    }
+
+    #[test]
+    fn a_killed_child_that_nobody_has_waited_for_is_not_alive() {
+        let mut child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id();
+        let (_, start) = proc_stat(pid).unwrap();
+        // SAFETY: a signal to our own child.
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        let mut gone = false;
+        for _ in 0..100 {
+            if !alive(pid, start) {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        child.wait().unwrap();
+        assert!(gone, "a zombie counts as not alive");
+    }
 }

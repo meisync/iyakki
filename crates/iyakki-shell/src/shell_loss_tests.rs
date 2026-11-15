@@ -142,8 +142,9 @@ fn it_cannot_be_dismissed_but_can_be_minimised_and_opened_again() {
     let full = sh.loss.rect.unwrap();
     // Esc and clicks elsewhere do not close it, and it has no close button
     sh.handle(&Event::Key(Key::Esc));
+    sh.handle(&Event::Key(Key::Esc)); // Esc on Home asks about signing out; the second Esc is Stay
     sh.render(&mut g);
-    assert!(sh.loss.rect.is_some() && !sh.loss.minimised);
+    assert!(sh.loss.rect.is_some() && !sh.loss.minimised && sh.session.is_some());
     assert!(!sh.hits().iter().any(|h| h.label.to_lowercase().contains("close") && lb::is_click(match h.ev { Event::Tab(n) => n, _ => 0 })));
     // minimise: a slim strip, still on screen, still not gone
     sh.dispatch(&Event::Tab(lb::MINIMISE));

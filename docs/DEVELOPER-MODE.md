@@ -106,7 +106,7 @@ Every command takes `--device NAME` (default: the first paired device, or the on
 | `iyakki dev config provider add ID --kind K [--url U] [--key-file F\|--key-env V\|--key-stdin]` / `key ID ...` / `remove ID` | Model providers. The API key goes into the system vault and can never be read back: not by `list`, `export`, a log or the audit log. It is never taken on the command line. (`config`) |
 | `iyakki dev config firewall list\|allow VALUE [--ports P] [--proto tcp\|udp\|both] [--minutes N]\|remove ID\|keep\|revert` | The firewall with the same 60-second keep-or-revert as Settings. After a change the command checks that the device still answers this computer and then keeps it; if it does not answer, the device reverts by itself. (`config`) |
 | `iyakki dev app info\|permissions\|clear-data\|reset APP`, `app data APP [KEY]`, `app config APP get\|set\|rm KEY [VALUE\|--file F]`, `app logs\|console APP [--follow]` | The saved data (`iyakki.storage` keys) of a tile app that developer mode installed, so test data can be seeded; the page console is the app's log. Apps from a store are out of reach. `app grant\|revoke` says plainly that an app holds exactly what its manifest declares. (`config`) |
-| `iyakki dev shell [--minutes N] [--root] [--reason TEXT] [-- CMD ARGS]` | Run commands on the device. Asks the administrator on the device's screen; with `-- CMD` runs one command and returns its exit status. Interactive otherwise: one command per line (no terminal: a line mode), the folder carries over, Ctrl+C sends SIGINT (twice: KILL). (`shell` + approval) |
+| `iyakki dev shell [--tty] [--minutes N] [--root] [--reason TEXT] [-- CMD ARGS]` | Run commands on the device. Asks the administrator on the device's screen; with `-- CMD` runs one command and returns its exit status. Interactive otherwise: one command per line (no terminal: a line mode), the folder carries over, Ctrl+C sends SIGINT (twice: KILL). (`shell` + approval) |
 | `iyakki dev forward LOCAL:REMOTE` | Forward `127.0.0.1:LOCAL` on this computer to port REMOTE of the device's own loopback (the Lemonade port 13305, the dev k3s API 6443...). (`forward`) |
 | `iyakki dev reboot` / `poweroff` | Restart or switch off, after an approval on the device's screen every time. (`power`) |
 | `iyakki dev update-pack IMAGE.img -o DIR [--version V] [--variant NAME]` | On the computer: read the install image's boot partition WITHOUT mounting it and write the update payload (kernel, initramfs, boot menu, theme, EFI loader, SHA-256 of each, `update.json`). |
@@ -181,8 +181,16 @@ developer mode off ends that computer's open sessions at once.
 | `files` | `files ls/stat/push/pull/rm/mkdir` in the account's home, its workspaces and `/tmp/iyakki-dev` | any | links are resolved before the check and never written through; sizes and chunks are bounded |
 | `files:system` | also READ `/etc`, `/lib/modules`, `/var/log` and the data folder | administrators | never write; the vault, keys, password files, the paired-computer list, TLS keys and wifi passwords are never readable |
 | `config` | `config ...`, `app ...` | machine-wide settings: administrators | a whitelist with types and ranges; provider keys are write-only |
-| `input` | `input tap/key/text/swipe` | any | into the shell's event queue, not below it |
+| `input` | `input tap/key/text/swipe` | any | into the shell's event queue, not below it; **never answers an approval or power card** (below) |
 | `input:password` | the same while a password field has focus | any | off by default even with `input` |
+
+**`input` and approval cards.** Keys and taps from a paired computer never reach a card that asks a person for permission: the shell/reboot/update
+approval card (and its banner), the power menu on Home, the power key's card, the sign-in screen's power card and a flow's permission ask.
+While one is up the device refuses `input` with "answer this on the device's own screen", and anything queued just before it came up
+is dropped by the shell and logged (`devmode.input`, dropped). A press from `input` also never counts as the person's own press for an
+Auto-mode hard-ask card (swap, compressed memory). A person's own keyboard, mouse and touch work as always. (Found 2026-11-14 in M80's run:
+`input text zzprobe` on Home opened the power card with `p` and restarted with `r`; an `input` holder could also have pressed the approve key
+of its own `shell` ask.) Cards inside an app (for example a tile's own confirm) are not covered by this rule and stay as they were.
 | `shell` | `shell`, and everything `power` allows | administrators | **also needs a grant** (below) |
 | `power` | `reboot`, `poweroff` | administrators | needs an approval on the device's screen each time |
 | `update` | `update` (the boot files) | administrators | section 7 |
@@ -215,8 +223,9 @@ the device (`settings:read`, `settings:write`, `vault:status`, `vault:lock`, `va
 `POST /v1/dev/core/call`, `POST /v1/dev/core/stream/read`, `POST /v1/dev/core/stream/close`. A remote computer can never unlock the vault or
 answer a question: those answer `needs_consent` and the question appears on the device's screen. No call returns a secret, a password or a
 token; every call is in the activity log and every change in the audit log with the call's name and never its values. The switch and the
-grants are not on a Settings page yet (the functions `DevMode::set_core_enabled` and `DevMode::set_core_scope` are what a page will call); this
-is a proof of the transport, not a feature to rely on.
+grants are on Settings -> Developer mode (key `K` for the switch; `j` and `z` or a tap on a line for the scopes of the selected computer) and
+in chat (`core_contract_status`, `core_contract_switch`, `core_contract_scope_set`; changes ask every time and are on the hard-ask list). It
+works on one computer's loopback only (the relay is F-CORE-17); do not rely on it yet.
 
 ### 6b. Diagnosing without a root shell
 
@@ -240,6 +249,30 @@ is a proof of the transport, not a feature to rely on.
   (the logs are for administrator accounts). No command line of the kernel, no settings values, no file contents.
 * `iyakki dev shell` commands start with the standard device nodes (`/dev/null`, `zero`, `full`, `random`, `urandom`, `tty`) made usable by
   everyone, so `2>/dev/null` works; this is done by the device process when it is root and is logged (`dev.shell.devnodes`).
+
+### Web service scopes (`api:*`, alpha.3)
+
+A program (not a person at a keyboard) can pair through developer mode and then sign in to the device's **web service** with its paired key: it
+signs the login (`POST /api/v1/login`) with its developer key, bound to the service's certificate, a nonce and the clock, and gets a short-lived token. What the token may call is
+decided by `api:*` scopes, per computer, by an administrator on the device (Settings, Developer mode: the ten families listed under the selected computer; tap, or `i` / `m` to
+cycle none, reading only, all). A new computer holds none, and a request can never widen them.
+
+| Scope | Routes it covers |
+|---|---|
+| `api:status` | who am I, version, models, tools, the API description |
+| `api:chat` | chat runs, their events, the approvals of tool calls |
+| `api:flows`, `api:schedules` | list, read and run flows and their runs; flow schedules |
+| `api:files` | the account's files: list, read, write, move, delete, upload, download |
+| `api:git` | clone and look at repositories |
+| `api:data` | the data service |
+| `api:tenant` | tenants, namespaces, members, configuration, approvals |
+| `api:notify` | the notification inbox and its channels |
+| `api:tiles` | the tiles of the web view and the event stream |
+
+`api:<family>:read` allows only GET and HEAD. **`api:admin` (administrator routes) and the sign-in routes can never be granted.** The scopes are read afresh on every request, so
+a revoke or an unpairing applies at once. The assistant has `devmode_api_scopes` (reads) and `devmode_api_scope_set` (asks). Tested through the service's own pipeline and over real
+TLS on the loopback address; **not tried with a real paired computer on a network**, and the sign-in on the embedded desktop service answers 501 (no certificate of its own).
+Design: [`development/MINIMAL-WEBSERVICE.md`](development/MINIMAL-WEBSERVICE.md) section 10.
 
 ## 7. System update: replace the boot files, keep the way back
 
@@ -315,7 +348,8 @@ when, by whom, last use; mode 0600), `pairing.json` (the open code, deleted when
   tests run as an ordinary user); the sound volume, time zone and display size taking effect in the running shell after `config set`
   (the settings are saved and the shell reads them, but nobody watched it change); `reboot`/`poweroff` reaching the real host;
   a second display (`--display N`); the pairing and every scope against a second machine on a real network.
-* **Not done:** a terminal (pty) for `dev shell`; `app grant/revoke` (an app holds exactly what its manifest declares); shared folders,
+* **Terminal (F-DEV-16):** `iyakki dev shell --tty` (with or without `-- CMD`) runs the command, or an interactive `sh -i`, on a pseudo-terminal of this window's size with its own session: line editing, `vi`, `top` and Ctrl+C work, the window size follows resizes, and Ctrl+] ends the session on this side. It needs the same grant, session and audit rules as the line mode (the audit line says `(terminal)` and never holds the keys typed). Routes: `POST /v1/dev/shell/exec?tty=1&rows=&cols=&term=`, `GET /v1/dev/shell/read?enc=b64`, `POST /v1/dev/shell/resize`.
+* **Not done:** `app grant/revoke` (an app holds exactly what its manifest declares); shared folders,
   display layout and app permissions in `config` (the whitelist has what is listed by `config list`); the desktop window does not run
   the listener, so none of this works there; forwarded connections and shell output travel as separate HTTPS requests (fine on a LAN,
   slow for bulk transfers: use `files push` or `forward` with patience).

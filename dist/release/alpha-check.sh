@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
-# ./run.sh alpha-check [--dry] [--no-qemu] [--no-tests] [--keep-licenses]
+# ./run.sh alpha-check [--dry] [--no-qemu] [--no-tests] [--keep-licenses] [--image-gate] [--budgets]
 # The gate before an alpha is cut. Prints a PASS / FAIL / WARN / SKIP table and exits non-zero when anything FAILs.
 #   --dry           only the fast checks that do not build or write anything (version, FEATURES totals, links, secrets, files, sizes)
 #   --no-qemu       skip the QEMU smoke tests even when images exist
-#   --no-tests      skip `cargo test --workspace` (the build, licence and doc checks still run)
+#   --no-tests      skip `cargo test --workspace` (the build, licence, doc and compatibility checks still run)
 #   --keep-licenses do not regenerate THIRD_PARTY_LICENSES.txt
+#   --image-gate    also scan the finished images (dist/release/image-gate.sh, F-QA-05): FAIL when one holds an unlisted file, SKIP when there is none
+#   --budgets       also check the size budgets of the finished images (dist/release/budgets-gate.sh, F-PKG-05): FAIL when one is over, SKIP when there is none
 # Cargo runs with TMPDIR on the disk (target/tmp) and old iyakki-* leftovers there are removed at the end.
 set -uo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/env.sh"
+iyakki_require_free_disk || exit 1
 cd "$ROOT"
-DRY=0; QEMU=1; TESTS=1; LIC=1
+DRY=0; QEMU=1; TESTS=1; LIC=1; IMGGATE=0; BUDGETS=0
 for a in "$@"; do case "$a" in
-  --dry) DRY=1 ;; --no-qemu) QEMU=0 ;; --no-tests) TESTS=0 ;; --keep-licenses) LIC=0 ;;
-  -h|--help) sed -n 2,9p "$0"; exit 0 ;; *) echo "unknown option $a" >&2; exit 2 ;; esac; done
+  --dry) DRY=1 ;; --no-qemu) QEMU=0 ;; --no-tests) TESTS=0 ;; --keep-licenses) LIC=0 ;; --image-gate) IMGGATE=1 ;; --budgets) BUDGETS=1 ;;
+  -h|--help) sed -n 2,11p "$0"; exit 0 ;; *) echo "unknown option $a" >&2; exit 2 ;; esac; done
 OUT="$ROOT/target/alpha-check"; mkdir -p "$OUT"
 trap iyakki_tmp_clean EXIT
 NAMES=(); RES=(); NOTE=()
@@ -51,7 +54,7 @@ junk="$( (git ls-files; git ls-files -o --exclude-standard) 2>/dev/null | grep -
 if [ -z "$junk" ]; then rec "no backup or junk files" PASS; else rec "no backup or junk files" WARN "$(echo $junk)"; fi
 
 if [ "$DRY" = 1 ]; then
-  for s in "workspace builds (locked)" "zero warnings" "workspace tests" "window (iyakki-gui) builds" "macOS cross-check" "cargo deny licenses" "THIRD_PARTY_LICENSES.txt regenerated" "SBOM.json" "QEMU smoke tests"; do rec "$s" SKIP "--dry"; done
+  for s in "workspace builds (locked)" "zero warnings" "workspace tests" "compatibility gates" "window (iyakki-gui) builds" "macOS cross-check" "cargo deny licenses" "THIRD_PARTY_LICENSES.txt regenerated" "SBOM.json" "QEMU smoke tests" "image content gate"; do rec "$s" SKIP "--dry"; done
 else
   # 4. build, warnings, tests
   if cargo build --workspace --locked >"$OUT/build.log" 2>&1; then rec "workspace builds (locked)" PASS; else rec "workspace builds (locked)" FAIL "see $OUT/build.log"; fi
@@ -66,16 +69,22 @@ else
       *) rec "workspace tests" FAIL "see $OUT/test-summary.log and $OUT/test.log" ;;
     esac
   else rec "workspace tests" SKIP "--no-tests"; fi
+  # 4a. the compatibility charter's gates (docs/development/CORE-COMPATIBILITY-DESIGN.md): versioned surfaces listed, the core API surface only grows, golden fixtures read
+  run "compatibility gates (surfaces, core API snapshot, fixtures)" compat dist/release/compat-check.sh
   if cargo build --locked --manifest-path crates/iyakki-gui/Cargo.toml --bin iyakki-desktop >"$OUT/gui-build.log" 2>&1; then
     rec "window (iyakki-gui) builds" PASS "$(crates/iyakki-gui/target/debug/iyakki-desktop --version 2>&1 | head -n1)"
   else rec "window (iyakki-gui) builds" FAIL "see $OUT/gui-build.log"; fi
-  # 4b. macOS: compiles only (cargo check for the installed apple-darwin targets). WARN-level: a skip or a failure warns, never fails the gate
+  # 4b. macOS: compiles only (cargo check for the installed apple-darwin targets). A skip (target not installed) warns; a failure FAILS the gate (KI-078 is fixed)
   mac="$(bash dist/release/check-macos.sh 2>&1 | tee "$OUT/macos-check.log" | tail -n1)"
   case "$mac" in
     "check-macos: PASS"*) rec "macOS cross-check" PASS "${mac#check-macos: }" ;;
     "check-macos: SKIP"*) rec "macOS cross-check" WARN "${mac#check-macos: } (compiles-only check; see $OUT/macos-check.log)" ;;
-    *) rec "macOS cross-check" WARN "${mac#check-macos: }: a Linux-only piece lost its cfg fence (see $OUT/macos-check.log)" ;;
+    *) rec "macOS cross-check" FAIL "${mac#check-macos: }: a Linux-only piece lost its cfg fence (see $OUT/macos-check.log)" ;;
   esac
+  # 4c. the browser client engine (EXPERIMENTAL): builds for wasm32, has no imports and the exports the glue calls; the committed module matches
+  if rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unknown$'; then
+    if sh dist/client-engine/build.sh --check >"$OUT/client-engine.log" 2>&1; then rec "client engine (wasm32)" PASS "$(tail -n1 "$OUT/client-engine.log")"; else rec "client engine (wasm32)" FAIL "see $OUT/client-engine.log"; fi
+  else rec "client engine (wasm32)" WARN "wasm32-unknown-unknown is not installed (rustup target add wasm32-unknown-unknown)"; fi
   # 5. licences
   if command -v cargo-deny >/dev/null; then
     if cargo deny --manifest-path "$ROOT/Cargo.toml" check licenses >"$OUT/deny.log" 2>&1 && cargo deny --manifest-path "$ROOT/crates/iyakki-gui/Cargo.toml" check licenses >>"$OUT/deny.log" 2>&1; then rec "cargo deny licenses" PASS "both workspaces"; else rec "cargo deny licenses" FAIL "see $OUT/deny.log"; fi
@@ -104,6 +113,24 @@ else
       run "QEMU install (iyakki-usb, BIOS and UEFI boots)" qemu-install env IYAKKI_USB="$ROOT/target/debug/iyakki-usb" sh dist/buildroot/qemu-install-test.sh
     else rec "QEMU install" SKIP "no install image"; fi
   else rec "QEMU smoke tests" SKIP "$([ "$QEMU" = 1 ] && echo 'no images or no qemu' || echo '--no-qemu')"; fi
+  # 8. the content of the finished images against legal/image-rules.txt (optional: the images are built elsewhere and do not all pass yet)
+  if [ "$IMGGATE" = 1 ]; then
+    ig="$(sh dist/release/image-gate.sh 2>&1 | tee "$OUT/image-gate.log" | tail -n1)"
+    case "$ig" in
+      "image-gate: PASS"*) rec "image content gate" PASS "${ig#image-gate: }" ;;
+      "image-gate: SKIPPED"*) rec "image content gate" SKIP "${ig#image-gate: }" ;;
+      *) rec "image content gate" FAIL "see $OUT/image-gate.log" ;;
+    esac
+  else rec "image content gate" SKIP "not asked for (--image-gate)"; fi
+  # 9. the size budgets of the finished images (optional, like the content gate)
+  if [ "$BUDGETS" = 1 ]; then
+    bg="$(sh dist/release/budgets-gate.sh 2>&1 | tee "$OUT/budgets-gate.log" | tail -n1)"
+    case "$bg" in
+      "budgets-gate: PASS"*) rec "image size budgets" PASS "${bg#budgets-gate: }" ;;
+      "budgets-gate: SKIPPED"*) rec "image size budgets" SKIP "${bg#budgets-gate: }" ;;
+      *) rec "image size budgets" FAIL "see $OUT/budgets-gate.log" ;;
+    esac
+  else rec "image size budgets" SKIP "not asked for (--budgets)"; fi
 fi
 
 # the table

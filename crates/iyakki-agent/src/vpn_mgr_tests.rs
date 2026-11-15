@@ -120,6 +120,17 @@ fn the_vault_failing_during_import_rolls_back() {
 }
 
 #[test]
+fn the_firewall_is_told_the_tunnels_network_while_it_is_up_and_nothing_when_it_is_down() {
+    let r = rig("fwnets");
+    let id = import_full(&r, "Office");
+    assert!(r.sys.st.lock().unwrap().tunnel_nets.is_empty());
+    r.mgr.set_enabled(&id, true, NOW).unwrap();
+    assert_eq!(r.sys.st.lock().unwrap().tunnel_nets, vec!["10.8.0.0/24".to_string()], "the network, not the host address");
+    r.mgr.set_enabled(&id, false, NOW + 3).unwrap();
+    assert!(r.sys.st.lock().unwrap().tunnel_nets.is_empty());
+}
+
+#[test]
 fn a_full_connect_sets_up_in_order_and_disable_undoes_all_of_it() {
     let r = rig("full");
     let id = import_full(&r, "Office");
@@ -517,7 +528,16 @@ fn a_dropped_tunnel_stops_the_forwarder_and_a_reconnect_listens_again() {
     // the interface disappears: the watcher tears the tunnel parts down, which stops the loop
     r.sys.st.lock().unwrap().links.clear();
     r.mgr.tick(NOW + 2);
-    std::net::UdpSocket::bind(("127.0.0.1", port)).expect("the forwarder stopped with the tunnel");
+    // the watcher stops the forwarder thread, which gives the port back when it has noticed: wait for it (at most 10 s) instead of one try
+    let t0 = std::time::Instant::now();
+    let freed = loop {
+        match std::net::UdpSocket::bind(("127.0.0.1", port)) {
+            Ok(s) => break s,
+            Err(e) if t0.elapsed() > std::time::Duration::from_secs(10) => panic!("the forwarder stopped with the tunnel: {e}; {}", crate::testdir::describe_port(port)),
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+        }
+    };
+    drop(freed);
     // later the back-off ends and the connect listens again
     r.mgr.tick(NOW + 400);
     assert!(std::net::UdpSocket::bind(("127.0.0.1", port)).is_err(), "{:?}", r.mgr.status(&id));
@@ -574,4 +594,46 @@ fn the_startup_registry_hears_connecting_connected_and_down_without_a_key_or_a_s
     let Some(StartupState::Failed(why)) = reg.state("vpn") else { panic!("{:?}", reg.state("vpn")) };
     assert!(why.contains("Office") && !why.contains("203.0.113.9") && !why.contains(&key(0x11)), "{why}");
     r.mgr.stop_all();
+}
+
+#[test]
+fn the_firewall_line_names_a_kill_switch_or_a_fail_closed_guard_only_while_it_is_in_place() {
+    use iyakki_vpn::profile::{Mode, Settings};
+    let r = rig("guard-line");
+    let id = import_full(&r, "Office");
+    assert_eq!(r.mgr.guard_line(), None, "nothing enabled");
+    r.mgr.set_settings(&id, Settings { kill_switch: true, ..Settings::full() }, NOW).unwrap();
+    assert_eq!(r.mgr.guard_line(), None, "set but not enabled: no guard yet");
+    r.mgr.set_enabled(&id, true, NOW).unwrap();
+    let l = r.mgr.guard_line().expect("the guard is in");
+    assert!(l.starts_with("VPN kill switch is active (Office)") && l.contains("local network keeps working"), "{l}");
+    // the guard stays after the tunnel drops, and so does the line
+    hs(&r, NOW as i64);
+    r.mgr.tick(NOW + 1);
+    r.sys.st.lock().unwrap().links.clear();
+    r.mgr.tick(NOW + 2);
+    assert!(r.mgr.guard_line().is_some());
+    // disabling takes the guard and the line away
+    r.mgr.set_enabled(&id, false, NOW + 3).unwrap();
+    assert_eq!(r.mgr.guard_line(), None);
+    // FULL without the kill switch has no guard to name
+    r.mgr.set_settings(&id, Settings { kill_switch: false, ..Settings::full() }, NOW + 4).unwrap();
+    r.mgr.set_enabled(&id, true, NOW + 5).unwrap();
+    assert_eq!(r.mgr.guard_line(), None);
+    assert_eq!(r.mgr.profiles()[0].settings.mode, Mode::Full);
+}
+
+#[test]
+fn the_guard_line_says_how_many_more_profiles_hold_a_guard() {
+    use iyakki_vpn::profile::Settings;
+    let r = rig("guard-line2");
+    let id = import_full(&r, "Office");
+    r.mgr.set_settings(&id, Settings { kill_switch: true, ..Settings::full() }, NOW).unwrap();
+    r.mgr.set_enabled(&id, true, NOW).unwrap();
+    let mut rows = r.mgr.rows();
+    let mut second = rows[0].clone();
+    second.profile.name = "Lab".into();
+    rows.push(second);
+    let l = crate::vpn_mgr::guard_line_of(&rows).unwrap();
+    assert!(l.contains("(Office and 1 more)"), "{l}");
 }

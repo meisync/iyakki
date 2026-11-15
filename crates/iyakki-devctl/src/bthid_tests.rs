@@ -377,3 +377,68 @@ fn a_typed_passkey_has_exactly_six_digits_and_a_pin_one_to_sixteen_printable_cha
     assert!(check_typed_pin("").is_err() && check_typed_pin(&"x".repeat(17)).is_err() && check_typed_pin("a\nb").is_err());
     assert!(check_typed_pin(&"x".repeat(16)).is_ok());
 }
+
+/// One Device ID record: vendor, product, version and where the vendor number comes from.
+fn pnp(vendor: u16, product: u16, version: u16, source: u16) -> Vec<u8> {
+    seq(&[seq(&[
+        u16e(0x0001),
+        seq(&[vec![0x19, 0x12, 0x00]]),
+        u16e(0x0201),
+        u16e(vendor),
+        u16e(0x0202),
+        u16e(product),
+        u16e(0x0203),
+        u16e(version),
+        u16e(0x0205),
+        u16e(source),
+    ])])
+}
+
+#[test]
+fn the_vendor_and_product_come_from_the_device_id_record() {
+    let r = sdp_request_for(UUID_PNP, 3, &[]);
+    assert_eq!(&r[5..10], &[0x35, 0x03, 0x19, 0x12, 0x00], "it asks for UUID 0x1200");
+    assert_eq!(sdp_request(3, &[]), sdp_request_for(UUID_HID, 3, &[]), "the HID request is unchanged");
+    let mut ch = Chan::new();
+    ch.reply = Some(Box::new(|req| vec![Recv::Data(response(tid_of(req), &pnp(0x004c, 0x0267, 0x0100, 1), &[]))]));
+    let rec = fetch_pnp_record(&mut ch, Duration::from_secs(1)).unwrap().expect("a record");
+    assert_eq!(rec, PnpRecord { vendor: 0x004c, product: 0x0267, version: 0x0100, source: 1 });
+    assert_eq!(&ch.sent[0][5..10], &[0x35, 0x03, 0x19, 0x12, 0x00]);
+}
+
+#[test]
+fn a_device_without_a_usable_device_id_record_gives_none_and_never_an_error_of_its_own() {
+    // no record at all
+    let mut ch = Chan::new();
+    ch.reply = Some(Box::new(|req| vec![Recv::Data(response(tid_of(req), &seq(&[]), &[]))]));
+    assert_eq!(fetch_pnp_record(&mut ch, Duration::from_secs(1)).unwrap(), None);
+    // a vendor of 0, a vendor from nobody we know, a record missing its product
+    assert_eq!(parse_pnp_record(&pnp(0, 5, 0, 1)), None);
+    assert_eq!(parse_pnp_record(&pnp(0x1234, 5, 0, 7)), None);
+    let partial = seq(&[seq(&[u16e(0x0201), u16e(0x1234), u16e(0x0205), u16e(2)])]);
+    assert_eq!(parse_pnp_record(&partial), None);
+    // the first usable record wins, a bad one before it is skipped
+    let two = [seq(&[seq(&[u16e(0x0201), u16e(0)])]), pnp(0x046d, 0xb35b, 0x0001, 2)];
+    let rec = parse_pnp_record(&{
+        let mut body = Vec::new();
+        body.extend_from_slice(&two[0][3..]);
+        body.extend_from_slice(&two[1][3..]);
+        seq(&[body])
+    });
+    assert_eq!(rec.map(|r| (r.vendor, r.product, r.source)), Some((0x046d, 0xb35b, 2)));
+    // damage never panics and a silent device is a timeout like any other SDP read
+    let full = pnp(0x004c, 0x0267, 1, 1);
+    for cut in 0..full.len() {
+        let _ = parse_pnp_record(&full[..cut]);
+    }
+    assert!(parse_pnp_record(&[]).is_none() && parse_pnp_record(&[0xff; 40]).is_none());
+    assert!(matches!(fetch_pnp_record(&mut Chan::new(), Duration::from_secs(1)), Err(HidError::Timeout)));
+}
+
+#[test]
+fn the_numbers_reach_the_kernel_input_device() {
+    let p = parse_pnp_record(&pnp(0x004c, 0x0267, 1, 1)).unwrap();
+    let c = uhid_create2("Kbd", "AA:BB:CC:DD:EE:FF", p.vendor as u32, p.product as u32, &KBD);
+    assert_eq!(u32::from_le_bytes(c[264..268].try_into().unwrap()), 0x004c);
+    assert_eq!(u32::from_le_bytes(c[268..272].try_into().unwrap()), 0x0267);
+}

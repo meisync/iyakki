@@ -238,6 +238,9 @@ pub struct PageNav {
 pub fn page_nav(w: u32, h: u32, s: f32, pages: usize) -> PageNav {
     let (d, gap) = (26.0 * s, 8.0 * s);
     let total = d * (pages as f32 + 2.0) + gap * (pages as f32 + 1.0);
+    // many pages on a narrow screen: the buttons and dots shrink together to stay inside the window
+    let k = ((w as f32 - 16.0 * s) / total).min(1.0);
+    let (d, gap, total) = (d * k, gap * k, total * k);
     let x0 = (w as f32 - total) / 2.0;
     let y = h as f32 - 78.0 * s;
     let at = |i: usize| R::new(x0 + i as f32 * (d + gap), y, d, d);

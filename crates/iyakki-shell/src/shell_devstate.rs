@@ -3,6 +3,7 @@
 //! regions and the text fields. The safety rules (secret fields, private apps, credentials, limits) are applied by
 //! `iyakki_agent::devmode::state::build`, not here.
 
+use crate::stale_stats::mark_stale;
 use super::*;
 use iyakki_agent::devmode::state::{self, Raw, RawField, Rect};
 
@@ -71,7 +72,7 @@ impl Shell {
     pub(super) fn dev_state_tick(&mut self) {
         state::heartbeat(self.env.services.dir());
         if state::wanted(self.env.services.dir()) {
-            self.stale = true;
+            mark_stale!(self);
         }
     }
 }

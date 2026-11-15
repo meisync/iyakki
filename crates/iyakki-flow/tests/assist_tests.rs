@@ -920,6 +920,37 @@ fn the_real_trial_runs_read_only_steps_and_refuses_the_rest() {
 }
 
 #[test]
+fn a_whole_flow_trial_tries_the_read_only_steps_and_refuses_every_step_with_effects() {
+    let e = env("assist-whole");
+    e.host.on_http(|req| if req.url.contains("/v2/") { ok_json("{}") } else { Ok(host::ok_response(404, "gone")) });
+    let reg = e.engine.registry();
+    let t = EngineTrial { engine: &e.engine, reg: &reg };
+    let mut f = linear("fl");
+    e.publish(f.clone());
+    let run = e.run("fl");
+    f.nodes[1].config["url"] = json!("https://api.example.com/v2/a");
+    f.nodes.push(Node::new("n", "notify", json!({"title": "x"})));
+    f.nodes.push(Node::new("c", "cam_photo", json!({})));
+    let calls = e.host.http_calls.lock().unwrap().len();
+    e.host.notices.lock().unwrap().clear();
+    let w = t.whole(&f, &run);
+    assert!(w.tried.contains(&"a".to_string()), "{w:?}");
+    assert!(w.refused.iter().any(|r| r.0 == "n") && w.refused.iter().any(|r| r.0 == "c"), "{w:?}");
+    assert!(w.failed.is_empty(), "{w:?}");
+    assert!(matches!(w.state(), TrialState::Passed(s) if s.contains("with effects not run")));
+    assert!(e.host.http_calls.lock().unwrap().len() > calls, "the read-only step was really tried");
+    assert!(e.host.notices.lock().unwrap().is_empty() && e.host.cam_calls.lock().unwrap().is_empty(), "no message and no picture");
+    // a read-only step that fails fails the trial; a write is refused, not tried
+    f.nodes[1].config["url"] = json!("https://api.example.com/other");
+    assert!(matches!(t.whole(&f, &run).state(), TrialState::Failed(_)));
+    f.nodes[1].config = json!({"url": "https://api.example.com/v2/a", "method": "POST"});
+    let calls = e.host.http_calls.lock().unwrap().len();
+    let w = t.whole(&f, &run);
+    assert!(w.refused.iter().any(|r| r.0 == "a"), "{w:?}");
+    assert_eq!(e.host.http_calls.lock().unwrap().len(), calls, "a write is never sent by a trial");
+}
+
+#[test]
 fn the_files_hold_no_input_value_and_no_secret() {
     let w = World::new("assist-files", autopilot(true));
     let token = format!("{}{}", "ghp_", "Z9y8X7w6V5u4T3s2R1q0P9o8N7m6");
@@ -945,4 +976,116 @@ fn the_files_hold_no_input_value_and_no_secret() {
 }
 
 #[allow(dead_code)]
+// ------------------------------------------------------------------------------------------------ F-FLOW-34: Matrix notice and agent profile
+
+#[test]
+fn autopilot_tells_the_person_by_matrix_only_when_that_is_switched_on_and_a_refusal_is_audited() {
+    let off = World::new("assist-mx-off", autopilot(true));
+    off.run();
+    off.propose_url();
+    off.tick();
+    assert!(off.e.host.channel_calls.lock().unwrap().is_empty(), "off by default");
+    let w = World::new("assist-mx-on", autopilot(true));
+    w.book.set_matrix(true, " ops \n").unwrap();
+    assert_eq!((w.book.global().matrix, w.book.global().matrix_room.as_str()), (true, "ops"));
+    w.run();
+    w.propose_url();
+    w.tick();
+    let calls = w.e.host.channel_calls.lock().unwrap().clone();
+    assert!(!calls.is_empty());
+    assert_eq!((calls[0].channels.clone(), calls[0].room.as_str(), calls[0].dry_run), (vec!["matrix".to_string()], "ops", false));
+    assert!(calls[0].dedupe_key.starts_with("assist-fl-"), "{}", calls[0].dedupe_key);
+    // the INBOX note is made in any case
+    assert!(w.e.host.notices.lock().unwrap().iter().any(|x| x.title.contains("Autopilot published version 2")));
+    // the default fake host has no messaging account: the refusal is audited, nothing fails
+    assert!(w.e.host.audit_lines().iter().any(|l| l.starts_with("flow.assist.matrix fl: not sent")), "{:?}", w.e.host.audit_lines());
+    assert_eq!(w.published().meta.version, 2);
+}
+
+#[test]
+fn the_agent_profile_asks_local_models_first_falls_back_on_failure_and_passes_the_time_limit() {
+    use iyakki_flow::assist_profile::{AgentProfile, ProfileModel};
+    let w = World::new("assist-profile", autopilot(true));
+    let m = |n: &str, local, t| ProfileModel { name: n.into(), local, timeout_secs: t };
+    let p = w.book.set_profile(AgentProfile { name: " night ".into(), models: vec![m("cloud/big", false, 90), m("lan/small", true, 5)], local_first: true, fallback: true }).unwrap();
+    assert_eq!(p.name, "night");
+    assert_eq!(p.models[1].timeout_secs, 10, "a limit below the minimum is raised");
+    w.run();
+    w.e.host.propose(Err("the local model timed out".into()));
+    w.propose_url();
+    w.tick();
+    let asked: Vec<(String, u64)> = w.e.host.heal_requests.lock().unwrap().iter().map(|r| (r.model.clone(), r.timeout_secs)).collect();
+    assert_eq!(asked, vec![("lan/small".to_string(), 10), ("cloud/big".to_string(), 90)], "local first, then the next after a failure");
+    assert_eq!(w.published().meta.version, 2, "the second model's fix was published");
+}
+
+#[test]
+fn without_fallback_one_model_gets_one_try_and_a_failure_names_each_model() {
+    use iyakki_flow::assist_profile::{propose_with_profile, AgentProfile, ProfileModel};
+    let host = FakeHost::new();
+    let req = iyakki_flow::host::HealRequest { run_id: "r".into(), flow_id: "f".into(), node_id: "a".into(), context: String::new(), agent: String::new(), model: String::new(), timeout_secs: 0, max_cents: 5 };
+    let prof = |fallback| AgentProfile { name: "p".into(), models: vec![ProfileModel { name: "a/one".into(), local: false, timeout_secs: 30 }, ProfileModel { name: "b/two".into(), local: false, timeout_secs: 30 }], local_first: false, fallback };
+    host.propose(Err("down".into()));
+    host.propose(Err("busy".into()));
+    let e = propose_with_profile(&*host, &prof(false), &req, &iyakki_flow::Cancel::new()).unwrap_err();
+    assert!(e.contains("a/one: down") && !e.contains("b/two"), "{e}");
+    assert_eq!(host.heal_requests.lock().unwrap().len(), 1);
+    let e = propose_with_profile(&*host, &prof(true), &req, &iyakki_flow::Cancel::new()).unwrap_err();
+    assert!(e.contains("a/one:") && e.contains("b/two:"), "{e}");
+    // an empty profile is one try with the assistant's own model
+    assert_eq!(AgentProfile::default().order().len(), 1);
+    assert!(AgentProfile::default().order()[0].name.is_empty());
+    // a cancelled run asks nobody
+    let c = iyakki_flow::Cancel::new();
+    c.cancel();
+    assert!(propose_with_profile(&*host, &prof(true), &req, &c).unwrap_err().contains("cancelled"));
+}
+
+#[test]
+fn a_profile_is_checked_for_names_duplicates_and_size() {
+    use iyakki_flow::assist_profile::{AgentProfile, ProfileModel};
+    let m = |n: &str| ProfileModel { name: n.into(), ..Default::default() };
+    assert!(AgentProfile { models: vec![m("")], ..Default::default() }.cleaned().is_err());
+    assert!(AgentProfile { models: vec![m("a"), m("a")], ..Default::default() }.cleaned().unwrap_err().contains("twice"));
+    assert!(AgentProfile { models: (0..7).map(|i| m(&format!("m{i}"))).collect(), ..Default::default() }.cleaned().is_err());
+    let p = AgentProfile { name: "  ".into(), models: vec![ProfileModel { name: "x/y".into(), local: true, timeout_secs: 99_999 }], ..Default::default() }.cleaned().unwrap();
+    assert_eq!((p.name.as_str(), p.models[0].timeout_secs), ("default", 1800));
+    assert!(p.summary().contains("x/y (local) 1800s"));
+    // an old settings file without the new keys still loads
+    let g: Global = serde_json::from_str(r#"{"enabled":true,"max_publish_per_day":3}"#).unwrap();
+    assert!(!g.matrix && g.profile == AgentProfile::default());
+}
+
 fn _unused(_: Arc<FakeHost>) {}
+
+#[test]
+fn the_activity_log_and_the_readout_list_what_the_agent_did_newest_first_and_hold_no_values() {
+    use iyakki_flow::assist_activity::{ago, lines, readout};
+    let e = env("assist-activity");
+    e.publish(linear("fl"));
+    let root = e.dir.join("flows");
+    let t = std::sync::atomic::AtomicI64::new(1_000_000);
+    let t = Arc::new(t);
+    let t2 = t.clone();
+    let book = AssistStore::from_fn(&root, move || t2.load(std::sync::atomic::Ordering::SeqCst));
+    book.record("fl", "draft", 3, "a fix for step b").unwrap();
+    t.store(1_600_000, std::sync::atomic::Ordering::SeqCst);
+    book.set_paused("fl", true).unwrap();
+    book.record("fl", "publish", 0, "version 3").unwrap();
+    let now = 1_600_000 + 2 * 3600 * 1000;
+    let l = lines(&book, "fl", now, 10);
+    assert!(l.len() >= 2, "{l:?}");
+    assert!(l[0].contains("a new version was published (version 3)") && l[0].starts_with("2 h ago"), "{l:?}");
+    assert!(l.iter().any(|x| x.contains("the agent made a draft (a fix for step b)")), "{l:?}");
+    assert_eq!(lines(&book, "fl", now, 1).len(), 1);
+    let r = readout(&book, "fl", now, 5);
+    assert_eq!(r["flow"], "fl");
+    assert_eq!(r["paused"], true);
+    assert!(r["waiting"].as_array().unwrap().is_empty() && r["watch"].is_null());
+    assert_eq!(r["counters"]["suggestions"], 0);
+    assert_eq!(ago(10_000, 10_000), "just now");
+    assert_eq!(ago(10_000_000, 10_000_000 - 5 * 60_000), "5 min ago");
+    assert_eq!(ago(10_000_000_000, 0), "115 days ago");
+    // a flow that does not exist reads as empty, not as an error
+    assert!(lines(&book, "nope", now, 5).is_empty());
+}

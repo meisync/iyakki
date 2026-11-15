@@ -16,13 +16,34 @@ pub fn count(text: &str) -> BTreeMap<String, usize> {
     m
 }
 
-/// The expected summary text: `done 219 · partial 121 · planned 0 · blocked 0 · deprecated 0 · total 340`. Every status is listed, also when
+/// The expected summary text: `done 219 · partial 121 (impl open 100 · unproven 21) · planned 0 · blocked 0 · deprecated 0 · total 340`. Every status is listed, also when
 /// it has no rows (the core test `matrix_is_consistent` prints it the same way; a status that drops to zero must not change the format).
 pub fn summary(text: &str) -> String {
     let c = count(text);
-    let mut parts: Vec<String> = STATUSES.iter().map(|s| format!("{s} {}", c.get(*s).copied().unwrap_or(0))).collect();
-    parts.push(format!("total {}", c.values().sum::<usize>()));
-    parts.join(" · ")
+    let (mut open, mut unproven) = (0, 0);
+    for line in text.lines().filter(|l| l.starts_with("| F-")) {
+        let cells: Vec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
+        if cells.get(3) != Some(&"partial") {
+            continue;
+        }
+        let (i, t) = cells.get(5).and_then(|x| x.split_once('/')).map(|(a, b)| (a.parse::<u32>().unwrap_or(0), b.parse::<u32>().unwrap_or(0))).unwrap_or((0, 0));
+        let manual = cells.get(6).copied().unwrap_or("");
+        if i < 100 {
+            open += 1;
+        } else if t < 100 || manual == "needed" || manual.starts_with("failed") {
+            unproven += 1;
+        }
+    }
+    let n = |s: &str| c.get(s).copied().unwrap_or(0);
+    format!(
+        "done {} · partial {} (impl open {open} · unproven {unproven}) · planned {} · blocked {} · deprecated {} · total {}",
+        n("done"),
+        n("partial"),
+        n("planned"),
+        n("blocked"),
+        n("deprecated"),
+        c.values().sum::<usize>()
+    )
 }
 
 /// Problems: a missing or wrong summary line, an unknown status.
@@ -48,11 +69,11 @@ pub fn check(text: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
-    const T: &str = "x <!-- summary:start -->done 2 · partial 1 · planned 0 · blocked 0 · deprecated 0 · total 3<!-- summary:end -->\n| F-A-01 | a | P1 | done | P1 | 100% | t | |\n| F-A-02 | b | P1 | done | P1 | 100% | t | |\n| F-A-03 | c | P1 | partial | P1 | 50% | | |\n";
+    const T: &str = "x <!-- summary:start -->done 2 · partial 1 (impl open 1 · unproven 0) · planned 0 · blocked 0 · deprecated 0 · total 3<!-- summary:end -->\n| F-A-01 | a | P1 | done | P1 | 100/100 | none | t | |\n| F-A-02 | b | P1 | done | P1 | 100/100 | none | t | |\n| F-A-03 | c | P1 | partial | P1 | 50/30 | needed | | |\n";
 
     #[test]
     fn totals_are_counted_and_compared() {
-        assert_eq!(summary(T), "done 2 · partial 1 · planned 0 · blocked 0 · deprecated 0 · total 3");
+        assert_eq!(summary(T), "done 2 · partial 1 (impl open 1 · unproven 0) · planned 0 · blocked 0 · deprecated 0 · total 3");
         assert!(check(T).is_empty());
         assert!(check(&T.replace("done 2", "done 3"))[0].contains("totals line"));
         assert!(check("nothing")[0].contains("markers"));

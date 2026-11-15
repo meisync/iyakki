@@ -50,7 +50,7 @@ pub fn parse_header(f: &[u8]) -> Option<Header> {
     Some(Header { fc0: f[0] & 0xfc, da: f[4..10].try_into().ok()?, sa: f[10..16].try_into().ok()?, bssid: f[16..22].try_into().ok()? })
 }
 
-fn header(fc0: u8, da: Mac, sa: Mac, bssid: Mac) -> Vec<u8> {
+pub(crate) fn header(fc0: u8, da: Mac, sa: Mac, bssid: Mac) -> Vec<u8> {
     let mut h = vec![fc0, 0, 0, 0];
     h.extend_from_slice(&da);
     h.extend_from_slice(&sa);
@@ -108,6 +108,16 @@ pub fn beacon_head(bssid: Mac, ssid: &[u8], interval_tu: u16, band: Band, channe
 
 /// Beacon after the TIM: ERP and extended rates (2.4 GHz), then the RSN element.
 pub fn beacon_tail(band: Band) -> Vec<u8> {
+    beacon_tail_with(band, &eapol::rsn_ie_ccmp_psk())
+}
+
+/// The band a channel frequency (MHz) belongs to: 4900 and up is 5 GHz (6 GHz is not offered).
+pub fn band_for_freq(freq_mhz: u32) -> Band {
+    if freq_mhz >= 4900 { Band::A5 } else { Band::G24 }
+}
+
+/// [`beacon_tail`] with the RSN element of the caller (for WPA3, see [`crate::rsn`]).
+pub fn beacon_tail_with(band: Band, rsn: &[u8]) -> Vec<u8> {
     let mut f = Vec::new();
     let (_, ext) = rates(band);
     if band == Band::G24 {
@@ -116,16 +126,21 @@ pub fn beacon_tail(band: Band) -> Vec<u8> {
     if !ext.is_empty() {
         ie(&mut f, 50, &ext);
     }
-    f.extend_from_slice(&eapol::rsn_ie_ccmp_psk());
+    f.extend_from_slice(rsn);
     f
 }
 
 /// The probe response template given to the kernel: the beacon without TIM, as a probe response (the receiver address is
 /// filled in by the driver).
 pub fn probe_response(bssid: Mac, ssid: &[u8], interval_tu: u16, band: Band, channel: u8) -> Vec<u8> {
+    probe_response_with(bssid, ssid, interval_tu, band, channel, &eapol::rsn_ie_ccmp_psk())
+}
+
+/// [`probe_response`] with the RSN element of the caller.
+pub fn probe_response_with(bssid: Mac, ssid: &[u8], interval_tu: u16, band: Band, channel: u8, rsn: &[u8]) -> Vec<u8> {
     let mut f = beacon_head(bssid, ssid, interval_tu, band, channel);
     f[0] = SUBTYPE_PROBE_RESP;
-    f.extend(beacon_tail(band));
+    f.extend(beacon_tail_with(band, rsn));
     f
 }
 

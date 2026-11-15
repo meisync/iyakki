@@ -43,3 +43,29 @@ as fast as the IYAKKI desktop. Built 2026-11-04 (steps 1 to 5, rows F-CONN-01 to
 
 1. Move the client and decoder into the small crate (agent re-exports). 2. `probe`/`pin` and plain actions. 3. `serve` with the page and the
 bridge, with the security checks above and tests for each refusal. 4. `--share` once the storage routes exist. 5. Media bridge from the page.
+
+## 5. The window program (`iyakki-connect window`, EXPERIMENTAL; built 2026-11-11)
+
+Status: built for Linux and tried with Chrome 157 only (see KI-088). Detail and security rules: `CLIENT-SPLIT-DESIGN.md` step 5 and section 5. Row F-CLIENT-02.
+
+* `iyakki-connect window LINK|ADDRESS|NAME` shows the client page of an IYAKKI instance (a bare-metal machine or a cloud pod) in the installed
+  browser as an application window (no tabs, no address bar). There is no bundled engine and no GUI toolkit: the page and the engine are the
+  instance's own (`/connect`, `/connect/engine.wasm`), fetched over a pinned TLS connection, so the window always matches the instance's version.
+* The link is the one from Settings, Remote access, Connect a client: `https://host/connect?pin=SHA256#token`. The pin in the link (added by the
+  instance) lets the first connection pin the certificate with no question; without it the program asks like `pin` does. A pin that changed is a hard
+  stop (exit status 2), a link that disagrees with a stored pin or with the certificate shown is a hard stop, and the pin is never replaced silently.
+* A small server on `127.0.0.1` (random port; Host, Origin and a cookie from a one-time launch address; CSRF value for changes) serves the page,
+  replaces `/connect/keys.js` and relays the session WebSocket to the instance over the pinned connection. The browser needs no public certificate
+  authority and never sees the key. The instance's one-time token is never in an argument list: the browser opens a start page in its private profile
+  folder, which sends it to the launch address, which redirects to `/connect#token`.
+* The browser is found by well-known paths (Chrome, Chromium, Edge, then Firefox, then Safari; override with `--browser PATH` or
+  `IYAKKI_CONNECT_BROWSER`), started with `--app=`, a temporary profile (mode 700, deleted afterwards), no extensions, no sync, and its password
+  manager switched off in that profile. Firefox and Safari have no application mode: they get an ordinary window and the program says so. A
+  browser is never downloaded or bundled.
+* The device key lives in the program, one Ed25519 key per instance (`<config>/device-keys/*.key`, mode 600; the list is `instances.json`). The page
+  asks `POST /local/sign`; the program signs only a sign-in text for the client session for this device, within a minute of its clock, over a
+  challenge it saw come from the instance on the relayed socket (each challenge once). A plain browser tab keeps its own WebCrypto key as before.
+* Commands: `window`, `devices` (list), `devices forget NAME`; `pin`, `unpin`, `pins` are shared. `window ... --no-browser` prints the local
+  address instead of opening a browser; `--browser-arg ARG` (repeatable) appends an argument to the browser's command line.
+* Later: the operating system's key store instead of a key file (Keychain, DPAPI, Secret Service; the file mode is the protection until then); a
+  Windows build of the program (the crate uses Unix file modes today); signed and packaged installers; Edge, Firefox and Safari tried for real.

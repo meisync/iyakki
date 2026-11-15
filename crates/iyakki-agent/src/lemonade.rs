@@ -468,6 +468,8 @@ pub fn explain_error(model: &str, e: &str) -> String {
         format!("the Lemonade server asks for an API key (it was started with LEMONADE_API_KEY); set it with Key in Settings → Models ({e})")
     } else if l.contains("not found") || l.contains("not downloaded") || l.contains("404") || l.contains("not installed") {
         format!("`{model}` is not ready on the Lemonade server: pull it first in Settings → Models ({e})")
+    } else if l.contains("connection refused") || l.contains("timed out") || l.contains("timeout") || l.contains("failed to lookup") || l.contains("no route") || l.contains("unreachable") {
+        format!("the Lemonade server did not answer: check that it is running and that the address in Settings → Models is right ({e})")
     } else {
         e.to_string()
     }
@@ -691,6 +693,12 @@ mod tests {
         assert!(voices_for("kokoro-v1").contains(&"af_heart"));
         assert!(explain_error("SDXL-Base-1.0", "HTTP 404: model not found").contains("pull it first"));
         assert!(explain_error("x", "HTTP 401: Unauthorized").contains("API key"));
+        // a server that is off or not reachable is said in plain words (found by the live check against a server that was not there)
+        for raw in ["io: Connection refused (os error 61)", "timed out reading response", "io: No route to host"] {
+            let m = explain_error("x", raw);
+            assert!(m.contains("did not answer") && m.contains(raw), "{m}");
+        }
+        assert_eq!(explain_error("x", "HTTP 500: boom"), "HTTP 500: boom");
     }
 }
 

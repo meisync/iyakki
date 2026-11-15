@@ -710,7 +710,7 @@ with a report. Tools that publish only "latest" (the pip and npm based ones) hav
 **Assistant tools.** `store_outdated` reads. `store_update`, `store_remove` and `store_rollback` always ask (they are hard-ask:
 never run by Auto or Autopilot, never "allow for the session"), the card names the item, the versions, the source, what is deleted and
 what is kept. The assistant cannot grant new permissions or accept warnings; it tells the person to use the tile. Deleting data
-needs the item's name typed by the person (`ask_user`), like `platform_remove`. Driver packs and platform services have their own tools.
+needs the item's name typed by the person (`ask_user`), like `platform_remove`. Before an update the store copies the item's own data (when it keeps any; at most 256 MB, the newest three snapshots are kept, older ones are moved aside, not deleted); `store_data_snapshots` lists them and `store_data_restore` (always asks) puts one back, keeping what was there as `.rolled-back-<snapshot>`. Driver packs and platform services have their own tools.
 
 ## 16. Arranging the store your way
 
@@ -785,6 +785,16 @@ of section 15; removing asks what to do with the app's saved data (kept by defau
 server takes the `tile` kind by default. The IDE's **Publish** button runs the whole route (checks, version, store, signing key, token,
 review card, publish, install back to test): docs/APP-AUTHORING.md, "Publish to a private store from the IDE". A withdrawal by the store's
 administrator stops new installs but does not remove copies already installed (section 13, Limits).
+
+### 17.0 Bundles, `requires` and wizards in `app.json` (alpha.3, data and checks only)
+
+A tile package's `app.json` may carry more than the app (docs/development/CORE-ACCESS-MODEL.md sections 6d and 6e):
+
+* `manifest_version` (absent means 1) and `requires` (`core_interface` like `">=0.3 <1"`, `capabilities_needed`, `capabilities_optional`). The review refuses what this IYAKKI cannot serve and names both versions and the side to update; an update that needs a newer IYAKKI says "Needs a newer IYAKKI" and the installed version keeps running.
+* `contents`: up to 16 members, each `{id, kind, file, title?, optional?, capabilities?, requires?, wizards?}` with `kind` one of skill, flow, tool, mcp, agent, template, theme, extension, tile (other kinds are kept and shown as "not supported by this IYAKKI"). `file` is a path inside the app (no `..`, at most 100 characters, at most 512 KB, the app stays under the 1.5 MB cap). Members ask for their own capabilities and are approved on the same card, grouped by member; the approval is stored as `<installation>/<member>`. Install, update and remove are all or none. A member this IYAKKI cannot install blocks the install unless it is `optional`. Wired today: skill, flow (arrives as a draft in the person's Flows folder), agent, template, theme, extension; tool, mcp and a nested tile are not wired yet.
+* `wizards`: declarative install, update, reconfigure and remove wizards. They are read and checked; nothing runs them yet.
+
+Unknown fields in `app.json` are kept (older IYAKKI versions refused them).
 
 ### 17.1 Publishing from the IDE into the private store deployed on this device
 

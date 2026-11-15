@@ -273,7 +273,7 @@ impl Env for RealEnv {
         let host = std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_string()).ok().filter(|h| !h.is_empty() && h.len() <= 63 && h.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))).unwrap_or_else(|| "iyakki".into());
         let dm = crate::devmode::DevMode::open(&self.data);
         let on = dm.is_on();
-        Beacon { host, version: env!("CARGO_PKG_VERSION").to_string(), role: if on { "target" } else { "host" }.into(), dev_on: on, pairing_open: on && dm.pairing().is_some(), mac: String::new(), id: id.clone(), port: DEV_PORT }
+        Beacon { host, version: env!("CARGO_PKG_VERSION").to_string(), role: if on { "target" } else { "host" }.into(), dev_on: on, pairing_open: on && dm.pairing().is_some(), mac: String::new(), id: id.clone(), port: DEV_PORT, ip6: None }
     }
 
     fn dev_hello(&self, ip: Ipv4Addr) -> Result<Hello, String> {

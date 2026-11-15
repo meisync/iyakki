@@ -738,12 +738,12 @@ impl Feed {
                 }
                 if let Some(p) = want_detail {
                     let d = pod_detail(&*kube, &target, &p, now);
-                    s2.lock().unwrap().detail = Some((p, d));
+                    s2.lock().unwrap_or_else(std::sync::PoisonError::into_inner).detail = Some((p, d));
                 }
                 if let Some((p, c)) = pod {
                     if last_log.is_none_or(|t| t.elapsed() >= log_interval) {
                         let l = pod_logs(&*kube, &target, &p, &c, LOG_TAIL);
-                        let mut s = s2.lock().unwrap();
+                        let mut s = s2.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         if s.pod.as_ref().is_some_and(|x| x.0 == p) {
                             s.logs = Some((p, l));
                         }
@@ -761,19 +761,19 @@ impl Feed {
         self.visible.store(on, Ordering::Relaxed);
     }
     pub fn latest(&self) -> Option<Arc<Snapshot>> {
-        self.shared.lock().unwrap().snap.clone()
+        self.shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner).snap.clone()
     }
     pub fn fetches(&self) -> u64 {
-        self.shared.lock().unwrap().fetches
+        self.shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner).fetches
     }
     /// Fetch now: a wait between retries ends at once and the backoff starts over.
     pub fn refresh(&self) {
-        self.shared.lock().unwrap().refresh = true;
+        self.shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner).refresh = true;
         self.retry.gate.bump();
     }
     /// How the failures stand: stale data, the banner, when it last worked (none while all is well).
     pub fn status(&self) -> Status {
-        self.shared.lock().unwrap().tracker.status(self.retry.timer.now_ms(), self.retry.timer.wall_secs())
+        self.shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner).tracker.status(self.retry.timer.now_ms(), self.retry.timer.wall_secs())
     }
     /// The managed k3s is starting: refused connections are expected and the banner waits longer.
     pub fn set_starting(&self, on: bool) {
@@ -789,7 +789,7 @@ impl Feed {
     }
     /// Look at another namespace or selector (the old snapshot is dropped, a new one is fetched at once).
     pub fn set_target(&self, t: Target) {
-        let mut s = self.shared.lock().unwrap();
+        let mut s = self.shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if s.target != t {
             self.retry.gate.bump();
             s.tracker = Tracker::default();
@@ -802,26 +802,26 @@ impl Feed {
         }
     }
     pub fn target(&self) -> Target {
-        self.shared.lock().unwrap().target.clone()
+        self.shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner).target.clone()
     }
     /// Follow the log of a pod (None stops following).
     pub fn follow(&self, pod: Option<(String, String)>) {
-        let mut s = self.shared.lock().unwrap();
+        let mut s = self.shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if s.pod != pod {
             s.logs = None;
             s.pod = pod;
         }
     }
     pub fn logs(&self) -> Option<(String, Result<Vec<String>, String>)> {
-        self.shared.lock().unwrap().logs.clone()
+        self.shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner).logs.clone()
     }
     pub fn request_detail(&self, pod: &str) {
-        let mut s = self.shared.lock().unwrap();
+        let mut s = self.shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         s.detail = None;
         s.want_detail = Some(pod.to_string());
     }
     pub fn detail(&self) -> Option<(String, Result<PodDetail, String>)> {
-        self.shared.lock().unwrap().detail.clone()
+        self.shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner).detail.clone()
     }
 }
 
@@ -844,19 +844,19 @@ impl FakeKube {
         FakeKube { rules: Mutex::new(Vec::new()), calls: Mutex::new(Vec::new()) }
     }
     pub fn answer(&self, contains: &str, stdout: &str) -> &Self {
-        self.rules.lock().unwrap().insert(0, (contains.into(), Out { code: Some(0), stdout: stdout.into(), ..Default::default() }));
+        self.rules.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(0, (contains.into(), Out { code: Some(0), stdout: stdout.into(), ..Default::default() }));
         self
     }
     pub fn fail(&self, contains: &str, stderr: &str) -> &Self {
-        self.rules.lock().unwrap().insert(0, (contains.into(), Out { code: Some(1), stderr: stderr.into(), ..Default::default() }));
+        self.rules.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(0, (contains.into(), Out { code: Some(1), stderr: stderr.into(), ..Default::default() }));
         self
     }
     pub fn missing(&self) -> &Self {
-        self.rules.lock().unwrap().insert(0, (String::new(), Out { missing: true, stderr: "kubectl: No such file or directory".into(), ..Default::default() }));
+        self.rules.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(0, (String::new(), Out { missing: true, stderr: "kubectl: No such file or directory".into(), ..Default::default() }));
         self
     }
     pub fn calls(&self) -> Vec<String> {
-        self.calls.lock().unwrap().clone()
+        self.calls.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 }
 
@@ -869,8 +869,8 @@ impl Default for FakeKube {
 impl Kube for FakeKube {
     fn run(&self, args: &[String]) -> Out {
         let line = args.join(" ");
-        self.calls.lock().unwrap().push(line.clone());
-        for (k, o) in self.rules.lock().unwrap().iter() {
+        self.calls.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(line.clone());
+        for (k, o) in self.rules.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter() {
             if line.contains(k.as_str()) {
                 return o.clone();
             }

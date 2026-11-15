@@ -68,6 +68,8 @@ pub enum Note {
     NeedsAv(String),
     /// One developer-tools line from the page (the helper's `DevEvent`); stored only when the person turned developer tools for the chat agent on.
     Dev(String),
+    /// The response headers the engine received for the page that just committed (the helper's `ResponseHeaders`); kept only like `Dev`.
+    Headers { url: String, status: u32, headers: String },
     /// The page asks for the camera / microphone / screen (the helper's `PermissionRequest`): `kinds` are `media_kind` bits. The browser
     /// decides (`browser_media.rs`) and answers with [`Full::answer_permission`]; no answer means no.
     Media { id: u32, kinds: u8, origin: String },
@@ -121,6 +123,8 @@ pub struct Full {
     /// The last address recorded in the history (so a title arriving later does not count a second visit).
     pub visited: String,
     scale_hello: f32,
+    /// The generation of the extension snapshot last sent to the helper (0: none).
+    ext_gen: u64,
     zoom_pct: u32,
     /// The part of a wheel unit not yet sent.
     wheel_carry: f32,
@@ -233,6 +237,7 @@ impl Full {
             good_url: String::new(),
             visited: String::new(),
             scale_hello: st.scale.max(0.1),
+            ext_gen: 0,
             zoom_pct: (st.zoom * 100.0).round() as u32,
             wheel_carry: 0.0,
             zoom_sent: 100,
@@ -304,6 +309,17 @@ impl Full {
             return None;
         }
         self.load_started.map(|t| t.elapsed().as_secs_f32())
+    }
+
+    /// Hand the helper the browser extensions' current snapshot (the custom header rules are the first extension) when it changed since
+    /// the last time. Only the person's browser calls this; the media and agent views carry no rules.
+    pub fn sync_extensions(&mut self) {
+        let host = iyakki_agent::browserext::host();
+        if self.ext_gen != host.generation() {
+            let (g, blob) = host.blob();
+            self.ext_gen = g;
+            self.view.send(ToHelper::Extensions(blob));
+        }
     }
 
     pub fn navigate(&mut self, url: &str) {
@@ -560,6 +576,7 @@ impl Full {
                     self.redraw = true;
                 }
                 WvEvent::DevEvent(l) => self.notes.push(Note::Dev(l)),
+                WvEvent::ResponseHeaders { url, status, headers } => self.notes.push(Note::Headers { url, status, headers }),
                 WvEvent::PermissionRequest { id, kinds, origin } => self.notes.push(Note::Media { id, kinds, origin }),
                 WvEvent::CaptureState(k) => {
                     if self.capture != k {
@@ -901,6 +918,7 @@ pub fn key_events(k: &Key) -> Vec<ToHelper> {
             let upper = c.is_ascii_uppercase();
             (keys::from_char(*c), proto::MOD_CTRL | if upper { proto::MOD_SHIFT } else { 0 }, String::new())
         }
+        Key::Alt(c) => (keys::from_char(*c), proto::MOD_ALT | if c.is_ascii_uppercase() { proto::MOD_SHIFT } else { 0 }, String::new()),
         Key::Enter => (keys::RETURN, 0, "\r".into()),
         Key::Backspace => (keys::BACKSPACE, 0, String::new()),
         Key::Delete => (keys::DELETE, 0, String::new()),

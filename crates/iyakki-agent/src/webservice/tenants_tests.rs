@@ -202,3 +202,39 @@ fn a_machine_that_is_not_a_pod_has_one_tenant_this_machine_and_no_switch() {
     assert!(openapi::document(Profile::Cloud)["paths"].get("/api/v1/tenant/switch").is_some());
     assert!(!h.dir.join("cloud").exists(), "nothing was written");
 }
+
+#[test]
+fn the_role_change_trail_is_readable_by_tenant_administrators_only() {
+    let (h, root, ann, _bob) = three();
+    let (s, v, _) = h.call("GET", "/api/v1/tenant/audit", Some(&root), None);
+    assert_eq!(s, 200, "{v}");
+    let lines = v["lines"].as_array().unwrap();
+    assert!(lines.len() >= 2, "{v}");
+    assert!(lines.iter().all(|l| l["time"].is_u64() && l["change"].is_string()));
+    assert!(lines.iter().any(|l| l["change"].as_str().unwrap().contains("ann")), "adding ann is in the trail: {v}");
+    // paging: newest first, a page of one, the rest said to follow, a page past the end empty
+    assert_eq!(v["total"].as_u64().unwrap() as usize, lines.len());
+    let times: Vec<u64> = lines.iter().map(|l| l["time"].as_u64().unwrap()).collect();
+    assert!(times.windows(2).all(|w| w[0] >= w[1]), "newest first: {times:?}");
+    let (s, one, _) = h.call("GET", "/api/v1/tenant/audit?limit=1&offset=0", Some(&root), None);
+    assert_eq!(s, 200);
+    assert_eq!((one["lines"].as_array().unwrap().len(), one["more"].as_bool(), one["limit"].as_u64()), (1, Some(true), Some(1)), "{one}");
+    assert_eq!(one["lines"][0], lines[0]);
+    let (_, second, _) = h.call("GET", "/api/v1/tenant/audit?limit=1&offset=1", Some(&root), None);
+    assert_eq!(second["lines"][0], lines[1]);
+    let (_, past, _) = h.call("GET", "/api/v1/tenant/audit?limit=5&offset=1000", Some(&root), None);
+    assert_eq!((past["lines"].as_array().unwrap().len(), past["more"].as_bool()), (0, Some(false)));
+    // a plain member may not read it; nobody without a session either
+    let (s, v, _) = h.call("GET", "/api/v1/tenant/audit", Some(&ann), None);
+    assert_eq!(s, 403, "{v}");
+    assert_eq!(h.call("GET", "/api/v1/tenant/audit", None, None).0, 401);
+    // promote ann: now she can
+    assert_eq!(h.call("POST", "/api/v1/tenant/members", Some(&root), Some(json!({"name": "ann", "role": "admin"}))).0, 200);
+    let (s, v2, _) = h.call("GET", "/api/v1/tenant/audit", Some(&ann), None);
+    assert_eq!(s, 200);
+    assert!(v2["lines"].as_array().unwrap().len() > lines.len(), "the promotion is in the trail too");
+    // a machine that is not a pod has no tenant roles at all
+    let desk = harness("agent-api", |_| {});
+    let t = desk.root();
+    assert_ne!(desk.call("GET", "/api/v1/tenant/audit", Some(&t), None).0, 200);
+}

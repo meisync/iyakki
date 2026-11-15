@@ -1,10 +1,11 @@
 //! The tenant's time zone for cron triggers (tenant configuration `schedule.timezone`, default UTC).
 //!
 //! A trigger names its own zone (`tz` on the cron trigger, default `local`). In the cloud `local` means the tenant's setting, never the
-//! pod's clock. No time zone database is in the repository: a zone name is read from the system's zone files (`/usr/share/zoneinfo`,
-//! the same reader the desktop uses) when the image has them; the shipped `FROM scratch` container does not, so there only `UTC`, `Z`
-//! and fixed offsets (`+05:30`, `-0800`) work and any other name falls back to UTC with a visible warning in the status. No rule table
-//! was written by hand (daylight saving changes are the system files' job).
+//! pod's clock. A zone name is read from the system's zone files (`/usr/share/zoneinfo`, the same reader the desktop uses) when the image
+//! has them (they also know the past); the shipped `FROM scratch` container does not, so there the built-in table of [`super::tzrules`]
+//! answers: about a hundred IANA zones with their current daylight saving rules. A name in neither (and a rule from before the current
+//! one, in the built-in table) falls back to UTC with a visible warning in the status; `UTC`, `Z` and fixed offsets (`+05:30`, `-0800`)
+//! always work.
 
 use iyakki_flow::sched::{basic_tz, FixedTz, Tz, TzResolver};
 use std::path::PathBuf;
@@ -46,7 +47,7 @@ pub fn mode_of(setting: &str, zoneinfo: &Option<PathBuf>) -> Mode {
     if let Some(t) = basic_tz(s) {
         return Mode::Fixed(t.offset_secs(0));
     }
-    if zone_file(zoneinfo, s).is_some() {
+    if zone_file(zoneinfo, s).is_some() || super::tzrules::builtin(s).is_some() {
         return Mode::Zone(s.to_string());
     }
     Mode::FellBackToUtc(s.to_string())
@@ -61,14 +62,14 @@ pub fn tenant_resolver(setting: &str, zoneinfo: Option<PathBuf>) -> TzResolver {
         if let Some(t) = basic_tz(n) {
             return Some(t);
         }
-        Some(zone_file(&zoneinfo, n).unwrap_or_else(|| Arc::new(FixedTz(0))))
+        Some(zone_file(&zoneinfo, n).or_else(|| super::tzrules::builtin(n)).unwrap_or_else(|| Arc::new(FixedTz(0))))
     })
 }
 
 /// Is this a value `schedule.timezone` may take? (Offsets and UTC always; a name only when the zone files know it.)
 pub fn setting_ok(setting: &str, zoneinfo: &Option<PathBuf>) -> Result<(), String> {
     match mode_of(setting, zoneinfo) {
-        Mode::FellBackToUtc(n) => Err(format!("`{n}` is not a zone this image knows (use UTC or an offset like +05:30)")),
+        Mode::FellBackToUtc(n) => Err(format!("`{n}` is not a zone this image knows (use UTC, an offset like +05:30 or a zone such as Europe/Berlin)")),
         _ => Ok(()),
     }
 }

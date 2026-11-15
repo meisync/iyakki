@@ -30,6 +30,8 @@ use iyakki_webview::proto::{self, FromHelper, Framer, Hello, MouseKind, Rect, To
 const BAR_W: u32 = 16;
 
 struct Fake {
+    /// The header rules of the last extension snapshot (what the real web process extension would hold).
+    ext_rules: Vec<iyakki_webview::ext::HeaderRule>,
     stream: UnixStream,
     shm: std::fs::File,
     hello: Hello,
@@ -88,6 +90,27 @@ impl Fake {
         let _ = self.stream.write_all(&m.encode());
     }
 
+    /// What the web process extension would add to a request for this address (names only, never values).
+    fn log_request_headers(&mut self, url: &str) {
+        use iyakki_webview::ext::{headers_for, Target};
+        let Some((scheme, rest)) = url.split_once("://") else { return };
+        if (scheme != "http" && scheme != "https") || self.ext_rules.is_empty() {
+            return;
+        }
+        let https = scheme == "https";
+        let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        let (auth, path) = (&rest[..end], &rest[end..]);
+        let (host, port) = match auth.rsplit_once(':') {
+            Some((h, p)) => (h, p.parse().unwrap_or(0)),
+            None => (auth, if https { 443 } else { 80 }),
+        };
+        let path = path.split(['?', '#']).next().unwrap_or("");
+        let ambiguous = path.contains('%') || path.contains('\\') || path.split('/').any(|s| s == "." || s == "..");
+        let t = Target { https, host: host.to_ascii_lowercase(), port, segs: path.split('/').filter(|s| !s.is_empty()).map(str::to_string).collect(), ambiguous };
+        let names: Vec<String> = headers_for(&self.ext_rules, &t).iter().map(|h| h.0.to_string()).collect();
+        self.log(format!("request headers for {host}: [{}]", names.join(",")));
+    }
+
     fn log(&mut self, s: String) {
         self.send(FromHelper::Log(s));
     }
@@ -142,6 +165,7 @@ impl Fake {
         match m {
             ToHelper::Hello(_) => {}
             ToHelper::Navigate(url) => {
+                self.log_request_headers(&url);
                 if let Some(name) = url.strip_prefix("fake://download/") {
                     self.send(FromHelper::Download { url: format!("https://example.org/files/{name}"), name: name.to_string() });
                 } else if let Some(raw) = url.strip_prefix("fake://report/") {
@@ -302,6 +326,20 @@ impl Fake {
                 }
             }
             ToHelper::ScreenSource(_) => {} // logged only
+            ToHelper::Extensions(blob) => {
+                use iyakki_webview::ext::Snapshot;
+                match Snapshot::decode(&blob.0) {
+                    Err(e) => {
+                        self.ext_rules.clear();
+                        self.log(format!("extensions: refused ({e})"));
+                    }
+                    Ok(snap) => {
+                        let d = snap.dispatch();
+                        self.log(format!("extensions: {} entries, {} header rules, ignored: [{}]", snap.entries.len(), d.header_rules.len(), d.report.join("; ")));
+                        self.ext_rules = d.header_rules;
+                    }
+                }
+            }
             ToHelper::Quit => return false,
         }
         true
@@ -382,7 +420,7 @@ fn main() {
             }
         }
     };
-    let mut f = Fake { stream: stream.try_clone().unwrap(), shm, w: 0, h: 0, img: Vec::new(), bar: 0, mouse: (-100, -100), history: Vec::new(), idx: 0, busy: [false; 2], input: 0, next_slot: 0, dirty: None, visible: true, animate, hung: false, fs: false, audio: false, spam: 0, asked: 0, capturing: 0, hello: hello.clone() };
+    let mut f = Fake { ext_rules: Vec::new(), stream: stream.try_clone().unwrap(), shm, w: 0, h: 0, img: Vec::new(), bar: 0, mouse: (-100, -100), history: Vec::new(), idx: 0, busy: [false; 2], input: 0, next_slot: 0, dirty: None, visible: true, animate, hung: false, fs: false, audio: false, spam: 0, asked: 0, capturing: 0, hello: hello.clone() };
     f.send(FromHelper::Ready { version: proto::VERSION, engine: "fake".into(), engine_version: "1".into() });
     f.resize(hello.w, hello.h);
     f.log(format!("got Hello {hello:?}"));

@@ -5,11 +5,19 @@ edition.workspace = true
 license.workspace = true
 description = "The contract between IYAKKI apps and IYAKKI core: traits, serde request/response types, ApiError, Capabilities, Identity. No IO."
 
-[dependencies]
-iyakki-sec.workspace = true
-thiserror.workspace = true
-libc = "0.2"
-serde = { version = "1", features = ["derive"] }
+[features]
+# "native" brings the parts that need libc and iyakki-sec (child reaping, the policy-based host and service traits). Without it the crate is
+# pure logic (catalogue, approvals, broker, access log types, contract) and is meant to build for wasm32 as well.
+default = ["native"]
+native = ["dep:libc", "dep:iyakki-sec", "dep:iyakki-zram", "dep:iyakki-devctl", "dep:iyakki-storage", "dep:iyakki-netscan"]
 
-[dev-dependencies]
+[dependencies]
+iyakki-sec = { workspace = true, optional = true }
+thiserror.workspace = true
+iyakki-zram = { workspace = true, optional = true }
+iyakki-devctl = { workspace = true, optional = true }
+iyakki-storage = { workspace = true, optional = true }
+iyakki-netscan = { workspace = true, optional = true }
+libc = { version = "0.2", optional = true }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"

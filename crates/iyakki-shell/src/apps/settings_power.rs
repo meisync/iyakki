@@ -65,7 +65,7 @@ impl SettingsApp {
 
     pub(super) fn handle_power(&mut self, k: &Key, cx: &AppCx) {
         let Key::Char(c) = k else { return };
-        if !matches!(c, 'e' | 'b' | 'v' | 's' | 'w' | 'x') {
+        if !matches!(c, 'e' | 'b' | 'v' | 's' | 'w' | 'x' | 'l' | 'p') {
             return;
         }
         if !self.admin(cx) {
@@ -98,6 +98,25 @@ impl SettingsApp {
                     self.ok(if m == 0 { "The computer will not sleep by itself.".to_string() } else { format!("The computer sleeps after {m} minutes without use, unless something is running.") });
                 }
             }
+            'l' => {
+                if !caps.lid {
+                    return self.fail("This computer shows no lid switch, so there is nothing to set.");
+                }
+                let next = cur.lid.next();
+                if self.pw_save(cx, &format!("lid={next:?}"), |s| s.lid = next) {
+                    self.ok(match next {
+                        power::LidAction::Nothing => "Closing the lid does nothing.".to_string(),
+                        power::LidAction::Lock => "Closing the lid locks the screen. Apps and runs go on.".to_string(),
+                        power::LidAction::Sleep => "Closing the lid locks the screen and sleeps the computer, unless sleeping is not possible or something is running (then it only locks).".to_string(),
+                    });
+                }
+            }
+            'p' => {
+                let next = cur.button.next();
+                if self.pw_save(cx, &format!("button={next:?}"), |s| s.button = next) {
+                    self.ok(format!("The power button: {}.", next.label()));
+                }
+            }
             'w' => {
                 let on = !cur.sleep_when_busy;
                 if self.pw_save(cx, &format!("sleep_when_busy={on}"), |s| s.sleep_when_busy = on) {
@@ -117,7 +136,7 @@ impl SettingsApp {
     }
 
     pub(super) fn power_buttons(&self) -> Vec<Btn> {
-        vec![("Performance", TEXT, 'e'), ("Balanced", ACCENT, 'b'), ("Power saver", TEXT, 'v'), ("Sleep after idle", TEXT, 's'), ("Sleep while busy", TEXT, 'w')]
+        vec![("Performance", TEXT, 'e'), ("Balanced", ACCENT, 'b'), ("Power saver", TEXT, 'v'), ("Sleep after idle", TEXT, 's'), ("Sleep while busy", TEXT, 'w'), ("Lid", TEXT, 'l'), ("Power button", TEXT, 'p')]
     }
 
     pub(super) fn render_power(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
@@ -140,10 +159,34 @@ impl SettingsApp {
         }
         let sleep_title = if cfg.sleep_after_min == 0 { "Sleep when idle: never".to_string() } else { format!("Sleep when idle: after {} minutes", cfg.sleep_after_min) };
         let sleep_help = if caps.t2 { "Experimental on this Mac: by default it only switches to the power saver profile. Never while something is running." } else { "Locks the session and sleeps. Never while an install, download, write, job or model is working. Click to change the time." };
-        row(g, &mut y, &sleep_title, sleep_help, cfg.sleep_after_min > 0, admin && caps.sleep, 's');
-        row(g, &mut y, "Sleep even while something is running", "Off by default. Turn it on only if you want sleep to win over a running install or job.", cfg.sleep_when_busy, admin && caps.sleep, 'w');
+        // the remaining cards go two to a row where the window is wide, so the page keeps its rows when the lid and the power button join it
+        let wide = a.w > 820.0 * s;
+        let gap = 10.0 * s;
+        let half = (a.w - gap) / 2.0;
+        let mut cards: Vec<(String, String, bool, bool, char)> = vec![
+            (sleep_title, sleep_help.to_string(), cfg.sleep_after_min > 0, admin && caps.sleep, 's'),
+            ("Sleep even while something is running".into(), "Off by default. Turn it on only if you want sleep to win over a running install or job.".into(), cfg.sleep_when_busy, admin && caps.sleep, 'w'),
+        ];
+        if caps.lid {
+            cards.push((format!("Closing the lid: {}", cfg.lid.label()), "Click to change: nothing, lock the screen, or sleep. Sleep only when this computer can sleep and nothing is running, otherwise it locks.".into(), cfg.lid != power::LidAction::Nothing, admin, 'l'));
+        }
+        cards.push((format!("Power button: {}", cfg.button.label()), "Click to change: open the power card (the default), lock the screen, sleep, or nothing. Sleep falls back to the card when it is not possible.".into(), cfg.button != power::ButtonAction::Card, admin, 'p'));
         if caps.t2 {
-            row(g, &mut y, "Try real sleep on this Mac (experimental)", "Sleep and wake are not dependable on Apple T2 Macs. If it does not wake, hold the power button.", cfg.sleep_experimental, admin && caps.sleep, 'x');
+            cards.push(("Try real sleep on this Mac (experimental)".into(), "Sleep and wake are not dependable on Apple T2 Macs. If it does not wake, hold the power button.".into(), cfg.sleep_experimental, admin && caps.sleep, 'x'));
+        }
+        let mut i = 0;
+        while i < cards.len() {
+            if y + rh > limit {
+                break;
+            }
+            let per = if wide { 2.min(cards.len() - i) } else { 1 };
+            for j in 0..per {
+                let (title, help, on, can, key) = &cards[i + j];
+                let (x, w) = if per == 2 { (a.x + j as f32 * (half + gap), half) } else { (a.x, a.w) };
+                controls::switch_row(g, R::new(x, y, w, rh), s, title, help, *on, *can, Event::Key(Key::Char(*key)), ACCENT);
+            }
+            y += rh + 8.0 * s;
+            i += per;
         }
         y += 4.0 * s;
         let line = |g: &mut Gfx, y: &mut f32, col: [u8; 4], face: Face, text: &str| {

@@ -154,12 +154,12 @@ fn the_cards_are_clickable_and_the_page_says_what_is_not_supported() {
     let mut g = Gfx::new(1280, 720);
     g.clear(rgb(0, 0, 0));
     a.render(&mut g, R::new(0.0, 72.0, 1280.0, 648.0), 1.0, &cx, 0);
-    for k in ['e', 'b', 'v', 's', 'w', 'x'] {
+    for k in ['e', 'b', 'v', 's', 'w', 'p', 'x'] {
         assert!(g.hits.iter().any(|h| h.ev == Event::Key(Key::Char(k))), "a card for {k}");
     }
-    // the lid and the power button are said plainly, not offered
+    // what the machine cannot do is said plainly
     let text = iyakki_agent::power::limits(&iyakki_agent::power::caps(&PowerEnv::at(machine("pw-draw-t", true, true, true)))).join(" ");
-    assert!(text.contains("Lid and power button: not supported") && text.contains("experimental on this Mac"), "{text}");
+    assert!(text.contains("experimental on this Mac"), "{text}");
     // a click on a card does what the key does
     let hit = g.hits.iter().find(|h| h.ev == Event::Key(Key::Char('v'))).unwrap().ev.clone();
     a.handle(&hit, &cx);
@@ -181,4 +181,46 @@ fn the_page_draws_at_six_sizes_on_every_kind_of_machine() {
             }
         }
     }
+}
+
+#[test]
+fn the_lid_and_the_power_button_are_chosen_on_the_page_kept_and_the_lid_row_exists_only_with_a_lid() {
+    let cx = admin("pw-lid");
+    let no_lid = machine("pw-lid-a", true, true, false);
+    let mut a = SettingsApp::new(&cx).with_power_env(PowerEnv::at(&no_lid));
+    a.go_to(Tab::Power);
+    key(&mut a, &cx, 'l');
+    assert!(a.status().unwrap().0.contains("no lid switch"), "{:?}", a.status());
+    assert_eq!(cfg(&cx).lid, iyakki_agent::power::LidAction::Nothing);
+    // the button works on every machine and cycles card -> lock -> sleep -> nothing -> card
+    key(&mut a, &cx, 'p');
+    assert_eq!(cfg(&cx).button, iyakki_agent::power::ButtonAction::Lock);
+    key(&mut a, &cx, 'p');
+    assert_eq!(cfg(&cx).button, iyakki_agent::power::ButtonAction::Sleep);
+    assert!(a.status().unwrap().0.contains("sleep"));
+    key(&mut a, &cx, 'p');
+    key(&mut a, &cx, 'p');
+    assert_eq!(cfg(&cx).button, iyakki_agent::power::ButtonAction::Card);
+    let with_lid = machine("pw-lid-b", true, true, false);
+    put(&with_lid, "proc/acpi/button/lid/LID0/state", "state:      open");
+    let mut a = SettingsApp::new(&cx).with_power_env(PowerEnv::at(&with_lid));
+    a.go_to(Tab::Power);
+    key(&mut a, &cx, 'l');
+    assert_eq!(cfg(&cx).lid, iyakki_agent::power::LidAction::Lock);
+    key(&mut a, &cx, 'l');
+    assert_eq!(cfg(&cx).lid, iyakki_agent::power::LidAction::Sleep);
+    assert!(a.status().unwrap().0.contains("only locks"), "{:?}", a.status());
+    let mut g = Gfx::new(1280, 720);
+    g.clear(rgb(0, 0, 0));
+    a.render(&mut g, R::new(0.0, 72.0, 1280.0, 648.0), 1.0, &cx, 0);
+    assert!(g.text_log.iter().any(|t| t.2.contains("Closing the lid: sleep")), "the lid row is drawn");
+    assert!(g.text_log.iter().any(|t| t.2.contains("Power button: open the power card")), "{:?}", g.text_log.iter().map(|t| t.2.clone()).filter(|t| t.contains("Power")).collect::<Vec<_>>());
+    // only an administrator changes either
+    let user = plain_user("pw-lid-user");
+    let mut a = SettingsApp::new(&user).with_power_env(PowerEnv::at(&with_lid));
+    a.go_to(Tab::Power);
+    key(&mut a, &user, 'p');
+    key(&mut a, &user, 'l');
+    assert_eq!(cfg(&user).lid, iyakki_agent::power::LidAction::Nothing);
+    assert_eq!(cfg(&user).button, iyakki_agent::power::ButtonAction::Card);
 }

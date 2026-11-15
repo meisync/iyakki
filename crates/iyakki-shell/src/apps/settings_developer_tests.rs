@@ -280,6 +280,81 @@ fn every_part_of_the_page_answers_a_click_like_its_key() {
     assert!(!a.devel.log);
 }
 
+#[test]
+fn the_web_service_scopes_of_a_computer_are_listed_and_changed_by_tap_and_by_key_and_follow_the_store() {
+    let cx = admin("devset-api");
+    let d = DevMode::open(cx.services.dir());
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx, Tab::Developer);
+    key(&mut a, &cx, Key::Char('e'));
+    key(&mut a, &cx, Key::Char('p'));
+    pair(&d, "laptop");
+    let g = draw(&mut a, &cx, 1280, 1800);
+    for fam in ["api:status", "api:chat", "api:flows", "api:files", "api:tenant", "api:notify", "api:tiles"] {
+        assert!(g.hits.iter().any(|h| h.label == format!("laptop: {fam}")), "{fam} is listed");
+    }
+    assert!(!g.hits.iter().any(|h| h.label == "laptop: api:admin"), "the administrator family is never offered");
+    // a tap cycles the family: nothing -> reading only -> all -> nothing
+    tap(&mut a, &cx, &g, |h| h.label == "laptop: api:flows");
+    assert_eq!(d.api_scopes("laptop"), vec!["api:flows:read".to_string()]);
+    let g = draw(&mut a, &cx, 1280, 1800);
+    tap(&mut a, &cx, &g, |h| h.label == "laptop: api:flows");
+    assert_eq!(d.api_scopes("laptop"), vec!["api:flows".to_string()]);
+    assert!(a.status().is_some_and(|s| s.0.contains("api:flows")), "{:?}", a.status());
+    // the keys do the same for the family under the cursor
+    key(&mut a, &cx, Key::Char('i'));
+    key(&mut a, &cx, Key::Char('m'));
+    assert_eq!(d.api_scopes("laptop").len(), 2, "{:?}", d.api_scopes("laptop"));
+    let g = draw(&mut a, &cx, 1280, 1800);
+    tap(&mut a, &cx, &g, |h| h.label == "laptop: api:flows");
+    assert!(d.api_scopes("laptop").iter().all(|s| !s.starts_with("api:flows")), "the third tap takes it back");
+    assert!(cx.audit.recent(20).iter().any(|l| l.contains("devmode.api.set")));
+    // at the four sizes the lines stay inside the window
+    for (w, h) in [(1280u32, 1800u32), (1920, 2000), (1024, 1800), (800, 1800)] {
+        let g = draw(&mut a, &cx, w, h);
+        assert!(g.hits.iter().filter(|x| x.label.starts_with("laptop: api:")).all(|x| x.rect.x >= -0.5 && x.rect.x + x.rect.w <= w as f32 + 0.5), "{w}x{h}");
+    }
+}
+
+#[test]
+fn the_core_contract_switch_and_the_scopes_of_a_computer_are_on_the_page_off_by_default_and_audited() {
+    let cx = admin("devset-core");
+    let d = DevMode::open(cx.services.dir());
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx, Tab::Developer);
+    key(&mut a, &cx, Key::Char('e'));
+    key(&mut a, &cx, Key::Char('p'));
+    pair(&d, "laptop");
+    assert!(!d.core_enabled(), "off by default");
+    let g = draw(&mut a, &cx, 1280, 2400);
+    for sc in iyakki_agent::devmode::contract::GRANTABLE {
+        assert!(g.hits.iter().any(|h| h.label == format!("laptop: {sc}")), "{sc} is listed");
+    }
+    assert!(!g.hits.iter().any(|h| h.label == "laptop: local"), "the local marker is never offered");
+    assert!(g.hits.iter().any(|h| h.label == "Core contract on/off"));
+    // the switch by key; the scopes by tap and by key
+    key(&mut a, &cx, Key::Char('K'));
+    assert!(d.core_enabled(), "{:?}", a.status());
+    let g = draw(&mut a, &cx, 1280, 2400);
+    tap(&mut a, &cx, &g, |h| h.label == "laptop: flows:run");
+    assert_eq!(d.core_scopes("laptop"), vec!["flows:run".to_string()]);
+    key(&mut a, &cx, Key::Char('j'));
+    key(&mut a, &cx, Key::Char('z'));
+    assert_eq!(d.core_scopes("laptop").len(), 2, "{:?}", d.core_scopes("laptop"));
+    let g = draw(&mut a, &cx, 1280, 2400);
+    tap(&mut a, &cx, &g, |h| h.label == "laptop: flows:run");
+    assert!(!d.core_scopes("laptop").contains(&"flows:run".to_string()), "the second tap takes it back");
+    key(&mut a, &cx, Key::Char('K'));
+    assert!(!d.core_enabled());
+    let log = cx.audit.recent(30);
+    assert!(log.iter().any(|l| l.contains("core contract on")) && log.iter().any(|l| l.contains("core scope flows:run granted for laptop")) && log.iter().any(|l| l.contains("core contract off")));
+    // the lines stay inside the window at four sizes
+    for (w, h) in [(1280u32, 2400u32), (1920, 2400), (1024, 2400), (800, 2400)] {
+        let g = draw(&mut a, &cx, w, h);
+        assert!(g.hits.iter().filter(|x| x.label.starts_with("laptop: ") && x.label.contains(':')).all(|x| x.rect.x >= -0.5 && x.rect.x + x.rect.w <= w as f32 + 0.5), "{w}x{h}");
+    }
+}
+
 fn pair_again(a: &mut SettingsApp, cx: &AppCx, d: &DevMode, name: &str) {
     key(a, cx, Key::Char('p'));
     pair(d, name);
@@ -404,4 +479,126 @@ fn the_keys_4_8_and_1_approve_a_shell_for_4_8_and_12_hours_and_y_uses_the_8_hour
     }
     assert_eq!(iyakki_agent::devmode::grants::AUTO_DEFAULT_HOURS, 8, "the automatic approval defaults to 8 hours");
     assert_eq!(iyakki_agent::devmode::grants::MAX_MINUTES, 720);
+}
+
+#[test]
+fn the_restart_box_is_drawn_only_where_it_can_apply_ticks_and_unticks_by_key_and_by_tap_is_audited_and_ends_with_developer_mode() {
+    use iyakki_agent::devmode::scopes::Scope;
+    let texts = |g: &Gfx| g.layout_log.texts.iter().map(|t| t.3.clone()).collect::<Vec<_>>().join("\n");
+    let cx = admin("devset-restartbox");
+    let d = DevMode::open(cx.services.dir());
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx, Tab::Developer);
+    // switching on makes the certificate in the background: give it the time it takes before pairing
+    key(&mut a, &cx, Key::Char('e'));
+    let t0 = std::time::Instant::now();
+    while !d.is_on() && t0.elapsed() < std::time::Duration::from_secs(10) {
+        a.handle(&Event::Tick, &cx);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(d.is_on(), "developer mode came on");
+    paired_laptop(&cx, &d, &mut a);
+    let user = cx.session.user.clone();
+    // a computer without the power scope: no box, and the key says why it cannot be ticked
+    assert!(!texts(&draw(&mut a, &cx, 1280, 1400)).contains("Allow restarts from this computer"), "no box without the power scope");
+    key(&mut a, &cx, Key::Char('r'));
+    assert!(a.status().is_some_and(|s| s.0.contains("power")), "{:?}", a.status());
+    assert!(!d.restart_grant_active("laptop"));
+    // with the power scope the box is there, unticked, and says how long it lasts
+    d.set_scope(&cx.session.policy, &user, "laptop", Scope::Power, true).unwrap();
+    let t = texts(&draw(&mut a, &cx, 1280, 1400));
+    assert!(t.contains("[ ] Allow restarts from this computer without asking") && t.contains("lasts as long as this developer connection") && t.contains("Tap to allow (r)"), "{t}");
+    // a tap on the box ticks it: nothing else changes, the audit has one line, and the box now offers to stop
+    let g = draw(&mut a, &cx, 1280, 1400);
+    let h = g.hits.iter().find(|h| h.ev == Event::Key(Key::Char('r'))).expect("the box takes a tap");
+    let ev = h.ev.clone();
+    a.handle(&ev, &cx);
+    assert!(d.restart_grant_active("laptop"), "{:?}", a.status());
+    assert!(a.status().is_some_and(|s| s.0.contains("may restart or switch off this device without asking until") && s.0.contains("Nothing else.")), "{:?}", a.status());
+    assert_eq!(cx.audit.recent(40).iter().filter(|l| l.contains("devmode.restart.grant_on") && l.contains("laptop")).count(), 1);
+    let t = texts(&draw(&mut a, &cx, 1280, 1400));
+    assert!(t.contains("[x] Allow restarts from this computer without asking") && t.contains("Tap to stop (r)"), "{t}");
+    assert!(!d.keys()[0].has(Scope::Shell) && !d.keys()[0].has(Scope::Files), "ticking the box grants no other scope");
+    // the key unticks it
+    key(&mut a, &cx, Key::Char('r'));
+    assert!(!d.restart_grant_active("laptop"));
+    assert!(a.status().is_some_and(|s| s.0.contains("must ask for approval to restart this device again")), "{:?}", a.status());
+    assert!(cx.audit.recent(40).iter().any(|l| l.contains("devmode.restart.grant_off") && l.contains("laptop")));
+    assert!(texts(&draw(&mut a, &cx, 1280, 1400)).contains("[ ] Allow restarts from this computer"));
+    // ticked again, it ends when developer mode is switched off, and the box goes with the connection
+    key(&mut a, &cx, Key::Char('r'));
+    assert!(d.restart_grant_active("laptop"));
+    key(&mut a, &cx, Key::Char('e'));
+    assert!(!d.is_on());
+    assert!(!d.restart_grant_active("laptop"), "switching developer mode off ends the grant");
+    assert!(!texts(&draw(&mut a, &cx, 1280, 1400)).contains("Allow restarts from this computer"), "no box while developer mode is off");
+}
+
+struct NoTools;
+impl iyakki_agent::agent::Tools for NoTools {
+    fn defs(&self) -> Vec<iyakki_agent::agent::ToolDef> {
+        vec![]
+    }
+    fn call(&self, name: &str, _a: &serde_json::Value) -> Result<String, String> {
+        Err(format!("no tool {name}"))
+    }
+    fn describe(&self, name: &str, _a: &serde_json::Value) -> String {
+        name.to_string()
+    }
+}
+
+#[test]
+fn the_wasm_tiles_switch_is_off_by_default_changed_by_the_key_and_by_the_chat_tool_that_asks() {
+    use iyakki_agent::agent::Risk;
+    use serde_json::json;
+    let cx = admin("devset-wasm");
+    let on = || cx.services.settings.lock().unwrap().get().wasm_tiles;
+    assert!(!on(), "off by default");
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx, Tab::Developer);
+    let mut g = draw(&mut a, &cx, 1280, 720);
+    assert!(g.hits.iter().any(|h| matches!(h.ev, Event::Key(Key::Char('W')))), "the page has a line to tap for it");
+    // the key turns it on and off, and the audit log says so
+    key(&mut a, &cx, Key::Char('W'));
+    assert!(on());
+    g = draw(&mut a, &cx, 1280, 720);
+    assert!(g.hits.iter().any(|h| matches!(h.ev, Event::Key(Key::Char('W')))));
+    assert!(cx.audit.recent(20).iter().any(|l| l.contains("settings.wasm_tiles") && l.contains("on")));
+    key(&mut a, &cx, Key::Char('W'));
+    assert!(!on());
+    // the chat tools do the same: reading is free, changing asks every time and is for administrators
+    let t = crate::apps::chat_settings::wrap(&cx, Arc::new(NoTools));
+    let risk = |n: &str| t.defs().into_iter().find(|d| d.spec.name == n).map(|d| d.risk);
+    assert_eq!(risk("wasm_tiles_status"), Some(Risk::Safe));
+    assert_eq!(risk("wasm_tiles_set"), Some(Risk::Ask));
+    assert!(t.call("wasm_tiles_status", &json!({})).unwrap().contains("are off"));
+    t.call("wasm_tiles_set", &json!({"enabled": true})).unwrap();
+    assert!(on());
+    assert!(t.call("wasm_tiles_status", &json!({})).unwrap().contains("are on"));
+    // an ordinary account neither sees the page line nor the change tool
+    let mut u = admin("devset-wasm-user");
+    u.session.user = "amy".into();
+    u.session.role = iyakki_sec::policy::Role::User;
+    u.session.policy = iyakki_sec::policy::Role::User.template();
+    let ut = crate::apps::chat_settings::wrap(&u, Arc::new(NoTools));
+    assert!(!ut.defs().iter().any(|d| d.spec.name == "wasm_tiles_set"));
+}
+
+#[test]
+fn the_pairing_card_names_an_address_of_this_computer_from_cx_os_and_never_the_loopback() {
+    use iyakki_core_fake::{Canned, FakeOs};
+    let mut cx = admin("devset-os");
+    cx.os = Arc::new(FakeOs::with(Canned { ipv4: Some(vec![("lo".into(), "127.0.0.1".into()), ("wlan0".into(), "192.168.7.9".into())]), ..Canned::default() }));
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx, Tab::Developer);
+    key(&mut a, &cx, Key::Char('e'));
+    key(&mut a, &cx, Key::Char('p'));
+    let g = draw(&mut a, &cx, 1280, 800);
+    let all: String = g.text_log.iter().map(|(_, _, t)| t.as_str()).collect::<Vec<_>>().join(" ");
+    assert!(all.contains("192.168.7.9:"), "{all}");
+    assert!(!all.contains("127.0.0.1:"));
+    // a machine that lists no address gets the placeholder, not a crash
+    cx.os = Arc::new(FakeOs::with(Canned { ipv4: None, ..Canned::default() }));
+    let g = draw(&mut a, &cx, 1280, 800);
+    assert!(g.text_log.iter().any(|(_, _, t)| t.contains("<this device's address>")), "the placeholder");
 }

@@ -13,6 +13,7 @@
 //! the prompt, none reaches an app; heartbeats still run, so work in the background goes on), [`Shell::render`] draws
 //! [`Shell::lock_render`] instead of the desktop, and the screen saver's heartbeat calls [`Shell::lock_tick`].
 
+use crate::stale_stats::mark_stale;
 use super::*;
 use iyakki_agent::lockscreen::{self, LockConfig};
 
@@ -62,6 +63,16 @@ impl Shell {
         self.env.services.lock_user_vault(&user);
         // an encrypted home folder closes with the screen when the person chose that (F-STORE-05)
         let _ = iyakki_agent::enchome::EncHome::on_screen_lock_if_any(self.env.services.dir(), &user);
+        // a browser engine that holds the open profile lets it go before the data is sealed (KI-742)
+        if iyakki_agent::profilepolicy::Policy::load(self.env.services.dir(), &user).lock_seal {
+            self.apps_let_go_for_lock();
+        }
+        // protected browser data is sealed with the screen when the person chose that (F-VAULT-08)
+        match iyakki_agent::profilepolicy::on_screen_lock(self.env.services.dir(), &user) {
+            Ok(true) => self.env.audit.record(&user, "browser.data.sealed", "screen lock"),
+            Ok(false) => {}
+            Err(e) => self.env.audit.record(&user, "browser.data.seal.failed", &format!("screen lock: {e}")),
+        }
         // nothing of the desktop stays open over the prompt
         self.ctx = None;
         self.clip = None;
@@ -79,7 +90,7 @@ impl Shell {
         self.lockui.user = user;
         self.lockui.vault_was_open = vault_was_open;
         self.hits.clear();
-        self.stale = true;
+        mark_stale!(self);
         true
     }
 
@@ -110,6 +121,15 @@ impl Shell {
             return;
         }
         let user = s.user.clone();
+        // the timed write-back of protected browser data (F-VAULT-07): once a second is cheap, the work runs on its own thread
+        if !self.lockui.active {
+            let (audit, who) = (self.env.audit.clone(), user.clone());
+            iyakki_agent::profilepolicy::tick_in_background(self.env.services.dir(), &user, iyakki_schema::now_secs(), move |b| {
+                if let iyakki_agent::profilepolicy::Beat::Failed(e) = b {
+                    audit.record(&who, "browser.data.checkpoint.failed", e);
+                }
+            });
+        }
         if self.tick % 15 == 0 && lockscreen::take_request(self.env.services.dir(), &user) {
             self.lock_screen("asked for");
             return;
@@ -142,13 +162,13 @@ impl Shell {
             Event::Tick => {
                 // the caret blinks and the clock moves
                 if self.tick % 15 == 0 {
-                    self.stale = true;
+                    mark_stale!(self);
                 }
                 return false;
             }
             Event::MouseMove(x, y) => {
                 self.mouse = (*x, *y);
-                self.stale = true;
+                mark_stale!(self);
             }
             Event::MouseDown(x, y) => {
                 self.mouse = (*x, *y);
@@ -180,7 +200,7 @@ impl Shell {
             Event::FocusAt(_, x) => self.lockui.form.fields[0].click(*x),
             _ => {}
         }
-        self.stale = true;
+        mark_stale!(self);
     }
 
     fn lock_submit(&mut self) {
@@ -192,7 +212,7 @@ impl Shell {
         }
         let user = self.lockui.user.clone();
         // the same check, and the same throttle, as the sign-in screen
-        let r = self.env.store.lock().map_err(|_| AccountError::Storage("lock".into())).and_then(|mut s| s.authenticate(&user, &pw));
+        let r = Ok::<_, AccountError>(self.env.store.lock().unwrap_or_else(std::sync::PoisonError::into_inner)).and_then(|mut s| s.authenticate(&user, &pw));
         match r {
             Ok(sess) if sess.user == user => self.lock_open(&user, &pw),
             Ok(_) => self.lockui.form.error = Some("That password does not open this screen".into()),
@@ -208,6 +228,13 @@ impl Shell {
         // ... and opens again with the same password (F-STORE-05)
         let _ = iyakki_agent::enchome::EncHome::on_screen_unlock_if_any(self.env.services.dir(), user, pw);
         let vault = self.env.services.unlock_user_vault(user, pw);
+        // ... and the browser data opens again if the lock sealed it (the key held since sign-in, else the vault's)
+        let vault_key = self.env.services.user_get(user, iyakki_agent::profilestore::VAULT_SECRET).ok().and_then(|t| iyakki_agent::profilestore::ProfileKey::from_hex(&t));
+        match iyakki_agent::profilepolicy::on_screen_unlock(self.env.services.dir(), user, vault_key) {
+            Ok(true) => self.env.audit.record(user, "browser.data.opened", "screen unlock"),
+            Ok(false) => {}
+            Err(e) => self.env.audit.record(user, "browser.data.locked", &format!("screen unlock: {e}")),
+        }
         self.lockui.active = false;
         self.lockui.form = LockUi::fresh_form();
         self.lockui.kept_ms = self.saver_now_ms();
@@ -216,8 +243,9 @@ impl Shell {
             self.env.audit.record(user, "vault.user.locked", "after the lock screen");
             self.say("Your personal vault could not be opened (see Settings -> Vault).");
         }
+        self.views_after_unlock();
         self.hits.clear();
-        self.stale = true;
+        mark_stale!(self);
     }
 
     /// Draw the lock instead of the desktop. False when the screen is not locked.

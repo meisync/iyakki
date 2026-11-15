@@ -1,0 +1,118 @@
+# Every versioned surface of IYAKKI (docs/development/CORE-COMPATIBILITY-DESIGN.md sections 2, 8 and 10, step 1).
+# Checked by crates/iyakki-core-api/tests/compat_surfaces.rs (./run.sh compat-check). Tab separated:
+#   kind  id  file  value  class  note
+# kind   spec (an iyakki_schema::Spec; value = its current schema number), const (a const with a VERSION, SCHEMA, MAGIC or ABI word in its name;
+#        value = its initialiser) or manual (a number that sits as a literal in code; value = text the file must still contain)
+# class  surface: a promise to other releases; the note starts with the charter surface letter (A Rust interface, B C interface, C wire
+#        protocols, D data on disk, E packages and manifests, F the system itself, G clients). not-ours: looks like a version but is
+#        a third party's number, a mask, a limit or a release name.
+# A new versioned thing without a row fails the test; a changed value fails until the row is updated (and the release has a fixture
+# folder under tests/compat/); a vanished thing fails until its row is deleted (a removed surface is a compatibility event).
+# Golden fixtures live in tests/compat/<release>/ (see tests/compat/README.md).
+const	ABI_FILE	crates/iyakki-agent/src/avaddon.rs	"/usr/share/iyakki/av-addon-abi"	not-ours	a path, not a version
+const	ABI_VERSION	crates/iyakki-tile-abi/src/lib.rs	1	surface	B tile ABI (WASM tiles); the tile-abi crate has its own tests
+const	BUNDLE_VERSION	crates/iyakki-agent/src/browserjobs.rs	1	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
+const	CATALOGUE_VERSION	crates/iyakki-core-api/src/appcaps.rs	0	surface	E capability catalogue; names listed in tests/compat/alpha2/capability-catalogue.txt
+const	CDI_VERSION	crates/iyakki-agent/src/gpucdi.rs	"0.6.0"	not-ours	version of the external CDI spec we write
+const	LINE_VERSION	crates/iyakki-agent/src/accessbroker.rs	1	surface	D per-line "v" of access/log.jsonl; fixture tests/compat/alpha2/data/access/log.jsonl
+const	LAYER_SCHEMA	crates/iyakki-stage1/src/layers.rs	1	surface	F layer manifest (layers.json / iyakki/layers/current.json) schema; a newer schema is refused by name, unknown fields ignored; fixture owed (tests/compat release folder at the next cut)
+const	CONFIG_VERSION	crates/iyakki-fw/src/model.rs	1	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
+const	CONTRACT_VERSION	crates/iyakki-core-api/src/contract/hello.rs	ContractVersion { major: 0, minor: 2 }	surface	C typed contract hello (CORE-CONTRACT); negotiation tested in contract tests, transcript owed
+const	DM_VERSION	crates/iyakki-storage/src/dm.rs	[4, 0, 0]	not-ours	device-mapper kernel interface version
+const	EVENT_MAGIC	crates/iyakki-tile-abi/src/lib.rs	*b"IYEV"	surface	B tile ABI event framing
+const	FILE_VERSION	crates/iyakki-agent/src/notes.rs	1	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
+const	FILE_VERSION	crates/iyakki-agent/src/sharedvault.rs	1	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
+const	FXP_VERSION	crates/iyakki-sshfs/src/sftp_proto.rs	2	not-ours	SFTP protocol version (external standard)
+const	IMAGE_VERSION	crates/iyakki-agent/src/avbuild.rs	env!("CARGO_PKG_VERSION")	not-ours	the release version of the image, not an interface
+const	KI_VERSION_MASK	crates/iyakki-hotspot/src/eapol.rs	0x0007	not-ours	bit mask of the EAPOL frame
+const	LEDGER_VERSION	crates/iyakki-agent/src/agenticrag.rs	1	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
+const	LIST_MAGIC	crates/iyakki-tile-abi/src/lib.rs	*b"IYDL"	surface	B tile ABI list framing
+const	MAGIC	crates/iyakki-agent/src/aacpipe.rs	b"IYPC"	surface	C pipe framing between processes
+const	MAGIC	crates/iyakki-agent/src/backup.rs	b"IYAKKIBK"	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
+const	MAGIC	crates/iyakki-agent/src/cloudsnapshot.rs	b"IYSNAP1\n"	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
+const	MAGIC	crates/iyakki-agent/src/devmode/patch.rs	b"IYPATCH1"	surface	F developer-mode patch container
+const	MAGIC	crates/iyakki-agent/src/directlink/beacon.rs	"IYAKKI-DEV 1"	surface	C direct link beacon line
+const	MAGIC	crates/iyakki-agent/src/hostengines.rs	b"IYHV\0"	surface	C host engine list framing
+const	MAGIC	crates/iyakki-agent/src/hostvoice.rs	b"IYBV\0"	surface	C host voice list framing
+const	MAGIC	crates/iyakki-agent/src/kb.rs	b"AFKB1"	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
+const	MAGIC	crates/iyakki-agent/src/pkg.rs	"IYAKKI-PKG 1"	surface	E package container header
+const	MAGIC	crates/iyakki-agent/src/profilestore.rs	b"IYKBP1\0\0"	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
+const	MAGIC	crates/iyakki-archive/src/xz.rs	[0xFD, b'7', b'z', b'X', b'Z', 0]	not-ours	xz file magic (external format)
+const	MAGIC	crates/iyakki-bindelta/src/bindelta.rs	b"IYBDELT1"	surface	F binary delta magic of component updates
+const	MAGIC	crates/iyakki-camdetect/src/camrec_format.rs	b"IYAKREC1"	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
+const	MAGIC	crates/iyakki-connect/src/devkey.rs	"iyakki-connect-key-v1"	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
+const	MAGIC	crates/iyakki-hotspot/src/dhcp.rs	[99, 130, 83, 99]	not-ours	DHCP magic cookie (external protocol)
+const	MAGIC	crates/iyakki-sshfs/src/sshkey.rs	b"openssh-key-v1\0"	not-ours	OpenSSH key magic (external format)
+const	MAGIC	crates/iyakki-volcrypt/src/header.rs	b"IYAKVOL1"	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
+const	MAGIC	crates/iyakki-wake/src/weights.rs	b"IYWK"	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
+const	MAGIC	crates/iyakki-zram/src/mkswap.rs	b"SWAPSPACE2"	not-ours	Linux swap magic (external format)
+const	MANIFEST_VERSION	crates/iyakki-core-api/src/bundle.rs	1	surface	E bundle manifest_version (bundles, owned by the bundle work); fixture owed by that work
+const	MAX_SCHEMA_BYTES	crates/iyakki-agent/src/wtool.rs	8 * 1024	not-ours	a size limit
+const	MAX_VERSION	crates/iyakki-qr/src/qr.rs	40	not-ours	QR code symbol size limit
+const	MAX_VERSION	crates/iyakki-qr/src/qr_decode.rs	10	not-ours	QR code symbol size limit
+const	MIN_PROTOCOL_VERSION	crates/iyakki-core-api/src/client.rs	1	surface	C oldest client session protocol still answered; same transcript
+const	NVIDIA_VERSION	crates/iyakki-agent/src/gpu_nvidia.rs	"595.99.02"	not-ours	version of the third-party driver
+const	PENDING_CONF_MAGIC	crates/iyakki-storage/src/lib.rs	"IYAKKI-INSTALL-CONF-v1\n"	surface	F install conf handed to the first boot
+const	PROFILE_VERSION	crates/iyakki-agent/src/hwprofile.rs	1	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
+const	PROTOCOL_VERSION	crates/iyakki-core-api/src/client.rs	1	surface	C client session protocol, range PROTOCOL_VERSION..MIN_PROTOCOL_VERSION; transcript in tests/compat/alpha2/client-session.jsonl
+const	PROTOCOL_VERSION	crates/iyakki-remote/src/server.rs	2	surface	G remote screen stream protocol (browser page and window client); fixture owed by the client-engine work
+const	QA_VERSION	crates/iyakki-agent/src/browserqa.rs	1	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
+const	REQUEST_VERSION	crates/iyakki-camdetect/src/person.rs	1	surface	C person-detect helper request; golden request owed
+const	SCAN_VERSION	crates/iyakki-agent/src/macfw.rs	2	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
+const	SCHEMA	crates/iyakki-agent/src/dlmanifest.rs	1	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
+const	SNAPSHOT_VERSION	crates/iyakki-webview/src/ext.rs	1	surface	C extension snapshot; bytes in tests/compat/alpha2/extension-snapshot.hex
+const	STORE_VERSION	crates/iyakki-agent/src/ragtools.rs	1	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
+const	T_VERSION_MENU	crates/iyakki-shell/src/apps/story.rs	4	not-ours	menu item numbers of the story tile
+const	T_VERSION_PICK	crates/iyakki-shell/src/apps/story.rs	500; // + version number (1 is the first)	not-ours	menu item numbers of the story tile
+const	VERSION	crates/iyakki-agent/src/dash/model.rs	1	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
+const	VERSION	crates/iyakki-agent/src/flows/channel_switch.rs	1	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
+const	VERSION	crates/iyakki-agent/src/flows/channel_policy.rs	1	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
+const	VERSION	crates/iyakki-agent/src/inbox.rs	2	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
+const	VERSION	crates/iyakki-agent/src/quickinstall_gitea.rs	"1.24.5"	not-ours	version of the Gitea we install
+const	VERSION	crates/iyakki-agent/src/relinfo.rs	env!("CARGO_PKG_VERSION")	not-ours	the release version, not an interface
+const	VERSION	crates/iyakki-agent/src/store/builtin.rs	"1.0.0"	not-ours	version of the built-in store entries seeded by the code, see store notes
+const	VERSION	crates/iyakki-agent/src/toolrouting.rs	1	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
+const	VERSION	crates/iyakki-bindelta/src/bindelta.rs	1	surface	F binary delta format of component updates
+const	VERSION	crates/iyakki-sshfs/src/rf_sftp.rs	2	not-ours	SFTP protocol version (external standard)
+const	VERSION	crates/iyakki-wake/src/weights.rs	1	surface	D on-disk format number or magic; own versioned format, fixture owed unless listed in DATA-LAYOUT-AND-UPGRADE.md
+const	VERSION	crates/iyakki-webview/src/proto.rs	1	surface	C helper socket protocol Hello.version (docs/WEBVIEW-PROTOCOL.md); golden frames owed
+const	VERSIONS	crates/iyakki-agent/src/platform/gitea.rs	["1.23.8", "1.24.5"]	not-ours	the Gitea versions we can install
+const	VERSIONS	crates/iyakki-agent/src/store/privatestore.rs	["1.0.0"]	not-ours	the private store entry versions seeded by the code
+const	VERSION_LINE	crates/iyakki-sshfs/src/rf_ssh.rs	"SSH-2.0-IYAKKI_Files"	not-ours	SSH identification banner (external protocol)
+const	VERSION_LINE	crates/iyakki-sshfs/src/ssh_server.rs	"SSH-2.0-IYAKKI_SFTP"	not-ours	SSH identification banner (external protocol)
+const	WG_GENL_VERSION	crates/iyakki-vpn/src/wgnl.rs	1	not-ours	WireGuard generic netlink version (kernel)
+const	WIZARD_VERSION	crates/iyakki-core-api/src/wizard.rs	1	surface	E wizard spec version (owned by the wizard work); fixture owed by that work
+const	WPA_VERSIONS	crates/iyakki-hotspot/src/nl80211.rs	75	not-ours	nl80211 constant (kernel)
+const	WPA_VERSION_2	crates/iyakki-hotspot/src/nl80211.rs	2	not-ours	nl80211 constant (kernel)
+spec	approval pins	crates/iyakki-shell/src/apps/chat.rs	1	surface	D JSON store with an iyakki-schema Spec; fixture under tests/compat/alpha2/data
+spec	views	crates/iyakki-agent/src/views.rs	1	surface	D JSON store with an iyakki-schema Spec; fixture tests/compat/alpha2/data/views-amy.json
+spec	browser graphics memory	crates/iyakki-agent/src/webgraphics.rs	1	surface	D JSON store with an iyakki-schema Spec; fixture under tests/compat/alpha2/data
+spec	browser graphics setting	crates/iyakki-agent/src/webgraphics.rs	1	surface	D JSON store with an iyakki-schema Spec; fixture under tests/compat/alpha2/data
+spec	dashboard sources	crates/iyakki-agent/src/dash/store.rs	1	surface	D JSON store with an iyakki-schema Spec; fixture under tests/compat/alpha2/data
+spec	dev cluster state	crates/iyakki-agent/src/k3sdev.rs	1	surface	D JSON store with an iyakki-schema Spec; fixture under tests/compat/alpha2/data
+spec	developer mode restart grant	crates/iyakki-agent/src/devmode/restartgrant.rs	1	surface	D JSON store with an iyakki-schema Spec (devmode/restart-grant.json, alpha.3); unknown fields kept, tested in devmode::tests_restart
+spec	flow	crates/iyakki-flow/src/store.rs	1	surface	D JSON store with an iyakki-schema Spec; fixture under tests/compat/alpha2/data
+spec	flow assist	crates/iyakki-flow/src/assist_store.rs	1	surface	D JSON store with an iyakki-schema Spec; fixture under tests/compat/alpha2/data
+spec	model options	crates/iyakki-agent/src/modelopts.rs	1	surface	D JSON store with an iyakki-schema Spec; fixture under tests/compat/alpha2/data
+spec	network devices	crates/iyakki-agent/src/devwatch.rs	1	surface	D JSON store with an iyakki-schema Spec; fixture under tests/compat/alpha2/data
+spec	package ratings	crates/iyakki-agent/src/store/ratings.rs	1	surface	D JSON store with an iyakki-schema Spec; fixture under tests/compat/alpha2/data
+spec	paired devices	crates/iyakki-agent/src/devmode/client.rs	1	surface	D JSON store with an iyakki-schema Spec; fixture under tests/compat/alpha2/data
+spec	settings	crates/iyakki-agent/src/settings.rs	1	surface	D JSON store with an iyakki-schema Spec; fixture under tests/compat/alpha2/data
+manual	vault file v	crates/iyakki-agent/src/vault.rs	File { v: 1,	surface	D vault file header (binary-ish JSON envelope with v); fixture in tests/fixtures/upgrade/alpha1/vault
+manual	update pack format 2 (layers)	crates/iyakki-agent/src/devmode/update.rs	pub const FORMAT_LAYERS: u32 = 2;	surface	F update.json format 2 with a layers section; a device that reads only format 1 refuses it by name; format 1 packs apply unchanged; fixture owed
+manual	access log line	crates/iyakki-core-api/src/broker.rs	pub struct AccessEvent	surface	D access/log.jsonl, one AccessEvent per line, every line written has "v" (LINE_VERSION), a line without it is alpha.2, trim keeps raw lines (finding F-3 fixed); fixture tests/compat/alpha2/data/access/log.jsonl
+manual	approvals file	crates/iyakki-agent/src/accessbroker.rs	approvals.json	surface	D store/approvals.json, schema 1 {schema, approvals}; the alpha.2 bare map is lifted with .pre-v1 (finding F-2 fixed); fixture tests/compat/alpha2/data/store/approvals.json
+manual	views file	crates/iyakki-agent/src/views.rs	views-{who}.json	surface	D views-<user>.json, schema 1 via iyakki-schema, alpha.2 file lifted with .pre-v1 (finding F-4 fixed); fixture tests/compat/alpha2/data/views-amy.json
+manual	app.json capabilities	crates/iyakki-core-api/src/appcaps.rs	pub struct CapabilityRequest	surface	E the capabilities list of app.json (unknown fields kept in extra, finding F-1 fixed); fixture tests/compat/alpha2/app.json
+manual	extension hook kinds	crates/iyakki-webview/src/ext.rs	REQUEST_HEADERS: u32 = 1	surface	C hook kind numbers 1 to 5 of the extension snapshot; never reused
+manual	client session tags	crates/iyakki-core-api/src/client.rs	tag = "t"	surface	C the t tag of ClientMsg and ServerMsg; transcript in tests/compat/alpha2/client-session.jsonl
+manual	client media streams	crates/iyakki-core-api/src/client.rs	pub const STREAM_AUDIO	surface	C binary stream tags 1 to 5 (picture, audio, camera, microphone in, camera in) and the media messages; never renumbered; transcript tests/compat/alpha3/client-media.jsonl, frames tests/compat/alpha3/binary-frames.txt
+const	AGENT_MAGIC	crates/iyakki-connect/src/devkey.rs	"iyakki-connect-agent-v1"	surface	D connect device key held by an ssh-agent: one line `iyakki-connect-agent-v1 <public key hex>`, no secret; reads exactly this word, a newer word (v2) is refused as `not a device key file` and a cut key as damaged, never guessed at; fixture tests/compat/alpha3/connect-agent-key.txt (read by iyakki-connect devkey agent_tests)
+const	MAGIC	crates/iyakki-usb/src/biosshared.rs	b"IYAKKI-BIOSSAVE1"	surface	D BIOS boot save file (the sectors a legacy-BIOS install overwrites, with SHA-256): reads magic 1 only; another magic is refused as `not a BIOS boot save file`, a flipped byte as damaged, a cut file as cut short; nothing is restored from a file that fails; fixture tests/compat/alpha3/bios-save-v1.hex (read by iyakki-usb biosshared tests)
+const	SCHEMA	crates/iyakki-agent/src/checkup_result.rs	1	surface	D signed CHECK-UP result file (checkup-result.json: body text, ed25519 public key, signature); reads schema 1; a newer schema is refused by name (`result schema N is not known to this release`) after the signature has been checked, never half-read; fixture tests/compat/alpha3/checkup-result.json (read by iyakki-agent checkup_result tests)
+const	USERS_SCHEMA	crates/iyakki-accounts/src/lib.rs	1	surface	D users.json stamp: a file without a stamp is the alpha.1 layout and is read; schema 1 is written; a bigger stamp is read, never written (every save refused with the sentence that says to update IYAKKI) and unknown fields are kept; fixtures tests/fixtures/upgrade/alpha1/users.json and tests/fixtures/upgrade/current/users.json (iyakki-shell upgrade_tests)
+const	SDK_VERSION	crates/iyakki-core-api/src/sdkbridge/mod.rs	"1.2"	surface	E app bridge window.iyakki (SDK 1.x, docs/development/SDK-BRIDGE-V2.md); additions only within a major; recorded calls: tests/compat/alpha3/sdk-bridge.json
+const	FILE_VERSION	crates/iyakki-agent/src/store/sdkv2_money.rs	1	surface	D per-app SDK 1.2 state file appdata/tile-sdk/<person>/<app>.sdk2.json (first-use answers, money limit); a newer file is read-only, unknown fields are kept
+const	MAGIC	crates/iyakki-agent/src/audiostream.rs	[0x49, 0x41]	surface	C wire frame of cloud audio streaming (F-VOICE-38); no transport sends it yet, so no fixture is owed until one does
+const	VERSION	crates/iyakki-agent/src/audiostream.rs	1	surface	C wire frame of cloud audio streaming (F-VOICE-38); no transport sends it yet, so no fixture is owed until one does
+const	MAGIC	crates/iyakki-agent/src/sqlmini.rs	b"SQLite format 3\0"	not-ours	the first bytes of every SQLite file (SQLite's own, not a format of ours)

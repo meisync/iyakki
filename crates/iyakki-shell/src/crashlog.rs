@@ -35,10 +35,7 @@ pub fn install() {
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             let frames = our_frames(&std::backtrace::Backtrace::force_capture().to_string(), 12);
-            if let Ok(mut l) = LAST.lock() {
-                *l = format!("{info} | {}", frames.join(" | "));
-                l.truncate(1800);
-            }
+            put(&LAST, format!("{info} | {}", frames.join(" | ")));
             prev(info);
         }));
     });
@@ -46,7 +43,19 @@ pub fn install() {
 
 /// The note of the last panic since the previous call (empty when none was recorded).
 pub fn take_last() -> String {
-    LAST.lock().map(|mut l| std::mem::take(&mut *l)).unwrap_or_default()
+    take(&LAST)
+}
+
+/// Keep a note. A lock that another thread poisoned (it panicked while holding it) is used all the same: the crash notes must work
+/// exactly when things are going wrong.
+fn put(slot: &Mutex<String>, note: String) {
+    let mut l = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    *l = note;
+    l.truncate(1800);
+}
+
+fn take(slot: &Mutex<String>) -> String {
+    std::mem::take(&mut *slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
 }
 
 #[cfg(test)]
@@ -58,6 +67,22 @@ mod tests {
         let bt = "   0: std::backtrace::Backtrace::force_capture\n   1: iyakki_shell::textsel::drag\n             at ./crates/iyakki-shell/src/textsel.rs:439:21\n   2: core::panicking::panic_fmt\n   3: <iyakki_shell::apps::ide::IdeApp as iyakki_shell::apps::App>::render\n";
         assert_eq!(our_frames(bt, 20), vec!["#1 iyakki_shell::textsel::drag at ./crates/iyakki-shell/src/textsel.rs:439:21", "#3 <iyakki_shell::apps::ide::IdeApp as iyakki_shell::apps::App>::render"]);
         assert_eq!(our_frames(bt, 1).len(), 1);
+    }
+
+    #[test]
+    fn the_note_is_kept_and_taken_even_when_a_thread_panicked_holding_the_lock() {
+        let slot = std::sync::Arc::new(Mutex::new(String::new()));
+        let s2 = slot.clone();
+        let _ = std::thread::spawn(move || {
+            let _g = s2.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            panic!("an app thread fails under the lock");
+        })
+        .join();
+        assert!(slot.is_poisoned(), "the setup: the lock is poisoned");
+        put(&slot, "x".repeat(5000));
+        let n = take(&slot);
+        assert_eq!(n.len(), 1800, "kept and cut to the limit");
+        assert_eq!(take(&slot), "", "taken once");
     }
 
     #[test]

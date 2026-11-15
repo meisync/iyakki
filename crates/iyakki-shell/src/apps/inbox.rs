@@ -524,6 +524,16 @@ impl InboxApp {
 }
 
 impl App for InboxApp {
+    fn dialog_title(&self) -> Option<String> {
+        match &self.mode {
+            Mode::Browse | Mode::Group(..) => None,
+            Mode::Task(f, _) | Mode::Calendar(f, _) | Mode::Reject(f, _) | Mode::Secret(f, _) => Some(f.title.clone()),
+            Mode::Detail(_) => Some("Approval details".into()),
+            Mode::Confirm(..) => Some("Are you sure?".into()),
+            Mode::Browser(_) => Some("The assistant asks about your browser".into()),
+        }
+    }
+
     fn title(&self) -> &'static str {
         "Inbox"
     }

@@ -6,6 +6,7 @@ license.workspace = true
 description = "The VPN core: profile model, WireGuard .conf and OpenVPN .ovpn sanitisers, secrets that are kept apart, the WireGuard generic-netlink messages, and the pure route, DNS and kill-switch plans. No sockets, no root, no dependencies beyond serde."
 
 [dependencies]
+iyakki-filter = { path = "../iyakki-filter" }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]

@@ -21,6 +21,10 @@ impl SettingsApp {
         if !matches!(k, Key::Char('c') | Key::Enter | Key::Char(' ')) || !self.admin(cx) {
             return;
         }
+        if iyakki_agent::cloudmode::window_mode() {
+            self.ok(format!("{} The setting does not apply here.", iyakki_agent::cloudmode::WINDOW_WHY));
+            return;
+        }
         let svc = Self::svc(cx);
         let next = svc.cloud_setting().next();
         match svc.set_cloud_setting(next) {
@@ -37,7 +41,7 @@ impl SettingsApp {
         let c = &self.cloud;
         let join = |v: Vec<String>| if v.is_empty() { "nothing".to_string() } else { v.join(", ") };
         vec![
-            ("Setting".into(), Self::svc(cx).cloud_setting().label().into()),
+            ("Setting".into(), if iyakki_agent::cloudmode::window_mode() { "Fixed: off in the window".to_string() } else { Self::svc(cx).cloud_setting().label().into() }),
             ("Mode now".into(), if c.on { "Cloud mode is on".into() } else { "Desktop (cloud mode is off)".to_string() }),
             ("Why".into(), c.why.clone()),
             ("Hidden apps".into(), join(c.hidden_apps.iter().map(|a| a.label()).collect())),
@@ -55,11 +59,14 @@ impl SettingsApp {
         let label_w = (210.0 * s).min(a.w * 0.38);
         for (label, value) in self.cloud_rows(cx) {
             g.text(a.x, y, 14.0 * s, MUTED, &label, Face::Sans);
-            let lines = g.wrap(14.0 * s, &value, Face::Bold, a.w - label_w);
+            // a label wider than its column (a narrow window, big text) puts the value on the line below it
+            let stacked = g.text_width(14.0 * s, &label, Face::Sans) + 10.0 * s > label_w;
+            let (vx, vw, top) = if stacked { (a.x, a.w, y + 18.0 * s) } else { (a.x + label_w, a.w - label_w, y) };
+            let lines = g.wrap(14.0 * s, &value, Face::Bold, vw);
             for (i, l) in lines.iter().take(3).enumerate() {
-                g.text(a.x + label_w, y + i as f32 * 18.0 * s, 14.0 * s, TEXT, l, Face::Bold);
+                g.text(vx, top + i as f32 * 18.0 * s, 14.0 * s, TEXT, l, Face::Bold);
             }
-            y += 24.0 * s + lines.len().clamp(1, 3).saturating_sub(1) as f32 * 18.0 * s;
+            y += 24.0 * s + lines.len().clamp(1, 3).saturating_sub(1) as f32 * 18.0 * s + if stacked { 18.0 * s } else { 0.0 };
         }
     }
 }

@@ -58,6 +58,7 @@ impl LearnApp {
                     v.push(Item::Row { title: p.topic.clone(), sub: format!("{} of {} done · {}{}", p.done_count(), p.sessions.len(), next, if p.events.is_empty() { "" } else { " · in the calendar" }), accent: ACCENT, selected: i == self.sel[0], ev: Event::Row(i) });
                 }
                 if !self.plans.is_empty() {
+                    v.push(Item::Buttons(vec![b("Export PDF", T_PDF, MUTED)]));
                     self.delete_buttons(&mut v, "Delete the selected plan");
                 }
             }
@@ -69,7 +70,7 @@ impl LearnApp {
                     v.push(Item::Row { title: q.topic.clone(), sub: format!("{} questions · {}", q.questions.len(), LearnApp::last_line(q)), accent: ACCENT, selected: i == self.sel[1], ev: Event::Row(i) });
                 }
                 if !self.quizzes.is_empty() {
-                    v.push(Item::Buttons(vec![b("Start the selected quiz", T_START, ACCENT)]));
+                    v.push(Item::Buttons(vec![b("Start the selected quiz", T_START, ACCENT), b("Export PDF", T_PDF, MUTED), b(if self.pdf_key { "Answer key: on" } else { "Answer key: off" }, T_PDF_KEY, MUTED)]));
                     self.delete_buttons(&mut v, "Delete the selected quiz");
                 }
             }
@@ -79,6 +80,7 @@ impl LearnApp {
                 v.push(Item::Text(format!("{} of {} sessions done · {} {} · {}", p.done_count(), p.sessions.len(), p.count, p.unit, p.every), MUTED));
                 let mut bt = vec![b("Back", T_BACK, MUTED)];
                 bt.push(if p.events.is_empty() { b("Add to calendar", T_CAL, ACCENT) } else { b("Remove from calendar", T_UNCAL, AMBER) });
+                bt.push(b("Export PDF", T_PDF, MUTED));
                 v.push(Item::Buttons(bt));
                 self.delete_buttons(&mut v, "Delete this plan");
                 v.push(Item::Text("Click a day (or press Enter) to open its lesson: the assistant writes it for you, with pictures. Space ticks the chosen day done.".into(), MUTED));
@@ -125,7 +127,7 @@ impl LearnApp {
                 if s.flagged > 0 {
                     v.push(Item::Text(format!("{} reported question{} left out of the score.", s.flagged, if s.flagged == 1 { " is" } else { "s are" }), AMBER));
                 }
-                v.push(Item::Buttons(vec![b("Try again", T_AGAIN, ACCENT), b("Done", T_BACK, MUTED), b("Report the chosen question", T_REPORT, AMBER)]));
+                v.push(Item::Buttons(vec![b("Try again", T_AGAIN, ACCENT), b("Done", T_BACK, MUTED), b("Report the chosen question", T_REPORT, AMBER), b("Export PDF", T_PDF, MUTED), b(if self.pdf_key { "Answer key: on" } else { "Answer key: off" }, T_PDF_KEY, MUTED)]));
                 v.push(Item::Text("Choose a question to see the answer. A question that is wrong can be reported: it stops counting.".into(), MUTED));
                 for (i, qu) in q.questions.iter().enumerate() {
                     let picked = a.answers.get(i).copied().flatten();
@@ -167,6 +169,7 @@ impl LearnApp {
             act.push(b("Go deeper", T_L_DEEPER, MUTED));
             if has {
                 act.push(b(if self.reading() { "Stop reading" } else { "Read aloud" }, T_L_READ, MUTED));
+                act.push(b("Export PDF", T_PDF, MUTED));
                 act.push(b("Write it again", T_L_REGEN, AMBER));
             }
             v.push(Item::Buttons(act));

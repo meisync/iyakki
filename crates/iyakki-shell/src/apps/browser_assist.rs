@@ -266,18 +266,55 @@ impl Assist {
 }
 
 /// Keep a page (or the selected words) in the person's own knowledge base, where the assistant can find it later.
-pub fn remember(cx: &AppCx, title: &str, url: &str, text: &str) -> Result<usize, String> {
+pub fn remember(cx: &AppCx, title: &str, url: &str, text: &str, whole_page: bool) -> Result<usize, String> {
     if text.trim().is_empty() {
         return Err("There is no text to keep.".into());
     }
     let ns = format!("user/{}", cx.session.user);
     let mut meta = BTreeMap::new();
     meta.insert("from".to_string(), "browser".to_string());
+    meta.insert("kind".to_string(), if whole_page { "page" } else { "selection" }.to_string());
     let title = if title.trim().is_empty() { url.to_string() } else { title.trim().to_string() };
     let mut kb = cx.services.kb.lock().map_err(|_| "the knowledge base is busy".to_string())?;
-    kb.add_document(&ns, &title, url, text, meta).map_err(|e| e.to_string())?;
+    // keeping a whole page again after it changed replaces the older copy of that page (what was selected is never replaced)
+    let older: Vec<String> = if whole_page { kb.docs(&ns).into_iter().filter(|d| d.source == url && d.meta.get("kind").is_some_and(|k| k == "page")).map(|d| d.id).collect() } else { Vec::new() };
+    let (id, added) = kb.add_document(&ns, &title, url, text, meta).map_err(|e| e.to_string())?;
+    if added {
+        for old in older.iter().filter(|o| **o != id) {
+            let _ = kb.remove_document(&ns, old);
+        }
+    }
     cx.audit.record(&cx.session.user, "browser.remember", url.split('/').nth(2).unwrap_or(""));
     Ok(text.chars().count())
+}
+
+#[cfg(test)]
+mod remember_tests {
+    use super::*;
+    use crate::apps::tests::cx_with_admin_store;
+
+    #[test]
+    fn keeping_a_page_again_replaces_its_older_copy_and_a_selection_is_never_replaced() {
+        let cx = cx_with_admin_store("rememberpage");
+        let ns = format!("user/{}", cx.session.user);
+        let url = "https://news.example.org/harbour";
+        let docs = || cx.services.kb.lock().unwrap().docs(&ns);
+        remember(&cx, "Harbour", url, "The ferry leaves at nine and the lighthouse is closed this week.", true).unwrap();
+        remember(&cx, "Harbour", url, "The ferry leaves at nine and the lighthouse is closed this week.", true).unwrap();
+        assert_eq!(docs().len(), 1, "the same text twice is one document");
+        remember(&cx, "Harbour", url, "A few words the person selected on the page.", false).unwrap();
+        assert_eq!(docs().len(), 2);
+        // the page changed: its older copy goes, the selection stays
+        remember(&cx, "Harbour", url, "The ferry leaves at ten now and the lighthouse has opened again.", true).unwrap();
+        let d = docs();
+        assert_eq!(d.len(), 2, "{d:?}");
+        assert!(d.iter().any(|x| x.meta.get("kind").map(String::as_str) == Some("selection")));
+        let page = d.iter().find(|x| x.meta.get("kind").map(String::as_str) == Some("page")).unwrap();
+        let text: String = cx.services.kb.lock().unwrap().doc_chunks(&ns, &page.id).into_iter().map(|c| c.1).collect();
+        assert!(text.contains("ten now") && !text.contains("at nine"), "{text}");
+        assert!(remember(&cx, "x", url, "  ", true).is_err());
+        assert!(cx.audit.recent(10).iter().any(|l| l.contains("browser.remember news.example.org")));
+    }
 }
 
 #[cfg(test)]

@@ -150,7 +150,9 @@ impl LabApp {
         g.button(r.x + r.w - clw - 12.0 * s, by, size, "Clear log", MUTED, Event::Tab(T_LOG_CLEAR));
         let t = R::new(r.x + 12.0 * s, r.y + 8.0 * s + size * 2.2, r.w - 24.0 * s, r.h - 16.0 * s - size * 2.2);
         if self.log.is_empty() {
-            g.text(t.x, t.y, 12.5 * s, DIM, "Every call is listed here: time, provider, model, what was asked, HTTP status, duration, bytes, errors and fallbacks. No secrets.", Face::Sans);
+            for (i, l) in g.wrap(12.5 * s, "Every call is listed here: time, provider, model, what was asked, HTTP status, duration, bytes, errors and fallbacks. No secrets.", Face::Sans, t.w).iter().take(4).enumerate() {
+                g.text(t.x, t.y + i as f32 * 17.0 * s, 12.5 * s, DIM, l, Face::Sans);
+            }
         } else {
             self.logv.render(g, t, 12.0 * s, Face::Mono);
         }
@@ -249,11 +251,14 @@ impl LabApp {
             } else {
                 "No picture model is available from your providers. Install a picture model in Settings \u{2192} Models (Lemonade: SD-Turbo or SDXL), or add a provider that draws pictures.".to_string()
             };
-            let card = R::new(x, y, w, 120.0 * s);
+            // the card is as tall as its text (a narrow window wraps it into more lines)
+            let text_h = para_d(g, x + 14.0 * s, y + 12.0 * s, w - 28.0 * s, size, TEXT, &t, 12, false);
+            let card_h = (text_h + 12.0 * s + 56.0 * s).max(120.0 * s);
+            let card = R::new(x, y, w, card_h);
             fx::panel(g, card, s, WARN);
-            para(g, x + 14.0 * s, y + 12.0 * s, w - 28.0 * s, size, TEXT, &t, 5);
-            g.button(x + 14.0 * s, y + 76.0 * s, 13.5 * s, "Refresh models", ACCENT, Event::Tab(T_REFRESH));
-            return 130.0 * s;
+            para(g, x + 14.0 * s, y + 12.0 * s, w - 28.0 * s, size, TEXT, &t, 12);
+            g.button(x + 14.0 * s, y + card_h - 44.0 * s, 13.5 * s, "Refresh models", ACCENT, Event::Tab(T_REFRESH));
+            return card_h + 10.0 * s;
         }
         let a_label = self.pic_model(Slot::PicA).map_or("none".to_string(), |m| m.label());
         y += chooser(g, x, y, w, s, "Model", &a_label, matches!(self.modal, Some(Modal::Pick { slot: Slot::PicA, .. })), T_MODEL);

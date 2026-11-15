@@ -867,11 +867,11 @@ impl BoardView {
         let mut bx = x - 8.0 * s;
         let task_like = a.kind == "task";
         for (i, (label, tip, c, on)) in [
-            ("Stop", "Stop the agent (s)", ERR, a.state.active() && task_like),
+            ("Stop", "Stop the agent (s)", ERR, a.state.active() && (task_like || a.kind == "autopilot")),
             ("Pause", "Pause at the end of the step (p)", AMBER, matches!(a.state, AState::Working | AState::WaitingApproval) && task_like),
             ("Resume", "Continue from the saved place (r)", OK, matches!(a.state, AState::Paused | AState::Failed | AState::Interrupted) && task_like),
             ("Message", "Send guidance: the agent pauses after its step and continues with it (m)", CYAN, task_like),
-            ("Open run", "Open the run in the Tasks tab (o)", MUTED, task_like),
+            ("Open run", "Open the run (o)", MUTED, task_like || !a.run_id.is_empty()),
         ]
         .into_iter()
         .enumerate()

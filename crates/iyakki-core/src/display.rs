@@ -173,7 +173,10 @@ pub fn may_probe_again(since_last: Option<Duration>) -> bool {
 /// One probe round now (the shell starting, a DRM event), in its own thread so the caller never waits for a slow
 /// connector. `found` runs when a connector that was not connected before is connected afterwards.
 pub fn probe_once_in_background(why: &'static str, found: fn()) {
-    let _ = std::thread::Builder::new().name("iyakki-display-probe".into()).spawn(move || probe_once(Path::new(SYS_DRM), why, found));
+    let _ = std::thread::Builder::new().name("iyakki-display-probe".into()).spawn(move || {
+        probe_once(Path::new(SYS_DRM), why, found);
+        iyakki_devctl::drmmodes::recover_in_background(SYS_DRM.into(), why, false, found);
+    });
 }
 
 /// Whether a round of probes also runs while a monitor is already connected (`iyakki.touchscreen=` on the kernel command line).
@@ -273,6 +276,7 @@ pub const SYS_DRM: &str = "/sys/class/drm";
 pub fn start(found: fn()) {
     let spawned = std::thread::Builder::new().name("iyakki-display".into()).spawn(move || {
         let sys = Path::new(SYS_DRM);
+        iyakki_devctl::drmmodes::set_logger(|l| log::info!("{l}"));
         let mode = ProbeMode::from_cmdline(&iyakki_storage::cmdline_text());
         set_probe_mode(mode);
         if mode != ProbeMode::Auto {
@@ -284,6 +288,8 @@ pub fn start(found: fn()) {
             found();
         }
         if r != Outcome::NoGpu {
+            // a monitor that is connected but whose modes the kernel did not read (a 4K screen listed at 1080p): ask again, in the background
+            iyakki_devctl::drmmodes::recover_in_background(SYS_DRM.into(), "boot", false, found);
             watch_events(found);
         }
     });
@@ -328,6 +334,7 @@ fn watch_events(found: fn()) {
         if is_drm_change(&buf[..n as usize]) && may_probe_again(last.map(|t| t.elapsed())) {
             last = Some(std::time::Instant::now());
             probe_once(Path::new(SYS_DRM), "display event", found);
+            iyakki_devctl::drmmodes::recover_in_background(SYS_DRM.into(), "display event", false, found);
         }
     }
 }

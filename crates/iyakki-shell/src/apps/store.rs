@@ -800,6 +800,9 @@ impl StoreApp {
         match self.store.install(&cx.services, &a, &rv.review, Confirm::all()) {
             Ok(rec) => {
                 cx.audit.record(&cx.session.user, "store.install", &format!("{} {} {} ({}, {})", rec.kind, rec.name, rec.version, rec.level, rec.scope));
+                if let Some(ap) = self.store.approval(&rec.key()).filter(|a| a.app_version == rec.version && !a.grants.is_empty()) {
+                    cx.audit.record(&cx.session.user, "store.approve", &ap.audit_detail());
+                }
                 self.say(format!("Installed {} {}.", rec.title, rec.version), true);
                 self.mode = self.back_mode();
                 self.reload(cx);
@@ -1397,6 +1400,35 @@ impl StoreApp {
 // ---------------------------------------------------------------------------------------------- the App
 
 impl App for StoreApp {
+    /// The question or form drawn over the Store, in the words it shows (F-A11Y-02): the screen reader says it once when it opens.
+    fn dialog_title(&self) -> Option<String> {
+        Some(match &self.mode {
+            Mode::Browse | Mode::Detail => return None,
+            Mode::Form(f, _) => f.title.clone(),
+            Mode::Confirm(a) => match a {
+                Ask::Remove { title, .. } => format!("Remove {title}?"),
+                Ask::RemoveInstalled(e) => format!("Remove {}?", e.title),
+                Ask::PinStore(..) => "Check this store's key".into(),
+                Ask::RemoveSource(_) => "Remove this catalog?".into(),
+                Ask::Reboot => "Restart this machine now?".into(),
+                Ask::RemovePlan(_) => "Remove, and what goes with it".into(),
+                Ask::UpdateAll(_) => "Update everything?".into(),
+                Ask::UpdateCli(_) => "Update this command-line tool?".into(),
+                Ask::Rollback { title, from, to, .. } => format!("Go back from {from} to {to} for {title}?"),
+                Ask::DeleteGroup(_, name) => format!("Delete the group {name}?"),
+                Ask::DeleteTag(t, _) => format!("Delete the tag {t}?"),
+            },
+            Mode::Review(rv) => match rv.purpose {
+                Purpose::Install => "Review before installing".into(),
+                Purpose::Update => "Review before updating".into(),
+            },
+            Mode::Edit(_) => "Edit the entry".into(),
+            Mode::Menu(_) => "Menu".into(),
+            Mode::Tags(_) => "Tags".into(),
+            Mode::Report(_) => "Report".into(),
+        })
+    }
+
     fn title(&self) -> &'static str {
         "Store"
     }
@@ -2509,12 +2541,48 @@ impl StoreApp {
             lines.push((K::Dim, "The old version is kept for one rollback; if the new one fails its check, the old one is put back.".into()));
         }
         lines.push((K::Head, if plan.is_some() { "It asks for (all of it)".into() } else { "It asks for".into() }));
-        if r.permissions.is_empty() {
+        if r.permissions.is_empty() && !r.asks_core() {
             lines.push((K::Text, "Nothing extra: no files, no network, no programs.".into()));
         }
         for pm in &r.permissions {
             let new = plan.is_some_and(|pl| pl.added.iter().any(|a| a.canonical == pm.canonical));
             lines.push((K::Perm, format!("{}{}{}", if new { "NEW  " } else { "" }, pm.words, if pm.sensitive { "  (every use still asks you)" } else { "" })));
+        }
+        if !r.core_lines.is_empty() {
+            lines.push((K::Head, "Device and system access".into()));
+            for cl in &r.core_lines {
+                let new = plan.is_some() && cl.is_new;
+                let t = format!("{}{}{}", if new { "NEW  " } else { "" }, cl.words, if cl.hard_ask { "  (every use still asks you)" } else { "" });
+                for (i, l) in wrap(g, &t).into_iter().enumerate() {
+                    lines.push((if i == 0 { K::Perm } else { K::Dim }, l));
+                }
+            }
+        }
+        if !r.members.is_empty() {
+            // a bundle: what else it brings, grouped by member, each with its own access (approved once, recorded per member)
+            lines.push((K::Head, "This bundle also brings".into()));
+            for m in &r.members {
+                let t = format!("{}  ({})", m.name(), m.kind);
+                for (i, l) in wrap(g, &t).into_iter().enumerate() {
+                    lines.push((if i == 0 { K::Text } else { K::Dim }, l));
+                }
+                if !m.note.is_empty() {
+                    for l in wrap(g, &m.note) {
+                        lines.push((K::Dim, l));
+                    }
+                }
+                match &m.state {
+                    iyakki_agent::store::bundle::MemberState::Skip(why) => lines.push((K::Warn, format!("{why}: left out{}", if m.optional { "" } else { " (the install is refused)" }))),
+                    iyakki_agent::store::bundle::MemberState::Install => {
+                        for cl in &m.lines {
+                            let t = format!("{}{}{}", if plan.is_some() && cl.is_new { "NEW  " } else { "" }, cl.words, if cl.hard_ask { "  (every use still asks you)" } else { "" });
+                            for (i, l) in wrap(g, &t).into_iter().enumerate() {
+                                lines.push((if i == 0 { K::Perm } else { K::Dim }, l));
+                            }
+                        }
+                    }
+                }
+            }
         }
         if !r.warnings.is_empty() {
             lines.push((K::Head, "Read before you go on".into()));
@@ -2573,7 +2641,7 @@ impl StoreApp {
                 (Some(_), true) => "Update anyway (y)",
                 (Some(_), false) => "Update (y)",
                 (None, true) => "Install anyway (y)",
-                (None, false) if !r.permissions.is_empty() => "Install and allow these (y)",
+                (None, false) if !r.permissions.is_empty() || r.asks_core() => "Install and allow these (y)",
                 (None, false) => "Install (y)",
             };
             let col = if r.needs_warning_ack() { AMBER } else { OK };
@@ -3381,17 +3449,34 @@ mod tests {
     struct Table {
         files: Mutex<HashMap<String, Vec<u8>>>,
         threads: Mutex<Vec<std::thread::ThreadId>>,
+        requested: Mutex<Vec<String>>,
     }
 
     impl Fetch for Table {
         fn get(&self, url: &str, _max: usize) -> Result<Vec<u8>, String> {
             self.threads.lock().unwrap().push(std::thread::current().id());
+            self.requested.lock().unwrap().push(url.to_string());
             self.files.lock().unwrap().get(url).cloned().ok_or_else(|| format!("could not reach {url}: offline"))
         }
     }
 
     fn key(a: &mut StoreApp, cx: &AppCx, k: Key) {
         a.handle(&Event::Key(k), cx);
+    }
+
+    #[test]
+    fn a_question_over_the_store_is_announced_by_its_own_words() {
+        let cx = cx("dlgtitle", Role::Admin);
+        let mut a = StoreApp::new(&cx);
+        assert_eq!(a.dialog_title(), None, "no dialog while browsing");
+        a.mode = Mode::Confirm(Ask::Reboot);
+        assert_eq!(a.dialog_title().as_deref(), Some("Restart this machine now?"));
+        a.mode = Mode::Confirm(Ask::DeleteTag("work".into(), 3));
+        assert_eq!(a.dialog_title().as_deref(), Some("Delete the tag work?"));
+        a.mode = Mode::Confirm(Ask::Remove { kind: "skill".into(), name: "n".into(), scope: iyakki_agent::skills::Scope::Shared, title: "Notes".into() });
+        assert_eq!(a.dialog_title().as_deref(), Some("Remove Notes?"));
+        a.mode = Mode::Detail;
+        assert_eq!(a.dialog_title(), None);
     }
 
     fn typed(a: &mut StoreApp, cx: &AppCx, s: &str) {
@@ -3968,6 +4053,53 @@ mod tests {
         // opening it again does not switch the filter off
         App::open_item(&mut a, "updates", &cx);
         assert!(a.iupdates);
+    }
+
+    #[test]
+    fn the_check_button_in_the_header_refreshes_the_catalog_and_asks_for_its_revocation_list_and_the_daily_check_stays_optional() {
+        let cx = cx("st-check-all", Role::Admin);
+        let mut a = StoreApp::new(&cx);
+        let k = new_signing_key().unwrap();
+        let text = signed_skill("remote-helper", "1.0.0", &k, &pub_meta("Remote helper", Pricing::default()));
+        let mut c = Catalog { v: 1, id: "web-store".into(), name: "Web store".into(), serial: 1, entries: vec![Entry { id: "remote-helper".into(), kind: "skill".into(), name: "remote-helper".into(), version: "1.0.0".into(), license: "MIT".into(), size: text.len() as u64, sha256: sha256_hex(text.as_bytes()), url: "packages/rh.iyp".into(), signer: public_key_hex(&k), added: 1_800_000_000, meta: pub_meta("Remote helper", Pricing::default()), ..Default::default() }], ..Default::default() };
+        c.sign(&k);
+        let table = Arc::new(Table::default());
+        table.files.lock().unwrap().insert("https://cat.example/s/catalog.json".into(), c.to_json().into_bytes());
+        table.files.lock().unwrap().insert("https://cat.example/s/packages/rh.iyp".into(), text.into_bytes());
+        a.fetch = table.clone();
+        a.switch(Section::Settings);
+        key(&mut a, &cx, Key::Char('a'));
+        typed(&mut a, &cx, "Web");
+        key(&mut a, &cx, Key::Tab);
+        for _ in 0..8 {
+            key(&mut a, &cx, Key::Backspace);
+        }
+        typed(&mut a, &cx, "https://cat.example/s/catalog.json");
+        key(&mut a, &cx, Key::Enter);
+        // the store's key is read in the background and confirmed before it is added
+        wait_job(&mut a, &cx);
+        assert!(matches!(a.mode, Mode::Confirm(Ask::PinStore(..))), "{:?}", a.status_text());
+        key(&mut a, &cx, Key::Char('y'));
+        assert!(matches!(a.mode, Mode::Browse), "{:?}", a.status_text());
+        // the header has the Check button; clicking it is the same as the key
+        let g = draw(&mut a, &cx, 1280, 720);
+        let button = g.hits.iter().find(|h| h.label.starts_with("Check")).map(|h| h.ev.clone()).expect("a Check button in the header");
+        let before = table.requested.lock().unwrap().len();
+        a.handle(&button, &cx);
+        assert!(a.job.is_some(), "the button starts the same background check");
+        wait_job(&mut a, &cx);
+        let asked: Vec<String> = table.requested.lock().unwrap()[before..].to_vec();
+        assert!(asked.iter().any(|u| u == "https://cat.example/s/catalog.json"), "the catalog is fetched again: {asked:?}");
+        assert!(asked.iter().any(|u| u == "https://cat.example/s/revocations.json"), "and so is its revocation list: {asked:?}");
+        // the daily check is optional: with the mode set to manual the button still works and nothing runs on its own
+        use iyakki_agent::store::updatecheck::Mode as CheckMode;
+        cx.services.settings.lock().unwrap().update(|s| s.update_check.mode = CheckMode::Manual).unwrap();
+        assert_eq!(cx.services.settings.lock().unwrap().get().update_check.mode, CheckMode::Manual);
+        let n = table.requested.lock().unwrap().len();
+        for _ in 0..20 {
+            a.handle(&Event::Tick, &cx);
+        }
+        assert_eq!(table.requested.lock().unwrap().len(), n, "no look is made unless the button or the key is used");
     }
 
     #[test]
@@ -4880,6 +5012,43 @@ mod tests {
         assert!(!a.submit_form(&cx, &mut form, &kind));
         assert!(qi::install_jobs(&cx.services.jobs, &cx.session.user).is_empty());
         assert!(!cx.audit.recent(20).iter().any(|l| l.contains("firmware.accept")), "no acceptance in the audit log");
+    }
+
+    #[test]
+    fn the_hardware_accept_and_start_refuses_a_user_and_a_missing_way_and_starts_the_job_with_the_acceptance_recorded_first() {
+        use iyakki_agent::quickinstall::{self as qi, Item as QItem};
+        let item = QItem::FwHardware;
+        // a user: refused in words, nothing recorded or started
+        let (mut u, ucx, _h) = fw_rig("st-fw-hw-user", Role::User, item);
+        let e = u.setup.hardware_accept_and_start(&ucx, "download", None, false).unwrap_err();
+        assert!(e.contains("administrator") && e.contains("user"), "{e}");
+        assert!(qi::install_jobs(&ucx.services.jobs, &ucx.session.user).is_empty());
+        assert!(!ucx.audit.recent(20).iter().any(|l| l.contains("firmware.accept")));
+        // an administrator who chose a way that is not there gets the sentence for that way, and still nothing starts
+        let (mut a, cx, _h) = fw_rig("st-fw-hw-admin", Role::Admin, item);
+        assert!(a.setup.hardware_accept_and_start(&cx, "folder", None, false).unwrap_err().contains("Choose the folder"));
+        let file = temp_dir("st-fw-hw-file").join("not-a-folder");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(a.setup.hardware_accept_and_start(&cx, "folder", Some(file.clone()), false).unwrap_err().contains("is not a folder"));
+        assert!(a.setup.hardware_accept_and_start(&cx, "received", None, false).unwrap_err().contains("No files have been received"));
+        assert!(a.setup.hardware_accept_and_start(&cx, "link", None, false).unwrap_err().contains("No cable"));
+        assert!(qi::install_jobs(&cx.services.jobs, &cx.session.user).is_empty());
+        assert!(!cx.audit.recent(20).iter().any(|l| l.contains("firmware.accept")), "a refusal records no acceptance");
+        // a request the kernel log made earlier (kept in the data folder) makes a plan: accept records the list, then the job starts
+        let data = cx.services.dir().join("qi");
+        let reqs = iyakki_agent::fwextra::parse_log("[    7.1] iwlwifi 0000:00:14.3: Direct firmware load for iwlwifi-cc-a0-77.ucode failed with error -2\n", iyakki_agent::fwextra::manifest());
+        assert!(!reqs.is_empty(), "the made-up log line names a file of the pinned release");
+        iyakki_agent::fwextra::remember(&data, &reqs);
+        let said = a.setup.hardware_accept_and_start(&cx, "download", None, false).expect("a plan exists, the job starts");
+        assert!(said.starts_with("Started:") && said.contains("downloaded from the upstream linux-firmware"), "{said}");
+        let log = cx.audit.recent(20);
+        let accepted = log.iter().position(|l| l.contains("firmware.accept")).expect("the acceptance is in the audit log");
+        let started = log.iter().position(|l| l.contains("quickinstall.start")).expect("the start is in the audit log");
+        assert!(accepted > started, "the acceptance is recorded before the job starts (the log lists newest first): {log:?}");
+        let jobs = qi::install_jobs(&cx.services.jobs, &cx.session.user);
+        assert_eq!(jobs.len(), 1);
+        assert!(jobs[0].command.contains("quick-install fw-hardware"), "{}", jobs[0].command);
+        let _ = std::fs::remove_dir_all(file.parent().unwrap());
     }
 
     #[test]

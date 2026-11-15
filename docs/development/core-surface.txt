@@ -1,0 +1,1237 @@
+# The public surface of crates/iyakki-core-api, one item per line (docs/development/CORE-COMPATIBILITY-DESIGN.md section 8).
+# Written by crates/iyakki-core-api/tests/core_surface.rs; do not edit by hand. A new item is appended by running the test with
+# IYAKKI_CORE_SURFACE_WRITE=1. An item that disappears or changes shape becomes a `removed<TAB>item<TAB>note` line, which needs
+# IYAKKI_CORE_SURFACE_NOTE="why, and which version or alias covers it". Gate: ./run.sh compat-check.
+crate | [cfg(feature = "native")] pub mod childstate
+crate | [cfg(feature = "native")] pub mod service
+crate | [cfg(feature = "native")] pub use childstate::{child_status, child_wait, steal_status, steal_status_of_marked, ChildState}
+crate | [cfg(feature = "native")] pub use service::{AuditSink, Authenticator, Principal}
+crate | pub mod appcaps
+crate | pub mod broker
+crate | pub mod bundle
+crate | pub mod channel
+crate | pub mod client
+crate | pub mod contract
+crate | pub mod error
+crate | pub mod identity
+crate | pub mod sysinfo
+crate | pub mod wizard
+crate | pub use channel::{Cap, Channel, ChannelError, ChannelIdentity, ChannelInfo, Delivery, DeliveryState, Health, HealthState, InMessage, Limits, OutAttachment, OutMessage, RateInfo, Trust}
+crate | pub use error::{ApiError, ApiResult}
+crate | pub use identity::{Capabilities, Identity}
+crate::appcaps | Approval.app: String
+crate::appcaps | Approval.app_sha256: String
+crate::appcaps | Approval.app_version: String
+crate::appcaps | Approval.at: i64
+crate::appcaps | Approval.grants: Vec<Grant>
+crate::appcaps | Approval.who: String
+crate::appcaps | AskPlan::All(Vec<CapabilityRequest>)
+crate::appcaps | AskPlan::More(Vec<CapabilityRequest>)
+crate::appcaps | AskPlan::Nothing
+crate::appcaps | BuiltinDefault::MayAsk
+crate::appcaps | BuiltinDefault::No
+crate::appcaps | BuiltinDefault::RolePolicy
+crate::appcaps | BuiltinDefault::TableOnly
+crate::appcaps | BuiltinDefault::Yes
+crate::appcaps | CapError::BadParam { name: String, why: String }
+crate::appcaps | CapError::Duplicate(String)
+crate::appcaps | CapError::NoReason(String)
+crate::appcaps | CapError::TooMany
+crate::appcaps | CapError::Unknown(String)
+crate::appcaps | CapabilityDef.builtin: BuiltinDefault
+crate::appcaps | CapabilityDef.gives: &'static str
+crate::appcaps | CapabilityDef.hard_ask: bool
+crate::appcaps | CapabilityDef.name: &'static str
+crate::appcaps | CapabilityDef.param: ParamKind
+crate::appcaps | CapabilityRequest.name: String
+crate::appcaps | CapabilityRequest.why: String
+crate::appcaps | CardLine.hard_ask: bool
+crate::appcaps | CardLine.is_new: bool
+crate::appcaps | CardLine.name: String
+crate::appcaps | CardLine.words: String
+crate::appcaps | Grant.name: String
+crate::appcaps | ParamKind::Device
+crate::appcaps | ParamKind::Filter
+crate::appcaps | ParamKind::Folder
+crate::appcaps | ParamKind::HostPort
+crate::appcaps | ParamKind::None
+crate::appcaps | ParamKind::Port
+crate::appcaps | ParamKind::Schedule
+crate::appcaps | ParamKind::UsbId
+crate::appcaps | [serde(default)] Approval.revoked: Vec<Grant>
+crate::appcaps | [serde(default, skip_serializing_if = "Option::is_none")] CapabilityRequest.param: Option<String>
+crate::appcaps | [serde(default, skip_serializing_if = "Option::is_none")] Grant.param: Option<String>
+crate::appcaps | impl ApprovalBook for MemoryBook
+crate::appcaps | impl std::error::Error for CapError
+crate::appcaps | impl std::fmt::Display for CapError
+crate::appcaps | pub const CATALOGUE: &[CapabilityDef] = &[def("camera.view", "see pictures from a camera", P::Device, B::Yes, false), def("camera.record", "record from a camera", P::Devi...
+crate::appcaps | pub const CATALOGUE_VERSION: u32 = 0
+crate::appcaps | pub const MAX_PARAM: usize = 200
+crate::appcaps | pub const MAX_REQUESTS: usize = 24
+crate::appcaps | pub const MAX_WHY: usize = 200
+crate::appcaps | pub enum AskPlan
+crate::appcaps | pub enum BuiltinDefault
+crate::appcaps | pub enum CapError
+crate::appcaps | pub enum ParamKind
+crate::appcaps | pub fn Approval::audit_detail(&self) -> String
+crate::appcaps | pub fn Approval::holds(&self, name: &str, param: Option<&str>) -> bool
+crate::appcaps | pub fn Approval::revoke(&mut self, name: &str) -> bool
+crate::appcaps | pub fn ApprovalBook::get(&self, installation: &str) -> Option<Approval>
+crate::appcaps | pub fn ApprovalBook::put(&mut self, installation: &str, a: Approval)
+crate::appcaps | pub fn ApprovalBook::remove(&mut self, installation: &str)
+crate::appcaps | pub fn Grant::of(r: &CapabilityRequest) -> Grant
+crate::appcaps | pub fn builtin_holds(app: &str, cap: &str) -> bool
+crate::appcaps | pub fn card_lines(reqs: &[CapabilityRequest], held: &[Grant]) -> Vec<CardLine>
+crate::appcaps | pub fn is_hard_ask(name: &str) -> bool
+crate::appcaps | pub fn lookup(name: &str) -> Option<&'static CapabilityDef>
+crate::appcaps | pub fn plan_ask(held: Option<&Approval>, reqs: &[CapabilityRequest]) -> AskPlan
+crate::appcaps | pub fn record_approval(who: &str, app: &str, version: &str, sha256: &str, at: i64, reqs: &[CapabilityRequest]) -> Approval
+crate::appcaps | pub fn validate_requests(reqs: &[CapabilityRequest]) -> Result<(), CapError>
+crate::appcaps | pub struct Approval
+crate::appcaps | pub struct CapabilityDef
+crate::appcaps | pub struct CardLine
+crate::appcaps | pub struct Grant
+crate::appcaps | pub struct MemoryBook(pub std::collections::BTreeMap<String, Approval>)
+crate::appcaps | pub trait ApprovalBook
+crate::broker | AccessEvent.allowed: bool
+crate::broker | AccessEvent.app: String
+crate::broker | AccessEvent.at: i64
+crate::broker | AccessEvent.capability: String
+crate::broker | AccessEvent.device: String
+crate::broker | AccessEvent.person: String
+crate::broker | AccessEvent.target: String
+crate::broker | Call.caller: &'a Caller
+crate::broker | Call.capability: &'a str
+crate::broker | Call.label: &'a str
+crate::broker | Call.unit: Option<&'a str>
+crate::broker | Caller.app: String
+crate::broker | Caller.device: String
+crate::broker | Caller.kind: CallerKind
+crate::broker | Caller.person: String
+crate::broker | CallerKind::Builtin
+crate::broker | CallerKind::Client { device_id: String }
+crate::broker | CallerKind::Store { installation: String }
+crate::broker | CardAnswer::Allow
+crate::broker | CardAnswer::Deny
+crate::broker | CardAnswer::Unavailable
+crate::broker | Denial::CardDeclined
+crate::broker | Denial::NoCard
+crate::broker | Denial::NotGranted
+crate::broker | Denial::Revoked
+crate::broker | Denial::UnknownCapability
+crate::broker | [serde(default)] AccessEvent.reason: String
+crate::broker | impl AccessSink for MemoryLog
+crate::broker | impl AccessSink for NullSink
+crate::broker | impl CardAsk for NoCard
+crate::broker | impl std::error::Error for Denial
+crate::broker | impl std::fmt::Display for Denial
+crate::broker | impl<T: ApprovalBook + Send + Sync> ApprovalLookup for T
+crate::broker | pub const COALESCE_ALLOWED_SECS: i64 = 60
+crate::broker | pub const COALESCE_DENIED_SECS: i64 = 10
+crate::broker | pub enum CallerKind
+crate::broker | pub enum CardAnswer
+crate::broker | pub enum Denial
+crate::broker | pub fn AccessSink:::record(&self, event: AccessEvent)
+crate::broker | pub fn ApprovalLookup:::approval(&self, installation: &str) -> Option<Approval>
+crate::broker | pub fn Broker::decide(&self, call: &Call<'_>) -> Result<(), Denial>
+crate::broker | pub fn Broker::decide_with(&self, call: &Call<'_>, label: &dyn Fn() -> String) -> Result<(), Denial>
+crate::broker | pub fn Broker::new(lookup: Arc<dyn ApprovalLookup>, card: Arc<dyn CardAsk>, sink: Arc<dyn AccessSink>, clock: Arc<dyn Fn() -> i64 + Send + Sync>) -> Broker
+crate::broker | pub fn CardAsk:::ask(&self, caller: &Caller, capability: &str, label: &str) -> CardAnswer
+crate::broker | pub fn Denial::code(&self) -> &'static str
+crate::broker | pub fn MemoryLog::new(cap: usize) -> MemoryLog
+crate::broker | pub fn MemoryLog::rows(&self) -> Vec<AccessEvent>
+crate::broker | pub fn client_key(device_id: &str) -> String
+crate::broker | pub struct AccessEvent
+crate::broker | pub struct Broker
+crate::broker | pub struct Call<'a>
+crate::broker | pub struct Caller
+crate::broker | pub struct MemoryLog
+crate::broker | pub struct NoCard
+crate::broker | pub struct NullSink
+crate::broker | pub trait AccessSink: Send + Sync
+crate::broker | pub trait ApprovalLookup: Send + Sync
+crate::broker | pub trait CardAsk: Send + Sync
+crate::bundle | ManifestExt.contents: Vec<Member>
+crate::bundle | ManifestExt.extra: BTreeMap<String, Value>
+crate::bundle | ManifestExt.manifest_version: Option<u32>
+crate::bundle | ManifestExt.requires: Option<Requires>
+crate::bundle | ManifestExt.wizards: Vec<WizardSpec>
+crate::bundle | Member.file: String
+crate::bundle | Member.id: String
+crate::bundle | Member.kind: String
+crate::bundle | MemberKind::Agent
+crate::bundle | MemberKind::Extension
+crate::bundle | MemberKind::Flow
+crate::bundle | MemberKind::Mcp
+crate::bundle | MemberKind::Skill
+crate::bundle | MemberKind::Template
+crate::bundle | MemberKind::Theme
+crate::bundle | MemberKind::Tile
+crate::bundle | MemberKind::Tool
+crate::bundle | MemberKind::Unknown(String)
+crate::bundle | Op::Eq
+crate::bundle | Op::Ge
+crate::bundle | Op::Gt
+crate::bundle | Op::Le
+crate::bundle | Op::Lt
+crate::bundle | RequiresRefusal.message: String
+crate::bundle | RequiresRefusal.update: UpdateSide
+crate::bundle | UpdateSide::App
+crate::bundle | UpdateSide::Core
+crate::bundle | VersionRange.parts: Vec<(Op, Triple)>
+crate::bundle | [serde(default, skip_serializing_if = "Option::is_none")] Member.requires: Option<Requires>
+crate::bundle | [serde(default, skip_serializing_if = "Option::is_none")] Requires.core_interface: Option<String>
+crate::bundle | [serde(default, skip_serializing_if = "String::is_empty")] Member.title: String
+crate::bundle | [serde(default, skip_serializing_if = "Vec::is_empty")] Member.capabilities: Vec<CapabilityRequest>
+crate::bundle | [serde(default, skip_serializing_if = "Vec::is_empty")] Member.wizards: Vec<WizardSpec>
+crate::bundle | [serde(default, skip_serializing_if = "Vec::is_empty")] Requires.capabilities_needed: Vec<String>
+crate::bundle | [serde(default, skip_serializing_if = "Vec::is_empty")] Requires.capabilities_optional: Vec<String>
+crate::bundle | [serde(default, skip_serializing_if = "is_false")] Member.optional: bool
+crate::bundle | [serde(flatten)] Member.extra: BTreeMap<String, Value>
+crate::bundle | [serde(flatten)] Requires.extra: BTreeMap<String, Value>
+crate::bundle | impl std::fmt::Display for RequiresRefusal
+crate::bundle | pub const CORE_INTERFACE: &str = "0.1"
+crate::bundle | pub const MANIFEST_VERSION: u32 = 1
+crate::bundle | pub const MAX_FILE_PATH: usize = 100
+crate::bundle | pub const MAX_ID: usize = 48
+crate::bundle | pub const MAX_MEMBERS: usize = 16
+crate::bundle | pub const MAX_REQUIRES_NAMES: usize = 24
+crate::bundle | pub const MAX_TITLE: usize = 60
+crate::bundle | pub enum MemberKind
+crate::bundle | pub enum Op
+crate::bundle | pub enum UpdateSide
+crate::bundle | pub fn ManifestExt::check_core(&self, core: &str) -> Result<(), RequiresRefusal>
+crate::bundle | pub fn ManifestExt::check_version(&self) -> Result<(), RequiresRefusal>
+crate::bundle | pub fn ManifestExt::effective_version(&self) -> u32
+crate::bundle | pub fn ManifestExt::from_object(obj: &serde_json::Map<String, Value>, known: &[&str]) -> Result<ManifestExt, String>
+crate::bundle | pub fn ManifestExt::is_newer(&self) -> bool
+crate::bundle | pub fn ManifestExt::validate(&self, declared: &[CapabilityRequest]) -> Result<(), String>
+crate::bundle | pub fn ManifestExt::write_into(&self, out: &mut serde_json::Map<String, Value>)
+crate::bundle | pub fn Member::kind(&self) -> MemberKind
+crate::bundle | pub fn MemberKind::is_known(&self) -> bool
+crate::bundle | pub fn MemberKind::name(&self) -> &str
+crate::bundle | pub fn MemberKind::of(s: &str) -> MemberKind
+crate::bundle | pub fn VersionRange::first_failure(&self, v: Triple) -> Option<(Op, Triple)>
+crate::bundle | pub fn VersionRange::parse(s: &str) -> Result<VersionRange, String>
+crate::bundle | pub fn VersionRange::satisfied_by(&self, v: Triple) -> bool
+crate::bundle | pub fn check_requires(r: &Requires, core: &str) -> Result<(), RequiresRefusal>
+crate::bundle | pub fn id_ok(s: &str) -> bool
+crate::bundle | pub fn missing_optional(r: &Requires) -> Vec<String>
+crate::bundle | pub fn parse_version(s: &str) -> Option<Triple>
+crate::bundle | pub fn rel_path_ok(p: &str) -> bool
+crate::bundle | pub fn validate_contents(members: &[Member]) -> Result<(), String>
+crate::bundle | pub fn validate_member_files(members: &[Member], size_of: &dyn Fn(&str) -> Option<usize>, max_bytes: usize) -> Result<(), String>
+crate::bundle | pub fn validate_requires(r: &Requires) -> Result<(), String>
+crate::bundle | pub struct ManifestExt
+crate::bundle | pub struct Member
+crate::bundle | pub struct Requires
+crate::bundle | pub struct RequiresRefusal
+crate::bundle | pub struct VersionRange
+crate::bundle | pub type Triple = (u32, u32, u32)
+crate::channel | Cap::Files
+crate::channel | Cap::Groups
+crate::channel | Cap::Images
+crate::channel | Cap::InboundPoll
+crate::channel | Cap::Reply
+crate::channel | Cap::Text
+crate::channel | ChannelError::Auth(String)
+crate::channel | ChannelError::Offline(String)
+crate::channel | ChannelError::RateLimited { retry_after_ms: u64 }
+crate::channel | ChannelError::Refused(String)
+crate::channel | ChannelError::Rejected(String)
+crate::channel | ChannelError::TooLarge(String)
+crate::channel | ChannelIdentity.display: String
+crate::channel | ChannelIdentity.id: String
+crate::channel | ChannelInfo.caps: Vec<Cap>
+crate::channel | ChannelInfo.display: String
+crate::channel | ChannelInfo.encrypted_rooms: bool
+crate::channel | ChannelInfo.kind: String
+crate::channel | Delivery.external_id: String
+crate::channel | Delivery.state: DeliveryState
+crate::channel | DeliveryState::Accepted
+crate::channel | Health.reason: String
+crate::channel | Health.state: HealthState
+crate::channel | HealthState::AuthFailed
+crate::channel | HealthState::Offline
+crate::channel | HealthState::Ok
+crate::channel | HealthState::RateLimited
+crate::channel | HealthState::Unknown
+crate::channel | InMessage.external_id: String
+crate::channel | InMessage.from: String
+crate::channel | InMessage.is_self: bool
+crate::channel | InMessage.room: String
+crate::channel | InMessage.text: String
+crate::channel | InMessage.time_ms: i64
+crate::channel | InMessage.trust: Trust
+crate::channel | InMessage.unreadable_encrypted: bool
+crate::channel | Limits.max_attachment_bytes: u64
+crate::channel | Limits.max_text_bytes: usize
+crate::channel | Limits.per_hour: u32
+crate::channel | OutAttachment.mime: String
+crate::channel | OutAttachment.name: String
+crate::channel | OutAttachment.path: PathBuf
+crate::channel | OutMessage.attachment: Option<OutAttachment>
+crate::channel | OutMessage.dedupe_key: String
+crate::channel | OutMessage.text: String
+crate::channel | OutMessage.to: String
+crate::channel | RateInfo.limited_count: u32
+crate::channel | RateInfo.retry_after_ms: Option<u64>
+crate::channel | Trust::External
+crate::channel | [serde(rename_all = "snake_case")] pub enum Cap
+crate::channel | [serde(rename_all = "snake_case")] pub enum DeliveryState
+crate::channel | [serde(rename_all = "snake_case")] pub enum HealthState
+crate::channel | [serde(rename_all = "snake_case")] pub enum Trust
+crate::channel | pub enum ChannelError
+crate::channel | pub fn Channel:::health(&self) -> Health
+crate::channel | pub fn Channel:::identity(&self) -> Result<ChannelIdentity, ChannelError>
+crate::channel | pub fn Channel:::info(&self) -> ChannelInfo
+crate::channel | pub fn Channel:::limits(&self) -> Limits
+crate::channel | pub fn Channel:::poll(&self, wait: Duration) -> Result<Vec<InMessage>, ChannelError>
+crate::channel | pub fn Channel:::rate_info(&self) -> RateInfo
+crate::channel | pub fn Channel:::send(&self, m: &OutMessage) -> Result<Delivery, ChannelError>
+crate::channel | pub fn Health::ok() -> Health
+crate::channel | pub fn Health::unknown() -> Health
+crate::channel | pub mod mock
+crate::channel | pub struct ChannelIdentity
+crate::channel | pub struct ChannelInfo
+crate::channel | pub struct Delivery
+crate::channel | pub struct Health
+crate::channel | pub struct InMessage
+crate::channel | pub struct Limits
+crate::channel | pub struct OutAttachment
+crate::channel | pub struct OutMessage
+crate::channel | pub struct RateInfo
+crate::channel | pub trait Channel: Send + Sync
+crate::channel::mock | impl Channel for MockChannel
+crate::channel::mock | pub fn MockChannel::fail_next_with(&self, e: Option<ChannelError>)
+crate::channel::mock | pub fn MockChannel::new(name: &str) -> MockChannel
+crate::channel::mock | pub fn MockChannel::push_inbound(&self, m: InMessage)
+crate::channel::mock | pub fn MockChannel::sent(&self) -> Vec<OutMessage>
+crate::channel::mock | pub struct MockChannel
+crate::childstate | ChildState::Exited(Option<i32>)
+crate::childstate | ChildState::Gone
+crate::childstate | ChildState::Running
+crate::childstate | pub enum ChildState
+crate::childstate | pub fn ChildState::code(&self) -> Option<i32>
+crate::childstate | pub fn ChildState::describe(&self) -> String
+crate::childstate | pub fn ChildState::is_over(&self) -> bool
+crate::childstate | pub fn ChildState::is_running(&self) -> bool
+crate::childstate | pub fn ChildState::success(&self) -> bool
+crate::childstate | pub fn child_status(child: &mut Child) -> ChildState
+crate::childstate | pub fn child_wait(child: &mut Child) -> ChildState
+crate::childstate | pub fn steal_status(pid: u32)
+crate::childstate | pub fn steal_status_of_marked(marker: &str, within: std::time::Duration) -> std::thread::JoinHandle<u32>
+crate::client | ClientMsg::Ack { seq: u32 }
+crate::client | ClientMsg::Auth { authorization: String }
+crate::client | ClientMsg::Bye
+crate::client | ClientMsg::Call { id: u64, capability: String, #[serde(default)] unit: Option<String> }
+crate::client | ClientMsg::Enrol { token: String, public: String, name: String }
+crate::client | ClientMsg::Hello { v: u32, #[serde(default = "one")] min_v: u32, #[serde(default)] offered: Vec<String>, #[serde(default)] needed: Vec<String>, #[serde(default)] client: String }
+crate::client | ClientMsg::Input { msg: String }
+crate::client | ClientMsg::PictureOpen { #[serde(default)] deflate: bool }
+crate::client | ClientMsg::Ping { ts: u64 }
+crate::client | ClientMsg::Resume { last_seq: u64 }
+crate::client | ClientMsg::SignIn { user: String, password: String }
+crate::client | ErrorCode::BadEnrolment
+crate::client | ErrorCode::BadMessage
+crate::client | ErrorCode::BadSequence
+crate::client | ErrorCode::BadSignature
+crate::client | ErrorCode::CapabilityMissing
+crate::client | ErrorCode::Closed
+crate::client | ErrorCode::DeviceRevoked
+crate::client | ErrorCode::DeviceUnknown
+crate::client | ErrorCode::Internal
+crate::client | ErrorCode::NotAuthenticated
+crate::client | ErrorCode::NotSignedIn
+crate::client | ErrorCode::RateLimited
+crate::client | ErrorCode::Replayed
+crate::client | ErrorCode::RoleDenied
+crate::client | ErrorCode::SignInRefused
+crate::client | ErrorCode::TokenExpired
+crate::client | ErrorCode::TokenUnknown
+crate::client | ErrorCode::TokenUsed
+crate::client | ErrorCode::TooBig
+crate::client | ErrorCode::Unsupported
+crate::client | ErrorCode::VersionMismatch
+crate::client | Kept.audience: String
+crate::client | Kept.body: String
+crate::client | Kept.seq: u64
+crate::client | Kept.topic: String
+crate::client | ProtoError.code: ErrorCode
+crate::client | ProtoError.message: String
+crate::client | Resumed::Events(Vec<Kept>)
+crate::client | Resumed::Gap { oldest: u64 }
+crate::client | ServerMsg::Authed { device: String, name: String }
+crate::client | ServerMsg::Bye { reason: String }
+crate::client | ServerMsg::CallErr { id: u64, code: String, message: String }
+crate::client | ServerMsg::CallOk { id: u64, detail: String }
+crate::client | ServerMsg::Enrolled { device: String, challenge: String }
+crate::client | ServerMsg::Error { code: ErrorCode, message: String }
+crate::client | ServerMsg::Event { seq: u64, topic: String, body: String }
+crate::client | ServerMsg::PictureOk
+crate::client | ServerMsg::Pong { ts: u64 }
+crate::client | ServerMsg::ResumeGap { oldest: u64 }
+crate::client | ServerMsg::ResumeOk { from: u64, count: u64 }
+crate::client | ServerMsg::SignedIn { person: String }
+crate::client | [serde(rename_all = "snake_case")] pub enum ErrorCode
+crate::client | [serde(tag = "t", rename_all = "snake_case")] pub enum ClientMsg
+crate::client | [serde(tag = "t", rename_all = "snake_case")] pub enum ServerMsg
+crate::client | impl From<ProtoError> for ServerMsg
+crate::client | impl fmt::Debug for ClientMsg
+crate::client | impl fmt::Display for ProtoError
+crate::client | impl std::error::Error for ProtoError
+crate::client | pub const MAX_TEXT: usize = 64 * 1024
+crate::client | pub const MIN_PROTOCOL_VERSION: u32 = 1
+crate::client | pub const PROTOCOL_VERSION: u32 = 1
+crate::client | pub const STREAM_PICTURE: u8 = 1
+crate::client | pub const WS_PATH: &str = "/client/ws"
+crate::client | pub enum Resumed
+crate::client | pub fn ErrorCode::as_str(self) -> &'static str
+crate::client | pub fn EventRing::latest(&self) -> u64
+crate::client | pub fn EventRing::new(cap: usize) -> EventRing
+crate::client | pub fn EventRing::push(&mut self, audience: &str, topic: &str, body: &str) -> u64
+crate::client | pub fn EventRing::since(&self, last_seq: u64, person: &str) -> Resumed
+crate::client | pub fn ProtoError::new(code: ErrorCode, message: impl Into<String>) -> ProtoError
+crate::client | pub fn binary(stream: u8, payload: &[u8]) -> Vec<u8>
+crate::client | pub fn decode_client(text: &str) -> Result<ClientMsg, ProtoError>
+crate::client | pub fn decode_server(text: &str) -> Result<ServerMsg, ProtoError>
+crate::client | pub fn encode_client(m: &ClientMsg) -> String
+crate::client | pub fn encode_server(m: &ServerMsg) -> String
+crate::client | pub fn negotiate(v: u32, min_v: u32, offered: &[String], needed: &[String], server: &[&str]) -> Result<Vec<String>, ProtoError>
+crate::client | pub fn split_binary(msg: &[u8]) -> Option<(u8, &[u8])>
+crate::client | pub mod cap
+crate::client | pub struct EventRing
+crate::client | pub struct Kept
+crate::client | pub struct ProtoError
+crate::client::cap | pub const CALLS: &str = "calls"
+crate::client::cap | pub const EVENTS: &str = "events"
+crate::client::cap | pub const INPUT: &str = "input"
+crate::client::cap | pub const PICTURE: &str = "picture"
+crate::client::cap | pub const SERVER: &[&str] = &[PICTURE, INPUT, EVENTS, CALLS]
+crate::contract | pub mod catalog
+crate::contract | pub mod consent
+crate::contract | pub mod context
+crate::contract | pub mod error
+crate::contract | pub mod event
+crate::contract | pub mod flows
+crate::contract | pub mod hello
+crate::contract | pub mod settings
+crate::contract | pub mod stream
+crate::contract | pub mod vault
+crate::contract | pub use consent::{ConsentAnswer, ConsentKind, ConsentRequest, Consents, LocalSeat}
+crate::contract | pub use context::{guard, CallContext, Risk, Scope, Transport}
+crate::contract | pub use error::{CallError, CallResult, ErrorCode, IdempotencyKey, RateLimit, RateLimiter}
+crate::contract | pub use event::{Event, EventBatch, EventLog, Resume}
+crate::contract | pub use flows::{Approval, FlowEvent, FlowInfo, Flows, RunId, RunState, RunStatus}
+crate::contract | pub use hello::{negotiate, ClientHello, ContractVersion, DomainSupport, Hello, Negotiated, CONTRACT_VERSION}
+crate::contract | pub use settings::{SettingChange, SettingEvent, SettingKind, SettingSpec, SettingValue, Settings}
+crate::contract | pub use stream::{Chunk, StreamHandle, StreamId, StreamKind, Streams}
+crate::contract | pub use vault::{ActionOutcome, NamedAction, Vault, VaultStatus}
+crate::contract::catalog | CallSpec.name: &'static str
+crate::contract::catalog | CallSpec.risk: Risk
+crate::contract::catalog | CallSpec.scope: &'static str
+crate::contract::catalog | DomainSpec.calls: &'static [CallSpec]
+crate::contract::catalog | DomainSpec.events: &'static [&'static str]
+crate::contract::catalog | DomainSpec.name: &'static str
+crate::contract::catalog | DomainSpec.since_minor: u16
+crate::contract::catalog | pub const DOMAINS: &[DomainSpec] = &[DomainSpec { name: "settings", since_minor: 1, calls: &[c("schema", Scope::SETTINGS_READ, Risk::Read), c("get", Scope::SETTINGS_READ,...
+crate::contract::catalog | pub const PLANNED: &[&str] = &["accounts", "chat", "models", "store", "apps", "updates", "downloads", "files", "sharing", "backup", "cluster", "git", "network", "firewall...
+crate::contract::catalog | pub fn call(domain_name: &str, call_name: &str) -> Option<&'static CallSpec>
+crate::contract::catalog | pub fn domain(name: &str) -> Option<&'static DomainSpec>
+crate::contract::catalog | pub fn hello_for(machine: &str, build: &str, capabilities: Capabilities) -> Hello
+crate::contract::catalog | pub struct CallSpec
+crate::contract::catalog | pub struct DomainSpec
+crate::contract::consent | ConsentAnswer::Allow
+crate::contract::consent | ConsentAnswer::Deny
+crate::contract::consent | ConsentKind::Camera
+crate::contract::consent | ConsentKind::Licence
+crate::contract::consent | ConsentKind::Microphone
+crate::contract::consent | ConsentKind::Other
+crate::contract::consent | ConsentKind::Pairing
+crate::contract::consent | ConsentKind::Permission
+crate::contract::consent | ConsentKind::VaultUnlock
+crate::contract::consent | ConsentRequest.created_ms: u64
+crate::contract::consent | ConsentRequest.expires_ms: u64
+crate::contract::consent | ConsentRequest.id: String
+crate::contract::consent | ConsentRequest.kind: ConsentKind
+crate::contract::consent | ConsentRequest.subject: String
+crate::contract::consent | ConsentRequest.text: String
+crate::contract::consent | ConsentRequest.text_key: String
+crate::contract::consent | [serde(rename_all = "snake_case")] pub enum ConsentAnswer
+crate::contract::consent | [serde(rename_all = "snake_case")] pub enum ConsentKind
+crate::contract::consent | pub fn Consents:::answer(&self, seat: &LocalSeat, id: &str, answer: ConsentAnswer) -> CallResult<()>
+crate::contract::consent | pub fn Consents:::pending(&self, ctx: &CallContext) -> CallResult<Vec<ConsentRequest>>
+crate::contract::consent | pub fn LocalSeat::claim(ctx: &CallContext) -> CallResult<LocalSeat>
+crate::contract::consent | pub fn LocalSeat::user(&self) -> &str
+crate::contract::consent | pub struct ConsentRequest
+crate::contract::consent | pub struct LocalSeat
+crate::contract::consent | pub trait Consents: Send + Sync
+crate::contract::context | CallContext.identity: Identity
+crate::contract::context | CallContext.transport: Transport
+crate::contract::context | Risk::AskPerson
+crate::contract::context | Risk::Change
+crate::contract::context | Risk::LocalOnly
+crate::contract::context | Risk::Read
+crate::contract::context | Transport::DevMode
+crate::contract::context | Transport::InProcess
+crate::contract::context | Transport::Relay
+crate::contract::context | [serde(rename_all = "snake_case")] pub enum Risk
+crate::contract::context | [serde(rename_all = "snake_case")] pub enum Transport
+crate::contract::context | pub const Scope::CONSENT_READ: &'static str = "consent:read"
+crate::contract::context | pub const Scope::FLOWS_APPROVE: &'static str = "flows:approve"
+crate::contract::context | pub const Scope::FLOWS_READ: &'static str = "flows:read"
+crate::contract::context | pub const Scope::FLOWS_RUN: &'static str = "flows:run"
+crate::contract::context | pub const Scope::LOCAL: &'static str = "local"
+crate::contract::context | pub const Scope::SETTINGS_READ: &'static str = "settings:read"
+crate::contract::context | pub const Scope::SETTINGS_WRITE: &'static str = "settings:write"
+crate::contract::context | pub const Scope::VAULT_LOCK: &'static str = "vault:lock"
+crate::contract::context | pub const Scope::VAULT_STATUS: &'static str = "vault:status"
+crate::contract::context | pub const Scope::VAULT_USE: &'static str = "vault:use"
+crate::contract::context | pub fn CallContext::allows(&self, scope: &str) -> bool
+crate::contract::context | pub fn CallContext::audit_line(&self, call: &str, risk: Risk, outcome: &str) -> String
+crate::contract::context | pub fn CallContext::is_local(&self) -> bool
+crate::contract::context | pub fn CallContext::local(user: &str, admin: bool) -> CallContext
+crate::contract::context | pub fn CallContext::remote(user: &str, transport: Transport, scopes: &[&str]) -> CallContext
+crate::contract::context | pub fn Risk::id(self) -> &'static str
+crate::contract::context | pub fn Scope::id(&self) -> &str
+crate::contract::context | pub fn Scope::new(id: &str) -> Option<Scope>
+crate::contract::context | pub fn Transport::is_local(self) -> bool
+crate::contract::context | pub fn guard(ctx: &CallContext, scope: &str, risk: Risk) -> CallResult<()>
+crate::contract::context | pub struct CallContext
+crate::contract::context | pub struct Scope(String)
+crate::contract::error | CallError.code: ErrorCode
+crate::contract::error | CallError.hint: String
+crate::contract::error | CallError.message: String
+crate::contract::error | CallError.message_key: String
+crate::contract::error | CallError.retry_after_ms: Option<u32>
+crate::contract::error | ErrorCode::Busy
+crate::contract::error | ErrorCode::Cancelled
+crate::contract::error | ErrorCode::Conflict
+crate::contract::error | ErrorCode::Denied
+crate::contract::error | ErrorCode::Expired
+crate::contract::error | ErrorCode::Internal
+crate::contract::error | ErrorCode::InvalidInput
+crate::contract::error | ErrorCode::Io
+crate::contract::error | ErrorCode::Locked
+crate::contract::error | ErrorCode::NeedsConsent
+crate::contract::error | ErrorCode::NotFound
+crate::contract::error | ErrorCode::Offline
+crate::contract::error | ErrorCode::RateLimited
+crate::contract::error | ErrorCode::Unauthenticated
+crate::contract::error | ErrorCode::Unsupported
+crate::contract::error | ErrorCode::VersionMismatch
+crate::contract::error | RateLimit.calls: u32
+crate::contract::error | RateLimit.per_ms: u32
+crate::contract::error | [serde(rename_all = "snake_case")] pub enum ErrorCode
+crate::contract::error | impl From<crate::error::ApiError> for CallError
+crate::contract::error | impl fmt::Display for CallError
+crate::contract::error | impl std::error::Error for CallError
+crate::contract::error | pub const ErrorCode::ALL: [ErrorCode; 16] = [ErrorCode::NotFound, ErrorCode::Denied, ErrorCode::Unsupported, ErrorCode::InvalidInput, ErrorCode::Busy, ErrorCode::Io, ErrorCode::Unau...
+crate::contract::error | pub fn CallError::hint(mut self, hint: &str) -> CallError
+crate::contract::error | pub fn CallError::new(code: ErrorCode, message_key: &str, message: &str) -> CallError
+crate::contract::error | pub fn CallError::retry_after(mut self, ms: u32) -> CallError
+crate::contract::error | pub fn ErrorCode::as_str(self) -> &'static str
+crate::contract::error | pub fn ErrorCode::safe_to_retry(self) -> bool
+crate::contract::error | pub fn IdempotencyKey::as_str(&self) -> &str
+crate::contract::error | pub fn IdempotencyKey::new(key: &str) -> CallResult<IdempotencyKey>
+crate::contract::error | pub fn RateLimiter::check(&mut self, now_ms: u64) -> CallResult<()>
+crate::contract::error | pub fn RateLimiter::new(limit: RateLimit) -> RateLimiter
+crate::contract::error | pub struct CallError
+crate::contract::error | pub struct IdempotencyKey(String)
+crate::contract::error | pub struct RateLimit
+crate::contract::error | pub struct RateLimiter
+crate::contract::error | pub type CallResult<T> = Result<T, CallError>
+crate::contract::event | Event.at_ms: u64
+crate::contract::event | Event.body: T
+crate::contract::event | Event.seq: u64
+crate::contract::event | Event.topic: String
+crate::contract::event | EventBatch.events: Vec<Event<T>>
+crate::contract::event | EventBatch.gap: bool
+crate::contract::event | EventBatch.next: u64
+crate::contract::event | Resume::After(u64)
+crate::contract::event | Resume::Latest
+crate::contract::event | [serde(rename_all = "snake_case")] pub enum Resume
+crate::contract::event | pub fn EventLog::last_seq(&self) -> u64
+crate::contract::event | pub fn EventLog::new(capacity: usize) -> EventLog<T>
+crate::contract::event | pub fn EventLog::push(&mut self, topic: &str, at_ms: u64, body: T) -> u64
+crate::contract::event | pub fn EventLog::read(&self, resume: Resume, topic: Option<&str>, limit: usize) -> EventBatch<T>
+crate::contract::event | pub struct Event<T>
+crate::contract::event | pub struct EventBatch<T>
+crate::contract::event | pub struct EventLog<T>
+crate::contract::flows | Approval.id: String
+crate::contract::flows | Approval.local_only: bool
+crate::contract::flows | Approval.text: String
+crate::contract::flows | Approval.text_key: String
+crate::contract::flows | FlowEvent::ApprovalAnswered { run: RunId, approval_id: String, allowed: bool, by: String }
+crate::contract::flows | FlowEvent::ApprovalNeeded { run: RunId, approval: Approval }
+crate::contract::flows | FlowEvent::Finished { run: RunId, state: RunState }
+crate::contract::flows | FlowEvent::Frame { run: RunId, stream: StreamHandle }
+crate::contract::flows | FlowEvent::Started { run: RunId, flow: String }
+crate::contract::flows | FlowEvent::Step { run: RunId, name: String }
+crate::contract::flows | FlowInfo.description: String
+crate::contract::flows | FlowInfo.id: String
+crate::contract::flows | FlowInfo.name: String
+crate::contract::flows | RunState::Failed
+crate::contract::flows | RunState::Running
+crate::contract::flows | RunState::Stopped
+crate::contract::flows | RunState::Succeeded
+crate::contract::flows | RunState::WaitingApproval
+crate::contract::flows | RunStatus.flow: String
+crate::contract::flows | RunStatus.pending_approval: Option<Approval>
+crate::contract::flows | RunStatus.run: RunId
+crate::contract::flows | RunStatus.state: RunState
+crate::contract::flows | RunStatus.step: String
+crate::contract::flows | [serde(rename_all = "snake_case")] pub enum RunState
+crate::contract::flows | [serde(tag = "type", rename_all = "snake_case")] pub enum FlowEvent
+crate::contract::flows | pub fn Flows:::approve(&self, ctx: &CallContext, run: &RunId, approval_id: &str, allow: bool) -> CallResult<RunStatus>
+crate::contract::flows | pub fn Flows:::events(&self, ctx: &CallContext, run: Option<&RunId>, resume: Resume, limit: usize) -> CallResult<EventBatch<FlowEvent>>
+crate::contract::flows | pub fn Flows:::list(&self, ctx: &CallContext) -> CallResult<Vec<FlowInfo>>
+crate::contract::flows | pub fn Flows:::start(&self, ctx: &CallContext, flow: &str, idem: &IdempotencyKey) -> CallResult<RunId>
+crate::contract::flows | pub fn Flows:::status(&self, ctx: &CallContext, run: &RunId) -> CallResult<RunStatus>
+crate::contract::flows | pub fn Flows:::stop(&self, ctx: &CallContext, run: &RunId) -> CallResult<RunStatus>
+crate::contract::flows | pub fn RunState::is_finished(self) -> bool
+crate::contract::flows | pub struct Approval
+crate::contract::flows | pub struct FlowInfo
+crate::contract::flows | pub struct RunId(pub String)
+crate::contract::flows | pub struct RunStatus
+crate::contract::flows | pub trait Flows: Send + Sync
+crate::contract::hello | ClientHello.contract: ContractVersion
+crate::contract::hello | ClientHello.wants: Vec<String>
+crate::contract::hello | ContractVersion.major: u16
+crate::contract::hello | ContractVersion.minor: u16
+crate::contract::hello | DomainSupport.calls: Vec<String>
+crate::contract::hello | DomainSupport.domain: String
+crate::contract::hello | DomainSupport.events: Vec<String>
+crate::contract::hello | DomainSupport.since_minor: u16
+crate::contract::hello | Hello.build: String
+crate::contract::hello | Hello.capabilities: Capabilities
+crate::contract::hello | Hello.contract: ContractVersion
+crate::contract::hello | Hello.domains: Vec<DomainSupport>
+crate::contract::hello | Hello.machine: String
+crate::contract::hello | Hello.oldest_minor: u16
+crate::contract::hello | Hello.rate_limit: RateLimit
+crate::contract::hello | Negotiated.missing: Vec<String>
+crate::contract::hello | Negotiated.usable: Vec<String>
+crate::contract::hello | Negotiated.version: Option<ContractVersion>
+crate::contract::hello | pub fn Hello::has_domain(&self, domain: &str) -> bool
+crate::contract::hello | pub fn Hello::supports(&self, domain: &str, call: &str) -> bool
+crate::contract::hello | pub fn negotiate(machine: &Hello, client: &ClientHello) -> Negotiated
+crate::contract::hello | pub struct ClientHello
+crate::contract::hello | pub struct ContractVersion
+crate::contract::hello | pub struct DomainSupport
+crate::contract::hello | pub struct Hello
+crate::contract::hello | pub struct Negotiated
+crate::contract::settings | SettingChange.key: String
+crate::contract::settings | SettingChange.repeated: bool
+crate::contract::settings | SettingChange.seq: u64
+crate::contract::settings | SettingChange.value: SettingValue
+crate::contract::settings | SettingEvent.by: String
+crate::contract::settings | SettingEvent.key: String
+crate::contract::settings | SettingEvent.value: SettingValue
+crate::contract::settings | SettingKind::Bool
+crate::contract::settings | SettingKind::Choice { options: Vec<String> }
+crate::contract::settings | SettingKind::Int { min: i64, max: i64 }
+crate::contract::settings | SettingKind::Text { max_len: u32 }
+crate::contract::settings | SettingSpec.default: SettingValue
+crate::contract::settings | SettingSpec.key: String
+crate::contract::settings | SettingSpec.kind: SettingKind
+crate::contract::settings | SettingSpec.label_key: String
+crate::contract::settings | SettingSpec.read_scope: String
+crate::contract::settings | SettingSpec.write_risk: Risk
+crate::contract::settings | SettingSpec.write_scope: String
+crate::contract::settings | SettingValue::Bool(bool)
+crate::contract::settings | SettingValue::Int(i64)
+crate::contract::settings | SettingValue::Text(String)
+crate::contract::settings | [serde(tag = "type", content = "value", rename_all = "snake_case")] pub enum SettingValue
+crate::contract::settings | [serde(tag = "type", rename_all = "snake_case")] pub enum SettingKind
+crate::contract::settings | pub fn SettingKind::accepts(&self, v: &SettingValue) -> bool
+crate::contract::settings | pub fn Settings:::get(&self, ctx: &CallContext, key: &str) -> CallResult<SettingValue>
+crate::contract::settings | pub fn Settings:::schema(&self, ctx: &CallContext) -> CallResult<Vec<SettingSpec>>
+crate::contract::settings | pub fn Settings:::set(&self, ctx: &CallContext, key: &str, value: SettingValue, idem: Option<&IdempotencyKey>) -> CallResult<SettingChange>
+crate::contract::settings | pub fn Settings:::watch(&self, ctx: &CallContext, key: Option<&str>, resume: Resume, limit: usize) -> CallResult<EventBatch<SettingEvent>>
+crate::contract::settings | pub struct SettingChange
+crate::contract::settings | pub struct SettingEvent
+crate::contract::settings | pub struct SettingSpec
+crate::contract::settings | pub trait Settings: Send + Sync
+crate::contract::stream | Chunk.data: Vec<u8>
+crate::contract::stream | Chunk.last: bool
+crate::contract::stream | Chunk.offset: u64
+crate::contract::stream | Chunk.stream: StreamId
+crate::contract::stream | StreamHandle.id: StreamId
+crate::contract::stream | StreamHandle.kind: StreamKind
+crate::contract::stream | StreamHandle.max_chunk: u32
+crate::contract::stream | StreamHandle.media_type: String
+crate::contract::stream | StreamHandle.total: Option<u64>
+crate::contract::stream | StreamKind::CameraFrame
+crate::contract::stream | StreamKind::File
+crate::contract::stream | StreamKind::Log
+crate::contract::stream | StreamKind::Screenshot
+crate::contract::stream | [serde(rename_all = "snake_case")] pub enum StreamKind
+crate::contract::stream | pub fn Streams:::close(&self, ctx: &CallContext, id: &StreamId) -> CallResult<()>
+crate::contract::stream | pub fn Streams:::read(&self, ctx: &CallContext, id: &StreamId, offset: u64, max_len: u32) -> CallResult<Chunk>
+crate::contract::stream | pub struct Chunk
+crate::contract::stream | pub struct StreamHandle
+crate::contract::stream | pub struct StreamId(pub String)
+crate::contract::stream | pub trait Streams: Send + Sync
+crate::contract::vault | ActionOutcome.ok: bool
+crate::contract::vault | ActionOutcome.summary: String
+crate::contract::vault | VaultStatus.entries: u32
+crate::contract::vault | VaultStatus.locked: bool
+crate::contract::vault | pub fn Vault:::lock(&self, ctx: &CallContext) -> CallResult<VaultStatus>
+crate::contract::vault | pub fn Vault:::status(&self, ctx: &CallContext) -> CallResult<VaultStatus>
+crate::contract::vault | pub fn Vault:::unlock(&self, seat: &LocalSeat, login_password: &str) -> CallResult<VaultStatus>
+crate::contract::vault | pub fn Vault:::use_secret(&self, ctx: &CallContext, action: &NamedAction, idem: Option<&IdempotencyKey>) -> CallResult<ActionOutcome>
+crate::contract::vault | pub struct ActionOutcome
+crate::contract::vault | pub struct NamedAction(pub String)
+crate::contract::vault | pub struct VaultStatus
+crate::contract::vault | pub trait Vault: Send + Sync
+crate::error | ApiError::Busy(String)
+crate::error | ApiError::Denied(String)
+crate::error | ApiError::InvalidInput(String)
+crate::error | ApiError::Io(String)
+crate::error | ApiError::NotFound(String)
+crate::error | ApiError::Unsupported(String)
+crate::error | [serde(tag = "code", content = "message", rename_all = "snake_case")] pub enum ApiError
+crate::error | pub fn ApiError::code(&self) -> &'static str
+crate::error | pub type ApiResult<T> = Result<T, ApiError>
+crate::host | pub fn HostApi:::can_power(&self) -> bool
+crate::host | pub fn HostApi:::can_sleep(&self) -> bool
+crate::host | pub fn HostApi:::detect_env(&self) -> String
+crate::host | pub fn HostApi:::net_status(&self) -> String
+crate::host | pub fn HostApi:::power_off(&self)
+crate::host | pub fn HostApi:::reboot(&self)
+crate::host | pub fn HostApi:::run_wasm(&self, user: &str, policy: &Policy, wasm: &[u8], entry: &str) -> Result<String, String>
+crate::host | pub fn HostApi:::sleep(&self)
+crate::host | pub trait HostApi: Send + Sync
+crate::identity | Capabilities.audio: bool
+crate::identity | Capabilities.battery: bool
+crate::identity | Capabilities.bluetooth: bool
+crate::identity | Capabilities.camera: bool
+crate::identity | Capabilities.display: bool
+crate::identity | Capabilities.keyboard: bool
+crate::identity | Identity.admin: bool
+crate::identity | Identity.scopes: Vec<String>
+crate::identity | Identity.user: String
+crate::identity | pub fn Capabilities::all() -> Capabilities
+crate::identity | pub fn Capabilities::names(&self) -> Vec<&'static str>
+crate::identity | pub fn Capabilities::none() -> Capabilities
+crate::identity | pub fn Identity::allows(&self, scope: &str) -> bool
+crate::identity | pub fn Identity::local(user: &str, admin: bool) -> Identity
+crate::identity | pub fn Identity::remote(user: &str, scopes: &[&str]) -> Identity
+crate::identity | pub struct Capabilities
+crate::identity | pub struct Identity
+crate::service | Principal.admin: bool
+crate::service | Principal.policy: Policy
+crate::service | Principal.role: String
+crate::service | Principal.user: String
+crate::service | pub fn AuditSink:::record(&self, user: &str, event: &str, detail: &str)
+crate::service | pub fn Authenticator:::login(&self, name: &str, password: &str) -> ApiResult<Principal>
+crate::service | pub fn Authenticator:::lookup(&self, user: &str) -> Option<Principal>
+crate::service | pub struct Principal
+crate::service | pub trait AuditSink: Send + Sync
+crate::service | pub trait Authenticator: Send + Sync
+crate::sysinfo | LoadAvg.fifteen: f64
+crate::sysinfo | LoadAvg.five: f64
+crate::sysinfo | LoadAvg.one: f64
+crate::sysinfo | MemInfo.available_kb: u64
+crate::sysinfo | MemInfo.free_kb: u64
+crate::sysinfo | MemInfo.swap_free_kb: u64
+crate::sysinfo | MemInfo.swap_total_kb: u64
+crate::sysinfo | MemInfo.total_kb: u64
+crate::sysinfo | Uptime.idle_secs: f64
+crate::sysinfo | Uptime.up_secs: f64
+crate::sysinfo | pub fn Sysinfo:::cmdline(&self) -> ApiResult<String>
+crate::sysinfo | pub fn Sysinfo:::cpu_count(&self) -> ApiResult<u32>
+crate::sysinfo | pub fn Sysinfo:::loadavg(&self) -> ApiResult<LoadAvg>
+crate::sysinfo | pub fn Sysinfo:::meminfo(&self) -> ApiResult<MemInfo>
+crate::sysinfo | pub fn Sysinfo:::product_name(&self) -> ApiResult<String>
+crate::sysinfo | pub fn Sysinfo:::uptime(&self) -> ApiResult<Uptime>
+crate::sysinfo | pub fn parse_loadavg(text: &str) -> ApiResult<LoadAvg>
+crate::sysinfo | pub fn parse_meminfo(text: &str) -> ApiResult<MemInfo>
+crate::sysinfo | pub fn parse_uptime(text: &str) -> ApiResult<Uptime>
+crate::sysinfo | pub struct LoadAvg
+crate::sysinfo | pub struct MemInfo
+crate::sysinfo | pub struct Uptime
+crate::sysinfo | pub trait Sysinfo: Send + Sync
+crate::wizard | CheckStep.check: String
+crate::wizard | CheckStep.id: String
+crate::wizard | Choice.label: String
+crate::wizard | Choice.value: String
+crate::wizard | Field.id: String
+crate::wizard | Field.kind: String
+crate::wizard | Field.label: String
+crate::wizard | FieldKind::Choice
+crate::wizard | FieldKind::Path
+crate::wizard | FieldKind::Secret
+crate::wizard | FieldKind::Text
+crate::wizard | FieldKind::Toggle
+crate::wizard | FieldKind::Unknown(String)
+crate::wizard | FormStep.fields: Vec<Field>
+crate::wizard | FormStep.id: String
+crate::wizard | MigrationStep.id: String
+crate::wizard | MigrationStep.migration: String
+crate::wizard | Rule.rule: String
+crate::wizard | Step::Check(CheckStep)
+crate::wizard | Step::Form(FormStep)
+crate::wizard | Step::Migration(MigrationStep)
+crate::wizard | Step::Summary(SummaryStep)
+crate::wizard | Step::Unknown(Value)
+crate::wizard | SummaryStep.id: String
+crate::wizard | Trigger.on: String
+crate::wizard | TriggerKind::OnInstall
+crate::wizard | TriggerKind::OnRemove
+crate::wizard | TriggerKind::OnUpdate
+crate::wizard | TriggerKind::Reconfigure
+crate::wizard | TriggerKind::Unknown(String)
+crate::wizard | WizardSpec.id: String
+crate::wizard | WizardSpec.steps: Vec<Step>
+crate::wizard | WizardSpec.trigger: Trigger
+crate::wizard | [serde(default = "one")] WizardSpec.wizard_version: u32
+crate::wizard | [serde(default)] SummaryStep.text: String
+crate::wizard | [serde(default, skip_serializing_if = "Option::is_none")] CheckStep.param: Option<String>
+crate::wizard | [serde(default, skip_serializing_if = "Option::is_none")] Field.default: Option<Value>
+crate::wizard | [serde(default, skip_serializing_if = "Option::is_none")] MigrationStep.from: Option<String>
+crate::wizard | [serde(default, skip_serializing_if = "Option::is_none")] MigrationStep.to: Option<String>
+crate::wizard | [serde(default, skip_serializing_if = "Option::is_none")] Rule.value: Option<Value>
+crate::wizard | [serde(default, skip_serializing_if = "Option::is_none")] Trigger.from: Option<String>
+crate::wizard | [serde(default, skip_serializing_if = "String::is_empty")] CheckStep.title: String
+crate::wizard | [serde(default, skip_serializing_if = "String::is_empty")] Field.help: String
+crate::wizard | [serde(default, skip_serializing_if = "String::is_empty")] FormStep.title: String
+crate::wizard | [serde(default, skip_serializing_if = "String::is_empty")] MigrationStep.title: String
+crate::wizard | [serde(default, skip_serializing_if = "String::is_empty")] Rule.message: String
+crate::wizard | [serde(default, skip_serializing_if = "String::is_empty")] SummaryStep.title: String
+crate::wizard | [serde(default, skip_serializing_if = "String::is_empty")] WizardSpec.title: String
+crate::wizard | [serde(default, skip_serializing_if = "Vec::is_empty")] Field.choices: Vec<Choice>
+crate::wizard | [serde(default, skip_serializing_if = "Vec::is_empty")] Field.rules: Vec<Rule>
+crate::wizard | [serde(default, skip_serializing_if = "is_false")] Field.required: bool
+crate::wizard | [serde(flatten)] CheckStep.extra: BTreeMap<String, Value>
+crate::wizard | [serde(flatten)] Field.extra: BTreeMap<String, Value>
+crate::wizard | [serde(flatten)] FormStep.extra: BTreeMap<String, Value>
+crate::wizard | [serde(flatten)] MigrationStep.extra: BTreeMap<String, Value>
+crate::wizard | [serde(flatten)] Rule.extra: BTreeMap<String, Value>
+crate::wizard | [serde(flatten)] SummaryStep.extra: BTreeMap<String, Value>
+crate::wizard | [serde(flatten)] Trigger.extra: BTreeMap<String, Value>
+crate::wizard | [serde(flatten)] WizardSpec.extra: BTreeMap<String, Value>
+crate::wizard | impl Serialize for Step
+crate::wizard | impl<'de> Deserialize<'de> for Step
+crate::wizard | pub const MAX_CHOICES: usize = 24
+crate::wizard | pub const MAX_DEFAULT: usize = 200
+crate::wizard | pub const MAX_FIELDS: usize = 12
+crate::wizard | pub const MAX_LABEL: usize = 80
+crate::wizard | pub const MAX_REF: usize = 100
+crate::wizard | pub const MAX_RULES: usize = 6
+crate::wizard | pub const MAX_RULE_NUMBER: u64 = 10_000
+crate::wizard | pub const MAX_STEPS: usize = 12
+crate::wizard | pub const MAX_TEXT: usize = 600
+crate::wizard | pub const MAX_WIZARDS: usize = 8
+crate::wizard | pub const WIZARD_VERSION: u32 = 1
+crate::wizard | pub enum FieldKind
+crate::wizard | pub enum Step
+crate::wizard | pub enum TriggerKind
+crate::wizard | pub fn Field::kind(&self) -> FieldKind
+crate::wizard | pub fn FieldKind::of(s: &str) -> FieldKind
+crate::wizard | pub fn Step::id(&self) -> String
+crate::wizard | pub fn Step::kind_name(&self) -> String
+crate::wizard | pub fn Trigger::kind(&self) -> TriggerKind
+crate::wizard | pub fn Trigger::matches_update_from(&self, installed: &str) -> bool
+crate::wizard | pub fn WizardSpec::check_runnable(&self) -> Result<(), String>
+crate::wizard | pub fn validate_wizards(specs: &[WizardSpec], declared: &[&str]) -> Result<(), String>
+crate::wizard | pub struct CheckStep
+crate::wizard | pub struct Choice
+crate::wizard | pub struct Field
+crate::wizard | pub struct FormStep
+crate::wizard | pub struct MigrationStep
+crate::wizard | pub struct Rule
+crate::wizard | pub struct SummaryStep
+crate::wizard | pub struct Trigger
+crate::wizard | pub struct WizardSpec
+crate::appcaps | [serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")] Approval.extra: serde_json::Map<String, serde_json::Value>
+crate::appcaps | [serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")] CapabilityRequest.extra: serde_json::Map<String, serde_json::Value>
+crate::appcaps | pub fn unknown_request_fields(reqs: &[CapabilityRequest]) -> Vec<String>
+crate::appcaps | pub struct CapabilityRequest
+crate::client | ClientMsg::AudioClose
+crate::client | ClientMsg::AudioOpen { #[serde(default)] side: Option<String> }
+crate::client | ClientMsg::CameraClose { unit: String }
+crate::client | ClientMsg::CameraOpen { unit: String }
+crate::client | ClientMsg::ClipboardGet { #[serde(default)] confirmed: bool }
+crate::client | ClientMsg::ClipboardPut { text: String, #[serde(default)] confirmed: bool }
+crate::client | ClientMsg::OfferClose { kind: String }
+crate::client | ClientMsg::OfferOpen { kind: String }
+crate::client | ServerMsg::AudioClosed { reason: String }
+crate::client | ServerMsg::AudioFlush
+crate::client | ServerMsg::AudioOk { rate: u32, channels: u8, chunk_ms: u32, side: String }
+crate::client | ServerMsg::CameraClosed { unit: String, reason: String }
+crate::client | ServerMsg::CameraOk { unit: String, fps: u32 }
+crate::client | ServerMsg::ClipboardOk
+crate::client | ServerMsg::ClipboardText { text: String }
+crate::client | ServerMsg::MediaErr { what: String, code: String, message: String }
+crate::client | ServerMsg::OfferClosed { kind: String, reason: String }
+crate::client | ServerMsg::OfferOk { kind: String, source: String }
+crate::client | pub const MAX_CLIPBOARD_MESSAGE: usize = 6 * media::MAX_CLIPBOARD + 256
+crate::client | pub const STREAM_AUDIO: u8 = 2
+crate::client | pub const STREAM_CAMERA: u8 = 3
+crate::client | pub const STREAM_CAMERA_IN: u8 = 5
+crate::client | pub const STREAM_MIC_IN: u8 = 4
+crate::client | pub mod media
+crate::client::cap | pub const AUDIO_OUT: &str = "audio.out"
+crate::client::cap | pub const CAMERA_FRAMES: &str = "camera.frames"
+crate::client::cap | pub const CLIENT_CAMERA: &str = "client.camera"
+crate::client::cap | pub const CLIENT_MICROPHONE: &str = "client.microphone"
+crate::client::cap | pub const CLIPBOARD_TEXT: &str = "clipboard.text"
+crate::client::cap | pub const SERVER_MEDIA: &[&str] = &[AUDIO_OUT, CLIPBOARD_TEXT, CAMERA_FRAMES, CLIENT_CAMERA, CLIENT_MICROPHONE]
+crate::client::media | ClipError::Empty
+crate::client::media | ClipError::TooBig
+crate::client::media | Side::Both
+crate::client::media | Side::Client
+crate::client::media | SourceKind::Camera
+crate::client::media | SourceKind::Microphone
+crate::client::media | pub const AUDIO_RATE: u32 = 48_000
+crate::client::media | pub const CAMERA_FPS: u32 = 5
+crate::client::media | pub const CHUNK_FRAMES: usize = (AUDIO_RATE as usize * CHUNK_MS as usize) / 1000
+crate::client::media | pub const CHUNK_MS: u32 = 20
+crate::client::media | pub const MAX_CAMERA_FRAME: usize = 256 * 1024
+crate::client::media | pub const MAX_CLIPBOARD: usize = 64 * 1024
+crate::client::media | pub const MAX_MIC_CHUNK: usize = 64 * 1024
+crate::client::media | pub const MAX_QUEUE_CHUNKS: usize = (MAX_QUEUE_MS / CHUNK_MS) as usize
+crate::client::media | pub const MAX_QUEUE_MS: u32 = 100
+crate::client::media | pub const MAX_UNIT: usize = 120
+crate::client::media | pub const MIC_RATE: u32 = 16_000
+crate::client::media | pub enum ClipError
+crate::client::media | pub enum Side
+crate::client::media | pub enum SourceKind
+crate::client::media | pub fn Chunker::channels(&self) -> usize
+crate::client::media | pub fn Chunker::clear(&mut self)
+crate::client::media | pub fn Chunker::new(channels: usize) -> Chunker
+crate::client::media | pub fn Chunker::push(&mut self, pcm: &[i16]) -> Vec<Vec<i16>>
+crate::client::media | pub fn JitterQueue::bounded() -> JitterQueue<T>
+crate::client::media | pub fn JitterQueue::clear(&mut self) -> usize
+crate::client::media | pub fn JitterQueue::dropped(&self) -> u64
+crate::client::media | pub fn JitterQueue::is_empty(&self) -> bool
+crate::client::media | pub fn JitterQueue::len(&self) -> usize
+crate::client::media | pub fn JitterQueue::new(cap: usize) -> JitterQueue<T>
+crate::client::media | pub fn JitterQueue::pop(&mut self) -> Option<T>
+crate::client::media | pub fn JitterQueue::push(&mut self, t: T)
+crate::client::media | pub fn Side::name(self) -> &'static str
+crate::client::media | pub fn Side::parse(s: Option<&str>) -> Option<Side>
+crate::client::media | pub fn SourceKind::capability(self) -> &'static str
+crate::client::media | pub fn SourceKind::parse(s: &str) -> Option<SourceKind>
+crate::client::media | pub fn SourceKind::word(self) -> &'static str
+crate::client::media | pub fn clean_clipboard(text: &str) -> Result<String, ClipError>
+crate::client::media | pub fn decode_audio(payload: &[u8], channels: usize) -> Option<(u32, Vec<i16>)>
+crate::client::media | pub fn decode_camera(payload: &[u8]) -> Option<(String, u32, &[u8])>
+crate::client::media | pub fn encode_audio(seq: u32, pcm: &[i16]) -> Vec<u8>
+crate::client::media | pub fn encode_camera(unit: &str, seq: u32, jpeg: &[u8]) -> Option<Vec<u8>>
+crate::client::media | pub fn looks_like_jpeg(b: &[u8]) -> bool
+crate::client::media | pub fn source_name(device_name: &str, kind: SourceKind) -> String
+crate::client::media | pub struct Chunker
+crate::client::media | pub struct JitterQueue<T>
+crate::client | CameraEntry.name: String
+crate::client | CameraEntry.unit: String
+crate::client | ClientMsg::CameraList
+crate::client | ServerMsg::CameraList { cameras: Vec<CameraEntry> }
+crate::client | pub struct CameraEntry
+crate | pub mod devices
+crate | pub use devices::{parse_mounts, parse_net_dev, parse_partitions, BlockDev, Disks, Mount, Net, NetCounters}
+crate::devices | BlockDev.major: u32
+crate::devices | BlockDev.minor: u32
+crate::devices | BlockDev.name: String
+crate::devices | BlockDev.size_bytes: u64
+crate::devices | Mount.fstype: String
+crate::devices | Mount.read_only: bool
+crate::devices | Mount.source: String
+crate::devices | Mount.target: String
+crate::devices | NetCounters.name: String
+crate::devices | NetCounters.rx_bytes: u64
+crate::devices | NetCounters.rx_packets: u64
+crate::devices | NetCounters.tx_bytes: u64
+crate::devices | NetCounters.tx_packets: u64
+crate::devices | pub fn Disks:::block_devices(&self) -> ApiResult<Vec<BlockDev>>
+crate::devices | pub fn Disks:::mounts(&self) -> ApiResult<Vec<Mount>>
+crate::devices | pub fn Net:::interfaces(&self) -> ApiResult<Vec<NetCounters>>
+crate::devices | pub fn parse_mounts(text: &str) -> Vec<Mount>
+crate::devices | pub fn parse_net_dev(text: &str) -> ApiResult<Vec<NetCounters>>
+crate::devices | pub fn parse_partitions(text: &str) -> ApiResult<Vec<BlockDev>>
+crate::devices | pub struct BlockDev
+crate::devices | pub struct Mount
+crate::devices | pub struct NetCounters
+crate::devices | pub trait Disks: Send + Sync
+crate::devices | pub trait Net: Send + Sync
+crate | [cfg(feature = "native")] pub use host::{HostApi, WasmTask}
+crate::host | WasmTask.bytes: usize
+crate::host | WasmTask.entry: String
+crate::host | WasmTask.id: u64
+crate::host | WasmTask.started: i64
+crate::host | WasmTask.user: String
+crate::host | pub fn HostApi:::wasm_tasks(&self) -> Vec<WasmTask>
+crate::host | pub struct WasmTask
+crate | pub mod sdkbridge
+crate::sdkbridge | Approval::EachCall
+crate::sdkbridge | Approval::EachCallTyped
+crate::sdkbridge | Approval::FirstUse
+crate::sdkbridge | Approval::Limit
+crate::sdkbridge | Approval::None
+crate::sdkbridge | Capability.key: &'static str
+crate::sdkbridge | Capability.legacy: bool
+crate::sdkbridge | Capability.param: Param
+crate::sdkbridge | Capability.sensitive: bool
+crate::sdkbridge | Capability.since: &'static str
+crate::sdkbridge | Capability.words: &'static str
+crate::sdkbridge | Effect::Change
+crate::sdkbridge | Effect::Listen
+crate::sdkbridge | Effect::Own
+crate::sdkbridge | Effect::Read
+crate::sdkbridge | Effect::Spend
+crate::sdkbridge | Namespace.capability: Option<&'static str>
+crate::sdkbridge | Namespace.legacy: bool
+crate::sdkbridge | Namespace.name: &'static str
+crate::sdkbridge | Namespace.ops: &'static [Op]
+crate::sdkbridge | Namespace.since: &'static str
+crate::sdkbridge | Op.approval: Approval
+crate::sdkbridge | Op.capability: Option<&'static str>
+crate::sdkbridge | Op.effect: Effect
+crate::sdkbridge | Op.name: &'static str
+crate::sdkbridge | Op.since: &'static str
+crate::sdkbridge | Param::Currency
+crate::sdkbridge | Param::Flag
+crate::sdkbridge | Param::Hosts { max: usize }
+crate::sdkbridge | Param::Level(&'static [&'static str])
+crate::sdkbridge | Param::Names { max: usize }
+crate::sdkbridge | Version.major: u16
+crate::sdkbridge | Version.minor: u16
+crate::sdkbridge | pub const CAPABILITIES: &[Capability] = &[old("storage", "1.0", Param::Flag, "keep its own saved data on this device _at most 256 KB_ only this app can read it_", false),...
+crate::sdkbridge | pub const EMBED_KINDS: [&str; 4] = ["markdown", "browser", "media", "dash"]
+crate::sdkbridge | pub const NAMESPACES: &[Namespace] = &[Namespace { name: "app", since: "1.0", capability: None, legacy: true, ops: &[op("info", "1.0", E::Read, A::None)] }, Namespace { n...
+crate::sdkbridge | pub const SDK_MAJOR: u16 = 1
+crate::sdkbridge | pub const SDK_MINOR: u16 = 2
+crate::sdkbridge | pub const SDK_VERSION: &str = "1.2"
+crate::sdkbridge | pub const Version::CURRENT: Version = Version { major: SDK_MAJOR, minor: SDK_MINOR }
+crate::sdkbridge | pub enum Approval
+crate::sdkbridge | pub enum Effect
+crate::sdkbridge | pub enum Param
+crate::sdkbridge | pub fn Approval::name(&self) -> &'static str
+crate::sdkbridge | pub fn Effect::name(&self) -> &'static str
+crate::sdkbridge | pub fn Version::parse(s: &str) -> Option<Version>
+crate::sdkbridge | pub fn Version::text(&self) -> String
+crate::sdkbridge | pub fn capability(key: &str) -> Option<&'static Capability>
+crate::sdkbridge | pub fn capability_of(n: &Namespace, o: &Op) -> Option<&'static str>
+crate::sdkbridge | pub fn find_op(full: &str) -> Option<(&'static Namespace, &'static Op)>
+crate::sdkbridge | pub fn grant_words(key: &str, v: &Value) -> Option<String>
+crate::sdkbridge | pub fn has(host: Version, name: &str, granted: &dyn Fn(&str) -> bool) -> bool
+crate::sdkbridge | pub fn known_at(host: Version, o: &Op) -> bool
+crate::sdkbridge | pub fn listing(host: Version, granted: &dyn Fn(&str) -> bool) -> Value
+crate::sdkbridge | pub fn namespace(name: &str) -> Option<&'static Namespace>
+crate::sdkbridge | pub fn needs_ok(host: Version, wanted: &str) -> Result<(), String>
+crate::sdkbridge | pub fn normalize_grant(key: &str, v: &Value) -> Result<Option<Value>, String>
+crate::sdkbridge | pub fn parse_permission(p: &str) -> Option<(String, Value)>
+crate::sdkbridge | pub fn permission_string(key: &str, v: &Value) -> String
+crate::sdkbridge | pub fn unsupported(full: &str, host: Version) -> Value
+crate::sdkbridge | pub mod markdown
+crate::sdkbridge | pub mod money
+crate::sdkbridge | pub struct Capability
+crate::sdkbridge | pub struct Namespace
+crate::sdkbridge | pub struct Op
+crate::sdkbridge | pub struct Version
+crate::sdkbridge | pub type Grants = BTreeMap<String, Value>
+crate::sdkbridge::markdown | Analysis.blocked_links: usize
+crate::sdkbridge::markdown | Analysis.images: usize
+crate::sdkbridge::markdown | Analysis.lines: usize
+crate::sdkbridge::markdown | Analysis.links: Vec<(String, String)>
+crate::sdkbridge::markdown | Analysis.plain: String
+crate::sdkbridge::markdown | Analysis.truncated: bool
+crate::sdkbridge::markdown | pub const DEFAULT_WIDTH: u32 = 640
+crate::sdkbridge::markdown | pub const MAX_LINKS: usize = 500
+crate::sdkbridge::markdown | pub const MAX_PLAIN: usize = 256 * 1024
+crate::sdkbridge::markdown | pub const MAX_TEXT: usize = 1 <<20
+crate::sdkbridge::markdown | pub const PX_PER_CHAR: u32 = 8
+crate::sdkbridge::markdown | pub fn Analysis::to_json(&self) -> Value
+crate::sdkbridge::markdown | pub fn analyze(text: &str, width_px: u32) -> Result<Analysis, String>
+crate::sdkbridge::markdown | pub struct Analysis
+crate::sdkbridge::money | Limit.currency: String
+crate::sdkbridge::money | Limit.per_day_minor: u64
+crate::sdkbridge::money | Refusal::BadAmount
+crate::sdkbridge::money | Refusal::NoLimit
+crate::sdkbridge::money | Refusal::OtherCurrency { allowed: String }
+crate::sdkbridge::money | Refusal::Over { remaining: u64, currency: String }
+crate::sdkbridge::money | pub const MAX_MINOR: u64 = 1_000_000_000_000
+crate::sdkbridge::money | pub enum Refusal
+crate::sdkbridge::money | pub fn Refusal::message(&self) -> String
+crate::sdkbridge::money | pub fn check_spend(limit: Option<&Limit>, spent_today: u64, currency: &str, amount: u64) -> Result<u64, Refusal>
+crate::sdkbridge::money | pub fn exponent(currency: &str) -> u32
+crate::sdkbridge::money | pub fn format_minor(amount: u64, currency: &str) -> String
+crate::sdkbridge::money | pub fn valid_currency(s: &str) -> bool
+crate::sdkbridge::money | pub struct Limit
+crate | [cfg(feature = "native")] pub use host::WasmIo
+crate::host | WasmIo.cancel: std::sync::Arc<std::sync::atomic::AtomicBool>
+crate::host | WasmIo.stdin: Vec<u8>
+crate::host | pub fn HostApi:::run_wasm_io(&self, user: &str, policy: &Policy, wasm: &[u8], entry: &str, io: &WasmIo) -> Result<String, String>
+crate::host | pub struct WasmIo
+crate::appcaps | LegacyMap.requests: Vec<CapabilityRequest>
+crate::appcaps | LegacyMap.unmapped: Vec<(String, &'static str)>
+crate::appcaps | pub fn map_legacy(flags: &[&str], hosts: &[String]) -> LegacyMap
+crate::appcaps | pub struct LegacyMap
+crate | pub mod compat
+crate::client | ServerMsg::HelloOk { v: u32, caps: Vec<String>, challenge: String, tile: u32, max_message: usize, #[serde(default, skip_serializing_if = "Vec::is_empty")] deprecations: Vec<String> }
+crate::compat | Deprecation.kind: String
+crate::compat | Deprecation.name: String
+crate::compat | Deprecation.not_before: String
+crate::compat | Deprecation.replacement: String
+crate::compat | Deprecation.since: String
+crate::compat | Peer.idle_secs: Option<u64>
+crate::compat | Peer.kind: String
+crate::compat | Peer.name: String
+crate::compat | Peer.version: String
+crate::compat | Report.client_protocol: String
+crate::compat | Report.contract: String
+crate::compat | Report.core: String
+crate::compat | Report.deprecated_seen: Vec<(String, u64)>
+crate::compat | Report.deprecations: Vec<Deprecation>
+crate::compat | Report.peers: Vec<Peer>
+crate::compat | Report.surfaces: Vec<Surface>
+crate::compat | Surface.id: String
+crate::compat | Surface.kind: String
+crate::compat | Surface.letter: String
+crate::compat | Surface.value: String
+crate::compat | UpdateSide::Client
+crate::compat | UpdateSide::Machine
+crate::compat | [serde(rename_all = "snake_case")] pub enum UpdateSide
+crate::compat | pub const DEPRECATION_TABLE: &str = include_str!("../../../docs/development/deprecations.txt")
+crate::compat | pub const SURFACE_TABLE: &str = include_str!("../../../docs/development/compat-surfaces.txt")
+crate::compat | pub fn Report::lines(&self, admin: bool) -> Vec<String>
+crate::compat | pub fn Report::new(core: &str, peers: Vec<Peer>, deprecated_seen: Vec<(String, u64)>) -> Report
+crate::compat | pub fn UpdateSide::word(self) -> &'static str
+crate::compat | pub fn deprecations() -> Vec<Deprecation>
+crate::compat | pub fn parse_deprecations(table: &str) -> Vec<Deprecation>
+crate::compat | pub fn parse_surfaces(table: &str) -> Vec<Surface>
+crate::compat | pub struct Deprecation
+crate::compat | pub struct Peer
+crate::compat | pub struct Report
+crate::compat | pub struct Surface
+crate::contract::catalog | pub const OLDEST_MINOR: u16 = 1
+crate::contract::hello | Negotiated.update: Option<crate::compat::UpdateSide>
+crate::contract::hello | [serde(default, skip_serializing_if = "Vec::is_empty")] Hello.deprecations: Vec<crate::compat::Deprecation>
+crate::contract::hello | pub fn Negotiated::say(&self, machine: &Hello, client: &ClientHello) -> Option<String>
+crate::contract::hello | pub const CONTRACT_VERSION: ContractVersion = ContractVersion { major: 0, minor: 2 }
+crate | pub use sysinfo::{parse_loadavg, parse_meminfo, parse_uptime, LoadAvg, MemInfo, Os, Sysinfo, Uptime}
+crate::sysinfo | pub fn Os:::sysinfo(&self) -> &dyn Sysinfo
+crate::sysinfo | pub trait Os: Send + Sync
+crate | pub mod audio
+crate | pub use audio::{Audio, PlaybackVolume, SoundCard}
+crate::audio | PlaybackVolume.control: String
+crate::audio | PlaybackVolume.muted: bool
+crate::audio | PlaybackVolume.percent: u32
+crate::audio | SoundCard.index: u32
+crate::audio | SoundCard.long_name: String
+crate::audio | SoundCard.name: String
+crate::audio | pub fn Audio:::change_volume(&self, card: u32, delta: Option<i32>) -> ApiResult<PlaybackVolume>
+crate::audio | pub fn Audio:::set_volume(&self, card: u32, percent: u32) -> ApiResult<PlaybackVolume>
+crate::audio | pub fn Audio:::sound_cards(&self) -> ApiResult<Vec<SoundCard>>
+crate::audio | pub fn Audio:::volume(&self, card: u32) -> ApiResult<PlaybackVolume>
+crate::audio | pub struct PlaybackVolume
+crate::audio | pub struct SoundCard
+crate::audio | pub trait Audio: Send + Sync
+crate::sysinfo | pub fn Os:::audio(&self) -> &dyn crate::audio::Audio
+crate::sysinfo | pub fn Os:::disks(&self) -> &dyn crate::devices::Disks
+crate::sysinfo | pub fn Os:::net(&self) -> &dyn crate::devices::Net
+crate::devices | pub fn Disks:::space(&self, path: &str) -> ApiResult<(u64, u64)>
+crate::devices | pub fn Net:::ipv4_addresses(&self) -> ApiResult<Vec<(String, String)>>
+crate::memory | pub fn Memory:::apply_swapfile(&self, bytes: Option<u64>, on_disk: bool) -> Vec<Step>
+crate::memory | pub fn Memory:::conf_path(&self) -> PathBuf
+crate::memory | pub fn Memory:::data_free(&self, dir: &Path) -> Option<u64>
+crate::memory | pub fn Memory:::data_on_disk(&self, dir: &Path) -> bool
+crate::memory | pub fn Memory:::read_conf(&self) -> String
+crate::memory | pub fn Memory:::reconfigure(&self, cfg: &Config, ram: u64) -> Result<Vec<Step>, String>
+crate::memory | pub fn Memory:::save_conf(&self, cfg: &Config) -> Result<(), String>
+crate::memory | pub fn Memory:::set_conf_key(&self, key: &str, value: Option<&str>) -> Result<(), String>
+crate::memory | pub fn Memory:::stats(&self) -> MemStats
+crate::memory | pub trait Memory: Send + Sync
+crate::memory | pub use iyakki_zram::apply::{swapoff_safe, Step, Swapper}
+crate::memory | pub use iyakki_zram::{CONF_PATH, SWAPFILE_PATH}
+crate::memory | pub use iyakki_zram::{bootspeed, compressed, config, preview, stats, MemStats}
+crate::memory | DataPlace::Disk
+crate::memory | DataPlace::Memory
+crate::memory | DataPlace::Other
+crate::memory | pub enum DataPlace
+crate::memory | pub fn Memory:::data_place(&self, dir: &Path) -> DataPlace
+crate::memory | pub use iyakki_storage::crashlog::wall
+crate | [cfg(feature = "native")] pub mod hardware
+crate::hardware | pub fn Hardware:::bluetooth(&self) -> btstate::BtState
+crate::hardware | pub fn Hardware:::broadcom_wifi_without_driver(&self) -> bool
+crate::hardware | pub fn Hardware:::cards(&self) -> Vec<(Card, Option<Volume>)>
+crate::hardware | pub fn Hardware:::cs8409_line(&self) -> Option<String>
+crate::hardware | pub fn Hardware:::ipv4(&self) -> Vec<(String, String)>
+crate::hardware | pub fn Hardware:::links(&self) -> Vec<Link>
+crate::hardware | pub fn Hardware:::mac_infos(&self, cfg: &mac::MacConfig) -> Vec<mac::MacInfo>
+crate::hardware | pub fn Hardware:::rfkill(&self) -> Vec<Rfkill>
+crate::hardware | pub fn Hardware:::screen(&self) -> Screen
+crate::hardware | pub fn Hardware:::set_brightness(&self, name: &str, percent: u32) -> Result<(), String>
+crate::hardware | pub fn Hardware:::set_rfkill(&self, id: &str, blocked: bool) -> Result<(), String>
+crate::hardware | pub trait Hardware: Send + Sync
+crate | [cfg(feature = "native")] pub mod host
+crate | [cfg(feature = "native")] pub mod memory
+crate::sysinfo | [cfg(feature = "native")] pub fn Os:::hardware(&self) -> std::sync::Arc<dyn crate::hardware::Hardware>
+crate::sysinfo | [cfg(feature = "native")] pub fn Os:::memory(&self) -> std::sync::Arc<dyn crate::memory::Memory>
+crate | [cfg(feature = "native")] pub mod guarded
+crate::guarded | impl Audio for GuardedAudio
+crate::guarded | impl CardAsk for GestureCard
+crate::guarded | impl Disks for GuardedDisks
+crate::guarded | impl Hardware for GuardedHardware
+crate::guarded | impl Memory for GuardedMemory
+crate::guarded | impl Net for GuardedNet
+crate::guarded | impl Os for GuardedOs
+crate::guarded | impl Sysinfo for GuardedSysinfo
+crate::guarded | pub const BRIGHTNESS_SET: &str = "system.brightness.set"
+crate::guarded | pub const MEMORY_SET: &str = "system.memory.set"
+crate::guarded | pub const RADIO_SET: &str = "system.radio.set"
+crate::guarded | pub const READ: &str = "system.read"
+crate::guarded | pub const VOLUME_SET: &str = "system.volume.set"
+crate::guarded | pub fn GestureCard::new(ttl: Duration) -> GestureCard
+crate::guarded | pub fn GuardedOs::new(inner: Arc<dyn Os>, broker: Arc<Broker>, caller: Caller) -> GuardedOs
+crate::guarded | pub struct GestureCard
+crate::guarded | pub struct GuardedOs
+crate::guarded | impl Drop for Scope
+crate::guarded | pub fn GestureCard::dispatch<R>(&self, handle: impl FnOnce() -> R) -> R
+crate::guarded | pub fn GestureTicket::redeem<R>(self, work: impl FnOnce() -> R) -> R
+crate::guarded | pub fn gesture_ticket() -> Option<GestureTicket>
+crate::guarded | pub struct GestureTicket
+crate::hardware | pub fn Hardware:::hardware_report(&self) -> Vec<String>
+crate::hardware | pub fn Hardware:::mac_summary(&self) -> Option<String>
+crate::devices | pub fn Disks:::reword_failure(&self, msg: &str) -> String
+crate::appcaps | pub const BUILTIN_TABLE: &[(&str, &[&str])] = &[("settings", &["bluetooth.use", "system.radio.set", "system.brightness.set", "system.volume.set", "system.memory.set", "sy...
+crate::guarded | pub const HOSTNAME_SET: &str = "system.hostname.set"
+crate::hardware | pub fn Hardware:::set_hostname(&self, name: &str, etc_hostname: &std::path::Path) -> Result<(), String>
+crate::hardware | pub use iyakki_devctl::{hostname_ok, btstate, mac, radio_on, Backlight, Card, Control, Link, LinkKind, Rfkill, Roots, Screen, Volume, BROADCOM_NO_DRIVER_TEXT}
+crate | [cfg(feature = "native")] pub mod crashlog
+crate::crashlog | pub fn CrashLog:::copy_to_folder(&self, dir: &Path, name: &str, dest_dir: &Path, now_unix: i64) -> Result<PathBuf, String>
+crate::crashlog | pub fn CrashLog:::current_file(&self, dir: &Path) -> Option<String>
+crate::crashlog | pub fn CrashLog:::has_file(&self, dir: &Path, name: &str) -> bool
+crate::crashlog | pub fn CrashLog:::last_lines(&self, dir: &Path, name: &str, n: usize) -> Vec<String>
+crate::crashlog | pub fn CrashLog:::latest_crash(&self, dir: &Path) -> Option<String>
+crate::crashlog | pub fn CrashLog:::mark_seen(&self, dir: &Path)
+crate::crashlog | pub fn CrashLog:::read_unclean(&self, dir: &Path) -> Option<Unclean>
+crate::crashlog | pub trait CrashLog: Send + Sync
+crate::crashlog | pub use iyakki_storage::crashlog::{wall, Unclean, LOG_SUBDIR}
+crate::guarded | impl crate::crashlog::CrashLog for GuardedCrashLog
+crate::guarded | pub const CRASHLOG_WRITE: &str = "system.crashlog.write"
+crate::sysinfo | [cfg(feature = "native")] pub fn Os:::crashlog(&self) -> std::sync::Arc<dyn crate::crashlog::CrashLog>
+crate | [cfg(feature = "native")] pub mod netscan
+crate::guarded | impl crate::netscan::NetScan for GuardedNetScan
+crate::guarded | pub const NET_SCAN: &str = "net.scan"
+crate::netscan | pub fn NetScan:::start(&self, targets: Vec<Ipv4Addr>, opts: Options, cancel: Arc<AtomicBool>, tx: Sender<Event>) -> Result<(), String>
+crate::netscan | pub fn NetScan:::subnets(&self) -> Vec<net::Subnet>
+crate::netscan | pub trait NetScan: Send + Sync
+crate::netscan | pub use iyakki_netscan::{net, Event, HostInfo, Kind, Options, Service}
+crate::sysinfo | [cfg(feature = "native")] pub fn Os:::netscan(&self) -> std::sync::Arc<dyn crate::netscan::NetScan>
+removed	crate::appcaps | [serde(deny_unknown_fields)] pub struct CapabilityRequest	F-1: deny_unknown_fields dropped from CapabilityRequest (unknown fields kept in extra); added extra, unknown_request_fields, Default
+removed	crate | [cfg(feature = "native")] pub use host::HostApi	the re-export line was widened to also export WasmTask (pub use host::{HostApi, WasmTask}); HostApi is still exported at the same path, so nothing a client used is gone
+removed	crate::client | ServerMsg::HelloOk { v: u32, caps: Vec<String>, challenge: String, tile: u32, max_message: usize }	F-CORE-19: HelloOk gains an optional deprecations list (serde default, skipped when empty, so recorded transcripts still read and older readers ignore it); Hello and Negotiated gain deprecations and update; a variant field added is a shape change of the struct variant only
+removed	crate::contract::hello | pub const CONTRACT_VERSION: ContractVersion = ContractVersion { major: 0, minor: 1 }	CONTRACT_VERSION is 0.2 (F-CORE-18: stream/read may answer base64; 0.1 shape still served)
+removed	crate | pub use sysinfo::{parse_loadavg, parse_meminfo, parse_uptime, LoadAvg, MemInfo, Sysinfo, Uptime}	Os trait added (F-ARCH-05 step 5); nothing removed or changed
+removed	crate | [cfg(feature = "native")] pub mod host	new module hardware and Os::hardware() (F-ARCH-06, lane P-B round 9); Os is implemented only by LocalOs and FakeOs
+removed	crate | pub mod memory	2026-11-13: host, memory and Os::memory()/hardware() are now behind the native feature (the Linux-only crates they need are optional), so the crate builds for wasm32 again; with the default feature the surface is unchanged
+removed	crate::sysinfo | pub fn Os:::memory(&self) -> std::sync::Arc<dyn crate::memory::Memory>	2026-11-13: host, memory and Os::memory()/hardware() are now behind the native feature (the Linux-only crates they need are optional), so the crate builds for wasm32 again; with the default feature the surface is unchanged
+removed	crate | pub mod host	2026-11-13: host, memory and Os::memory()/hardware() are now behind the native feature (the Linux-only crates they need are optional), so the crate builds for wasm32 again; with the default feature the surface is unchanged
+removed	crate::sysinfo | pub fn Os:::hardware(&self) -> std::sync::Arc<dyn crate::hardware::Hardware>	2026-11-13: host, memory and Os::memory()/hardware() are now behind the native feature (the Linux-only crates they need are optional), so the crate builds for wasm32 again; with the default feature the surface is unchanged
+removed	crate::appcaps | pub const BUILTIN_TABLE: &[(&str, &[&str])] = &[("settings", &["bluetooth.use"]), ("cameras", &["camera.view", "camera.record"]), ("camera", &["camera.view", "camera.reco...	BUILTIN_TABLE rows for settings and shell gain the system.* capabilities (guarded Os, F-ARCH-05/06); existing entries kept
+removed	crate::guarded | pub fn GestureCard::arm(&self)	GestureCard is now bound to the event dispatch (arm removed; dispatch, GestureTicket and gesture_ticket added) before any release used it
+removed	crate::hardware | pub use iyakki_devctl::{btstate, mac, radio_on, Backlight, Card, Control, Link, LinkKind, Rfkill, Roots, Screen, Volume, BROADCOM_NO_DRIVER_TEXT}	settings gains system.hostname.set in the built-in table; the hardware module also re-exports hostname_ok (additions to lists, the old items stay)
+removed	crate::appcaps | pub const BUILTIN_TABLE: &[(&str, &[&str])] = &[("settings", &["bluetooth.use", "system.radio.set", "system.brightness.set", "system.volume.set", "system.memory.set"]), (...	settings gains system.hostname.set in the built-in table; the hardware module also re-exports hostname_ok (additions to lists, the old items stay)

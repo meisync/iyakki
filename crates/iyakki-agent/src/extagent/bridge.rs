@@ -132,7 +132,7 @@ pub struct Gate {
     pub(crate) auto_refused_said: AtomicBool,
 }
 
-const NEVER_OFFERED: [&str; 6] = ["vault_request", "screen_capture", "ask_user", "more_tools", "write_file", "assistant_check"];
+const NEVER_OFFERED: [&str; 7] = ["vault_request", "screen_capture", "ask_user", "more_tools", "write_file", "assistant_check", "rag_sources_add_folder"];
 const OFFERED_PREFIXES: [&str; 15] = ["tile_", "app_", "board_", "bug_report", "deploy_", "k8s_", "history_search", "ide_browser_", "data_", "registry_", "run_command", "feature_", "web_", "job_", "pending_"];
 
 /// The authoring and publishing tools of the store (an IYAKKI app made and published to the private store end to end); each Ask one
@@ -565,6 +565,8 @@ impl Bridge {
             while !stop2.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((conn, _)) => {
+                        // an accepted socket inherits the listener's non-blocking mode on macOS and the BSDs (not on Linux): the reader below blocks
+                        let _ = conn.set_nonblocking(false);
                         let (gate, token) = (gate.clone(), token.clone());
                         std::thread::spawn(move || serve(conn, gate, &token));
                     }

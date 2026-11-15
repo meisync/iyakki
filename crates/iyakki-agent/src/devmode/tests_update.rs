@@ -627,3 +627,86 @@ fn without_room_or_without_the_loader_the_update_still_works_and_leaves_no_half_
     apply(&e, &m, false, "laptop").unwrap();
     assert!(!r.boot.root.join("EFI/iyakki-boot").exists());
 }
+
+fn loader_menu(initrd: &str) -> String {
+    format!("timeout 0\ntries 9\n\nentry iyakki\n  title IYAKKI\n  kind linux\n  kernel /boot/bzImage\n  initrd {initrd}\n  cmdline quiet\n  default\n\nentry install\n  title Install\n  kind linux\n  kernel /boot/bzImage\n  initrd {initrd}\n  cmdline quiet\n")
+}
+
+fn lean_stick_with_menu(tag: &str, menu: &str) -> (Rig, PathBuf, Manifest) {
+    let r = rig(tag);
+    std::fs::remove_file(r.boot.root.join("boot/initrd")).unwrap();
+    put(&r.boot.root, "boot/initrd-lean", &pseudo(1 << 20, 70));
+    put(&r.boot.root, "boot/root.sfs", &pseudo(3 << 20, 90));
+    put(&r.boot.root, "EFI/iyakki-boot/boot.cfg", menu.as_bytes());
+    let d = r.dir.join(format!("payload-{tag}"));
+    put(&d, "boot/bzImage", &pseudo((1 << 20) + 9, 11));
+    put(&d, "boot/initrd-lean", &pseudo((1 << 20) + 100, 71));
+    put(&d, "boot/root.sfs", &pseudo(3 << 20, 91));
+    put(&d, "boot/grub/grub.cfg", board_cfg().as_bytes());
+    // the pack was made from a full image: its loader menu names /boot/initrd (KI-200)
+    put(&d, "EFI/iyakki-boot/boot.cfg", loader_menu("/boot/initrd").as_bytes());
+    let list = list_boot(&d).into_iter().map(|(p, s)| (p.clone(), s, hash(&d.join(&p)))).collect::<Vec<_>>();
+    let m = build_manifest(&d, &list, Some("0.1.0-alpha.1"), Some("macweb"), "lean.img").unwrap();
+    (r, d, m)
+}
+
+fn menu_of(r: &Rig) -> String {
+    std::fs::read_to_string(r.boot.root.join("EFI/iyakki-boot/boot.cfg")).unwrap()
+}
+
+#[test]
+fn an_update_pack_with_a_full_image_menu_on_a_lean_stick_keeps_the_lean_initrd_in_the_loader_menu() {
+    let (r, d, m) = lean_stick_with_menu("bootcfg-lean-update", &loader_menu("/boot/initrd-lean"));
+    let free = || 500u64 << 20;
+    let e = env(&r, &free, None);
+    let p = plan(&e, &m, true).unwrap();
+    assert!(p.needs.iter().any(|n| n == "EFI/iyakki-boot/boot.cfg"));
+    stage_all(&e, &d, &m, &p.needs);
+    apply(&e, &m, true, "laptop").unwrap();
+    let t = menu_of(&r);
+    assert_eq!(t.matches("initrd /boot/initrd-lean").count(), 2, "{t}");
+    assert!(!t.contains("initrd /boot/initrd\n"), "{t}");
+    assert!(!r.boot.root.join("boot/initrd").exists());
+}
+
+#[test]
+fn an_update_on_a_full_stick_leaves_the_full_initrd_in_the_loader_menu() {
+    let r = rig("bootcfg-full-update");
+    put(&r.boot.root, "EFI/iyakki-boot/boot.cfg", loader_menu("/boot/initrd").as_bytes());
+    let (dir, m) = payload(&r, "0.1.0-alpha.2", "macweb", false, 7);
+    put(&dir, "EFI/iyakki-boot/boot.cfg", loader_menu("/boot/initrd").replace("quiet", "quiet splash").as_bytes());
+    let list = list_boot(&dir).into_iter().filter(|(p, _)| p != MANIFEST).map(|(p, s)| (p.clone(), s, hash(&dir.join(&p)))).collect::<Vec<_>>();
+    let m2 = build_manifest(&dir, &list, Some("0.1.0-alpha.2"), Some("macweb"), "full.img").unwrap();
+    let _ = m;
+    let free = || 500u64 << 20;
+    let e = env(&r, &free, None);
+    let p = plan(&e, &m2, false).unwrap_or_else(|x| panic!("plan: {x}"));
+    stage_all(&e, &dir, &m2, &p.needs);
+    apply(&e, &m2, false, "laptop").unwrap_or_else(|x| panic!("apply: {x}"));
+    let t = menu_of(&r);
+    assert_eq!(t.matches("initrd /boot/initrd\n").count(), 2, "{t}");
+    assert!(t.contains("quiet splash") && !t.contains("initrd-lean"));
+}
+
+#[test]
+fn an_update_that_changes_nothing_still_repairs_a_menu_that_names_a_missing_initrd() {
+    let (r, d, m) = lean_stick_with_menu("bootcfg-repair", &loader_menu("/boot/initrd"));
+    let free = || 500u64 << 20;
+    let e = env(&r, &free, None);
+    // the stick as the 2026-11-12 report found it: the lean disk only, the menu naming the full one
+    assert!(menu_of(&r).contains("initrd /boot/initrd\n"));
+    let p = plan(&e, &m, true).unwrap_or_else(|x| panic!("plan: {x}"));
+    stage_all(&e, &d, &m, &p.needs);
+    apply(&e, &m, true, "laptop").unwrap_or_else(|x| panic!("apply: {x}"));
+    // break it again and push the same pack: nothing else changes, the menu is repaired and the repair is in the log
+    put(&r.boot.root, "EFI/iyakki-boot/boot.cfg", loader_menu("/boot/initrd").as_bytes());
+    let e2 = env(&r, &free, None);
+    repair_boot_cfg(&e2, "laptop");
+    assert_eq!(menu_of(&r).matches("initrd /boot/initrd-lean").count(), 2);
+    // and the update's own no-change path runs the same repair
+    put(&r.boot.root, "EFI/iyakki-boot/boot.cfg", loader_menu("/boot/initrd").as_bytes());
+    let again = plan(&e2, &m, true).unwrap();
+    stage_all(&e2, &d, &m, &again.needs);
+    apply(&e2, &m, true, "laptop").unwrap();
+    assert_eq!(menu_of(&r).matches("initrd /boot/initrd-lean").count(), 2);
+}

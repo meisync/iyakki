@@ -83,7 +83,10 @@ pub fn missing_engine_banner(host: &str, reader_gave_up: bool, offered: bool) ->
     let what = site.map_or_else(|| "This page".to_string(), |n| n.to_string());
     Some((
         "This site needs the full web engine.".into(),
-        format!("{what} will not load properly in the built-in reader. Boot the \"web\" or \"macweb\" image (macweb is the Mac image with the web engine), or use window mode. Web searches, Wikipedia and most articles work here."),
+        match platform_note() {
+            Some(n) => format!("{what} will not load properly in the built-in reader. {n} Web searches, Wikipedia and most articles work here."),
+            None => format!("{what} will not load properly in the built-in reader. Boot the \"web\" or \"macweb\" image (macweb is the Mac image with the web engine), or use window mode. Web searches, Wikipedia and most articles work here."),
+        },
     ))
 }
 
@@ -94,7 +97,7 @@ pub const FULL_ENGINE_HELP_HTML: &str = "<html><head><title>The full web engine<
 <h2>Ways to get it</h2>\
 <ul>\
 <li>Boot the <b>web</b> image (any PC) or the <b>macweb</b> image (Intel Macs such as the Mac mini 2014): the engine is WPE WebKit in a helper program, and the BROWSER tile uses it by itself or when you press F.</li>\
-<li>Use <b>window mode</b> on a desktop (./run.sh window): the host's WebKitGTK is the engine.</li>\
+<li>Use <b>window mode</b> on a Linux desktop (./run.sh window): the host's WebKitGTK is the engine. On a Mac the window uses the built-in reader only.</li>\
 </ul>\
 <h2>Good to know</h2>\
 <ul>\
@@ -261,6 +264,26 @@ fn stop_group(child: &mut Child, grace: Duration) {
 /// Run the full browser on `url` and wait until the person leaves it. The caller must already have let go of the
 /// display and the input devices. Returns the exit status (0 = left normally). `stop` ends it early.
 pub fn run(data: &Path, user: &str, url: &str, stop: &std::sync::atomic::AtomicBool) -> Result<i32, String> {
+    run_reporting(data, user, url, stop, crate::startup::global())
+}
+
+/// [`run`] telling the startup registry what it is doing: starting while the profile and the browser come up, ready once the browser is
+/// running, failed (with the reason) when it could not be started. The registry's poll only says "ready" while the engine is installed.
+pub fn run_reporting(data: &Path, user: &str, url: &str, stop: &std::sync::atomic::AtomicBool, reg: &crate::startup::Registry) -> Result<i32, String> {
+    reg.starting("web", "starting the web engine");
+    match run_inner(data, user, url, stop, reg) {
+        Err(e) => {
+            reg.failed("web", &e);
+            Err(e)
+        }
+        ok => {
+            reg.ready("web");
+            ok
+        }
+    }
+}
+
+fn run_inner(data: &Path, user: &str, url: &str, stop: &std::sync::atomic::AtomicBool, reg: &crate::startup::Registry) -> Result<i32, String> {
     use std::os::unix::fs::DirBuilderExt;
     use std::os::unix::process::CommandExt;
     if !available() {
@@ -280,6 +303,7 @@ pub fn run(data: &Path, user: &str, url: &str, stop: &std::sync::atomic::AtomicB
     cmd.process_group(0).stdin(Stdio::null()).stdout(log.try_clone().map_err(|e| e.to_string())?).stderr(log);
     let mut child = cmd.spawn().map_err(|e| format!("could not start cage: {e}"))?;
     log::info!("webengine: started cage (pid {}) for {}", child.id(), iyakki_sec::url_host(&url).unwrap_or_default());
+    reg.ready("web");
     loop {
         let life = iyakki_core_api::child_status(&mut child);
         if life.is_over() {
@@ -341,10 +365,22 @@ pub fn embedded_helper() -> Option<PathBuf> {
     if img.is_file() {
         return Some(img);
     }
+    // the checkout's helper is a WebKitGTK script: Linux only (on macOS the built-in reader is the browser)
+    #[cfg(target_os = "linux")]
     if HOST_MODE.load(std::sync::atomic::Ordering::Relaxed) {
         return host_helper_in_checkout();
     }
     None
+}
+
+/// The one line the BROWSER tile shows where the full web engine cannot exist (not Linux, e.g. the macOS window): the built-in
+/// reader is the browser there. `None` on Linux.
+pub fn platform_note() -> Option<&'static str> {
+    if cfg!(target_os = "linux") {
+        None
+    } else {
+        Some("The full web engine is not available on this platform; pages are shown by the built-in reader.")
+    }
 }
 
 /// The embedded engine can be used.
@@ -597,13 +633,32 @@ mod tests {
     fn the_missing_engine_banner_shows_only_without_the_engine() {
         let (head, body) = missing_engine_banner("www.youtube.com", false, false).unwrap();
         assert_eq!(head, "This site needs the full web engine.");
-        assert!(body.starts_with("YouTube") && body.contains("\"web\" or \"macweb\" image") && body.contains("window mode"), "{body}");
+        assert!(body.starts_with("YouTube"), "{body}");
+        if cfg!(target_os = "linux") {
+            assert!(body.contains("\"web\" or \"macweb\" image") && body.contains("window mode"), "{body}");
+            assert_eq!(platform_note(), None);
+        } else {
+            assert!(body.contains("not available on this platform"), "{body}");
+        }
         assert!(missing_engine_banner("www.youtube.com", false, true).is_none(), "the engine is here: no banner");
         assert!(missing_engine_banner("example.org", false, false).is_none(), "an ordinary page gets none");
         let (_, generic) = missing_engine_banner("example.org", true, false).unwrap();
         assert!(generic.starts_with("This page"), "{generic}");
         assert!(missing_engine_banner("example.org", true, true).is_none());
         assert!(FULL_ENGINE_HELP_HTML.contains("macweb") && FULL_ENGINE_HELP_HTML.contains("window mode"));
+    }
+
+    #[test]
+    fn brotli_and_woff2_are_in_the_web_image_by_default_and_iris_is_not() {
+        const BUILD: &str = include_str!("../../../dist/buildroot/build.sh");
+        const SPEED: &str = include_str!("../../../dist/buildroot/configs/iyakki_web_speed.fragment");
+        const IRIS: &str = include_str!("../../../dist/buildroot/configs/iyakki_web_iris.fragment");
+        let set = |f: &str| f.lines().filter(|l| !l.trim_start().starts_with('#') && !l.trim().is_empty()).map(str::to_string).collect::<Vec<_>>();
+        assert_eq!(set(SPEED), vec!["BR2_PACKAGE_BROTLI=y".to_string(), "BR2_PACKAGE_WOFF2=y".to_string()]);
+        assert_eq!(set(IRIS), vec!["BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_IRIS=y".to_string()]);
+        assert!(BUILD.contains(r#"if [ "${WEB_SPEED:-1}" = 1 ]; then cat "$HERE/configs/iyakki_web_speed.fragment""#), "Brotli and WOFF2 are on unless WEB_SPEED=0");
+        assert!(BUILD.contains(r#"if [ "${WEB_IRIS:-0}" = 1 ] || [ "${WEB_CROCUS:-0}" = 1 ]; then cat "$HERE/configs/iyakki_web_iris.fragment""#), "iris stays opt-in");
+        assert!(BUILD.contains(r#"if [ "${WEB_VAAPI:-0}" = 1 ]"#), "VA-API stays opt-in");
     }
 
     #[test]

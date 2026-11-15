@@ -116,6 +116,10 @@ use iyakki_storage::Mounter as _;
 
 fn run() -> Result<ExitCode, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // replace the boot files of an installed stick without mounting it (F-UPG-05)
+    if args.iter().any(|a| a == "--update") {
+        return Ok(ExitCode::from(iyakki_usb::stickupdate::run(&args).clamp(0, 255) as u8));
+    }
     // the partition planner: install next to other systems, choose partitions, plan files (docs/INSTALLER.md)
     if args.iter().any(|a| a == "--plan" || a == "--apply-plan") {
         return Ok(ExitCode::from(iyakki_usb::plan_cli::run(&args).clamp(0, 255) as u8));

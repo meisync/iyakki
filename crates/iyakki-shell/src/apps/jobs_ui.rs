@@ -63,6 +63,8 @@ pub struct JobsUi {
     ws: Option<String>,
     jobs: Vec<Job>,
     polled: Option<Instant>,
+    /// Tests freeze the clock the rows are drawn against, so two frames never differ by a second that ticked between them.
+    fixed_now_ms: Option<u64>,
     open: Option<OpenLog>,
     stopping: HashSet<String>,
     /// Lines for jobs that finished since the last look: the chat shows them as events.
@@ -78,7 +80,7 @@ pub struct JobsUi {
 
 impl JobsUi {
     pub fn new(ws: Option<&str>) -> JobsUi {
-        JobsUi { ws: ws.map(str::to_string), jobs: Vec::new(), polled: None, open: None, stopping: HashSet::new(), events: Vec::new(), geoms: Vec::new(), overflow: 0, dirty: false, frame: 0, hurry: false }
+        JobsUi { ws: ws.map(str::to_string), jobs: Vec::new(), polled: None, fixed_now_ms: None, open: None, stopping: HashSet::new(), events: Vec::new(), geoms: Vec::new(), overflow: 0, dirty: false, frame: 0, hurry: false }
     }
 
     pub fn set_workspace(&mut self, ws: &str) {
@@ -379,7 +381,7 @@ impl JobsUi {
 
     fn draw_row(&mut self, g: &mut Gfx, row: R, i: usize, fs: f32, s: f32, tick: u64) {
         let j = self.jobs[i].clone();
-        let now = now_ms();
+        let now = self.fixed_now_ms.unwrap_or_else(now_ms);
         let running = j.running();
         let quiet = j.quiet_secs(now);
         let stalled = running && quiet >= QUIET_AFTER_SECS;
@@ -718,5 +720,52 @@ mod tests {
         assert_eq!(ui2.jobs()[0].progress, Some(50.0));
         assert_eq!(bar_pixels(&mut ui2, 0), bar_pixels(&mut ui2, 20), "a determinate bar does not slide");
         cleanup(&cx2);
+    }
+
+    #[test]
+    fn a_quiet_running_job_is_drawn_still_and_amber_with_how_long_it_has_been_quiet_and_a_busy_one_is_not() {
+        // the job is injected, so the drawing is tested without starting a process
+        let mut ui = JobsUi::new(Some(""));
+        // a frozen clock: the elapsed times in the row are the same in every frame, so only the animation can make frames differ
+        let t = now_ms();
+        ui.fixed_now_ms = Some(t);
+        ui.jobs.push(Job { id: "j1".into(), label: "waiting".into(), command: "sleep 30".into(), cwd: String::new(), owner: "admin".into(), workspace: String::new(), pid: 1, state: State::Running, started_ms: t - 70_000, ended_ms: 0, progress: None, last_line: "started".into(), last_active_ms: t, dismissed: false });
+        let frame = |ui: &mut JobsUi, tick: u64| -> Gfx {
+            let mut g = Gfx::new(800, 300);
+            g.clear(rgb(0, 0, 0));
+            ui.draw_strip(&mut g, R::new(10.0, 10.0, 700.0, 120.0), 14.0, 1.0, tick);
+            g
+        };
+        let text = |g: &Gfx| g.layout_log.texts.iter().map(|t| t.3.clone()).collect::<Vec<_>>().join("\n");
+        // amber pixels (red high, green mid, blue low) inside the row
+        let amber = |g: &Gfx, row: R| -> usize {
+            let mut n = 0;
+            for y in (row.y as u32)..((row.y + row.h) as u32) {
+                for x in (row.x as u32)..((row.x + row.w) as u32) {
+                    let o = (y as usize * g.width() as usize + x as usize) * 4;
+                    let p = &g.rgba()[o..o + 4];
+                    if p[0] > 200 && (130..230).contains(&p[1]) && p[2] < 140 {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+        // busy: it just printed, so it slides and says nothing about being quiet
+        let (b0, b1) = (frame(&mut ui, 0), frame(&mut ui, 20));
+        let row = ui.geoms[0].rect;
+        assert!(!text(&b0).contains("no activity"), "{}", text(&b0));
+        assert_ne!(b0.rgba(), b1.rgba(), "a busy job animates");
+        assert_eq!(amber(&b0, row), 0, "no amber while it shows signs of work");
+        // quiet for 65 s: the row says so, nothing moves, and it turns amber
+        ui.jobs[0].last_active_ms = t - 65_000;
+        let (q0, q1) = (frame(&mut ui, 0), frame(&mut ui, 20));
+        assert!(text(&q0).contains("no activity for 1m"), "{}", text(&q0));
+        assert!(text(&q0).contains("started"), "the last line is still shown: {}", text(&q0));
+        assert_eq!(q0.rgba(), q1.rgba(), "a quiet job stands still between frames");
+        assert!(amber(&q0, row) > 20, "amber spinner and bar: {} pixels", amber(&q0, row));
+        // output makes it busy again at the next poll
+        ui.jobs[0].last_active_ms = t;
+        assert!(!text(&frame(&mut ui, 0)).contains("no activity"));
     }
 }

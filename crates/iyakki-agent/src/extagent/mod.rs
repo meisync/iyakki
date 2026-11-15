@@ -70,6 +70,8 @@ pub struct AgentCfg {
     /// Copilot only: run it as a read-only advisor instead of offering IYAKKI's tools over MCP (the default is the policy bridge,
     /// verified against a live CLI; see docs/EXTERNAL-AGENTS.md).
     pub advisor_only: bool,
+    /// The agent writes PDF files with its own file tools, so IYAKKI does not offer `pdf_create` to it (docs/PDF.md).
+    pub native_pdf_output: bool,
     /// The person's home for the program (`HOME`, and `CLAUDE_CONFIG_DIR` for Claude Code): its login lives there. Filled in by
     /// `Services::agents_cfg`, never saved. Empty: the process's own.
     #[serde(skip)]
@@ -84,7 +86,7 @@ pub struct AgentCfg {
 
 impl Default for AgentCfg {
     fn default() -> Self {
-        AgentCfg { enabled: true, command: String::new(), model: String::new(), custom_models: vec![], key_ref: String::new(), allow_auto: false, advisor_only: false, env: vec![], vault_login: None, vault_locked: false }
+        AgentCfg { enabled: true, command: String::new(), model: String::new(), custom_models: vec![], key_ref: String::new(), allow_auto: false, advisor_only: false, native_pdf_output: false, env: vec![], vault_login: None, vault_locked: false }
     }
 }
 
@@ -105,11 +107,13 @@ pub struct CustomCfg {
     /// The environment variable the key is passed in (for example `OPENAI_API_KEY`).
     pub key_env: String,
     pub allow_auto: bool,
+    /// The program writes PDF files itself, so `pdf_create` is not offered to it.
+    pub native_pdf_output: bool,
 }
 
 impl Default for CustomCfg {
     fn default() -> Self {
-        CustomCfg { id: String::new(), name: String::new(), command: String::new(), model: String::new(), models_command: String::new(), custom_models: vec![], key_ref: String::new(), key_env: String::new(), allow_auto: false }
+        CustomCfg { id: String::new(), name: String::new(), command: String::new(), model: String::new(), models_command: String::new(), custom_models: vec![], key_ref: String::new(), key_env: String::new(), allow_auto: false, native_pdf_output: false }
     }
 }
 
@@ -292,6 +296,15 @@ impl AgentsCfg {
         let mut v: Vec<Box<dyn ExternalAgent>> = vec![Box::new(claude_code::ClaudeCode::new(self.with_bin(&self.claude, "claude"))), Box::new(copilot::Copilot::new(self.with_bin(&self.copilot, "copilot")))];
         v.extend(self.custom.iter().map(|c| Box::new(generic::Generic::new(self.custom_with_bin(c))) as Box<dyn ExternalAgent>));
         v
+    }
+
+    /// Does this agent write PDF files itself (`native_pdf_output`)? Then `pdf_create` is not offered to it.
+    pub fn native_pdf_output(&self, id: &str) -> bool {
+        match id {
+            CLAUDE_CODE => self.claude.native_pdf_output,
+            COPILOT => self.copilot.native_pdf_output,
+            other => other.strip_prefix("custom:").and_then(|c| self.custom.iter().find(|x| x.id == c)).is_some_and(|c| c.native_pdf_output),
+        }
     }
 
     pub fn cfg_of(&self, id: &str) -> Option<(bool, String)> {

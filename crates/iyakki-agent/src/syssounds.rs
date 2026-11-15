@@ -320,12 +320,12 @@ impl crate::services::Services {
 
     /// System sounds as set in Settings -> System sounds.
     pub fn system_sounds(&self) -> SystemSounds {
-        self.settings.lock().unwrap().get().sounds.clone()
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().sounds.clone()
     }
 
     /// Change Settings -> System sounds (callers check that the person may).
     pub fn update_system_sounds(&self, f: impl FnOnce(&mut SystemSounds)) -> Result<SystemSounds, String> {
-        self.settings.lock().unwrap().update(|s| f(&mut s.sounds)).map_err(|e| e.to_string())?;
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| f(&mut s.sounds)).map_err(|e| e.to_string())?;
         Ok(self.system_sounds())
     }
 

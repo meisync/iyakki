@@ -161,3 +161,52 @@ fn text_metrics_are_integer_and_stable() {
     assert_eq!(measure_text(0, 7, "é"), 6);
     assert_eq!(line_height(16), 20);
 }
+
+#[test]
+fn event_batches_name_a_wrong_version_marker_tag_text_and_trailing_bytes() {
+    let good = events().encode().unwrap();
+    let mut b = good.clone();
+    b[4] = 9;
+    assert_eq!(EventBatch::decode(&b), Err(DecodeError::BadVersion(9)));
+    let mut b = good.clone();
+    b[0] = b'X';
+    assert_eq!(EventBatch::decode(&b), Err(DecodeError::BadMagic));
+    // an unknown event tag
+    let mut b = Vec::new();
+    b.extend_from_slice(&EVENT_MAGIC);
+    b.extend_from_slice(&(ABI_VERSION as u16).to_le_bytes());
+    b.extend_from_slice(&[1, 200]);
+    assert_eq!(EventBatch::decode(&b), Err(DecodeError::BadTag(200)));
+    // text that is not UTF-8
+    let mut b = Vec::new();
+    b.extend_from_slice(&EVENT_MAGIC);
+    b.extend_from_slice(&(ABI_VERSION as u16).to_le_bytes());
+    b.extend_from_slice(&[1, 5, 2, 0xff, 0xfe]);
+    assert_eq!(EventBatch::decode(&b), Err(DecodeError::BadUtf8));
+    // bytes after the last event
+    let mut b = good.clone();
+    b.push(0);
+    assert_eq!(EventBatch::decode(&b), Err(DecodeError::TrailingBytes));
+    // too many events named in the header, and an oversized buffer
+    let mut b = Vec::new();
+    b.extend_from_slice(&EVENT_MAGIC);
+    b.extend_from_slice(&(ABI_VERSION as u16).to_le_bytes());
+    b.extend_from_slice(&[0xff, 0xff, 0xff, 0xff, 0x0f]);
+    assert_eq!(EventBatch::decode(&b), Err(DecodeError::TooManyItems));
+    assert_eq!(EventBatch::decode(&vec![0u8; limits::MAX_EVENT_BYTES + 1]), Err(DecodeError::TooLarge));
+    let long = EventBatch::new(vec![Event::TextInput { text: "x".repeat(limits::MAX_TEXT + 1) }]);
+    assert_eq!(long.encode(), Err(DecodeError::TooLarge));
+}
+
+#[test]
+fn a_display_list_with_an_unknown_tag_bad_text_or_trailing_bytes_is_refused() {
+    let good = sample().encode().unwrap();
+    let mut b = good.clone();
+    b.push(0);
+    assert_eq!(DisplayList::decode(&b), Err(DecodeError::TrailingBytes));
+    let mut b = Vec::new();
+    b.extend_from_slice(&LIST_MAGIC);
+    b.extend_from_slice(&(ABI_VERSION as u16).to_le_bytes());
+    b.extend_from_slice(&[1, 200]);
+    assert_eq!(DisplayList::decode(&b), Err(DecodeError::BadTag(200)));
+}

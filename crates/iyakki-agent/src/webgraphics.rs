@@ -374,7 +374,9 @@ pub fn set_mode(data: &Path, mode: Mode) -> Result<(), String> {
         return Err(why);
     }
     let _ = std::fs::create_dir_all(root(data));
-    let f = SettingFile { schema: SETTING_SCHEMA.current, mode: mode.id().to_string(), extra: Default::default() };
+    // fields a newer release wrote into the file are kept (charter rule 2)
+    let (_, old, _) = iyakki_schema::load_typed::<SettingFile>(&SETTING_SCHEMA, &root(data).join(SETTING_FILE), iyakki_schema::now_secs());
+    let f = SettingFile { schema: SETTING_SCHEMA.current, mode: mode.id().to_string(), extra: old.extra };
     iyakki_schema::save_typed(&SETTING_SCHEMA, &root(data).join(SETTING_FILE), &f, 0o600)?;
     let mut st = load_state(data);
     st.fallbacks.clear();

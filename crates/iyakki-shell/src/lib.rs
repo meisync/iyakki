@@ -1,7 +1,10 @@
 //! IYAKKI shell: login, role-aware launcher, and the CHAT / RAG / MCP / CLI / Users apps.
 #[cfg(test)]
 mod testmem;
-pub mod accounts;
+/// The accounts live in their own crate (`iyakki-accounts`); this keeps every `iyakki_shell::accounts::...` path as it was.
+pub mod accounts {
+    pub use iyakki_accounts::*;
+}
 pub use iyakki_uikit::access;
 pub use iyakki_uikit::gfx;
 pub use iyakki_uikit::fx;
@@ -9,6 +12,8 @@ pub use iyakki_uikit::fx;
 mod design_tests;
 #[cfg(test)]
 mod upgrade_tests;
+#[cfg(test)]
+mod compat_tests;
 pub use iyakki_uikit::shaping;
 pub use iyakki_uikit::theme;
 pub use iyakki_uikit::uisize;
@@ -22,6 +27,7 @@ pub use iyakki_uikit::textsel;
 pub use iyakki_uikit::ctxmenu;
 pub mod hwcheck;
 pub mod filepicker;
+pub mod pathpick;
 pub use iyakki_uikit::ui;
 pub mod apps;
 pub mod inputprofile;
@@ -33,6 +39,7 @@ pub use iyakki_uikit::tooltip;
 mod filepicker_tests;
 pub mod camera;
 pub mod launcher;
+pub mod stale_stats;
 pub mod shell;
 pub mod samples;
 pub mod backend;
@@ -59,6 +66,7 @@ pub mod clip_scan;
 pub mod installpop;
 pub mod batterybar;
 pub mod lossbar;
+pub mod crashcard;
 pub mod hostname;
 pub mod input;
 pub mod touchpad;
@@ -70,6 +78,7 @@ pub mod touchbar_host;
 #[cfg(test)]
 mod touchbar_tests;
 pub mod loginbar;
+pub mod soundowner;
 pub mod cloudsession;
 pub mod osk;
 pub mod panes;

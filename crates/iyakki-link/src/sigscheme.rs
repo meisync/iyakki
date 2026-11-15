@@ -33,14 +33,23 @@ pub fn request_text(who: &str, method: &str, path: &str, ts: u64, body: &[u8], n
     format!("iyakki-vault-v2\n{who}\n{method}\n{path}\n{ts}\n{}\n{nonce}", hex(&Sha256::digest(body)))
 }
 
-/// An Ed25519 key pair held by a device. The seed is cleared from memory when dropped.
+enum Inner {
+    /// The secret half is held here.
+    Seed([u8; 32]),
+    /// The secret half stays in an `ssh-agent`: only the public key is known, signing asks the agent at `sock`.
+    Agent { public: [u8; 32], sock: std::path::PathBuf },
+}
+
+/// An Ed25519 key pair held by a device, or a key that only an `ssh-agent` holds. The seed is cleared from memory when dropped.
 pub struct DeviceKey {
-    seed: [u8; 32],
+    inner: Inner,
 }
 
 impl Drop for DeviceKey {
     fn drop(&mut self) {
-        self.seed.zeroize();
+        if let Inner::Seed(s) = &mut self.inner {
+            s.zeroize();
+        }
     }
 }
 
@@ -54,28 +63,49 @@ impl DeviceKey {
     pub fn generate() -> Result<DeviceKey, String> {
         let mut seed = [0u8; 32];
         iyakki_sec::random_fill(&mut seed).map_err(|e| format!("no random numbers: {e:?}"))?;
-        Ok(DeviceKey { seed })
+        Ok(DeviceKey { inner: Inner::Seed(seed) })
     }
 
     pub fn from_seed(seed: [u8; 32]) -> DeviceKey {
-        DeviceKey { seed }
+        DeviceKey { inner: Inner::Seed(seed) }
+    }
+
+    /// A key that the `ssh-agent` listening on `sock` holds (see [`crate::sshagent`]). Nothing secret is here; each signature asks the agent.
+    pub fn from_agent(public: [u8; 32], sock: std::path::PathBuf) -> DeviceKey {
+        DeviceKey { inner: Inner::Agent { public, sock } }
+    }
+
+    /// True for a key that only an `ssh-agent` holds.
+    pub fn is_agent(&self) -> bool {
+        matches!(self.inner, Inner::Agent { .. })
     }
 
     pub fn from_hex(s: &str) -> Result<DeviceKey, String> {
         unhex32(s.trim()).map(DeviceKey::from_seed).ok_or_else(|| "a key seed is 64 hex digits".to_string())
     }
 
-    pub fn seed_hex(&self) -> String {
-        hex(&self.seed)
-    }
-
-    fn signing(&self) -> SigningKey {
-        SigningKey::from_bytes(&self.seed)
+    /// The secret seed as hex, to be written to a key file; `None` for a key that only an `ssh-agent` holds.
+    pub fn seed_hex(&self) -> Option<String> {
+        match &self.inner {
+            Inner::Seed(s) => Some(hex(s)),
+            Inner::Agent { .. } => None,
+        }
     }
 
     /// The public key (32 bytes).
     pub fn public(&self) -> [u8; 32] {
-        self.signing().verifying_key().to_bytes()
+        match &self.inner {
+            Inner::Seed(s) => SigningKey::from_bytes(s).verifying_key().to_bytes(),
+            Inner::Agent { public, .. } => *public,
+        }
+    }
+
+    /// An Ed25519 signature over `msg`: made here, or by the `ssh-agent` (and checked here against the public key, whatever it answers).
+    pub fn sign_bytes(&self, msg: &[u8]) -> Result<[u8; 64], String> {
+        match &self.inner {
+            Inner::Seed(s) => Ok(SigningKey::from_bytes(s).sign(msg).to_bytes()),
+            Inner::Agent { public, sock } => crate::sshagent::Agent::at(sock).sign(public, msg),
+        }
     }
 
     pub fn public_hex(&self) -> String {
@@ -91,12 +121,13 @@ impl DeviceKey {
     pub fn sign_request(&self, who: &str, method: &str, path: &str, ts: u64, body: &[u8]) -> Result<String, String> {
         let mut n = [0u8; 16];
         iyakki_sec::random_fill(&mut n).map_err(|e| format!("no random numbers: {e:?}"))?;
-        Ok(self.sign_request_with_nonce(who, method, path, ts, body, &hex(&n)))
+        self.sign_request_with_nonce(who, method, path, ts, body, &hex(&n))
     }
 
-    pub fn sign_request_with_nonce(&self, who: &str, method: &str, path: &str, ts: u64, body: &[u8], nonce: &str) -> String {
-        let sig = self.signing().sign(request_text(who, method, path, ts, body, nonce).as_bytes());
-        format!("IYAKKI-SIG id={who},ts={ts},nonce={nonce},sig={}", hex(&sig.to_bytes()))
+    /// Fails only for an `ssh-agent` key whose agent is gone, refuses, or answers with a wrong signature.
+    pub fn sign_request_with_nonce(&self, who: &str, method: &str, path: &str, ts: u64, body: &[u8], nonce: &str) -> Result<String, String> {
+        let sig = self.sign_bytes(request_text(who, method, path, ts, body, nonce).as_bytes())?;
+        Ok(format!("IYAKKI-SIG id={who},ts={ts},nonce={nonce},sig={}", hex(&sig)))
     }
 }
 
@@ -164,20 +195,20 @@ pub fn unbase64(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn put_string(out: &mut Vec<u8>, s: &[u8]) {
+pub(crate) fn put_string(out: &mut Vec<u8>, s: &[u8]) {
     out.extend_from_slice(&(s.len() as u32).to_be_bytes());
     out.extend_from_slice(s);
 }
 
-struct Rd<'a>(&'a [u8]);
+pub(crate) struct Rd<'a>(pub(crate) &'a [u8]);
 
 impl<'a> Rd<'a> {
-    fn u32(&mut self) -> Option<u32> {
+    pub(crate) fn u32(&mut self) -> Option<u32> {
         let (h, t) = self.0.split_first_chunk::<4>()?;
         self.0 = t;
         Some(u32::from_be_bytes(*h))
     }
-    fn string(&mut self) -> Option<&'a [u8]> {
+    pub(crate) fn string(&mut self) -> Option<&'a [u8]> {
         let n = self.u32()? as usize;
         if n > self.0.len() {
             return None;
@@ -305,7 +336,7 @@ mod tests {
     #[test]
     fn a_header_without_a_good_nonce_or_with_extra_fields_is_not_parsed() {
         let k = key(1);
-        let h = k.sign_request_with_nonce("ann", "POST", "/p", 5, b"", &"ab".repeat(16));
+        let h = k.sign_request_with_nonce("ann", "POST", "/p", 5, b"", &"ab".repeat(16)).unwrap();
         assert!(parse_authorization(&h).is_some());
         assert!(parse_authorization(&h.replace("nonce=", "extra=1,nonce=")).is_none());
         for bad in ["zz", "ab", &"a".repeat(65)] {

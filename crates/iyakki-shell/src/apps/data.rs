@@ -16,6 +16,7 @@ use iyakki_data::{table, DType, DataError, DataService, DatasetInfo, Dir, Export
 use serde_json::Value;
 
 use super::widgets::{Form, FormEvent, PickEvent, Picker};
+use super::data_port::DataPort;
 use super::{App, AppCx, Flow};
 use crate::ctxmenu::Item;
 use crate::gfx::{rgb, Face, Gfx, Icon};
@@ -58,22 +59,6 @@ impl DataEnv {
     /// The folder the open dialog starts in and stays inside.
     pub fn picker_root(&self) -> PathBuf {
         self.roots().home
-    }
-}
-
-impl DataEnv {
-    pub fn from_cx(cx: &AppCx) -> DataEnv {
-        let (p, u, d) = (cx.session.policy.clone(), cx.session.user.clone(), cx.services.dir().to_path_buf());
-        let (p2, u2, d2, p3, u3, d3) = (p.clone(), u.clone(), d.clone(), p.clone(), u.clone(), d.clone());
-        DataEnv {
-            svc: iyakki_data::service(),
-            // the account's scopes plus any shared host folder, as they are at this moment
-            can_read: Arc::new(move |path| iyakki_agent::scope::FileRoots::new(&p, &u, &d).read_ok(&p, &u, Path::new(path))),
-            can_write: Arc::new(move |path| iyakki_agent::scope::FileRoots::new(&p2, &u2, &d2).write_ok(&p2, &u2, Path::new(path))),
-            roots: Arc::new(move || iyakki_agent::scope::FileRoots::new(&p3, &u3, &d3)),
-            recent: Some(cx.services.dir().join(format!("data-recent-{}.json", cx.session.user))),
-            host: Some(super::hostfiles::HostEnv::for_cx(cx)),
-        }
     }
 }
 
@@ -1500,9 +1485,9 @@ pub struct DataApp {
 }
 
 impl DataApp {
-    pub fn new(cx: &AppCx) -> DataApp {
+    pub fn new(port: &dyn DataPort) -> DataApp {
         let params = OPEN_NEXT.with(|o| o.borrow_mut().take()).unwrap_or_default();
-        DataApp { view: DataView::new(DataEnv::from_cx(cx), params), user: cx.session.user.clone(), told: None }
+        DataApp { view: DataView::new(port.env(), params), user: port.user(), told: None }
     }
 
     /// Tell the chat assistant which table is shown (file and column names only), so "this table" means it.
@@ -1522,6 +1507,19 @@ impl DataApp {
 }
 
 impl App for DataApp {
+    #[cfg(test)]
+    fn probe(&self) -> String {
+        format!("{} | {:?}", self.view.path().unwrap_or(""), self.view.status())
+    }
+
+    fn dialog_title(&self) -> Option<String> {
+        Some(match self.view.modal.as_ref()? {
+            Modal::Host(_) => "Files on this computer".into(),
+            Modal::Open { picker, .. } => picker.title.clone(),
+            Modal::Path(f, _) => f.title.clone(),
+        })
+    }
+
     fn title(&self) -> &'static str {
         "Data"
     }
@@ -1564,6 +1562,10 @@ impl App for DataApp {
         self.view.draw(g, area, s, tick);
     }
 }
+
+#[cfg(test)]
+#[path = "data_fake_tests.rs"]
+mod fake_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2121,7 +2123,7 @@ mod tests {
     #[test]
     fn the_app_is_a_tile_that_hosts_the_view() {
         let cx = cx_with_admin_store("dv-app");
-        let mut app = DataApp::new(&cx);
+        let mut app = DataApp::new(&crate::apps::data_port::CxPort(&cx));
         assert_eq!((app.title(), app.icon()), ("Data", Icon::Data));
         let mut g = Gfx::new(1280, 700);
         g.clear(rgb(0, 0, 0));
@@ -2135,7 +2137,7 @@ mod tests {
         request_open(&f, Some("id < 5"));
         let mut cx2 = cx.clone();
         cx2.session.policy.fs_read = vec![d.to_string_lossy().into_owned()];
-        let mut app = DataApp::new(&cx2);
+        let mut app = DataApp::new(&crate::apps::data_port::CxPort(&cx2));
         app.view().settle();
         assert_eq!(app.view().total(), 5);
         assert!(OPEN_NEXT.with(|o| o.borrow().is_none()), "the request is used once");

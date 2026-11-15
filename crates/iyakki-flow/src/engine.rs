@@ -363,6 +363,7 @@ impl Inner {
 pub fn blank_run(id: &str, flow: Flow, inputs: Value, trigger: TriggerInfo, now: i64) -> Run {
     let mut r = Run {
         grants: vec![],
+        run_token: String::new(),
         id: id.to_string(),
         flow_id: flow.id.clone(),
         flow,
@@ -507,12 +508,18 @@ impl Engine {
         run.idempotency_key = req.idempotency_key.clone();
         run.parent = req.parent.clone();
         run.grants = req.grants.clone();
+        // a host that issues run tokens (a cloud tenant's service) gives this run its own; the redactor hides it from every log and output
+        let redactor = Arc::new(Redactor::new());
+        if let Some(t) = inner.host.issue_run_token(&id) {
+            redactor.add(&t);
+            run.run_token = t;
+        }
         if let Some(at) = req.at_ms.filter(|a| *a > now) {
             run.status = RunStatus::Scheduled;
             run.scheduled_ms = Some(at);
         }
         let desc = format!("{id} {} v{} by {} ({})", run.flow_id, run.flow.meta.version, run.trigger.by, run.trigger.kind);
-        inner.state.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), Slot { run, tx: None, cancel: Cancel::new(), redactor: Arc::new(Redactor::new()) });
+        inner.state.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), Slot { run, tx: None, cancel: Cancel::new(), redactor });
         inner.persist(&id);
         inner.host.audit("flow.run.start", &desc);
         inner.log(&id, "", &format!("run created ({})", req.trigger.kind));
@@ -662,6 +669,7 @@ impl Engine {
                     }
                 }
             });
+            inner.host.end_run_token(run_id);
             inner.log(run_id, "", "cancelled before it started");
         } else {
             inner.send(run_id, Ctl::Cancel);

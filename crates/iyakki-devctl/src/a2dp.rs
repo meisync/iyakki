@@ -1,8 +1,8 @@
 //! Bluetooth audio, the receiving side, continued (see [`crate::avdtp`] for the signalling): the pieces between the media channel and
 //! the speakers, and the minimal SDP server that lets a phone find the audio sink. No socket in here.
 //!
-//! * [`sdp_respond`]: a minimal in-house SDP server for ONE record, the A2DP sink (service class 0x110B, AVDTP on PSM 0x19, profile
-//!   0x110D). It answers `ServiceSearch`, `ServiceAttribute` and `ServiceSearchAttribute` requests, with continuation when the
+//! * [`sdp_respond`]: a minimal in-house SDP server for TWO records, the A2DP sink (service class 0x110B, AVDTP on PSM 0x19, profile
+//!   0x110D) and the AVRCP target (0x110C, AVCTP on PSM 0x17, profile 0x110E). It answers `ServiceSearch`, `ServiceAttribute` and `ServiceSearchAttribute` requests, with continuation when the
 //!   answer does not fit the size the phone asked for, and the SDP error response for anything it cannot answer.
 //! * [`parse_rtp`], [`Reorder`], [`StreamDecoder`]: RTP and the SBC media payload (one or more whole frames, or one frame in
 //!   fragments), put back into order, lost packets noticed, frames decoded with [`crate::sbc`].
@@ -48,6 +48,25 @@ fn e_text(s: &str) -> Vec<u8> {
     o
 }
 
+/// The handle of the second record, the AVRCP target (the remote-control service of the same sink, see [`crate::avrcp::sdp_record`]).
+pub const SDP_AVRCP_HANDLE: u32 = 0x0001_0002;
+
+pub(crate) fn sdp_uint16(v: u16) -> Vec<u8> {
+    e_uint16(v)
+}
+pub(crate) fn sdp_uint32(v: u32) -> Vec<u8> {
+    e_uint32(v)
+}
+pub(crate) fn sdp_uuid16(v: u16) -> Vec<u8> {
+    e_uuid16(v)
+}
+pub(crate) fn sdp_seq(items: &[Vec<u8>]) -> Vec<u8> {
+    e_seq(items)
+}
+pub(crate) fn sdp_text(s: &str) -> Vec<u8> {
+    e_text(s)
+}
+
 /// The attributes of the record: (id, encoded value), in id order.
 pub fn sdp_record(name: &str) -> Vec<(u16, Vec<u8>)> {
     vec![
@@ -62,8 +81,22 @@ pub fn sdp_record(name: &str) -> Vec<(u16, Vec<u8>)> {
     ]
 }
 
-/// The UUIDs the record contains (a search pattern matches when all its UUIDs are in here).
+/// The UUIDs the sink record contains (a search pattern matches a record when all its UUIDs are in the record).
 const RECORD_UUIDS: [u16; 5] = [0x110b, 0x110d, 0x0100, 0x0019, 0x1002];
+
+/// The records this server holds: (handle, UUIDs in it).
+fn record_table() -> [(u32, &'static [u16]); 2] {
+    [(SDP_RECORD_HANDLE, &RECORD_UUIDS), (SDP_AVRCP_HANDLE, &crate::avrcp::SDP_UUIDS)]
+}
+
+/// The attributes of the record with this handle.
+fn record_attrs(handle: u32, name: &str) -> Option<Vec<(u16, Vec<u8>)>> {
+    match handle {
+        SDP_RECORD_HANDLE => Some(sdp_record(name)),
+        SDP_AVRCP_HANDLE => Some(crate::avrcp::sdp_record(SDP_AVRCP_HANDLE, name)),
+        _ => None,
+    }
+}
 
 fn sdp_error(tid: u16, code: u16) -> Vec<u8> {
     let mut v = vec![0x01];
@@ -81,21 +114,27 @@ fn sdp_pdu(id: u8, tid: u16, params: &[u8]) -> Vec<u8> {
     v
 }
 
-fn pattern_matches(e: &Elem) -> Option<bool> {
+/// The handles of the records a search pattern matches; `None` for a pattern that is not well formed.
+fn pattern_matches(e: &Elem) -> Option<Vec<u32>> {
     let list = e.seq()?;
     if list.is_empty() || list.len() > 12 {
         return None;
     }
-    let mut all = true;
+    let table = record_table();
+    let mut all = [true; 2];
     for u in list {
         match u.uuid16() {
-            Some(u) => all &= RECORD_UUIDS.contains(&u),
-            // a UUID that is not on the Bluetooth base cannot be in this record
-            None if matches!(u, Elem::Uuid(_)) => all = false,
+            Some(u) => {
+                for (k, (_, ids)) in table.iter().enumerate() {
+                    all[k] &= ids.contains(&u);
+                }
+            }
+            // a UUID that is not on the Bluetooth base cannot be in these records
+            None if matches!(u, Elem::Uuid(_)) => all = [false; 2],
             None => return None,
         }
     }
-    Some(all)
+    Some(table.iter().enumerate().filter(|(k, _)| all[*k]).map(|(_, (h, _))| *h).collect())
 }
 
 /// The attribute id ranges of an `AttributeIDList` (raw bytes of the sequence): a 16-bit item is one attribute, a 32-bit item is a
@@ -129,9 +168,9 @@ fn id_ranges(raw: &[u8]) -> Option<Vec<(u16, u16)>> {
 }
 
 /// `AttributeList` for the requested ids: a sequence of id / value pairs in id order.
-fn attribute_list(name: &str, ranges: &[(u16, u16)]) -> Vec<u8> {
+fn attribute_list(handle: u32, name: &str, ranges: &[(u16, u16)]) -> Vec<u8> {
     let mut items = Vec::new();
-    for (id, val) in sdp_record(name) {
+    for (id, val) in record_attrs(handle, name).unwrap_or_default() {
         if ranges.iter().any(|(a, b)| id >= *a && id <= *b) {
             items.push(e_uint16(id));
             items.push(val);
@@ -185,13 +224,14 @@ fn sdp_answer(id: u8, tid: u16, p: &[u8], name: &str) -> Result<Vec<u8>, u16> {
             let rest = p.get(n..).filter(|r| r.len() >= 3).ok_or(SDP_ERR_INVALID_SYNTAX)?;
             let max = u16::from_be_bytes([rest[0], rest[1]]);
             continuation(&rest[2..])?;
-            let hit = pattern_matches(&pat).ok_or(SDP_ERR_INVALID_SYNTAX)? && max > 0;
+            let mut hits = pattern_matches(&pat).ok_or(SDP_ERR_INVALID_SYNTAX)?;
+            hits.truncate(max as usize);
             let mut v = Vec::new();
-            let c = hit as u16;
+            let c = hits.len() as u16;
             v.extend_from_slice(&c.to_be_bytes());
             v.extend_from_slice(&c.to_be_bytes());
-            if hit {
-                v.extend_from_slice(&SDP_RECORD_HANDLE.to_be_bytes());
+            for h in &hits {
+                v.extend_from_slice(&h.to_be_bytes());
             }
             v.push(0);
             Ok(sdp_pdu(0x03, tid, &v))
@@ -206,10 +246,10 @@ fn sdp_answer(id: u8, tid: u16, p: &[u8], name: &str) -> Result<Vec<u8>, u16> {
             let (_ids, n) = parse_elem(&p[6..]).map_err(bad)?;
             let ids_raw = &p[6..6 + n];
             let off = continuation(&p[6 + n..])?;
-            if handle != SDP_RECORD_HANDLE {
+            if record_attrs(handle, name).is_none() {
                 return Err(SDP_ERR_INVALID_HANDLE);
             }
-            let full = attribute_list(name, &id_ranges(ids_raw).ok_or(SDP_ERR_INVALID_SYNTAX)?);
+            let full = attribute_list(handle, name, &id_ranges(ids_raw).ok_or(SDP_ERR_INVALID_SYNTAX)?);
             let (data, cont) = chunk(&full, off, max)?;
             let mut v = (data.len() as u16).to_be_bytes().to_vec();
             v.extend_from_slice(&data);
@@ -224,9 +264,10 @@ fn sdp_answer(id: u8, tid: u16, p: &[u8], name: &str) -> Result<Vec<u8>, u16> {
             let (_ids, m) = parse_elem(&rest[2..]).map_err(bad)?;
             let ids_raw = &rest[2..2 + m];
             let off = continuation(&rest[2 + m..])?;
-            let hit = pattern_matches(&pat).ok_or(SDP_ERR_INVALID_SYNTAX)?;
+            let hits = pattern_matches(&pat).ok_or(SDP_ERR_INVALID_SYNTAX)?;
             let ranges = id_ranges(ids_raw).ok_or(SDP_ERR_INVALID_SYNTAX)?;
-            let full = if hit { e_seq(&[attribute_list(name, &ranges)]) } else { e_seq(&[]) };
+            let lists: Vec<Vec<u8>> = hits.iter().map(|h| attribute_list(*h, name, &ranges)).collect();
+            let full = e_seq(&lists);
             let (data, cont) = chunk(&full, off, max)?;
             let mut v = (data.len() as u16).to_be_bytes().to_vec();
             v.extend_from_slice(&data);

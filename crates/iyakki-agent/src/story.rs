@@ -1634,7 +1634,7 @@ pub fn voice_choices(engine: &voice::SpeechEngine) -> Vec<String> {
             }
             v
         }
-        voice::SpeechEngine::Command { .. } | voice::SpeechEngine::Browser | voice::SpeechEngine::Host { .. } => Vec::new(),
+        voice::SpeechEngine::Command { .. } | voice::SpeechEngine::Browser | voice::SpeechEngine::Host { .. } | voice::SpeechEngine::Gemini { .. } => Vec::new(),
     }
 }
 
@@ -1645,6 +1645,7 @@ pub fn engine_takes_speed(engine: &voice::SpeechEngine) -> bool {
         voice::SpeechEngine::Command { command } => command.contains("{speed}") || command.contains("{length_scale}"),
         voice::SpeechEngine::Browser => true,
         voice::SpeechEngine::Host { engine, .. } => engine != "pico2wave",
+        voice::SpeechEngine::Gemini { .. } => false,
     }
 }
 
@@ -2561,6 +2562,28 @@ impl StoryStore {
         ["wav", "mp3"].iter().map(|e| d.join(format!("audio.{e}"))).find(|p| p.is_file() && self.check_read(p).is_ok())
     }
 
+    /// The saved PDF of a story, if any (`story.pdf`, beside `story.md`).
+    pub fn pdf_path(&self, id: &str) -> Option<PathBuf> {
+        let p = self.story_dir(id).ok()?.join("story.pdf");
+        (p.is_file() && self.check_read(&p).is_ok()).then_some(p)
+    }
+
+    /// Keep the PDF of a story beside its text (`story.pdf`; an earlier copy of it is replaced: it is made from the story, not
+    /// written by the person). The story must be saved first. Returns the path and whether an earlier copy was replaced.
+    pub fn save_pdf(&self, id: &str, bytes: &[u8]) -> Result<(PathBuf, bool), String> {
+        let dir = self.story_dir(id)?;
+        self.check_read(&self.md_path(id)?).and_then(|p| if p.is_file() { Ok(p) } else { Err("save the story first".to_string()) })?;
+        let target = self.check_write(&dir.join("story.pdf"))?;
+        let replaced = target.is_file();
+        let tmp = self.check_write(&dir.join("story.pdf.part"))?;
+        std::fs::write(&tmp, bytes).map_err(|e| format!("could not save the PDF: {e}"))?;
+        std::fs::rename(&tmp, &target).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("could not save the PDF: {e}")
+        })?;
+        Ok((target, replaced))
+    }
+
     fn entry_from(&self, id: &str, text: &str) -> (StoryEntry, Story) {
         let (fields, body) = split_front(text);
         let get = |k: &str| fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()).unwrap_or_default();
@@ -2713,7 +2736,7 @@ impl StoryStore {
             return Err("that is not a story folder".into());
         }
         let _ = std::fs::remove_dir_all(w.join("pics"));
-        let mut files: Vec<String> = ["story.md", "audio.wav", "audio.mp3", "audio.json", "chat.json", "character.json", "pictures.log", "picture-options.json", "setting.txt"].iter().map(|f| f.to_string()).collect();
+        let mut files: Vec<String> = ["story.md", "audio.wav", "audio.mp3", "audio.json", "chat.json", "character.json", "pictures.log", "picture-options.json", "setting.txt", "story.pdf", "story.pdf.part"].iter().map(|f| f.to_string()).collect();
         files.extend((1..=self.versions(id)).map(|n| format!("story.v{n}.md")));
         files.extend(crate::piclog::file_names());
         for f in files {
@@ -4140,6 +4163,58 @@ mod tests {
         set_highlight_offset_ms(0);
         assert!((when[1] - when[0] - 250).abs() <= 40, "250 ms later: {when:?}");
         assert!((when[0] - when[2] - 250).abs() <= 40, "250 ms earlier: {when:?}");
+    }
+
+    /// Captures `log::info!` lines for the test that follows (None when another logger was installed first).
+    mod test_log {
+        use std::sync::Mutex;
+        static LINES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        struct Cap;
+        impl log::Log for Cap {
+            fn enabled(&self, _: &log::Metadata) -> bool {
+                true
+            }
+            fn log(&self, r: &log::Record) {
+                LINES.lock().unwrap_or_else(|e| e.into_inner()).push(format!("{}", r.args()));
+            }
+            fn flush(&self) {}
+        }
+        pub fn install() -> bool {
+            static INSTALLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            *INSTALLED.get_or_init(|| {
+                let ok = log::set_logger(&Cap).is_ok();
+                log::set_max_level(log::LevelFilter::Info);
+                ok
+            })
+        }
+        pub fn lines() -> Vec<String> {
+            LINES.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        }
+    }
+
+    #[test]
+    fn every_read_sentence_logs_its_sound_heard_position_clock_gap_and_offset_for_dev_dmesg() {
+        use crate::audiosink::set_highlight_offset_ms;
+        assert!(test_log::install(), "no other logger is installed in this test binary");
+        let _turn = OFFSET_TURN.lock().unwrap_or_else(|e| e.into_inner());
+        for offset in [0i32, 250, -250] {
+            set_highlight_offset_ms(offset);
+            let (r, time) = held_reader();
+            let sk = Arc::new(HeardSink { time: time.clone(), lag: 0, audio_ms: 2200 });
+            r.start(words_chunks(), 0, false, "v", Arc::new(PaddedSynth), sk);
+            wait_for("playing", || r.status() == Status::Playing);
+            advance_until("done", &time, 5, || r.status() == Status::Done);
+            let want = format!("highlight offset {offset} ms");
+            let line = test_log::lines().into_iter().rev().find(|l| l.starts_with("reading: sentence 1 of 1:") && l.contains(&want)).unwrap_or_else(|| panic!("no log line for offset {offset}: {:?}", test_log::lines()));
+            // every figure the owner needs to tune the offset from the device log is in the line, in words
+            for part in ["sound 2200 ms", "heard ", "word clock at ", "clock behind the sound by at most ", "ahead by at most ", "longest gap between polls ", "timeline: "] {
+                assert!(line.contains(part), "`{part}` missing from: {line}");
+            }
+            let heard: f32 = line.split("heard ").nth(1).and_then(|t| t.split(' ').next()).and_then(|n| n.parse().ok()).expect("a number after `heard`");
+            // the offset is applied to the heard position (that is how it moves the words), so the figure may sit that far outside the sound
+            assert!(heard > 0.0 && heard <= 2200.0 - offset.min(0) as f32, "the heard position is inside the sound once the offset is counted: {line}");
+        }
+        set_highlight_offset_ms(0);
     }
 
     #[test]

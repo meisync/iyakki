@@ -9,7 +9,7 @@ use super::*;
 use crate::agent::{Risk, ToolDef};
 use crate::chat::ToolSpec;
 
-pub const TOOLS: [&str; 6] = ["platform_list", "platform_status", "platform_deploy", "platform_upgrade", "platform_remove", "git_service_status"];
+pub const TOOLS: [&str; 7] = ["platform_list", "platform_status", "platform_deploy", "platform_upgrade", "platform_remove", "git_service_status", "platform_pull_request"];
 
 pub fn handles(name: &str) -> bool {
     TOOLS.contains(&name)
@@ -38,6 +38,7 @@ impl PlatformTools {
             t("platform_upgrade", "Upgrade an installed service to a newer pinned version along its upgrade path: `instance`, optional `version` (default the newest known), `backup_first` (default true: a dump is taken and a failure stops the upgrade). The person reviews the plan naming the cluster and approves; it ASKS in every mode and is never run automatically.", obj(json!({"instance": {"type": "string"}, "version": {"type": "string"}, "backup_first": {"type": "boolean"}}), &["instance"]), Risk::Ask, false),
             t("platform_remove", "Remove an installed service: `instance`, `delete_data` (default false: the PVC, Secrets, vault entries and namespace are KEPT), and `confirm`, which must be the instance id typed by the person (ask them with ask_user; never fill it in). It ASKS in every mode and the card says exactly what is deleted.", obj(json!({"instance": {"type": "string"}, "delete_data": {"type": "boolean"}, "confirm": {"type": "string"}}), &["instance", "confirm"]), Risk::Ask, false),
             t("git_service_status", "Read-only: the installed git services (Gitea) with their live state, web and clone addresses (no tokens), and the workspaces connected to each. This includes the Gitea the person installed from Store \u{2192} Setup (\"Gitea (versioning for your work)\", reachable on this machine at 127.0.0.1 and added as the Git connection \"Local Gitea\").", obj(json!({}), &[]), Risk::Safe, true),
+            t("platform_pull_request", "Open a pull request on the person's git service (Gitea) from the CURRENT branch of one of their connected workspaces into `base` (default main). `workspace` is the workspace name (git_service_status lists the connected ones with their service); `title` is required, `body` optional; `instance` only when more than one git service holds that workspace. The branch must already be pushed (the push is its own approval, in the IDE); nothing is merged and the token is never shown. The person approves the exact title and branches first.", obj(json!({"workspace": {"type": "string"}, "title": {"type": "string"}, "body": {"type": "string"}, "base": {"type": "string"}, "instance": {"type": "string"}}), &["workspace", "title"]), Risk::Ask, false),
         ]
     }
 
@@ -54,6 +55,7 @@ impl PlatformTools {
         match name {
             "platform_list" => "list the platform services, clusters and installed services".into(),
             "platform_status" | "git_service_status" => "read the state of the installed services".into(),
+            "platform_pull_request" => format!("OPEN A PULL REQUEST for the workspace \"{}\": {} (into {})", arg(args, "workspace"), arg(args, "title"), if arg(args, "base").is_empty() { "main" } else { arg(args, "base") }),
             "platform_deploy" => format!("DEPLOY {} to {}, namespace {} (you review the exact plan first)", spec(arg(args, "service")).map(|d| d.title()).unwrap_or_else(|| format!("`{}`", arg(args, "service"))), cluster(arg(args, "profile")), if arg(args, "namespace").is_empty() { "the default".to_string() } else { arg(args, "namespace").to_string() }),
             "platform_upgrade" => match self.installed(arg(args, "instance")) {
                 Ok(i) => format!("UPGRADE {} {} on {} to {}{}", i.title, i.version, i.cluster.as_ref().map(ClusterRef::line).unwrap_or_else(|| "its service".into()), if arg(args, "version").is_empty() { "the newest known version".to_string() } else { arg(args, "version").to_string() }, if args.get("backup_first").and_then(Value::as_bool) == Some(false) { " WITHOUT a backup" } else { " (backup first)" }),
@@ -71,6 +73,10 @@ impl PlatformTools {
         match name {
             "platform_deploy" => Some(match self.plan_from(args) {
                 Ok(p) => preview(&p),
+                Err(e) => format!("this would be refused: {e}"),
+            }),
+            "platform_pull_request" => Some(match self.pr_plan_from(args) {
+                Ok(p) => connect::preview_pull_request(&p),
                 Err(e) => format!("this would be refused: {e}"),
             }),
             "platform_upgrade" => Some(match self.upgrade_plan_from(args) {
@@ -93,6 +99,22 @@ impl PlatformTools {
             opts.set("namespace", arg(args, "namespace"));
         }
         plan(&self.pl, &*def, &profile, &opts)
+    }
+
+    /// The workspace by its name from the person's workspace list, and the git service that holds it.
+    fn pr_plan_from(&self, args: &Value) -> Result<connect::PrPlan, String> {
+        let name = arg(args, "workspace");
+        let reg = crate::workspace::Registry::load(&self.pl.dir, &self.pl.user);
+        let w = reg.ordered().into_iter().find(|w| w.name == name).ok_or_else(|| format!("`{name}` is not one of the person's workspaces"))?;
+        let all = installed::load(&self.pl.dir, &self.pl.user);
+        let holders: Vec<&Installed> = all.iter().filter(|i| i.kind == "git" && i.workspaces.iter().any(|l| l.workspace == name) && (arg(args, "instance").is_empty() || i.id == arg(args, "instance"))).collect();
+        let inst = match holders.as_slice() {
+            [one] => (*one).clone(),
+            [] => return Err(format!("the workspace `{name}` is not connected to a git service (git_service_status shows the connected ones)")),
+            _ => return Err(format!("more than one git service holds `{name}`: say which with `instance`")),
+        };
+        let base = if arg(args, "base").is_empty() { "main" } else { arg(args, "base") };
+        connect::plan_pull_request(&self.pl, &inst, &connect::WsInfo { name: w.name.clone(), root: w.root_path() }, base, arg(args, "title"), arg(args, "body"))
     }
 
     fn upgrade_plan_from(&self, args: &Value) -> Result<UpgradePlan, String> {
@@ -122,6 +144,11 @@ impl PlatformTools {
                 let names: Vec<String> = p.secrets.iter().flat_map(|s| s.entries.iter().map(|e| format!("uvault:{}", e.vault))).collect();
                 t.push_str(&format!("\nThe generated credentials are in the person's vault ({}) and in the Kubernetes Secret; they are not shown to you. The person can reveal them in Settings, Dev cluster, Platform services, Details.\n\n{}\nInstance id: {}", names.join(", "), a.how_to_use, a.instance));
                 Ok(t)
+            }
+            "platform_pull_request" => {
+                let p = self.pr_plan_from(args)?;
+                let link = connect::create_pull_request(&self.pl, &p, true)?;
+                Ok(format!("Opened the pull request for {} \u{2192} {}: {link}", p.head, p.base_branch))
             }
             "platform_upgrade" => {
                 let u = self.upgrade_plan_from(args)?;

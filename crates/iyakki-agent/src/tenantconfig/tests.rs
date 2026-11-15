@@ -473,6 +473,21 @@ fn tcfg_each_k3s_binding_has_its_own_credential_and_dev_cannot_serve_prod() {
 }
 
 #[test]
+fn tcfg_the_sandbox_gets_the_bindings_server_and_credential_only_when_the_binding_is_ready_and_the_teams_own() {
+    let x = t("k3s-sbx");
+    assert!(enforce::k3s_binding(&x.env(), "web", "dev").is_none(), "no binding yet");
+    binding(&x, "web", "dev", json!({})).unwrap();
+    let (server, cred) = enforce::k3s_binding(&x.env(), "web", "dev").unwrap();
+    assert_eq!(server, "https://web-dev.k3s.example.com:6443");
+    assert!(cred.name.starts_with("web-dev-"), "{}", cred.name);
+    assert!(enforce::k3s_binding(&x.env(), "web", "prod").is_none() && enforce::k3s_binding(&x.env(), "shop", "dev").is_none());
+    // a credential that is another environment's is not handed out, even when a file sneaks it in
+    x.write_file(json!({"items": [{"kind": "k3s.cluster", "namespace": "web", "name": "prod", "enabled": true, "values": {"api_server": "https://p.example.com", "credential": "vault:k3s.cluster/web-dev-credential", "deploy_role": "editor"}}]}));
+    x.vault.put(&SecretRef::parse("vault:k3s.cluster/web-dev-credential").unwrap(), "kc").unwrap();
+    assert!(enforce::k3s_binding(&x.env(), "web", "prod").is_none());
+}
+
+#[test]
 fn tcfg_prod_needs_a_second_person_and_promotion_follows_the_chain() {
     let x = t("k3s-eyes");
     for e in ["dev", "preprod", "prod"] {
@@ -1264,6 +1279,37 @@ fn tcfg_hook_the_deploy_gate_files_and_consumes_an_approval_once() {
 }
 
 #[test]
+fn tcfg_hook_a_cluster_manager_applies_only_after_the_gate_says_go_and_an_approval_is_spent_by_one_apply() {
+    let x = t("hook-deploy-through");
+    for e in ["dev", "preprod", "prod"] {
+        binding(&x, "web", e, json!({"deploy_role": if e == "dev" { "editor" } else { "admin" }})).unwrap();
+    }
+    let now = super::now_secs();
+    let mut prod = ask(&x, "web", "prod", "mia", 2);
+    prod.promoted_from = Some("preprod");
+    let applied = std::cell::RefCell::new(Vec::<Option<String>>::new());
+    let mut apply = |by: Option<&str>| -> Result<u32, String> {
+        applied.borrow_mut().push(by.map(String::from));
+        Ok(7)
+    };
+    let e = runtime::deploy_through(&x.env(), &prod, now, &mut apply).unwrap_err();
+    assert!(e.contains("waiting for approval") && e.contains("tenant_admin") && applied.borrow().is_empty(), "{e}");
+    let id = e.split_whitespace().nth(3).unwrap().to_string();
+    approvals::decide(&x.env(), &x.who("adam"), &id, true, now).unwrap();
+    assert_eq!(runtime::deploy_through(&x.env(), &prod, now, &mut apply), Ok(7));
+    assert_eq!(*applied.borrow(), vec![Some("adam".to_string())]);
+    assert!(runtime::deploy_through(&x.env(), &prod, now, &mut apply).is_err(), "the approval was spent by the first apply");
+    assert_eq!(applied.borrow().len(), 1);
+    // a failing apply is reported and audited; a denied person never reaches apply; a plain dev deploy needs no approval
+    let mut boom = |_: Option<&str>| -> Result<u32, String> { Err("the cluster said no".into()) };
+    assert_eq!(runtime::deploy_through(&x.env(), &ask(&x, "web", "dev", "max", 1), now, &mut boom), Err("the cluster said no".to_string()));
+    assert!(runtime::deploy_through(&x.env(), &ask(&x, "web", "dev", "eve", -1), now, &mut apply).is_err());
+    assert_eq!(applied.borrow().len(), 1);
+    let a = x.rec.all();
+    assert!(a.contains("tenant.deploy.waiting") && a.contains("tenant.deploy.applied") && a.contains("tenant.deploy.failed") && a.contains("tenant.deploy.denied"), "{a}");
+}
+
+#[test]
 fn tcfg_discovery_parses_ollama_and_openai_model_lists_and_rejects_the_rest() {
     let ollama = r#"{"models":[{"name":"llama3:8b","model":"llama3:8b","size":4661224676},{"name":"qwen2.5-coder:7b"},{"name":"llama3:8b"},{"name":"bad name"},{"model":"only-model-field"}]}"#;
     assert_eq!(discovery::parse_ollama_tags(ollama).unwrap(), vec!["llama3:8b", "only-model-field", "qwen2.5-coder:7b"]);
@@ -1407,4 +1453,220 @@ fn tcfg_the_file_is_read_fresh_on_every_request_and_stays_consistent_under_load(
     assert_eq!(x.get("adam", "media.policy", &[]).unwrap()["managed"], true);
     x.write_file(json!({"schema": 1, "items": []}));
     assert_eq!(x.get("adam", "media.policy", &[]).map(|v| v["managed"].clone()).unwrap_or(json!(false)), json!(false));
+}
+
+#[test]
+fn tcfg_a_person_layer_is_stored_per_person_narrows_only_and_is_audited() {
+    use super::person;
+    use crate::browsermedia::Policy;
+    let x = t("personlayer");
+    let role = iyakki_sec::policy::Role::User;
+    let put = |u: &str, kind: &str, body: Value| person::put(&x.env(), &x.who(u), kind, body);
+    // nothing configured by the tenant: nothing to narrow
+    assert_eq!(put("max", "media.policy", json!({"enabled": true, "values": {"deny_devices": ["mic"]}})).unwrap_err().status, 409);
+    x.put("adam", "media.policy", &[], json!({"enabled": true, "values": {"media": "allow"}})).unwrap();
+    let p = enforce::media_policy_for(&x.dir, None, "max", role, Policy::deny_all());
+    assert!(p.mic && p.camera, "the tenant allows everything");
+    // max narrows his own layer: no microphone for him, nobody else
+    let r = put("max", "media.policy", json!({"enabled": true, "values": {"deny_devices": ["mic"]}})).unwrap();
+    assert_eq!(r["effective"]["deny_devices"], json!(["mic"]));
+    let mine = enforce::media_policy_for(&x.dir, None, "max", role, Policy::deny_all());
+    assert!(!mine.mic && mine.camera && mine.audio);
+    assert!(enforce::media_policy_for(&x.dir, None, "mia", role, Policy::deny_all()).mic, "another person is not affected");
+    // a person cannot widen: tenant deny stays deny whatever the person layer says
+    x.put("adam", "media.policy", &[], json!({"enabled": true, "values": {"media": "deny"}})).unwrap();
+    put("mia", "media.policy", json!({"enabled": true, "values": {"media": "allow"}})).unwrap();
+    assert_eq!(enforce::media_policy_for(&x.dir, None, "mia", role, Policy::allow_all()), Policy::deny_all());
+    // a person layer that is off denies everything for that person (deny wins)
+    x.put("adam", "media.policy", &[], json!({"enabled": true, "values": {"media": "allow"}})).unwrap();
+    put("mia", "media.policy", json!({"enabled": false})).unwrap();
+    assert_eq!(enforce::media_policy_for(&x.dir, None, "mia", role, Policy::allow_all()), Policy::deny_all());
+    // reading returns only the caller's own layer
+    assert_eq!(person::get(&x.env(), &x.who("max"), "media.policy").unwrap()["items"][0]["values"]["deny_devices"], json!(["mic"]));
+    assert_eq!(person::get(&x.env(), &x.who("vic"), "media.policy").unwrap()["items"], json!([]));
+    // not for kinds that do not allow it, not for outsiders, no unknown fields, no bad values
+    assert_eq!(put("max", "egress.policy", json!({"enabled": true})).unwrap_err().status, 400);
+    assert_eq!(put("eve", "media.policy", json!({"enabled": true})).unwrap_err().status, 403);
+    assert_eq!(put("max", "media.policy", json!({"enabled": true, "secrets": {"x": "y"}})).unwrap_err().status, 400);
+    assert_eq!(put("max", "media.policy", json!({"enabled": true, "values": {"deny_devices": ["laser"]}})).unwrap_err().status, 400);
+    // delete restores the tenant's rule; the audit has hashes and field names, never values
+    person::delete(&x.env(), &x.who("max"), "media.policy", None).unwrap();
+    assert!(enforce::media_policy_for(&x.dir, None, "max", role, Policy::deny_all()).mic);
+    assert_eq!(person::delete(&x.env(), &x.who("max"), "media.policy", None).unwrap_err().status, 404);
+    let audit = x.rec.all();
+    assert!(audit.contains("tenant.config.person.put") && audit.contains("tenant.config.person.delete") && audit.contains("fields=deny_devices"), "{audit}");
+    // the file is private and named safely, whatever the user name holds
+    let evil = person::put(&x.env(), &Caller { user: "mia", roles: Some(&x.roles) }, "media.policy", json!({"enabled": true}));
+    assert!(evil.is_ok());
+    let files: Vec<String> = std::fs::read_dir(x.dir.join("cloud/config/person")).unwrap().flatten().map(|f| f.file_name().to_string_lossy().into_owned()).collect();
+    assert!(files.iter().all(|f| f == "mia.json"), "{files:?}");
+    assert_eq!(person::load(&x.dir, "../mia").len(), 0, "a user name cannot reach another person's file");
+    // the agent gate reads the person layer too: max keeps only one model, mia is not affected
+    x.put("adam", "agent.claude", &[], SHARED()).unwrap();
+    let gate = |u: &str, m: &str| enforce::agent_gate(&x.env(), "agent.claude", "default", None, u, Some(m), 9_000_000);
+    assert_eq!(gate("vic", "sonnet"), AgentUse::Allowed { shared: true });
+    person::put(&x.env(), &x.who("mia"), "agent.claude", json!({"enabled": true, "values": {"allowed_models": ["claude-opus"]}})).unwrap();
+    assert!(matches!(gate("mia", "sonnet"), AgentUse::Refused(w) if w.contains("model")), "the person layer narrows the models");
+    person::put(&x.env(), &x.who("max"), "agent.claude", json!({"enabled": false})).unwrap();
+    assert!(matches!(gate("max", "sonnet"), AgentUse::Refused(_)), "a person who switches the agent off for themselves cannot start it");
+}
+
+#[path = "localchat_tests.rs"]
+mod localchat_tests;
+
+#[test]
+fn tcfg_secrets_of_the_configuration_go_only_to_a_pinned_vault() {
+    let tenant = SecretRef::parse("vault:agent.claude/token").unwrap();
+    // the guard over a fake service: names are listed either way, secrets move only when pinned
+    let ops = Arc::new(FakeOps::default());
+    ops.scopes.lock().unwrap().insert("tenant".into(), Default::default());
+    let open = vault::LinkVault { ops: vault::PinGuard { inner: ops.clone(), pinned: false } };
+    assert_eq!(open.state(&tenant), SecretState::Missing, "the list carries no secret, so the screen can still show what exists");
+    assert_eq!(open.put(&tenant, "sk-real").unwrap_err(), vault::UNPINNED);
+    assert_eq!(open.remove(&tenant).unwrap_err(), vault::UNPINNED);
+    assert_eq!(open.use_secret(&tenant, "agent-run", &mut |_| Ok(String::new())).unwrap_err(), vault::UNPINNED);
+    assert!(ops.scopes.lock().unwrap().get("tenant").unwrap().is_empty(), "nothing reached the service");
+    let pinned = vault::LinkVault { ops: vault::PinGuard { inner: ops.clone(), pinned: true } };
+    pinned.put(&tenant, "sk-real").unwrap();
+    let mut got = String::new();
+    pinned.use_secret(&tenant, "agent-run", &mut |s| { got = s.to_string(); Ok(String::new()) }).unwrap();
+    assert_eq!(got, "sk-real");
+    assert_eq!(open.state(&tenant), SecretState::Set);
+
+    // the real binding, against a real loopback vault service: pinned works, unpinned writes nothing
+    let d = dir("vault-pinned-binding");
+    {
+        let tdir = d.join("tenants").join("acme");
+        let r = crate::cloudroles::Roles::new("alice").unwrap();
+        crate::cloudroles::save(&crate::cloudroles::path(&tdir), &r).unwrap();
+        let st = crate::cloudvaultd::Store::open(&d).unwrap();
+        st.enroll(&crate::cloudvaultd::Principal::Member { tenant: "acme".into(), user: "alice".into() }, &crate::cloudkeys::MemberKeys::from_seed([1; 32]).public()).unwrap();
+    }
+    let keydir = d.join("cloud").join("vault-keys");
+    std::fs::create_dir_all(&keydir).unwrap();
+    std::fs::write(keydir.join("alice.key"), "01".repeat(32)).unwrap();
+    let run = crate::cloudvaultd::start("127.0.0.1:0".parse().unwrap(), &d, None).unwrap();
+    let url = format!("https://127.0.0.1:{}", run.local_addr().port());
+    let pinned_link = crate::cloudvaultlink::Link::from_values(Some(&url), Some(&run.fingerprint), Some("acme"));
+    let loose_link = crate::cloudvaultlink::Link::from_values(Some(&url), None, Some("acme"));
+    let loose = vault::for_user_with(&d, "alice", &loose_link);
+    assert!(loose.put(&tenant, "sk-loose").unwrap_err().contains("pinned vault"));
+    let good = vault::for_user_with(&d, "alice", &pinned_link);
+    assert_eq!(good.state(&tenant), SecretState::Missing, "nothing was written by the unpinned attempt");
+    good.put(&tenant, "sk-pinned").unwrap();
+    let mut got = String::new();
+    good.use_secret(&tenant, "agent-run", &mut |s| { got = s.to_string(); Ok(String::new()) }).unwrap();
+    assert_eq!(got, "sk-pinned");
+    assert_eq!(loose.state(&tenant), SecretState::Set);
+    assert!(loose.use_secret(&tenant, "agent-run", &mut |_| Ok(String::new())).unwrap_err().contains("pinned vault"));
+    run.stop();
+}
+
+#[test]
+fn tcfg_a_team_host_service_is_applied_through_the_cluster_seam_only_after_the_deploy_decision() {
+    use crate::tenantconfig::hostservice::{apply_host_service, ServiceApplier};
+    struct Rec(std::sync::Mutex<Vec<(String, String)>>);
+    impl ServiceApplier for Rec {
+        fn apply_yaml(&self, namespace: &str, yaml: &str) -> Result<String, String> {
+            self.0.lock().unwrap().push((namespace.into(), yaml.into()));
+            Ok("service/llm-gpu created".into())
+        }
+    }
+    let x = t("svc-apply");
+    x.put("adam", "integration.policy", &[], json!({"enabled": true, "values": {"internal_hosts": ["10.0.5.0/24"]}})).unwrap();
+    x.put("mia", "models.local", &["web", "gpu"], local_body(json!({}))).unwrap();
+    binding(&x, "web", "dev", json!({"deploy_role": "editor"})).unwrap();
+    let c = Rec(Default::default());
+    let env = x.env();
+    // a person who may not deploy: nothing is applied
+    let e = apply_host_service(&env, &ask(&x, "web", "dev", "eve", -1), "gpu", &c, 1_000).unwrap_err();
+    assert!(e.contains("not applied") && c.0.lock().unwrap().is_empty(), "{e}");
+    // an editor in dev: applied once, to the team's namespace, with the Endpoints of the address
+    let out = apply_host_service(&env, &ask(&x, "web", "dev", "max", 1), "gpu", &c, 1_000).unwrap();
+    assert_eq!(out, "service/llm-gpu created");
+    let got = c.0.lock().unwrap().clone();
+    assert_eq!(got.len(), 1);
+    assert!(got[0].0 == "web" && got[0].1.contains("name: llm-gpu") && got[0].1.contains("- ip: \"10.0.5.7\""), "{}", got[0].1);
+    assert!(x.rec.all().contains("tenant.k3s.deploy"), "the deploy decision is audited");
+    // a host that is not switched on or does not exist has no Service
+    assert!(apply_host_service(&env, &ask(&x, "web", "dev", "max", 1), "nope", &c, 1_000).is_err());
+}
+
+#[test]
+fn tcfg_a_team_host_service_in_prod_waits_for_a_second_person_and_is_applied_once_after_the_approval() {
+    use crate::tenantconfig::hostservice::{apply_host_service, ServiceApplier};
+    struct Rec(std::sync::Mutex<Vec<String>>);
+    impl ServiceApplier for Rec {
+        fn apply_yaml(&self, namespace: &str, _yaml: &str) -> Result<String, String> {
+            self.0.lock().unwrap().push(namespace.into());
+            Ok("service/llm-gpu created".into())
+        }
+    }
+    let x = t("svc-apply-prod");
+    x.put("adam", "integration.policy", &[], json!({"enabled": true, "values": {"internal_hosts": ["10.0.5.0/24"]}})).unwrap();
+    x.put("mia", "models.local", &["web", "gpu"], local_body(json!({}))).unwrap();
+    for e in ["dev", "preprod", "prod"] {
+        binding(&x, "web", e, json!({"deploy_role": if e == "dev" { "editor" } else { "admin" }})).unwrap();
+    }
+    let (c, now) = (Rec(Default::default()), super::now_secs());
+    let mut prod = ask(&x, "web", "prod", "mia", 2);
+    prod.promoted_from = Some("preprod");
+    let e = apply_host_service(&x.env(), &prod, "gpu", &c, now).unwrap_err();
+    assert!(e.starts_with("the Service was not applied") && e.contains("waiting for approval") && c.0.lock().unwrap().is_empty(), "{e}");
+    let id = e.split_whitespace().nth(8).unwrap().to_string();
+    approvals::decide(&x.env(), &x.who("adam"), &id, true, now).unwrap();
+    assert_eq!(apply_host_service(&x.env(), &prod, "gpu", &c, now).unwrap(), "service/llm-gpu created");
+    assert_eq!(c.0.lock().unwrap().as_slice(), ["web"]);
+    assert!(apply_host_service(&x.env(), &prod, "gpu", &c, now).is_err(), "the approval was spent by the first apply");
+    assert_eq!(c.0.lock().unwrap().len(), 1);
+    assert!(x.rec.all().contains("tenant.deploy.applied"));
+}
+
+#[test]
+fn tcfg_the_git_push_guard_needs_an_entry_that_says_push_and_a_read_only_one_refuses_with_its_own_words() {
+    let x = t("hook-git-push");
+    let go = |u: &str| runtime::git_push_guard(&x.env(), Some("web"), "max", u);
+    assert!(go("https://anywhere.example/x.git").is_ok(), "a tenant with no git.remote entry changes nothing");
+    x.put("adam", "git.remote", &["gh"], json!({"enabled": true, "values": {"url_prefixes": ["https://github.com/acme/"], "access": "read_only"}})).unwrap();
+    let e = go("https://github.com/acme/app.git").unwrap_err();
+    assert!(e.contains("not pushing") && !e.contains("acme/app"), "{e}");
+    let e = go("https://github.com/other/app.git").unwrap_err();
+    assert!(e.contains("do not allow this repository address"), "{e}");
+    x.put("adam", "git.remote", &["gh"], json!({"enabled": true, "values": {"url_prefixes": ["https://github.com/acme/"], "access": "push"}, "secrets": {"credential": "ghp_SECRET"}})).unwrap();
+    assert!(go("https://github.com/acme/app.git").is_ok());
+    assert!(go("https://github.com/other/app.git").is_err(), "push to an address the entry does not cover");
+    // the platform's push check reads the same answer
+    assert!(crate::platform::connect::push_blocker_in(&x.env(), "max", "https://github.com/acme/app.git").is_none());
+    assert!(crate::platform::connect::push_blocker_in(&x.env(), "max", "https://elsewhere.example/a.git").is_some());
+    let a = x.rec.all();
+    assert!(a.contains("tenant.git.push") && a.contains("tenant.git.push.refused"), "{a}");
+}
+
+/// The notification channels' real network (`notifyhub::transport::RealNet`) against a real public HTTPS server: the egress allow-list
+/// decides first, the certificate is checked against the system's authorities, and the HTTP status line comes back. Needs the network, so it
+/// only runs by hand: `cargo test -p iyakki-agent --lib notify_real_net -- --ignored --nocapture`.
+#[test]
+#[ignore = "sends one small POST to example.com over the real network"]
+fn notify_real_net_posts_over_checked_tls_to_a_real_server_and_the_egress_list_decides_first() {
+    use crate::notifyhub::transport::{Net, RealNet};
+    use crate::notifyhub::webhook::HttpReq;
+    let x = t("realnet");
+    let net = RealNet { dir: x.dir.clone(), ca_files: Vec::new() };
+    let req = HttpReq { url: "https://example.com/iyakki-test".into(), headers: vec![("Content-Type".into(), "application/json".into())], body: br#"{"test":"iyakki notification channel"}"#.to_vec(), timeout_secs: 20 };
+    // a tenant with no egress policy sends nothing out
+    let e = net.post(None, &req).unwrap_err();
+    assert!(e.contains("no egress policy"), "{e}");
+    // a policy that does not list the host
+    x.put("adam", "egress.policy", &[], json!({"enabled": true, "values": {"allowed_domains": ["api.other.org"]}})).unwrap();
+    let e = net.post(None, &req).unwrap_err();
+    assert!(e.contains("does not allow"), "{e}");
+    // listed: the connection is made, the certificate checked, an HTTP status comes back (what example.com answers to a POST does not matter)
+    x.put("adam", "egress.policy", &[], json!({"enabled": true, "values": {"allowed_domains": ["example.com"]}})).unwrap();
+    let status = net.post(None, &req).unwrap_or_else(|e| panic!("example.com: {e}"));
+    crate::qeprintln!("example.com answered {status}");
+    assert!((100..600).contains(&status), "{status}");
+    // a host whose certificate does not match the name asked for is refused (the IP address of the same server, by name it does not carry)
+    let bad = HttpReq { url: "https://wrong.host.badssl.com/".into(), ..req.clone() };
+    x.put("adam", "egress.policy", &[], json!({"enabled": true, "values": {"allowed_domains": ["wrong.host.badssl.com"]}})).unwrap();
+    assert!(net.post(None, &bad).is_err(), "a certificate for another name is refused");
 }

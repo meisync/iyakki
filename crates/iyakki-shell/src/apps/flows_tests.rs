@@ -647,8 +647,12 @@ fn the_board_acts_on_several_runs_at_once_and_the_keyboard_walks_it() {
     let g = draw(&mut f);
     assert!(has_hit(&g, "Cancel selected") && has_hit(&g, "Run again"));
     click(&mut f, "Cancel selected");
-    for i in f.app.board.sel.clone() {
-        let _ = i;
+    // a cancel is carried out by the engine's own thread: wait (bounded) until both runs are cancelled before counting
+    for _ in 0..500 {
+        if ids.iter().filter(|i| f.env.engine.get_run(i).is_some_and(|r| r.status == RunStatus::Cancelled)).count() >= 2 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
     f.app.refresh_runs();
     let cancelled = f.app.runs.iter().filter(|r| r.status == RunStatus::Cancelled).count();
@@ -1296,6 +1300,10 @@ fn a_run_with_browser_steps_shows_its_session_live_its_pictures_and_a_report_tha
     // trusted, so nobody is asked
     let mut spec = browser_flow();
     spec["name"] = json!("Look");
+    // the hold keeps the session open while this test looks at it; a machine busy with other suites needs a long margin (a short hold
+    // made the test depend on how fast the screen is drawn)
+    spec["nodes"][2]["config"]["ms"] = json!(10_000);
+    spec["defaults"]["timeout_ms"] = json!(40_000);
     let flow = {
         let mut fl = build_flow(&spec).unwrap();
         fl.defaults.browser.trusted = true;
@@ -1346,7 +1354,7 @@ fn a_run_with_browser_steps_shows_its_session_live_its_pictures_and_a_report_tha
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(seen_session, "the Browser session badge shows while the run holds its session");
-    let run = f.env.engine.wait_for(&o.run_id, Duration::from_secs(30), |r| r.status.is_terminal()).unwrap();
+    let run = f.env.engine.wait_for(&o.run_id, Duration::from_secs(90), |r| r.status.is_terminal()).unwrap();
     assert_eq!(run.status, iyakki_flow::RunStatus::Succeeded, "{}", run.error);
     assert!(f.env.host.browser_session(&o.run_id).is_none(), "the session ended with the run");
     tick(&mut f, 6);
@@ -1677,6 +1685,35 @@ fn a_failed_last_run_shows_the_card_on_open_dismiss_persists_and_a_success_shows
 }
 
 #[test]
+fn the_offer_can_be_turned_off_for_one_flow_from_the_card_the_list_and_by_chat_and_the_list_says_so() {
+    let mut f = fx("offerflow");
+    let (flow, _run) = failed_run(&mut f, "Offer one", json!({}));
+    f.app.open_flow(&flow);
+    assert!(f.app.fail.is_some());
+    // the card has the button; it turns the offer off for this flow only
+    let g = fits(&mut f, 1280, 720, "card");
+    assert!(has_hit(&g, "Not for this flow"));
+    click(&mut f, "Not for this flow");
+    assert!(f.app.fail.is_none() && f.app.book.offer() && f.app.book.flow_is_off(&flow), "the general switch is untouched");
+    // the list tags the flow and the key O (on the list) turns it on again
+    f.app.close_flow();
+    f.app.list_sel = f.app.flows.iter().position(|x| x.id == flow).unwrap();
+    fits(&mut f, 1280, 720, "list with the tag");
+    f.app.tab_click(id::OFFER_FLOW);
+    assert!(!f.app.book.flow_is_off(&flow));
+    f.app.open_flow(&flow);
+    assert!(f.app.fail.is_some(), "the card is back");
+    f.app.close_flow();
+    f.app.list_sel = f.app.flows.iter().position(|x| x.id == flow).unwrap();
+    key(&mut f, Key::Char('O'));
+    assert!(f.app.book.flow_is_off(&flow));
+    // a change by chat (flow_failure_help) is seen at the next look
+    iyakki_agent::flows::failfix::FailBook::open(&f.env.data).set_offer_for(&flow, true);
+    f.app.open_flow(&flow);
+    assert!(!f.app.book.flow_is_off(&flow) && f.app.fail.is_some());
+}
+
+#[test]
 fn opening_a_failed_flow_with_the_assistant_open_makes_it_offer_once_and_never_edits() {
     let mut f = fx("offer");
     let (flow, run) = failed_run(&mut f, "Offer me", json!({}));
@@ -1935,6 +1972,34 @@ fn the_watch_strip_has_a_one_click_rollback_and_a_pause() {
     key(&mut f, Key::Char('y'));
     assert_eq!(f.env.store.published(&id).unwrap().node("call").unwrap().config["url"], "http://127.0.0.1:1/x");
     assert!(book.watch(&id).is_none() && book.paused(&id), "after a rollback the watch ends and autopilot pauses");
+}
+
+#[test]
+fn the_list_tags_a_flow_with_a_waiting_suggestion_and_the_kill_switch_stops_and_restarts_all_assist() {
+    let mut f = fx("assist-list");
+    let id = assisted_failure(&mut f, "Marked flow", AssistMode::Copilot);
+    f.env.assist_tick();
+    f.app.reload_flows();
+    f.app.refresh_runs();
+    assert!(f.app.sug_flows.contains(&id), "{:?}", f.app.sug_flows);
+    let g = fits(&mut f, 1280, 720, "list with the marker");
+    assert!(has_hit(&g, "Stop all assist (K)"));
+    // the kill switch (key K): stopped, audited by the shell, shown on the button and read by the assistant's own rule
+    key(&mut f, Key::Char('K'));
+    assert!(!f.env.assist_store().global().enabled && f.app.assist_off);
+    let g = fits(&mut f, 1280, 720, "list stopped");
+    assert!(has_hit(&g, "Assist: STOPPED, switch on (K)"));
+    assert!(f.env.with_assistant(|a| a.mode_of(&id)) == AssistMode::Off, "a stopped switch turns the flow's assist off");
+    f.app.tab_click(id::ASSIST_KILL);
+    assert!(f.env.assist_store().global().enabled && !f.app.assist_off);
+    assert!(f.env.with_assistant(|a| a.mode_of(&id)) == AssistMode::Copilot);
+    // a settled suggestion loses its tag
+    let book = f.env.assist_store();
+    book.list(&id).iter().for_each(|x| {
+        let _ = book.set_status(&id, &x.id, iyakki_flow::assist_store::Status::Rejected);
+    });
+    f.app.refresh_runs();
+    assert!(f.app.sug_flows.is_empty());
 }
 
 #[test]
@@ -2260,4 +2325,207 @@ fn the_webhook_panel_makes_a_hook_shows_its_address_once_and_switches_it_on_and_
     assert!(p.reveal.is_none() && p.views.len() == 1);
     let g = draw_at(&mut f, 800, 480);
     assert!(has_hit(&g, "Close (Esc)"));
+}
+
+#[test]
+fn card_text_grows_with_the_window_scale_a_little_and_a_short_name_still_fits() {
+    use super::flows_paint::{card_text_size, text_boost};
+    assert_eq!(text_boost(1.0), 1.0);
+    assert_eq!(text_boost(0.7), 1.0);
+    assert!(text_boost(1.5) > 1.0 && text_boost(1.5) <= text_boost(2.5) && text_boost(9.0) <= 1.15);
+    assert!(card_text_size(2.0, 1.0) > card_text_size(1.0, 1.0));
+    // the zoom still counts: zoomed in the text is larger, zoomed out it keeps its readable floor
+    assert!(card_text_size(1.0, 2.0) > card_text_size(1.0, 1.0));
+    assert!(card_text_size(1.0, 0.5) >= 10.0);
+    // the largest boost keeps every short sample name whole on its card
+    let mut f = fx("cardboost");
+    for tpl in ["cam-sleep-check", "cam-person-check"] {
+        sample_flow(&mut f, tpl);
+        let mut g = draw_at(&mut f, 1280, 720);
+        for n in f.app.flow.nodes.clone() {
+            if n.kind == "start" || n.kind == "end" || n.title().len() > 20 {
+                continue;
+            }
+            let shown = super::flows_paint::card_title(&mut g, &n, 3.0, 1.0);
+            assert_eq!(shown, n.title(), "`{}` is cut to `{shown}` at the largest boost", n.title());
+        }
+    }
+}
+
+// ------------------------------------------------------------------------------------------------ the Assist and messages page
+
+fn dv(f: &Fx) -> &super::flows_defaults::DefView {
+    match &f.app.modal {
+        Some(Modal::Defaults(v)) => v,
+        _ => panic!("the Assist and messages page is not open"),
+    }
+}
+
+/// Move the cursor of the page to the row whose label starts with `label`.
+fn def_row(f: &mut Fx, label: &str) {
+    for _ in 0..40 {
+        key(f, Key::Up);
+    }
+    let i = dv(f).rows.iter().position(|r| r.label.starts_with(label)).unwrap_or_else(|| panic!("no row `{label}`: {:?}", dv(f).rows.iter().map(|r| r.label.clone()).collect::<Vec<_>>()));
+    for _ in 0..i {
+        key(f, Key::Down);
+    }
+    assert!(dv(f).rows[dv(f).sel].label.starts_with(label));
+}
+
+#[test]
+fn the_defaults_page_sets_the_account_switches_the_agent_profile_and_the_message_policy_and_audits_each_change() {
+    let mut f = fx("defaults");
+    let log: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let sink = log.clone();
+    *f.env.host.audit_sink.lock().unwrap() = Some(Arc::new(move |_, action, detail| sink.lock().unwrap().push_str(&format!("{action} {detail}\n"))));
+    draw(&mut f);
+    assert!(has_hit(&draw(&mut f), "Assist settings (G)"));
+    key(&mut f, Key::Char('G'));
+    assert!(matches!(f.app.modal, Some(Modal::Defaults(_))));
+    // page 1: the account's defaults
+    assert!(dv(&f).rows.iter().any(|r| r.label.starts_with("Assist for every flow") && r.value == "ON"));
+    def_row(&mut f, "Assist for every flow");
+    key(&mut f, Key::Enter);
+    assert!(!f.env.assist_store().global().enabled, "the kill switch from the page");
+    key(&mut f, Key::Enter);
+    assert!(f.env.assist_store().global().enabled);
+    def_row(&mut f, "Automatic publishes per day");
+    key(&mut f, Key::Right);
+    key(&mut f, Key::Right);
+    assert_eq!(f.env.assist_store().global().max_publish_per_day, 5);
+    key(&mut f, Key::Left);
+    assert_eq!(f.env.assist_store().global().max_publish_per_day, 4);
+    def_row(&mut f, "Tell me by Matrix");
+    key(&mut f, Key::Enter);
+    assert!(f.env.assist_store().global().matrix);
+    def_row(&mut f, "Matrix room");
+    key(&mut f, Key::Enter);
+    assert!(dv(&f).edit.is_some());
+    types(&mut f, "ops");
+    key(&mut f, Key::Enter);
+    let g = f.env.assist_store().global();
+    assert_eq!((g.matrix, g.matrix_room.as_str()), (true, "ops"));
+    // page 2: the agent profile
+    key(&mut f, Key::Char('2'));
+    def_row(&mut f, "Add a model");
+    key(&mut f, Key::Enter);
+    types(&mut f, "local/qwen3-8b");
+    key(&mut f, Key::Enter);
+    def_row(&mut f, "Add a model");
+    key(&mut f, Key::Enter);
+    types(&mut f, "cloud/big");
+    key(&mut f, Key::Enter);
+    let p = f.env.assist_store().global().profile;
+    assert_eq!(p.models.iter().map(|m| (m.name.as_str(), m.local)).collect::<Vec<_>>(), vec![("local/qwen3-8b", true), ("cloud/big", false)]);
+    def_row(&mut f, "  time limit of model 2");
+    key(&mut f, Key::Right);
+    assert_eq!(f.env.assist_store().global().profile.models[1].timeout_secs, 150);
+    def_row(&mut f, "Model 2");
+    key(&mut f, Key::Enter);
+    assert!(f.env.assist_store().global().profile.models[1].local);
+    def_row(&mut f, "Ask local models first");
+    key(&mut f, Key::Enter);
+    def_row(&mut f, "Try the next model");
+    key(&mut f, Key::Enter);
+    let p = f.env.assist_store().global().profile;
+    assert!(!p.local_first && !p.fallback);
+    def_row(&mut f, "  remove model 1");
+    key(&mut f, Key::Enter);
+    assert_eq!(f.env.assist_store().global().profile.models.len(), 1);
+    // page 3: outside messages
+    let id = open_flow(&mut f, two_steps());
+    f.app.close_flow();
+    f.app.reload_flows();
+    f.app.open_defaults(super::flows_defaults::DefTab::Messages);
+    assert!(dv(&f).rows.iter().any(|r| r.label.starts_with("Quiet hours") && r.value == "off"));
+    def_row(&mut f, "Quiet hours");
+    key(&mut f, Key::Enter);
+    assert_eq!(f.env.host.msg_policy.policy().quiet, Some((1320, 420)));
+    def_row(&mut f, "  quiet hours start");
+    key(&mut f, Key::Right);
+    key(&mut f, Key::Right);
+    assert_eq!(f.env.host.msg_policy.policy().quiet, Some((1380, 420)));
+    def_row(&mut f, "  quiet hours end");
+    key(&mut f, Key::Left);
+    assert_eq!(f.env.host.msg_policy.policy().quiet, Some((1380, 390)));
+    def_row(&mut f, "Ask again when nobody answers");
+    key(&mut f, Key::Right);
+    key(&mut f, Key::Right);
+    assert_eq!(f.env.host.msg_policy.policy().escalate_after_secs, Some(30 * 60));
+    def_row(&mut f, "  room for the second message");
+    key(&mut f, Key::Enter);
+    types(&mut f, "phone");
+    key(&mut f, Key::Enter);
+    assert_eq!(f.env.host.msg_policy.policy().escalate_room, "phone");
+    key(&mut f, Key::Left);
+    key(&mut f, Key::Char('3'));
+    let before = f.env.host.chan.allowed(&id);
+    def_row(&mut f, "Outside messages: Check");
+    key(&mut f, Key::Enter);
+    assert_eq!(f.env.host.chan.allowed(&id), !before, "the per-flow switch");
+    // a message waiting for an answer can be acknowledged from the page
+    f.env.host.msg_policy.watch(&id, "k1", "the disk is full", 1);
+    key(&mut f, Key::Char('3'));
+    def_row(&mut f, "  answered: ");
+    key(&mut f, Key::Enter);
+    assert!(f.env.host.msg_policy.watching().is_empty());
+    // every change was audited
+    let audit = log.lock().unwrap().clone();
+    for want in ["flow.assist.stop_all", "flow.assist.settings", "flow.outside_messages.policy", "flow.outside_messages ", "flow.outside_messages.ack"] {
+        assert!(audit.contains(want), "{want} is not in the audit log: {audit}");
+    }
+    // the assistant cannot do any of it: only the person's page and the chat tools that ask
+    key(&mut f, Key::Esc);
+    assert!(f.app.modal.is_none());
+}
+
+#[test]
+fn the_activity_page_shows_what_the_agent_did_and_the_whole_flow_trial_runs_only_read_only_steps() {
+    let mut f = fx("activity");
+    let id = assisted_failure(&mut f, "Activity flow", AssistMode::Copilot);
+    f.env.assist_tick();
+    f.app.reload_flows();
+    f.app.open_defaults(super::flows_defaults::DefTab::Activity);
+    let text: Vec<String> = dv(&f).lines.iter().map(|l| l.0.clone()).collect();
+    assert!(text[0].contains("Activity flow") && text[0].contains("copilot"), "{text:?}");
+    assert!(text.iter().any(|l| l.contains("suggestion") && l.contains("ago") || l.contains("just now")), "{text:?}");
+    assert!(text.iter().any(|l| l.contains("1 waiting")), "{text:?}");
+    // the same readout as the dev command prints
+    let v = iyakki_flow::assist_activity::readout(&f.env.assist_store(), &id, f.app.now(), 10);
+    assert_eq!(v["waiting"].as_array().map(Vec::len), Some(1));
+    // the trial: one worker thread, the answer comes back through the screen's queue
+    key(&mut f, Key::Char('t'));
+    assert!(dv(&f).trying);
+    for _ in 0..400 {
+        f.app.poll();
+        if !dv(&f).trying {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!dv(&f).trying, "the trial finished");
+    let lines: Vec<String> = dv(&f).lines.iter().map(|l| l.0.clone()).collect();
+    assert!(lines[0].starts_with("~ trial of"), "{lines:?}");
+    assert!(lines.iter().any(|l| l.contains("failed call")), "the dead address fails its read-only try: {lines:?}");
+    assert_eq!(f.env.store.versions(&id).len(), 1, "a trial publishes nothing");
+}
+
+#[test]
+fn the_defaults_page_fits_every_size_on_every_page_and_never_leaves_the_screen() {
+    let mut f = fx("defaults-geo");
+    let _ = assisted_failure(&mut f, "Geometry flow", AssistMode::Copilot);
+    f.env.assist_tick();
+    f.app.reload_flows();
+    for (w, h) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (800, 480), (480, 600)] {
+        for (n, tab) in [super::flows_defaults::DefTab::Assist, super::flows_defaults::DefTab::Agent, super::flows_defaults::DefTab::Messages, super::flows_defaults::DefTab::Activity].into_iter().enumerate() {
+            f.app.open_defaults(tab);
+            let g = fits(&mut f, w, h, &format!("defaults page {n}"));
+            for l in ["Close (Esc)", "Next page (Tab)"] {
+                assert!(has_hit(&g, l), "{w}x{h} page {n}: no `{l}`");
+            }
+            assert!(g.hits.iter().filter(|x| matches!(x.ev, Event::Tab(i) if i < 4)).count() >= 4, "{w}x{h}: the four pages are buttons");
+            key(&mut f, Key::Esc);
+        }
+    }
 }

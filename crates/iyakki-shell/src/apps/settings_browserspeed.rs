@@ -22,7 +22,7 @@ impl SettingsApp {
         let size = 15.0 * s;
         let btn_w = ["Change (k)", "Clear cache (x)"].iter().map(|l| g.text_width(size, l, Face::Bold) + size * 1.7).fold(0.0, f32::max);
         let info_w = (a.w - btn_w - 10.0 * s).max(120.0 * s);
-        let m = super::super::browser_speed::machine(cx.services.dir());
+        let m = super::super::browser_speed::machine_os(&*cx.os, cx.services.dir());
         let b = super::super::browser_speed::budget_for(c.cache, &m);
         let help = format!("The browser keeps pages, pictures, styles and scripts so the next visit is faster: up to {} in memory and {} on disk right now. It shrinks by itself when the computer is short of memory.", iyakki_web::net::human(b.mem), iyakki_web::net::human(b.disk));
         controls::info_row(g, R::new(a.x, y, info_w, 58.0 * s), s, &format!("Cache size: {}", c.cache.label()), &help);

@@ -18,7 +18,7 @@ impl FakeLemonade {
     }
 
     pub fn bodies(&self, path: &str) -> Vec<String> {
-        self.seen.lock().unwrap().iter().filter(|(_, p, _)| p.starts_with(path)).map(|(_, _, b)| b.clone()).collect()
+        self.seen.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().filter(|(_, p, _)| p.starts_with(path)).map(|(_, _, b)| b.clone()).collect()
     }
 }
 
@@ -82,7 +82,7 @@ pub(crate) fn serve() -> FakeLemonade {
                 }
                 let mut body = vec![0u8; len];
                 let _ = r.read_exact(&mut body);
-                log.lock().unwrap().push((method.clone(), path.clone(), String::from_utf8_lossy(&body).into_owned()));
+                log.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((method.clone(), path.clone(), String::from_utf8_lossy(&body).into_owned()));
                 let (status, ctype, out) = reply(&method, &path, &String::from_utf8_lossy(&body));
                 let _ = s.write_all(format!("HTTP/1.1 {status} X\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", out.len()).as_bytes());
                 let _ = s.write_all(&out);

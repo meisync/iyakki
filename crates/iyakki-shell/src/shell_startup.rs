@@ -15,6 +15,7 @@
 //! Developer mode: the strip and the list are drawn with ordinary text, so `iyakki dev state` shows them; the strip is also a button
 //! called "startup status" for `iyakki dev input click`.
 
+use crate::stale_stats::mark_stale;
 use super::*;
 use iyakki_agent::startup::{self, Calm, Line, Phase, Registry};
 
@@ -207,7 +208,7 @@ impl Shell {
         if key != self.startup.shown || (visible && ((animated && self.tick % 4 == 0) || (fading && self.tick % 2 == 0))) {
             self.startup.shown = key;
             if visible || self.startup.open {
-                self.stale = true;
+                mark_stale!(self);
             }
         }
     }
@@ -234,7 +235,7 @@ impl Shell {
                 _ => (255, sum.failed() > 0),
             };
             let accent = if failed { ERR } else if matches!(phase, Phase::Done(_)) { OK } else { crate::fx::AMBER };
-            g.rrect(strip.x, strip.y, strip.w, strip.h, strip.h / 2.0, faded([18, 24, 46, 230], alpha));
+            g.rrect(strip.x, strip.y, strip.w, strip.h, strip.h / 2.0, faded(crate::fx::panel_alpha(230), alpha));
             g.rrect_outline(strip.x, strip.y, strip.w, strip.h, strip.h / 2.0, s.max(1.0), faded([accent[0], accent[1], accent[2], 120], alpha));
             let (cx, cy) = (strip.x + 15.0 * s, strip.y + strip.h / 2.0);
             let text = match phase {
@@ -355,7 +356,7 @@ impl Shell {
     pub(super) fn startup_toggle(&mut self) {
         self.startup.open = !self.startup.open;
         self.startup.sel = 0;
-        self.stale = true;
+        mark_stale!(self);
     }
 
     fn startup_retry(&mut self, i: usize) {
@@ -388,7 +389,7 @@ impl Shell {
             n if (TAB_OPEN..TAB_OPEN + MAX_ROWS).contains(&n) => self.startup_open(n - TAB_OPEN),
             _ => {}
         }
-        self.stale = true;
+        mark_stale!(self);
     }
 
     /// Keys and clicks for the Home screen's list; true when taken.
@@ -411,12 +412,12 @@ impl Shell {
                     Key::Enter | Key::Char('o') => self.startup_open(self.startup.sel),
                     _ => {}
                 }
-                self.stale = true;
+                mark_stale!(self);
                 true
             }
             Event::Row(i) if self.startup.open => {
                 self.startup.sel = *i;
-                self.stale = true;
+                mark_stale!(self);
                 true
             }
             // a click anywhere else only closes the list
@@ -424,7 +425,7 @@ impl Shell {
                 let inside = self.startup.panel.is_some_and(|p| p.contains(*x, *y)) || self.startup.strip.is_some_and(|p| p.contains(*x, *y));
                 if !inside {
                     self.startup.open = false;
-                    self.stale = true;
+                    mark_stale!(self);
                 }
                 !inside
             }

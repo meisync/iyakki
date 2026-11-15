@@ -484,6 +484,7 @@ pub fn early_boot_critical() -> LatePlan {
     // The kernel starts PID 1 with no PATH; without this, modprobe/ip/udhcpc/mdev are never found.
     std::env::set_var("PATH", "/usr/sbin:/usr/bin:/sbin:/bin");
     mount_pseudo_filesystems();
+    boot_record_start();
     // The kernel drops all but about 10 lines per 5 seconds that a program writes to its log (`printk.devkmsg=ratelimit`, the default), so the
     // boot lines that follow (and the timeline `lean-check.sh` reads) went missing. Switch the limit off; the lean first stage does the same.
     let _ = std::fs::write("/proc/sys/kernel/printk_devkmsg", "on\n");
@@ -581,6 +582,7 @@ pub fn late_boot(mut plan: LatePlan) {
     // brought up further down), so nothing is reachable without it. A failure is loud (top bar, audit log), never silent.
     firewall_boot();
     swapfile_setup();
+    boot_prefetch_start();
     // Driver packs from the data volume (firmware links, modprobe options, matching prebuilt modules) go in before the
     // network, sound and Bluetooth drivers load, so those drivers find their firmware the first time.
     // ... and only the packs that fit this machine (packfit.rs: the Mac Bluetooth patch is left out on a non-T2 Mac whose chip refuses it)
@@ -789,12 +791,45 @@ fn start_remote_diagnostics() {
 pub fn memory_settings() -> iyakki_zram::Resolved {
     let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
     let conf = std::fs::read_to_string(iyakki_zram::CONF_PATH).unwrap_or_default();
-    iyakki_zram::config::resolve(&cmdline, &conf)
+    // the experimental compressed memory (F-BOOT-31) looks at the data volume only when it is on
+    let (exp, _) = iyakki_zram::compressed::resolve_experiment(&cmdline, &conf);
+    let free = if exp == iyakki_zram::compressed::Experiment::On {
+        let on_disk = matches!(iyakki_storage::data_location(&iyakki_storage::Roots::real(), Path::new(DATA_DIR)), iyakki_storage::DataLocation::Disk(_));
+        if on_disk { iyakki_zram::compressed::data_free(Path::new(DATA_DIR)) } else { None }
+    } else {
+        None
+    };
+    memory_settings_from(&cmdline, &conf, free, total_ram())
+}
+
+/// [`memory_settings`] over the facts it reads, so the boot-time choice can be tested: the command line, `system.conf`, the free room on
+/// the data volume when it is on a disk (`None`: not on a disk, or not asked) and the RAM. Kernel command line over `system.conf` over
+/// the defaults; the experimental compressed memory is off unless asked for, then zswap with a small swap file when the data volume is on
+/// a disk with room, else zram only. The data volume is mounted before this runs (early_boot_critical).
+fn memory_settings_from(cmdline: &str, conf: &str, data_free: Option<u64>, ram: u64) -> iyakki_zram::Resolved {
+    let mut r = iyakki_zram::config::resolve(cmdline, conf);
+    let (exp, _) = iyakki_zram::compressed::resolve_experiment(cmdline, conf);
+    if exp == iyakki_zram::compressed::Experiment::On {
+        let plan = iyakki_zram::compressed::plan(&r.config, exp, data_free, ram);
+        log::info!("compressed memory (experimental): {}", plan.reason);
+        r.config = plan.config;
+    }
+    r
 }
 
 /// Total RAM in bytes from `/proc/meminfo`.
 pub fn total_ram() -> u64 {
-    iyakki_zram::stats::parse_meminfo(&std::fs::read_to_string("/proc/meminfo").unwrap_or_default()).0
+    meminfo_bytes().0
+}
+
+/// `MemAvailable` in bytes (the one reader of `/proc/meminfo` in this file is [`meminfo_bytes`]).
+pub fn available_ram() -> u64 {
+    meminfo_bytes().2
+}
+
+/// (total, free, available, swap total, swap free) in bytes.
+fn meminfo_bytes() -> (u64, u64, u64, u64, u64) {
+    iyakki_zram::stats::parse_meminfo(&std::fs::read_to_string("/proc/meminfo").unwrap_or_default())
 }
 
 fn log_steps(steps: Vec<iyakki_zram::apply::Step>) {
@@ -832,6 +867,39 @@ pub fn memory_setup() {
     log_steps(steps);
 }
 
+/// The boot-order switches in force: the kernel command line over `system.conf` (Settings, Memory), off unless asked for.
+#[cfg(target_os = "linux")]
+fn boot_speed() -> iyakki_zram::bootspeed::BootSpeed {
+    iyakki_zram::bootspeed::resolve(&std::fs::read_to_string("/proc/cmdline").unwrap_or_default(), &std::fs::read_to_string(iyakki_zram::CONF_PATH).unwrap_or_default())
+}
+
+/// `iyakki.bootrecord=1`: for the first 90 seconds note every file opened on the root filesystem, in order, and keep the list on the data
+/// volume for the prefetch (F-BOOT-30). A developer's option: off unless asked for; never fatal.
+fn boot_record_start() {
+    #[cfg(target_os = "linux")]
+    if boot_speed().record {
+        std::thread::spawn(|| {
+            let tmp = Path::new("/run/iyakki-boot-order.list");
+            match crate::bootprefetch::record_for(90, tmp) {
+                Ok(n) => match std::fs::copy(tmp, crate::bootprefetch::LIST_PATH) {
+                    Ok(_) => log::info!("boot order: {n} file(s) recorded in {}", crate::bootprefetch::LIST_PATH),
+                    Err(e) => log::warn!("boot order: {n} file(s) recorded but the list could not be kept: {e}"),
+                },
+                Err(e) => log::warn!("boot order: recording failed ({e})"),
+            }
+        });
+    }
+}
+
+/// `iyakki.prefetch=on`: after the critical path, ask the kernel to read the recorded boot-order files into the page cache in the background,
+/// within the memory budget and out of the way of the foreground. Off unless asked for (not measured yet, F-BOOT-30).
+fn boot_prefetch_start() {
+    #[cfg(target_os = "linux")]
+    if boot_speed().prefetch {
+        std::thread::spawn(|| log::info!("{}", crate::bootprefetch::prefetch_from(Path::new(crate::bootprefetch::LIST_PATH), &available_ram)));
+    }
+}
+
 /// The optional swap file on the data volume, in the background (writing it can take a while). Off unless asked for.
 fn swapfile_setup() {
     let r = memory_settings();
@@ -861,12 +929,14 @@ fn clock_floor_after_data() {
 }
 
 /// Stop the speakers before the final sync (the T2 sound chip loops its buffer until the power is gone): see `iyakki_agent::quiet`.
+#[cfg(target_os = "linux")]
 fn quiet_sound() {
     #[cfg(feature = "shell")]
     iyakki_agent::quiet::quiet_for_shutdown();
 }
 
 /// Save the time for the next boot's floor (before the disks are flushed at shutdown).
+#[cfg(target_os = "linux")]
 fn clock_floor_save() {
     #[cfg(feature = "shell")]
     iyakki_agent::clockfloor::save_now();
@@ -877,6 +947,13 @@ fn bind_home_on_data() {
     #[cfg(target_os = "linux")]
     for l in crate::homebind::bind_home_real(Path::new(DATA_DIR), &|src, target| mount(&src.display().to_string(), &target.display().to_string(), "", libc::MS_BIND, "")) {
         log::info!("{l}");
+    }
+    // KI-095: homes made before the 0700 rule are tightened at every start (audit line per change)
+    #[cfg(feature = "shell")]
+    if std::process::id() == 1 && Path::new("/etc/iyakki").is_dir() {
+        for l in iyakki_agent::scope::tighten_homes(Path::new(crate::homebind::HOME)) {
+            log::info!("{l}");
+        }
     }
 }
 
@@ -1115,6 +1192,32 @@ pub fn sleep() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_boot_time_memory_choice_follows_the_command_line_then_the_file_and_the_room_on_the_data_disk() {
+        use super::memory_settings_from;
+        use iyakki_zram::config::{Size, ZramMode};
+        const GIB: u64 = 1 << 30;
+        // off (nothing asked for): the defaults, whatever the disk offers
+        let off = memory_settings_from("quiet", "", Some(100 * GIB), 8 * GIB);
+        assert!(off.config.swapfile.is_none() && !off.config.zswap, "{:?}", off.config);
+        let same = memory_settings_from("quiet", "compressed-memory=off\n", None, 8 * GIB);
+        assert_eq!(off.config, same.config);
+        // on in system.conf, a data disk with room: zswap with a swap file of a quarter of RAM, zram off
+        let zswap = memory_settings_from("quiet", "compressed-memory=on\n", Some(50 * GIB), 8 * GIB);
+        assert!(zswap.config.zswap && zswap.config.zram == ZramMode::Off && zswap.config.swapfile == Some(2 * GIB), "{:?}", zswap.config);
+        // on, but no data disk, or too little room on it: zram only
+        for free in [None, Some(GIB)] {
+            let z = memory_settings_from("quiet", "compressed-memory=on\n", free, 8 * GIB);
+            assert!(z.config.zram == ZramMode::On && z.config.size == Size::Auto && !z.config.zswap && z.config.swapfile.is_none(), "{free:?}: {:?}", z.config);
+        }
+        // the command line wins over the file, both ways
+        assert!(memory_settings_from("iyakki.zram=exp", "compressed-memory=off\n", Some(50 * GIB), 8 * GIB).config.zswap);
+        assert!(!memory_settings_from("iyakki.compressed=off", "compressed-memory=on\n", Some(50 * GIB), 8 * GIB).config.zswap);
+        // the person's own swappiness survives the experiment
+        let kept = memory_settings_from("quiet", "compressed-memory=on\nswappiness=60\n", Some(50 * GIB), 8 * GIB);
+        assert_eq!(kept.config.swappiness, 60);
+    }
+
     #[test]
     fn sleep_state_prefers_freeze_then_mem_and_never_disk() {
         use super::choose_sleep_state as c;

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One entry point for the IYAKKI cloud artifacts (docs/CLOUD-IMAGES.md).
 #
-#   dist/cloud/build-cloud.sh docker [--arm64] [--no-build]   OCI image (linux/amd64; --arm64 adds linux/arm64), SBOM, licences, tarball, sums, signature
+#   dist/cloud/build-cloud.sh docker [--arm64] [--headless] [--no-build]   OCI image (linux/amd64; --arm64 adds linux/arm64), SBOM, licences, tarball, sums, signature
 #   dist/cloud/build-cloud.sh iso    [--dry-run] [--no-build] the cloud ISO (VMs, optical) by REPACKING the existing web+mac builds: no Buildroot make
 #   dist/cloud/build-cloud.sh disk                            the stick-ready raw disk image (GPT + ESP + boot volume) from that repack
 #   dist/cloud/build-cloud.sh qcow2                           the same disk as qcow2 for VMs
@@ -48,10 +48,13 @@ build_bin() { # ARCH -> path of the static program
       [ -n "$cross" ] || die "arm64: no cross compiler (target/buildroot-*aarch64*/host/bin/aarch64-*-linux-musl-gcc); build the aarch64 toolchain first: dist/buildroot/build.sh libre aarch64 (not started here)"
       export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="$cross" CC_aarch64_unknown_linux_musl="$cross" AR_aarch64_unknown_linux_musl="${cross%gcc}ar"
     fi
-    say "cargo build --release --locked --target $tgt -p iyakki-core (incremental; log $LOGS/cloud-cargo-$arch.log)"
-    (cd "$ROOT" && capped cargo build --release --locked --target "$tgt" -p iyakki-core) >"$LOGS/cloud-cargo-$arch.log" 2>&1 || { tail -20 "$LOGS/cloud-cargo-$arch.log" >&2; die "cargo build failed (see $LOGS/cloud-cargo-$arch.log)"; }
+    say "cargo build --release --locked --target $tgt -p iyakki-core${HEADLESS:+ (headless: no shell, no screen)} (incremental; log $LOGS/cloud-cargo-$arch.log)"
+    # a headless build is the web service without the desktop (iyakki-core feature `headless`); it has its own target folder so it never
+    # overwrites the full program's files
+    (cd "$ROOT" && if [ -n "${HEADLESS:-}" ]; then CARGO_TARGET_DIR="$ROOT/target/headless" capped cargo build --release --locked --target "$tgt" -p iyakki-core --no-default-features --features headless; else capped cargo build --release --locked --target "$tgt" -p iyakki-core; fi) >"$LOGS/cloud-cargo-$arch.log" 2>&1 || { tail -20 "$LOGS/cloud-cargo-$arch.log" >&2; die "cargo build failed (see $LOGS/cloud-cargo-$arch.log)"; }
   fi
   local b="$ROOT/target/$tgt/release/iyakki"
+  [ -z "${HEADLESS:-}" ] || b="$ROOT/target/headless/$tgt/release/iyakki"
   [ -x "$b" ] || die "$b is missing"
   echo "$b"
 }
@@ -60,8 +63,8 @@ host_bin() { # a program that runs on this machine (the static amd64 one)
   local b="$ROOT/target/x86_64-unknown-linux-musl/release/iyakki"; [ -x "$b" ] || die "$b is missing: run  build-cloud.sh docker  first"; echo "$b"
 }
 
-make_ctx() { # ARCH BIN -> prepared docker context folder
-  local arch="$1" bin="$2" c="$OUT/ctx-$arch"
+make_ctx() { # ARCH BIN [DOCKERFILE] -> prepared docker context folder
+  local arch="$1" bin="$2" df="${3:-Dockerfile}" c="$OUT/ctx-${HEADLESS:+headless-}$arch"
   rm -rf "$c"; mkdir -p "$c/etc/ssl/certs" "$c/etc/iyakki" "$c/licenses" "$c/var/lib/iyakki" "$c/tmp"
   cp "$bin" "$c/iyakki"
   [ -r /etc/ssl/certs/ca-certificates.crt ] || die "no /etc/ssl/certs/ca-certificates.crt on this machine"
@@ -70,7 +73,7 @@ make_ctx() { # ARCH BIN -> prepared docker context folder
   printf 'The CA bundle /etc/ssl/certs/ca-certificates.crt is the Mozilla root list as packaged by the build machine (MPL-2.0 data).\nThe program /iyakki is statically linked (musl, MIT) with the permissive Rust crates listed in THIRD_PARTY_LICENSES.txt and sbom.cdx.json.\nNo GPL or LGPL program is in this image. Corresponding source of the program: %s\n' "$SOURCE_URL" >"$c/licenses/README.txt"
   cp "$ROOT/dist/service/service.cloud.json" "$c/etc/iyakki/service.cloud.example.json"
   "$bin" cloud example example-tenant >"$c/etc/iyakki/tenant.example.json" 2>/dev/null || rm -f "$c/etc/iyakki/tenant.example.json"
-  cp "$HERE/Dockerfile" "$c/Dockerfile"
+  cp "$HERE/$df" "$c/Dockerfile"
   chmod 1777 "$c/tmp"; find "$c" -exec touch -d "@$EPOCH" {} + 2>/dev/null || true
   # no secrets in the context: refuse private keys and token files
   if grep -rIl -e "PRIVATE KEY-----" -e "ghp_" -e "sk-ant-" "$c" --exclude=ca-certificates.crt 2>/dev/null | grep -q .; then die "a secret-looking string is in the build context $c"; fi
@@ -83,8 +86,11 @@ sign_out() {
 }
 
 cmd_docker() {
-  local arm=0
-  for a in "$@"; do case "$a" in --arm64) arm=1 ;; --no-build) NO_BUILD=1 ;; *) die "docker: unknown option $a" ;; esac; done
+  local arm=0 HEADLESS=""
+  for a in "$@"; do case "$a" in --arm64) arm=1 ;; --headless) HEADLESS=1 ;; --no-build) NO_BUILD=1 ;; *) die "docker: unknown option $a" ;; esac; done
+  export HEADLESS
+  # the headless image: the service without the desktop, tagged and named apart, its own Dockerfile (the default command is the cloud service)
+  local suffix="" dockerfile="Dockerfile"; [ -z "$HEADLESS" ] || { suffix="-headless"; dockerfile="Dockerfile.headless"; }
   command -v docker >/dev/null || die "docker is not installed"
   local arches="amd64"; [ "$arm" = 1 ] && arches="amd64 arm64"
   local created; created="$(date -u -d "@$EPOCH" +%Y-%m-%dT%H:%M:%SZ)"
@@ -93,8 +99,8 @@ cmd_docker() {
     local bin; bin="$(build_bin "$arch")"
     local sum; sum="$(sha256sum "$bin" | cut -d' ' -f1)"
     echo "$sum  iyakki-$arch" >>"$OUT/binary.sha256.new"
-    make_ctx "$arch" "$bin"
-    local tag="$REPO:$VERSION-$arch"
+    make_ctx "$arch" "$bin" "$dockerfile"
+    local tag="$REPO:$VERSION$suffix-$arch"
     say "docker build $tag (no base image is pulled: FROM scratch)"
     # classic builder is enough for a FROM-scratch COPY image; memory-capped
     DOCKER_BUILDKIT=0 nice docker build --memory 6g --platform "linux/$arch" \
@@ -107,11 +113,11 @@ cmd_docker() {
       --label "org.opencontainers.image.source=$SOURCE_URL" \
       --label "org.opencontainers.image.vendor=IYAKKI" \
       --label "dev.iyakki.binary.sha256=$sum" \
-      -t "$tag" -f "$OUT/ctx-$arch/Dockerfile" "$OUT/ctx-$arch" >"$LOGS/cloud-docker-$arch.log" 2>&1 || { tail -20 "$LOGS/cloud-docker-$arch.log" >&2; die "docker build failed ($LOGS/cloud-docker-$arch.log)"; }
-    [ "$arch" = amd64 ] && docker tag "$tag" "$REPO:$VERSION"
-    docker save -o "$OUT/iyakki-cloud-$VERSION-$arch.tar" "$tag"
-    tars="$tars $OUT/iyakki-cloud-$VERSION-$arch.tar"
-    say "image $tag: $(docker image inspect "$tag" --format '{{.Size}}' | awk '{printf "%.1f MB", $1/1e6}') ; tarball $(du -h "$OUT/iyakki-cloud-$VERSION-$arch.tar" | cut -f1)"
+      -t "$tag" -f "$OUT/ctx-${HEADLESS:+headless-}$arch/Dockerfile" "$OUT/ctx-${HEADLESS:+headless-}$arch" >"$LOGS/cloud-docker-$arch.log" 2>&1 || { tail -20 "$LOGS/cloud-docker-$arch.log" >&2; die "docker build failed ($LOGS/cloud-docker-$arch.log)"; }
+    [ "$arch" = amd64 ] && docker tag "$tag" "$REPO:$VERSION$suffix"
+    docker save -o "$OUT/iyakki-cloud-$VERSION$suffix-$arch.tar" "$tag"
+    tars="$tars $OUT/iyakki-cloud-$VERSION$suffix-$arch.tar"
+    say "image $tag: $(docker image inspect "$tag" --format '{{.Size}}' | awk '{printf "%.1f MB", $1/1e6}') ; tarball $(du -h "$OUT/iyakki-cloud-$VERSION$suffix-$arch.tar" | cut -f1)"
   done
   mv "$OUT/binary.sha256.new" "$OUT/binary.sha256"
   cp "$ROOT/legal/sbom.cdx.json" "$OUT/iyakki-sbom.cdx.json"

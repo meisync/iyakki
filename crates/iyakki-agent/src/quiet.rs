@@ -72,8 +72,12 @@ impl Env for System {
 
     fn silence(&self, max: Duration) {
         use std::io::Write;
-        let Ok(mut child) = std::process::Command::new("aplay")
-            .args(["-q", "-D", crate::softvol::PCM, "-t", "raw", "-f", "S16_LE", "-r", "48000", "-c", "2", "-"])
+        let Ok(mut child) = {
+            let argv = crate::voice::sound_player_argv(&["aplay", "-q", "-D", crate::softvol::PCM, "-t", "raw", "-f", "S16_LE", "-r", "48000", "-c", "2", "-"].map(String::from));
+            let mut c = std::process::Command::new(&argv[0]);
+            c.args(&argv[1..]);
+            c
+        }
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

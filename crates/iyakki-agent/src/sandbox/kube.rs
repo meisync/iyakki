@@ -31,6 +31,11 @@ pub trait KubeApi: Send + Sync {
     fn artifacts(&self, _ns: &str, _run: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
         Ok(vec![])
     }
+    /// The door to the team's own cluster, when this one has none of its own: the binding of (team, environment) with its credential from
+    /// the vault (`binding.rs`). `None`: use this door as it is (fakes, and a `Kubectl` given a kubeconfig of its own).
+    fn for_binding(&self, _env: &crate::tenantconfig::api::Env, _team: &str, _environment: &str) -> Option<std::sync::Arc<dyn KubeApi>> {
+        None
+    }
     /// Delete everything the run made (Job, NetworkPolicy, ConfigMap, Secret), found by the run label.
     fn delete_run(&self, ns: &str, run: &str) -> Result<(), String>;
 }
@@ -47,7 +52,7 @@ impl Kubectl {
         Kubectl { program: "kubectl".into(), kubeconfig, timeout: Duration::from_secs(60) }
     }
 
-    fn run(&self, args: &[&str], stdin: Option<&[u8]>, cap: usize) -> Result<Vec<u8>, String> {
+    pub(crate) fn run(&self, args: &[&str], stdin: Option<&[u8]>, cap: usize) -> Result<Vec<u8>, String> {
         let mut c = Command::new(&self.program);
         if let Some(k) = &self.kubeconfig {
             c.arg("--kubeconfig").arg(k);
@@ -73,21 +78,22 @@ impl Kubectl {
             b
         });
         let end = Instant::now() + self.timeout;
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(s)) => break s,
-                Ok(None) if Instant::now() > end => {
+        let state = loop {
+            match iyakki_core_api::child_status(&mut child) {
+                s if s.is_over() => break s,
+                _ if Instant::now() > end => {
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err("kubectl did not answer in time".into());
                 }
-                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-                Err(e) => return Err(e.to_string()),
+                _ => std::thread::sleep(Duration::from_millis(20)),
             }
         };
         let o = reader.join().unwrap_or_default();
         let e = ereader.join().unwrap_or_default();
-        if status.success() {
+        // a status taken by the PID 1 reaper: the answer counts when kubectl printed one and no error
+        let gone_ok = state == iyakki_core_api::ChildState::Gone && !o.is_empty() && e.iter().all(|b| b.is_ascii_whitespace());
+        if state.success() || gone_ok {
             Ok(o)
         } else {
             Err(String::from_utf8_lossy(&e).lines().next().unwrap_or("kubectl failed").chars().take(300).collect())
@@ -96,6 +102,13 @@ impl Kubectl {
 }
 
 impl KubeApi for Kubectl {
+    fn for_binding(&self, env: &crate::tenantconfig::api::Env, team: &str, environment: &str) -> Option<std::sync::Arc<dyn KubeApi>> {
+        if self.kubeconfig.is_some() {
+            return None;
+        }
+        let dir = std::env::temp_dir().join("iyakki-sandbox-kc");
+        super::binding::BindingKube::from_binding(env, team, environment, &dir).map(|k| std::sync::Arc::new(k) as std::sync::Arc<dyn KubeApi>)
+    }
     fn apply(&self, manifest: &Value) -> Result<(), String> {
         self.run(&["apply", "-f", "-"], Some(manifest.to_string().as_bytes()), 4096).map(|_| ())
     }

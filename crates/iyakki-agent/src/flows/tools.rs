@@ -18,7 +18,7 @@ use crate::services::Services;
 pub const MAX_CHARS: usize = 6000;
 
 pub fn is_flow_tool(name: &str) -> bool {
-    matches!(name, "flow_list" | "flow_get" | "flow_runs" | "flow_run_status" | "flow_logs" | "flow_explain_failure" | "flow_create" | "flow_edit" | "flow_run" | "flow_cancel" | "flow_publish" | "flow_rollback" | "flow_apply_to_runs" | "flow_set_heal_policy" | "flow_delete" | "flow_drop_version" | "flow_prune_history") || is_webhook_tool(name)
+    matches!(name, "flow_list" | "flow_get" | "flow_runs" | "flow_run_status" | "flow_logs" | "flow_explain_failure" | "flow_failure_help" | "flow_assist_stop_all" | "flow_assist_activity" | "flow_trial" | "flow_outside_messages" | "flow_outside_messages_set" | "flow_outside_messages_policy" | "flow_assist_settings" | "flow_create" | "flow_edit" | "flow_run" | "flow_cancel" | "flow_publish" | "flow_rollback" | "flow_apply_to_runs" | "flow_set_heal_policy" | "flow_delete" | "flow_drop_version" | "flow_prune_history" | "remote_machines" | "remote_machine_add" | "remote_machine_remove" | "remote_flow_run") || is_webhook_tool(name)
 }
 
 pub fn is_webhook_tool(name: &str) -> bool {
@@ -37,7 +37,7 @@ fn obj(props: Value, req: &[&str]) -> Value {
     json!({"type": "object", "properties": props, "required": req})
 }
 
-const NODE_HELP: &str = "A node: {id, kind, name?, config, retry?, timeout_ms?, runner?, heal?, on_error?}. Kinds and their config: http {method,url,headers,body,expect_status,extract}; cli {command:[program,args...] (never a shell), cwd, env, parse (text|json|lines|regex), retry_exit_codes, retry_patterns, cli:{id,min_version}}; grpc {address,method,data,plaintext,metadata,deadline_ms} (uses grpcurl); browser {steps,allow_domains,level (read_only|interactive),extract}; agent {prompt,output_schema,max_cents} (no tools yet); script {lang:js|wasm,source|package,args}; condition {expr} (ports true/false); switch {value,cases}; delay {seconds}; approval {message,timeout_s}; notify {title,body,level}; subflow {flow,inputs}; foreach {items,flow,max_items}; remote {url,auth:{kind,secret}}. BROWSER QA kinds (one private browser session per run, closed when the run ends; selectors are CSS; secrets only as `vault:NAME` in text fields; put `defaults.browser` {trusted,profile:isolated|person,max_actions,max_minutes} on the flow): br_open {url,wait:load|idle|none}; br_screenshot {name,selector?,index?,full_page?} (output.path is a PNG file); br_dom {mode:page|outer_html|text|attributes|summary,selector?,max_bytes,console,links,failures}; br_assert {check: exists|not_exists|count|text_equals|text_contains|text_matches|attr_equals|attr_contains|value_equals|visible|hidden|enabled|disabled|checked|url_equals|url_contains|title_equals|title_contains|no_console_errors|page_contains|page_not_contains, selector?, expected?, attribute?, soft?, wait_ms} (output.passed, output.message); br_click {selector,native?}; br_type {selector,text,clear,press_enter}; br_fill {fields:{selector:value},submit?}; br_submit {selector?}; br_key {key,selector?}; br_hover; br_scroll {to:selector|top|bottom|down|up}; br_select {selector,option,by}; br_wait {for:selector|selector_gone|text|text_gone|url|time,value,ms}; br_extract {fields:{name:selector|{selector,attr,all}},rows:{selector,columns}}; br_js {expression,args} (administrators only); br_frame {action:frame|parent|main|tabs,selector}; br_viewport {preset|width,height}; br_storage {kind:cookie|local_storage|session_storage,name,value}; br_download {name_contains,save_in}; br_compare {name,threshold,tolerance,update} (baseline picture, saved on the first run). CAMERA kind: cam_photo {device?,keep?} takes one picture (output.path is a JPEG, output.taken_at) and runs only when the person switched on `defaults.camera` (Camera allowed; you cannot); the picture is deleted when the run ends unless keep is on; show it to a vision model with an agent step `images`. An agent step can show screenshots to a vision-capable model with `images: [\"{{ nodes.shot.output.path }}\"]`. Use {{ nodes.<id>.output.<field> }} and {{ inputs.<name> }} in config; credentials only as {{secret.NAME}} (a vault secret the person stores, never a value). thrift is planned and cannot run. retry: {attempts, backoff:{kind:fixed,delay_ms} | {kind:exponential,base_ms,factor,max_ms,jitter} | {kind:list,steps:[{timeout_ms,delay_ms}]}}.";
+const NODE_HELP: &str = "A node: {id, kind, name?, config, retry?, timeout_ms?, runner?, heal?, on_error?}. Kinds and their config: http {method,url,headers,body,expect_status,extract}; cli {command:[program,args...] (never a shell), cwd, env, parse (text|json|lines|regex), retry_exit_codes, retry_patterns, cli:{id,min_version}}; grpc {address,method,data,plaintext,metadata,deadline_ms} (uses grpcurl); browser {steps,allow_domains,level (read_only|interactive),extract}; agent {prompt,output_schema,max_cents} (no tools yet); script {lang:js|wasm,source|package,args}; condition {expr} (ports true/false); switch {value,cases}; delay {seconds}; approval {message,timeout_s}; notify {title,body,level}; subflow {flow,inputs}; foreach {items,flow,max_items}; remote {url,auth:{kind,secret}}. BROWSER QA kinds (one private browser session per run, closed when the run ends; selectors are CSS; secrets only as `vault:NAME` in text fields; put `defaults.browser` {trusted,profile:isolated|person,max_actions,max_minutes} on the flow): br_open {url,wait:load|idle|none}; br_screenshot {name,selector?,index?,full_page?} (output.path is a PNG file); br_dom {mode:page|outer_html|text|attributes|summary,selector?,max_bytes,console,links,failures}; br_assert {check: exists|not_exists|count|text_equals|text_contains|text_matches|attr_equals|attr_contains|value_equals|visible|hidden|enabled|disabled|checked|url_equals|url_contains|title_equals|title_contains|no_console_errors|page_contains|page_not_contains, selector?, expected?, attribute?, soft?, wait_ms} (output.passed, output.message); br_click {selector,native?}; br_type {selector,text,clear,press_enter}; br_fill {fields:{selector:value},submit?}; br_submit {selector?}; br_key {key,selector?}; br_hover; br_scroll {to:selector|top|bottom|down|up}; br_select {selector,option,by}; br_wait {for:selector|selector_gone|text|text_gone|url|time,value,ms}; br_extract {fields:{name:selector|{selector,attr,all}},rows:{selector,columns}}; br_js {expression,args} (administrators only); br_frame {action:frame|parent|main|tabs,selector}; br_viewport {preset|width,height}; br_storage {kind:cookie|local_storage|session_storage,name,value}; br_download {name_contains,save_in}; br_compare {name,threshold,tolerance,update} (baseline picture, saved on the first run). CAMERA kind: cam_photo {device?,keep?} takes one picture (output.path is a JPEG, output.taken_at) and runs only when the person switched on `defaults.camera` (Camera allowed; you cannot); the picture is deleted when the run ends unless keep is on; show it to a vision model with an agent step `images`. An agent step can show screenshots to a vision-capable model with `images: [\"{{ nodes.shot.output.path }}\"]`. Use {{ nodes.<id>.output.<field> }} and {{ inputs.<name> }} in config; credentials only as {{secret.NAME}} (a vault secret the person stores, never a value). thrift {endpoint,method,args}. retry: {attempts, backoff:{kind:fixed,delay_ms} | {kind:exponential,base_ms,factor,max_ms,jitter} | {kind:list,steps:[{timeout_ms,delay_ms}]}}.";
 
 pub fn defs(p: &Policy) -> Vec<ToolDef> {
     if !offered(p) {
@@ -51,8 +51,16 @@ pub fn defs(p: &Policy) -> Vec<ToolDef> {
         tool("flow_run_status", "One run in detail: each step's state, attempts (n of max, the limit and the pause of each), the error, what it waits for, the fix cards and who decided them.", obj(json!({"run": {"type": "string"}}), &["run"]), Risk::Safe, true),
         tool("flow_logs", "The log of a run (redacted), optionally one step's, the last `tail` lines (default 60, at most 300).", obj(json!({"run": {"type": "string"}, "node": {"type": "string"}, "tail": {"type": "integer"}}), &["run"]), Risk::Safe, true),
         tool("flow_explain_failure", "Why a run failed or is stuck, from its data: the failing step, every attempt with its limit, pause and error, what the numbers suggest, and any fix the agent proposed. Quote it; do not guess beyond it.", obj(json!({"run": {"type": "string"}}), &["run"]), Risk::Safe, true),
+        tool("flow_failure_help", "Offer the assistant when a flow fails, on or off: `on` for `flow` (default the open one) or `all: true` for every flow. Asks first.", obj(json!({"flow": flow_arg.clone(), "on": {"type": "boolean"}, "all": {"type": "boolean", "description": "true: the general switch for every flow"}}), &["on"]), Risk::Ask, false),
+        tool("flow_outside_messages", "Say whether a flow may send messages OUTSIDE this computer (Matrix, from its notify steps), or list every flow with its state. A flow that came from outside (an import, a store template) starts OFF; its INBOX notes still work. One message per flow per 5 minutes at most.", obj(json!({"flow": {"type": "string", "description": "the flow's id; omit to list all flows"}}), &[]), Risk::Safe, false),
+        tool("flow_outside_messages_set", "Switch the outside messages of ONE flow on or off. Asks first; switching ON is the person's trust decision, so only do it when they ask for it by name.", obj(json!({"flow": flow_arg.clone(), "on": {"type": "boolean"}}), &["on"]), Risk::Ask, false),
+        tool("flow_outside_messages_policy", "Quiet hours and escalation for the Matrix messages of flows. Without arguments it shows them. `quiet_start` and `quiet_end` (HH:MM, local time) hold messages in those hours until they end (errors still go through; the INBOX note is always made at once); `quiet_off: true` removes them. `escalate_minutes` (0 = off) asks again in `escalate_room` when a message that needs the person was not acknowledged in time; `ack_flow` marks a flow's messages as seen. Asks first.", obj(json!({"quiet_start": {"type": "string"}, "quiet_end": {"type": "string"}, "quiet_off": {"type": "boolean"}, "escalate_minutes": {"type": "integer"}, "escalate_room": {"type": "string"}, "ack_flow": {"type": "string"}}), &[]), Risk::Ask, false),
+        tool("flow_assist_settings", "How the flow-fixing agent works. Without arguments it shows the settings. `matrix` (true/false) and `matrix_room`: also tell the person by Matrix when autopilot publishes, rolls back or asks. The named agent profile: `models` (a list of {name as provider/model, local, timeout_seconds}), `local_first`, `fallback` (try the next model when one fails or runs out of time), `profile_name`. Asks first.", obj(json!({"matrix": {"type": "boolean"}, "matrix_room": {"type": "string"}, "models": {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string"}, "local": {"type": "boolean"}, "timeout_seconds": {"type": "integer"}}, "required": ["name"]}}, "local_first": {"type": "boolean"}, "fallback": {"type": "boolean"}, "profile_name": {"type": "string"}}), &[]), Risk::Ask, false),
+        tool("flow_trial", "Try the whole flow (`flow`, its draft) once, WITHOUT effects, with the input its newest run recorded: every read-only step is run, every step with effects (a message, a write, a camera, a browser, a remote call, a model) is refused and listed. Nothing is sent, written or published. Asks first (a read-only step may still reach the network).", obj(json!({"flow": {"type": "string", "description": "the flow's id"}}), &[]), Risk::Ask, false),
+        tool("flow_assist_activity", "Read-only: what the flow-fixing agent did for ONE flow (`flow`): the suggestions waiting, the version it watches, today's counters and the Activity log, newest first (`limit`, default 10). Shows no input value or secret.", obj(json!({"flow": {"type": "string", "description": "the flow's id"}, "limit": {"type": "integer"}}), &[]), Risk::Safe, true),
+        tool("flow_assist_stop_all", "Kill switch: stop assist for EVERY flow at once. Asks first. Only the person switches it on again.", obj(json!({}), &[]), Risk::Ask, false),
         tool("flow_create", &format!("Make a new DRAFT flow (nothing runs until it is published). Give `name`, optional `description`, `nodes` (a start node is added if missing; with no `edges` they are chained in order), `edges` [{{from,to,port?,when?}}], `triggers` [{{kind: manual|cron|interval|once|calendar|file_change|on_failure|event, expr?, tz?, every_s?, ...}}], `inputs` [{{name,type,required,default}}], `defaults`. Or `template` (health-check, nightly-backup, build-test-deploy, site-monitor, grpc-call, daily-report, qa-login-smoke, qa-responsive-shots, qa-page-health) with `name`. {NODE_HELP} Asks the person first."), obj(json!({"name": {"type": "string"}, "description": {"type": "string"}, "template": {"type": "string"}, "nodes": {"type": "array", "items": {"type": "object"}}, "edges": {"type": "array", "items": {"type": "object"}}, "chain": {"type": "boolean"}, "triggers": {"type": "array", "items": {"type": "object"}}, "inputs": {"type": "array", "items": {"type": "object"}}, "defaults": {"type": "object"}}), &[]), Risk::Ask, false),
-        tool("flow_edit", &format!("Change a DRAFT flow (never a published version): `ops` is a list of {{op: add_node|update_node|remove_node|add_edge|remove_edge|set_trigger|remove_trigger|set_default|set_meta|set_input, ...}}. update_node merges `config` keys (null removes one) and sets retry, timeout_ms, runner, heal, track, on_error. add_node may carry `after` (connect from that node, with `port`) and `before`. The change is marked as the agent's until the person publishes. {NODE_HELP} Asks the person first."), obj(json!({"flow": flow_arg.clone(), "ops": {"type": "array", "items": {"type": "object"}}}), &["ops"]), Risk::Ask, false),
+        tool("flow_edit", &format!("Change a DRAFT flow (never a published version): `ops` is a list of {{op: add_node|update_node|remove_node|add_edge|remove_edge|set_trigger|remove_trigger|set_default|set_meta|set_input, ...}}. update_node merges `config` keys (null removes one) and sets retry, timeout_ms, runner, heal, track, on_error. add_node may carry `after` (connect from that node, with `port`) and `before`. The change is marked as the agent's until the person publishes. A node: {{id, kind, name?, config, retry?, timeout_ms?, runner?, heal?, on_error?}}; the node kinds and their config are in the flow_create description. Asks the person first."), obj(json!({"flow": flow_arg.clone(), "ops": {"type": "array", "items": {"type": "object"}}}), &["ops"]), Risk::Ask, false),
         tool("flow_run", "Start a run now, or later with `at` (\"in 10m\", \"2026-10-20 15:30\" local time). Runs the latest published version; `draft: true` runs the draft to try it. `inputs` is an object; `key` is an idempotency key (the same key never starts a second run). Asks the person first.", obj(json!({"flow": flow_arg.clone(), "inputs": {"type": "object"}, "at": {"type": "string"}, "draft": {"type": "boolean"}, "key": {"type": "string"}}), &[]), Risk::Ask, false),
         tool("flow_cancel", "Cancel a run (a running command ends at its own timeout). Asks the person first.", obj(json!({"run": {"type": "string"}}), &["run"]), Risk::Ask, false),
         tool("flow_publish", "Publish the draft as the next immutable version, with an optional `label` and a `changelog` line. The person always approves, also in Auto mode, and approves any change the agent made.", obj(json!({"flow": flow_arg.clone(), "label": {"type": "string"}, "changelog": {"type": "string"}}), &["changelog"]), Risk::Ask, false),
@@ -67,6 +75,10 @@ pub fn defs(p: &Policy) -> Vec<ToolDef> {
         tool("webhook_regenerate", "Make a webhook's secret address (and shared secret) again; the old ones stop working at once. The new ones are shown only on the person's screen. Asks the person first.", obj(json!({"id": {"type": "string"}}), &["id"]), Risk::Ask, false),
         tool("webhook_enable", "Switch a webhook on. Only works when the flow is published with the trigger and the person may run flows. Asks the person first.", obj(json!({"id": {"type": "string"}}), &["id"]), Risk::Ask, false),
         tool("webhook_disable", "Switch a webhook off: it answers 404 from then on. Asks the person first.", obj(json!({"id": {"type": "string"}}), &["id"]), Risk::Ask, false),
+        tool("remote_machines", "List the saved machines a flow's `remote_flow` step can run flows on: name and address, never a token. Read only.", obj(json!({}), &[]), Risk::Safe, false),
+        tool("remote_machine_add", "Save another IYAKKI as a machine for flows: a short `name`, its web address (`url`, https, host and port only) and `token_vault`, the NAME of the vault entry that holds the sign-in token there (never the token itself). Asks the person first.", obj(json!({"name": {"type": "string"}, "url": {"type": "string"}, "token_vault": {"type": "string"}}), &["name", "url", "token_vault"]), Risk::Ask, false),
+        tool("remote_machine_remove", "Forget a saved machine (flows that name it will fail until it is saved again). Asks the person first.", obj(json!({"name": {"type": "string"}}), &["name"]), Risk::Ask, false),
+        tool("remote_flow_run", "Run one flow on a saved machine now and follow it for up to `wait_s` seconds (default 60, at most 300): `machine` (a saved name), `flow` (its id over there), optional `inputs` object. A step that waits for a person over there is left for that person. Asks the person first, every time.", obj(json!({"machine": {"type": "string"}, "flow": {"type": "string"}, "inputs": {"type": "object"}, "wait_s": {"type": "integer"}}), &["machine", "flow"]), Risk::Ask, false),
         tool("webhook_public", "Let a webhook take senders from OUTSIDE the local network for `minutes` (at most 10080 = 7 days; 0 closes it again). Always asks, in every approval mode.", obj(json!({"id": {"type": "string"}, "minutes": {"type": "integer"}}), &["id", "minutes"]), Risk::Ask, false),
     ]
 }
@@ -78,7 +90,16 @@ pub fn describe(name: &str, args: &Value) -> String {
         "flow_create" => format!("make a draft flow “{}”{}", s("name"), if s("template").is_empty() { String::new() } else { format!(" from the {} template", s("template")) }),
         "flow_edit" => format!("change the draft of {flow} ({} operation(s))", args.get("ops").and_then(Value::as_array).map_or(0, Vec::len)),
         "flow_run" => format!("run {flow}{}{}", if s("at").is_empty() { " now".to_string() } else { format!(" at {}", s("at")) }, if args.get("draft").and_then(Value::as_bool).unwrap_or(false) { " (the draft)" } else { "" }),
+        "flow_failure_help" => format!("{} offering the assistant when {} fails", if args.get("on").and_then(Value::as_bool).unwrap_or(true) { "turn on" } else { "turn off" }, if args.get("all").and_then(Value::as_bool).unwrap_or(false) { "any flow".to_string() } else { flow.clone() }),
+        "flow_outside_messages_set" => format!("{} outside messages (Matrix) for {flow}", if args.get("on").and_then(Value::as_bool).unwrap_or(false) { "let it SEND" } else { "stop" }),
+        "flow_outside_messages_policy" => "change the quiet hours or escalation of flow Matrix messages".to_string(),
+        "flow_trial" => format!("try {flow} once without effects (read-only steps run, steps with effects are refused)"),
+        "flow_assist_settings" => "change how the flow-fixing agent works (Matrix notice, models, order, fallback, time limits)".to_string(),
+        "flow_assist_stop_all" => "STOP assist for every flow (no suggestions, no autopilot until you switch it on again)".to_string(),
         "flow_cancel" => format!("cancel run {}", s("run")),
+        "remote_machine_add" => format!("save the machine “{}” at {} (its token stays in your vault as “{}”)", s("name"), s("url"), s("token_vault").chars().take(60).collect::<String>()),
+        "remote_machine_remove" => format!("forget the saved machine “{}”", s("name")),
+        "remote_flow_run" => format!("run flow {} on the machine “{}” and follow it", s("flow"), s("machine")),
         "flow_publish" => format!("PUBLISH the draft of {flow} as the next version: {}", s("changelog")),
         "flow_rollback" => format!("ROLL BACK {flow} to version {}, published as a new version", args.get("version").and_then(Value::as_i64).unwrap_or(0)),
         "flow_delete" => format!("DELETE {flow} with all its versions (this cannot be undone)"),
@@ -234,6 +255,142 @@ impl FlowEnv {
                 let r = self.engine.get_run(s(args, "run")).ok_or_else(|| format!("there is no run `{}`", s(args, "run")))?;
                 Ok(explain_failure(&r))
             }
+            "flow_outside_messages" => {
+                let f = s(args, "flow");
+                if !f.is_empty() {
+                    if !self.store.exists(f) {
+                        return Err(format!("there is no flow `{f}` (flow_list shows them)"));
+                    }
+                    return Ok(format!("Flow `{f}`: outside messages are {}.", if self.host.chan.allowed(f) { "ON" } else { "OFF" }));
+                }
+                let v = self.summaries();
+                if v.is_empty() {
+                    return Ok("There are no flows yet.".into());
+                }
+                Ok(cut(v.iter().map(|f| format!("{}: {}", f.id, if self.host.chan.allowed(&f.id) { "on" } else { "off" })).collect::<Vec<_>>().join("\n")))
+            }
+            "flow_outside_messages_set" => {
+                let on = args.get("on").and_then(Value::as_bool).ok_or("give `on`: true or false")?;
+                let id = self.flow_id(args, open)?;
+                if !self.store.exists(&id) {
+                    return Err(format!("there is no flow `{id}` (flow_list shows them)"));
+                }
+                self.host.chan.set(&id, on)?;
+                self.host_audit("flow.outside_messages", &format!("{id} {} by {AGENT} after the person approved", if on { "on" } else { "off" }));
+                Ok(format!("Flow `{id}`: outside messages are now {}.", if on { "ON (one every 5 minutes at most)" } else { "OFF" }))
+            }
+            "flow_outside_messages_policy" => {
+                let book = &self.host.msg_policy;
+                let mut p = book.policy();
+                let mut changed = false;
+                let hm = |v: &str| -> Result<u32, String> {
+                    let (h, m) = v.trim().split_once(':').ok_or("times are HH:MM")?;
+                    let (h, m): (u32, u32) = (h.parse().map_err(|_| "times are HH:MM")?, m.parse().map_err(|_| "times are HH:MM")?);
+                    if h > 23 || m > 59 { return Err("times are HH:MM".into()); }
+                    Ok(h * 60 + m)
+                };
+                if args.get("quiet_off").and_then(Value::as_bool).unwrap_or(false) {
+                    p.quiet = None;
+                    changed = true;
+                } else if !s(args, "quiet_start").is_empty() || !s(args, "quiet_end").is_empty() {
+                    p.quiet = Some((hm(s(args, "quiet_start"))?, hm(s(args, "quiet_end"))?));
+                    p.offset_min = crate::clock::Zone::system().local(crate::clock::now_unix()).offset / 60;
+                    changed = true;
+                }
+                if let Some(n) = args.get("escalate_minutes").and_then(Value::as_u64) {
+                    p.escalate_after_secs = if n == 0 { None } else { Some(n * 60) };
+                    changed = true;
+                }
+                if args.get("escalate_room").is_some() {
+                    p.escalate_room = s(args, "escalate_room").to_string();
+                    changed = true;
+                }
+                let acked = if s(args, "ack_flow").is_empty() { None } else { Some(book.ack(s(args, "ack_flow"))) };
+                if changed {
+                    let p = book.set_policy(p)?;
+                    self.host_audit("flow.outside_messages.policy", &format!("{} by {AGENT} after the person approved", p.summary()));
+                }
+                let mut out = format!("Outside messages: {}.", book.policy().summary());
+                if let Some(n) = acked {
+                    out.push_str(&format!(" {n} watched message(s) of `{}` acknowledged.", s(args, "ack_flow")));
+                }
+                out.push_str(&format!(" {} held for quiet hours, {} watched for an answer.", book.held().len(), book.watching().len()));
+                Ok(out)
+            }
+            "flow_assist_settings" => {
+                let book = self.assist_store();
+                let g = book.global();
+                if let Some(on) = args.get("matrix").and_then(Value::as_bool) {
+                    let room = if args.get("matrix_room").is_some() { s(args, "matrix_room").to_string() } else { g.matrix_room.clone() };
+                    book.set_matrix(on, &room)?;
+                } else if args.get("matrix_room").is_some() {
+                    book.set_matrix(g.matrix, s(args, "matrix_room"))?;
+                }
+                let mut prof = g.profile.clone();
+                let mut touched = false;
+                if let Some(list) = args.get("models").and_then(Value::as_array) {
+                    prof.models = list.iter().map(|m| iyakki_flow::assist_profile::ProfileModel { name: m.get("name").and_then(Value::as_str).unwrap_or("").to_string(), local: m.get("local").and_then(Value::as_bool).unwrap_or(false), timeout_secs: m.get("timeout_seconds").and_then(Value::as_u64).unwrap_or(120) }).collect();
+                    touched = true;
+                }
+                if let Some(b) = args.get("local_first").and_then(Value::as_bool) { prof.local_first = b; touched = true; }
+                if let Some(b) = args.get("fallback").and_then(Value::as_bool) { prof.fallback = b; touched = true; }
+                if !s(args, "profile_name").is_empty() { prof.name = s(args, "profile_name").to_string(); touched = true; }
+                if touched {
+                    book.set_profile(prof)?;
+                }
+                let g = book.global();
+                self.host_audit("flow.assist.settings", &format!("matrix {} · {} (by {AGENT} after the person approved)", g.matrix, g.profile.summary()));
+                Ok(format!("Flow-fixing agent: Matrix notice {}{}. Profile {}.", if g.matrix { "on" } else { "off" }, if g.matrix_room.is_empty() { String::new() } else { format!(" (room {})", g.matrix_room) }, g.profile.summary()))
+            }
+            "flow_trial" => {
+                let id = self.flow_id(args, open)?;
+                let w = self.trial_whole(&id)?;
+                let mut out = format!("Trial of {id} (no effects): {}.\n", w.summary());
+                for t in &w.tried {
+                    out.push_str(&format!("  tried {t}\n"));
+                }
+                for (n, why) in &w.refused {
+                    out.push_str(&format!("  refused {n}: {why}\n"));
+                }
+                for (n, e) in &w.failed {
+                    out.push_str(&format!("  failed {n}: {e}\n"));
+                }
+                Ok(cut(out))
+            }
+            "flow_assist_activity" => {
+                let id = self.flow_id(args, open)?;
+                if !self.store.exists(&id) {
+                    return Err(format!("there is no flow `{id}` (flow_list shows them)"));
+                }
+                let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(10).min(50) as usize;
+                let r = iyakki_flow::assist_activity::readout(&self.assist_store(), &id, super::now_ms(), limit);
+                Ok(serde_json::to_string_pretty(&r).unwrap_or_default())
+            }
+            "flow_assist_stop_all" => {
+                let book = self.assist_store();
+                if !book.global().enabled {
+                    return Ok("Assist was already stopped for every flow.".into());
+                }
+                book.set_enabled(false)?;
+                self.host_audit("flow.assist.stop_all", &format!("by {AGENT} after the person approved"));
+                Ok("Assist is stopped for every flow. Only the person can switch it on again (the flows list, key K).".into())
+            }
+            "flow_failure_help" => {
+                let on = args.get("on").and_then(Value::as_bool).ok_or("give `on`: true or false")?;
+                let mut book = super::failfix::FailBook::open(&self.data);
+                if args.get("all").and_then(Value::as_bool).unwrap_or(false) {
+                    book.set_offer(on);
+                    self.host_audit("flow.failure_help", &format!("all {}", if on { "on" } else { "off" }));
+                    return Ok(format!("The assistant is {} when a flow fails (the general switch).", if on { "offered" } else { "not offered" }));
+                }
+                let id = self.flow_id(args, open)?;
+                if !self.store.exists(&id) {
+                    return Err(format!("there is no flow `{id}`"));
+                }
+                book.set_offer_for(&id, on);
+                self.host_audit("flow.failure_help", &format!("{id} {}", if on { "on" } else { "off" }));
+                Ok(format!("The assistant is {} when `{id}` fails{}.", if on { "offered" } else { "not offered" }, if on && !book.offer() { ", but the general switch is off" } else { "" }))
+            }
             "flow_create" => {
                 let by = AGENT;
                 let f = if !s(args, "template").is_empty() { self.from_template(s(args, "template"), s(args, "name"), by)? } else { self.create_draft(build_flow(args)?, by)? };
@@ -279,8 +436,43 @@ impl FlowEnv {
                 if !s(args, "key").is_empty() {
                     req.idempotency_key = Some(s(args, "key").to_string());
                 }
+                let flow_id = req.flow_id.clone();
                 let o = self.engine.start_run(req)?;
+                if !o.existing && !at.is_some_and(|a| a > now) {
+                    self.report_run(&o.run_id, &flow_id);
+                }
                 Ok(if o.existing { format!("A run with that key already exists: {}.", o.run_id) } else if at.is_some_and(|a| a > now) { format!("Scheduled run {}.", o.run_id) } else { format!("Started run {}. flow_run_status shows how it goes.", o.run_id) })
+            }
+            "remote_machines" => {
+                let v = super::machines::Machines::new(&self.data).list();
+                if v.is_empty() {
+                    return Ok("No machines are saved. remote_machine_add saves one.".into());
+                }
+                Ok(v.iter().map(|m| format!("{} {}", m.name, m.url)).collect::<Vec<_>>().join("\n"))
+            }
+            "remote_machine_add" => {
+                let token = s(args, "token_vault");
+                let Some(vn) = super::machines::vault_name(token) else { return Err("give the NAME of the vault entry that holds the token (never the token itself)".into()) };
+                if self.svc.user_get(&self.user, &vn).is_err() && self.svc.user_get(&self.user, &format!("svc.{vn}")).is_err() {
+                    return Err("there is no such entry in your vault: store the token in SETTINGS, Vault first, then give its name".into());
+                }
+                let m = super::machines::Machines::new(&self.data).add(s(args, "name"), s(args, "url"), &vn)?;
+                self.host_audit("flow.remote_machine", &format!("saved {} {}", m.name, m.url));
+                Ok(format!("Saved the machine `{}` at {}.", m.name, m.url))
+            }
+            "remote_machine_remove" => {
+                let gone = super::machines::Machines::new(&self.data).remove(s(args, "name"))?;
+                if gone {
+                    self.host_audit("flow.remote_machine", &format!("removed {}", s(args, "name")));
+                }
+                Ok(if gone { "Forgot it.".into() } else { "No machine has that name.".into() })
+            }
+            "remote_flow_run" => {
+                use iyakki_flow::host::{Host, RemoteFlowRequest};
+                let req = RemoteFlowRequest { run_id: "chat".into(), flow_id: "chat".into(), node_id: "tool".into(), machine: s(args, "machine").into(), flow: s(args, "flow").into(), inputs: args.get("inputs").filter(|v| v.is_object()).cloned().unwrap_or(Value::Null), wait_s: args.get("wait_s").and_then(Value::as_u64).unwrap_or(60).clamp(1, 300) };
+                let r = self.host.remote_flow(&req, &Cancel::new()).map_err(|e| e.message)?;
+                let steps = r.steps.iter().map(|(n, st)| format!("{n}: {st}")).collect::<Vec<_>>().join(", ");
+                Ok(format!("Run {} on {}: {}{}{}{}", r.run, req.machine, r.status, if r.ended { "" } else { " (still going over there)" }, if r.waiting.is_empty() { String::new() } else { format!(". It waits for a person there: {}", r.waiting) }, if steps.is_empty() { String::new() } else { format!(". Steps: {steps}") }))
             }
             "flow_cancel" => {
                 self.engine.cancel(s(args, "run"))?;
@@ -576,6 +768,12 @@ const APP_REFUSAL: &str = "App building is not available in FLOWS. Make a flow i
 pub const PROMPT_RULES: &str = "\nYou work in FLOWS, the person's workflow tile (what is open is described below, refreshed with every message). Work on workflows first: prefer the flow_* tools (list, read, create, edit, run, explain a flow, its runs and failures) over every general tool. When a flow is OPEN ON SCREEN, requests to change, add to or update a flow apply to THAT flow: use flow_edit on it (leave `flow` out), step by step, and summarise what changed; call flow_create only when no flow is open or the person asks for a new one by name. Whatever the person asks you to create, make, build or automate here, the answer is a FLOW (flow_create): never an IYAKKI tile app, a web service, a Dockerfile or a deployment, and those tools are not offered. Only if the person explicitly asks for an app, say that apps are built in the AI IDE. When a flow needs a value you do not have (flow_run lists the missing required inputs), call ask_form with those fields instead of guessing or asking in prose; secrets go in a secret field, which stores them in the vault so you never see them. To build or change a flow use flow_create and flow_edit: they make DRAFTS, shown on the canvas at once, marked as yours, and the person publishes them. Never publish by yourself: ask with flow_publish only when the person says to, and it will ask them. Look before you change: flow_get first, then edit step by step (ids, ports and `{{ nodes.<id>.output.<field> }}` references must match). For \"why did run N fail\" call flow_explain_failure and quote its numbers; do not invent causes. Retry settings go in the node's `retry` (attempts, and backoff fixed, exponential or a per-attempt list of timeout and pause). Commands are a list of arguments, never a shell string. Credentials: never ask for, repeat or write one; use {{secret.NAME}} and, when the secret is missing, call vault_request so the person types it into their vault. You cannot approve your own fix: when a run needs the person, say so and point them to the card. A message that starts with FLOW FAILURE REQUEST asks you to fix a failed run of the open flow: read it with flow_explain_failure and flow_get, explain the cause in plain words, propose ONE fix with flow_edit on the open flow (the person approves it), never run, publish or roll back on your own, never ask for a credential, and when it says this is the last attempt and the cause is still unclear, stop and say why. Board and feature-row rules do not apply here.";
 
 impl Tools for FlowTools {
+
+    fn inner_tools(&self) -> Option<&dyn Tools> {
+
+        Some(&*self.inner)
+
+    }
     fn defs(&self) -> Vec<ToolDef> {
         // the flow tools lead; app creation is not offered here (a flow is the default thing to make in FLOWS)
         let mut v = defs(&self.env.policy);
@@ -609,7 +807,7 @@ impl Tools for FlowTools {
     }
     fn approved_always(&self, name: &str) -> bool {
         // publishing and the other hard-ask calls are decided each time
-        if is_flow_tool(name) { !matches!(name, "flow_publish" | "flow_rollback" | "flow_apply_to_runs" | "flow_set_heal_policy" | "flow_delete" | "flow_drop_version" | "flow_prune_history") } else { self.inner.approved_always(name) }
+        if is_flow_tool(name) { !matches!(name, "flow_publish" | "flow_rollback" | "flow_apply_to_runs" | "flow_set_heal_policy" | "flow_delete" | "flow_drop_version" | "flow_prune_history" | "remote_flow_run" | "remote_machine_add") } else { self.inner.approved_always(name) }
     }
     fn grant_blocker(&self, name: &str, args: &Value) -> Option<String> {
         self.inner.grant_blocker(name, args)

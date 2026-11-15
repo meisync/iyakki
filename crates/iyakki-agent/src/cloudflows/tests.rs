@@ -816,12 +816,32 @@ fn the_tenants_zone_decides_when_a_local_cron_fires() {
 #[test]
 fn an_unknown_zone_name_is_utc_and_says_so_where_there_are_no_zone_files() {
     let none = None;
-    assert_eq!(tz::mode_of("Europe/Berlin", &none), tz::Mode::FellBackToUtc("Europe/Berlin".into()));
-    assert!(tz::setting_ok("Europe/Berlin", &none).is_err());
+    assert_eq!(tz::mode_of("Mars/Olympus", &none), tz::Mode::FellBackToUtc("Mars/Olympus".into()));
+    assert!(tz::setting_ok("Mars/Olympus", &none).is_err());
     assert!(tz::setting_ok("+01:00", &none).is_ok() && tz::setting_ok("UTC", &none).is_ok());
-    let r = tz::tenant_resolver("Europe/Berlin", None);
+    let r = tz::tenant_resolver("Mars/Olympus", None);
     assert_eq!(r("local").unwrap().offset_secs(T0 as i64), 0, "UTC, not the pod's clock");
     assert_eq!(tz::mode_of("../../etc/passwd", &Some(PathBuf::from("/usr/share/zoneinfo"))), tz::Mode::FellBackToUtc("../../etc/passwd".into()));
+}
+
+#[test]
+fn the_built_in_zone_table_answers_where_the_image_has_no_zone_files_and_daylight_saving_moves_a_cron_fire() {
+    use iyakki_flow::sched::Cron;
+    let none = None;
+    assert_eq!(tz::mode_of("Europe/Berlin", &none), tz::Mode::Zone("Europe/Berlin".into()));
+    assert!(tz::setting_ok("America/New_York", &none).is_ok() && tz::setting_ok("Etc/GMT+5", &none).is_ok());
+    let cron = Cron::parse("0 9 * * *").unwrap();
+    let r = tz::tenant_resolver("Europe/Berlin", None);
+    let z = r("local").unwrap();
+    // a day in January (UTC+1) and a day in July (UTC+2): 09:00 in Berlin is 08:00 and 07:00 UTC
+    let jan = 1_768_435_200i64; // 2026-01-15T00:00:00Z
+    let jul = 1_784_073_600i64; // 2026-07-15T00:00:00Z
+    assert_eq!(cron.next_after(jan, z.as_ref()).unwrap(), jan + 8 * 3600);
+    assert_eq!(cron.next_after(jul, z.as_ref()).unwrap(), jul + 7 * 3600);
+    // a trigger naming another zone keeps it, whatever the tenant's setting
+    let ny = r("America/New_York").unwrap();
+    assert_eq!(cron.next_after(jul, ny.as_ref()).unwrap(), jul + 13 * 3600);
+    assert_eq!(cron.next_after(jan, ny.as_ref()).unwrap(), jan + 14 * 3600);
 }
 
 #[test]
@@ -1017,7 +1037,7 @@ fn a_run_nobody_started_gets_a_secret_only_through_the_gate_of_its_schedules_tea
     let reg = Registry::new(&d);
     let r = roles();
     reg.upsert(make_schedule(&r, "max", "f", "web", "dev", RunAs::Owner, T0).unwrap()).unwrap();
-    let run = |flow: &str, trigger: &str| RunSecretCx { run_id: "r1".into(), flow_id: flow.into(), trigger: trigger.into() };
+    let run = |flow: &str, trigger: &str| RunSecretCx { run_id: "r1".into(), flow_id: flow.into(), trigger: trigger.into(), ..Default::default() };
     // a person started it: not decided here (the person's own vault as always)
     for t in ["manual", "chat", "test", "contract"] {
         assert!(unattended_secret(&d, vault.as_ref(), &reg, "max", &run("f", t), "api-token").is_none(), "{t}");
@@ -1043,6 +1063,31 @@ fn a_run_nobody_started_gets_a_secret_only_through_the_gate_of_its_schedules_tea
 }
 
 #[test]
+fn an_unattended_run_gets_a_secret_only_with_the_run_token_issued_for_it() {
+    use super::identity::unattended_secret_presented;
+    use iyakki_flow::host::RunSecretCx;
+    let d = dir("unattended-token");
+    let vault = MemVault::new();
+    vault.put(&SecretRef::parse("vault:team/web/api-token").unwrap(), "s3cr3t").unwrap();
+    let reg = Registry::new(&d);
+    let r = roles();
+    reg.upsert(make_schedule(&r, "max", "f", "web", "dev", RunAs::Owner, T0).unwrap()).unwrap();
+    write_config(&d, json!([{"kind": "flows.unattended", "namespace": "web", "name": "api-token", "enabled": true, "values": {"secret": "vault:team/web/api-token", "terms_ack": true}}]));
+    let run = |id: &str, trigger: &str| RunSecretCx { run_id: id.into(), flow_id: "f".into(), trigger: trigger.into(), ..Default::default() };
+    let tokens = RunTokens::default();
+    let t1 = tokens.issue("r1", T0, 60).unwrap();
+    let ask = |tok: Option<&str>, id: &str, now: u64, trig: &str| unattended_secret_presented(&tokens, tok, now, &d, vault.as_ref(), &reg, "max", &run(id, trig), "api-token");
+    assert_eq!(ask(Some(&t1), "r1", T0 + 1, "cron"), Some(Ok("s3cr3t".to_string())));
+    for (tok, id, now) in [(None, "r1", T0 + 1), (Some("rt-forged"), "r1", T0 + 1), (Some(t1.as_str()), "r2", T0 + 1), (Some(t1.as_str()), "r1", T0 + 61)] {
+        let e = ask(tok, id, now, "cron").unwrap().unwrap_err();
+        assert!(e.starts_with("needs secret") && e.contains("run token"), "{tok:?} {id} {now}: {e}");
+    }
+    tokens.revoke_run("r1");
+    assert!(ask(Some(&t1), "r1", T0 + 2, "interval").unwrap().is_err(), "a revoked token is refused");
+    assert!(ask(None, "r1", T0, "manual").is_none(), "a person's run is not decided here");
+}
+
+#[test]
 fn a_notify_step_that_names_people_or_a_role_reaches_them_and_a_bad_or_teamless_to_stays_with_the_owner() {
     use super::notify::from_node_notice_to;
     let note = iyakki_flow::host::Notice { title: "disk full".into(), body: "b".into(), level: "warn".into(), flow_id: "nightly".into(), run_id: "r7".into(), needs_you: false };
@@ -1059,4 +1104,66 @@ fn a_notify_step_that_names_people_or_a_role_reaches_them_and_a_bad_or_teamless_
     assert_eq!(to("web", json!(7)), Recipients::People(vec!["max".into()]));
     let n = from_node_notice_to("acme", "web", "max", &note, &json!("role:admin"));
     assert_eq!((n.severity, n.source.as_str(), n.team.as_deref()), (Severity::High, "flow:nightly:r7", Some("web")));
+}
+
+#[test]
+fn the_desktop_answer_goes_through_the_same_claim_and_only_an_approver_may_give_it() {
+    let x = fix("ap-desktop");
+    let (w, e) = (x.waits(), Engine::default());
+    let a = x.file(&w, "max", "r1", None, "reject", T0).unwrap();
+    let go = |by: &str, yes: bool, now: u64| w.resolve_from_desktop(&x.env(), &x.roles, "r1", "gate", yes, by, "", &e, now);
+    // a run this tenant does not wait on is the desktop's own business
+    assert!(w.resolve_from_desktop(&x.env(), &x.roles, "r9", "gate", true, "mia", "", &e, T0).is_none());
+    // the requester and a stranger are refused and nothing reached the engine
+    assert!(go("max", true, T0 + 1).unwrap().unwrap_err().contains("not one of the approvers"));
+    assert!(go("vic", true, T0 + 1).unwrap().is_err());
+    assert!(e.decided.lock().unwrap().is_empty());
+    // the team's admin answers at the desktop: applied once, the router's request is closed, a second answer from the API is too late
+    assert_eq!(go("mia", true, T0 + 2).unwrap().unwrap(), Resolution::Applied);
+    assert_eq!(e.decided.lock().unwrap().as_slice(), [("r1".into(), "gate".into(), true, "mia".into())]);
+    assert!(x.decide("mia", &a.approval_id, true, T0 + 3).is_err(), "the request left the approvers' list");
+    assert!(x.poll(&w, &e, T0 + 4).is_empty());
+    assert_eq!(e.decided.lock().unwrap().len(), 1, "exactly once");
+    assert!(go("mia", false, T0 + 5).is_none(), "resolved requests are gone");
+}
+
+#[test]
+fn a_desktop_answer_after_an_api_decision_was_claimed_is_already_resolved() {
+    let x = fix("ap-desktop-late");
+    let (w, e) = (x.waits(), Engine::default());
+    x.file(&w, "max", "r1", None, "reject", T0).unwrap();
+    assert_eq!(w.resolve_once("max", "r1", "gate", false, "mia", "", &e, T0 + 1), Resolution::Applied);
+    assert_eq!(e.decided.lock().unwrap().len(), 1);
+    // half applied (a crash between claim and engine): the desktop does not decide a second time
+    let w2 = x.waits();
+    w2.mark_state_for_test("r1", "gate", "claimed", T0 + 2);
+    assert_eq!(w2.resolve_from_desktop(&x.env(), &x.roles, "r1", "gate", true, "mia", "", &e, T0 + 3).unwrap().unwrap(), Resolution::AlreadyResolved);
+    assert_eq!(e.decided.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn the_services_secret_hooks_issue_a_token_per_run_and_refuse_a_scheduled_run_without_its_own() {
+    use iyakki_flow::host::RunSecretCx;
+    let d = dir("hooks-token");
+    let (secret, issue, end) = super::real::secret_hooks(&d, &d.join("flows"));
+    let t1 = issue("r1").expect("a token for r1");
+    let t2 = issue("r2").unwrap();
+    assert!(t1.starts_with("rt-") && t1 != t2);
+    let run = |id: &str, token: &str| RunSecretCx { run_id: id.into(), flow_id: "f".into(), trigger: "cron".into(), token: token.into() };
+    // another run's token, a forged one and none at all: refused before any secret lookup
+    for (id, tok) in [("r1", t2.as_str()), ("r1", "rt-forged"), ("r1", "")] {
+        let e = secret("max", &run(id, tok), "api-token").unwrap().unwrap_err();
+        assert!(e.starts_with("needs secret") && e.contains("run token"), "{id} {tok}: {e}");
+    }
+    // its own token passes the token check (the gate then looks at the marking, which this fixture has none of)
+    let e = secret("max", &run("r1", &t1), "api-token").unwrap().unwrap_err();
+    assert!(!e.contains("run token"), "{e}");
+    // a person's run is not decided here
+    assert!(secret("max", &RunSecretCx { trigger: "manual".into(), ..run("r1", "") }, "x").is_none());
+    // the run ends: its token is revoked at once (not left to expire), and another run's token is not touched
+    end("r1");
+    let e = secret("max", &run("r1", &t1), "api-token").unwrap().unwrap_err();
+    assert!(e.starts_with("needs secret") && e.contains("run token"), "after the end: {e}");
+    let e = secret("max", &run("r2", &t2), "api-token").unwrap().unwrap_err();
+    assert!(!e.contains("run token"), "the other run's token still passes the token check: {e}");
 }

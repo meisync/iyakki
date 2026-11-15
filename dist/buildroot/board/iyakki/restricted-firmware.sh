@@ -94,9 +94,9 @@ case "$cmd" in
     while read -r kind size sha path pack; do
       fetch_one "$path" "$size" "$sha" "$WORK/dl/$path"
       if [ "$kind" = file ]; then
-        install -D -m 0644 "$WORK/dl/$path" "$TARGET/lib/firmware/$path"; n=$((n + 1))
+        mkdir -p "$(dirname "$TARGET/lib/firmware/$path")"; install -m 0644 "$WORK/dl/$path" "$TARGET/lib/firmware/$path"; n=$((n + 1))
       else
-        install -D -m 0644 "$WORK/dl/$path" "$TARGET/usr/share/doc/linux-firmware-restricted/$pack/$(echo "$path" | tr '/' '-')"
+        mkdir -p "$TARGET/usr/share/doc/linux-firmware-restricted/$pack"; install -m 0644 "$WORK/dl/$path" "$TARGET/usr/share/doc/linux-firmware-restricted/$pack/$(echo "$path" | tr '/' '-')"
       fi
     done < "$WORK/rows"
     # the licence texts also sit with the image's other firmware licences (firmware-licences.sh runs next and fills the rest)

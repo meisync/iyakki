@@ -1063,6 +1063,36 @@ mod tests {
     }
 
     #[test]
+    fn every_kind_has_its_keeping_time_and_the_hard_cap_of_200_drops_the_oldest_but_never_a_flagged_one() {
+        let d = DAY;
+        for k in [Kind::Info, Kind::Device, Kind::Download, Kind::System] {
+            assert_eq!(retention_secs(k, "x"), 7 * d, "{k:?}");
+        }
+        for k in [Kind::Agent, Kind::Reminder] {
+            assert_eq!(retention_secs(k, "runs"), 14 * d, "{k:?}");
+            assert_eq!(retention_secs(k, "x"), 14 * d, "{k:?}");
+        }
+        for k in [Kind::Warning, Kind::Error] {
+            assert_eq!(retention_secs(k, "x"), 30 * d, "{k:?}");
+        }
+        let s = store("g5c");
+        let now = 100 * d;
+        let first = s.add("amy", Kind::Info, "flagged oldest", "", "src0", None, now).unwrap();
+        s.flag("amy", &first.id, true).unwrap();
+        // five sources of 60 = 300 entries, all fresh, none over the per-source cap
+        for src in 0..5 {
+            for i in 0..MAX_PER_SOURCE {
+                s.add("amy", Kind::Info, &format!("s{src}-{i}"), "", &format!("src{src}"), None, now + 1 + (src * 100 + i) as i64).unwrap();
+            }
+        }
+        let l = s.list("amy");
+        assert_eq!(l.len(), MAX_NOTIFICATIONS);
+        assert!(l.iter().any(|n| n.id == first.id), "the flagged one stays");
+        assert!(l.iter().all(|n| n.title != "s0-0"), "the oldest unflagged one went first");
+        assert!(l.iter().any(|n| n.title == "s4-59"), "the newest stays");
+    }
+
+    #[test]
     fn an_older_file_loads_is_grouped_once_and_says_so_without_losing_anything_else() {
         let s = store("g6");
         let now = 100 * 86_400;

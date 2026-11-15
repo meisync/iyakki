@@ -43,11 +43,14 @@ define NVIDIA_OPEN_BUILD_CMDS
 	$(LINUX_MAKE_ENV) $(BR2_MAKE) -C $(@D) $(NVIDIA_OPEN_MAKE_OPTS) modules
 endef
 
-# Only the four modules (no nvidia-peermem, no vGPU): the same list the vendor installer gives a desktop card.
+# Only the four modules (no nvidia-peermem, no vGPU): the same list the vendor installer gives a desktop card. nvidia-peermem is built because the
+# kernel has the InfiniBand core headers, but it only serves RDMA network cards (GPUDirect) and needs ib_core, which the image does not load: it is
+# removed after the install (found 2026-11-13 on the amd-mini build, where five modules were installed).
 define NVIDIA_OPEN_INSTALL_TARGET_CMDS
 	$(LINUX_MAKE_ENV) $(BR2_MAKE) -C $(LINUX_DIR) $(LINUX_MAKE_FLAGS) \
 		M=$(@D)/kernel-open PWD=$(@D)/kernel-open \
 		modules_install
+	rm -f $(TARGET_DIR)/lib/modules/*/updates/nvidia-peermem.ko*
 endef
 
 $(eval $(generic-package))

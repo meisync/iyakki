@@ -67,6 +67,8 @@ fn the_idle_profile_is_what_the_owner_measured_on_2026_11_06() {
     for r in [CLICKHOUSE, OPENSEARCH, ELASTICSEARCH, GRAPHDB, PROMETHEUS, GITEA] {
         assert!(r.idle_mb < mem_mb(r.mem_lim), "{} idles below its ceiling", r.item.id());
     }
+    // the table's own numbers named in the matrix: ClickHouse one core, Lemonade 500m / 6 cores and 16 GiB
+    assert_eq!((CLICKHOUSE.cpu_lim, LEMONADE.cpu_req, LEMONADE.cpu_lim, LEMONADE.mem_lim), ("1", "500m", "6", "16Gi"));
 }
 
 #[test]

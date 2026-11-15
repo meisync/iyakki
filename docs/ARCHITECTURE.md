@@ -47,7 +47,6 @@ ordinary programs through four listed interfaces ([`../BOUNDARY.md`](../BOUNDARY
 | `iyakki-mem` | Tiered memory (registers, scratchpad, vector store) with paging |
 | `iyakki-hw` | Microphone and camera bridges into WASM guests |
 | `iyakki-edit` | Editor engine (buffers, syntax, diff), no dependencies |
-| `iyakki-ui` | Headless editor model, with an optional egui editor binary |
 | `iyakki-web` | Browser engine: HTML, CSS, layout, images, fetch |
 | `iyakki-js` | JavaScript platform for pages (QuickJS-ng in WebAssembly) |
 | `iyakki-webview` | Shell side of the optional full web engine helper (socket protocol, shared-memory frames) |

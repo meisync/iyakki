@@ -12,8 +12,13 @@ pub fn plain_error(provider: &str, raw: &str) -> String {
     let said = match status {
         Some(401 | 403) => format!("{who} refused the key. Check the key in Settings -> Models."),
         Some(404) if l.contains("not found for account") => format!("{who}: the key works, but its account cannot use this model. Make the key at build.nvidia.com (Get API Key, with the Cloud Functions service), then pick a model from the list in Settings -> Models."),
+        // a server that unloaded the model for another request (Lemonade: "No model loaded: x")
+        Some(404) if l.contains("no model loaded") => format!("{who} has not loaded that model right now (another request may have swapped it out). Try again in a moment, or pick another model."),
+        // a server on the LAN (Lemonade, Ollama, any OpenAI-compatible one) has no accounts: it just has no model of that name
+        Some(404) if l.contains("model") && (l.contains("available models") || l.contains("try pulling")) && !l.contains("account") => format!("{who} has no model with that name. Pick one from the list in Settings -> Models."),
         Some(404) if l.contains("function") || l.contains("model") => format!("{who}: this model is not available for this account, or its name is wrong. Pick a model from the list in Settings -> Models."),
         Some(404) => format!("{who} did not find that address. Check the server address in Settings -> Models."),
+        Some(429) if provider.trim() == crate::gemini::PROVIDER_ID => format!("{who}: {} If you use a paid key, wait a little or look at the quota of your Google project.", crate::gemini::limit_advice(crate::gemini::Tier::Free)),
         Some(429) => format!("{who} says there were too many requests or the quota is used up. Wait a minute and try again, or pick another model."),
         Some(408 | 504) => format!("{who} took too long to answer. Try again."),
         Some(s) if (500..600).contains(&s) => format!("{who} is having trouble right now. Try again in a little while."),
@@ -103,6 +108,19 @@ mod tests {
         assert!(m.contains("model is not available for this account, or its name is wrong"), "{m}");
         let u = plain_error("my-server", "HTTP 404: 404 page not found");
         assert!(u.contains("did not find that address") && u.contains("server address"), "{u}");
+    }
+
+    #[test]
+    fn a_missing_model_on_a_lan_server_does_not_talk_about_an_account() {
+        let m = plain_error("lemonade-lan", "HTTP 404: Model 'no-such-model' was not found. Available models include: 'a', 'b', and 119 more.");
+        assert!(m.starts_with("lemonade-lan has no model with that name. Pick one from the list in Settings -> Models."), "{m}");
+        assert!(!m.to_lowercase().contains("account"), "{m}");
+        assert!(m.contains("Details:") && m.contains("no-such-model"), "the technical line is kept: {m}");
+        let n = plain_error("lemonade-lan", "HTTP 404: No model loaded: qwen3-8b");
+        assert!(n.starts_with("lemonade-lan has not loaded that model right now") && !n.to_lowercase().contains("account"), "{n}");
+        // a hosted service that talks about access keeps the account wording
+        let h = plain_error("OpenAI", "HTTP 404: The model `gpt-9` does not exist or you do not have access to it.");
+        assert!(h.contains("not available for this account"), "{h}");
     }
 
     #[test]

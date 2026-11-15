@@ -484,3 +484,17 @@ fn the_git_tile_asks_settings_for_the_page_with_the_wizard_open() {
     assert_eq!(b.tab(), Tab::GitKeys);
     assert!(!b.git_wizard_open());
 }
+
+#[test]
+fn the_private_key_box_has_browse_and_a_live_check_and_still_takes_a_pasted_key() {
+    let cx = admin("gitset-browse");
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx, Tab::GitKeys);
+    key(&mut a, &cx, Key::Char('i'));
+    let Some(Modal::Form(_, f)) = &mut a.modal else { panic!("the import form") };
+    assert!(f.path_check(1).is_some(), "the key box is a path field (Browse, Ctrl+O, a chip)");
+    assert!(f.path_check(0).is_none(), "the name is not");
+    f.focus = 1;
+    f.browse(1);
+    assert!(f.picker.borrow().is_some(), "Browse opens the file picker over the form");
+}

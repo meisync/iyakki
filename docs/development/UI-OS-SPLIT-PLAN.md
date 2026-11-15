@@ -128,7 +128,7 @@ feature_matrix --test dependency_ratchet`, and the filtered tile tests named in 
 - Test that proves no behaviour change: for each moved site, a test with a fake tree (`LocalOs` over a temporary `/proc`) giving the same
   value the old code gave, plus the tile's existing tests unchanged: `apps::store_setup_tests`, `apps::settings_time_tests`, `apps::settings_memory_tests`,
   `apps::settings_browserspeed_tests`, `apps::browser_speed_tests`.
-- Checklist: [ ] `Os` trait [ ] `iyakki-core-local` [ ] `AppCx.os` [ ] 4 tiles moved [ ] allow-list lowered by 10 lines [ ] FEATURES row updated.
+- Checklist: [x] `Os` trait [x] `iyakki-core-local` [x] `AppCx.os` (2026-11-13, lane P-B; the device gives `LocalOs`, tests `FakeOs`) [ ] tiles moved (the `/proc/meminfo`, `/proc/cmdline` and `/proc/uptime` reads the list above names are already gone from non-test tile code; the indirect reads `memgate::read_mem_now`, `statvfs_free` and `available_parallelism` still are, and no tile calls `cx.os` yet) [ ] allow-list lowered (unchanged: its 19 lines are other access) [x] FEATURES row updated.
 
 ### Step 6 - Audio, Disks, Net slices (L, one commit each)
 
@@ -246,3 +246,46 @@ Slice order for the Services domains (each slice follows the pattern of steps 5-
 Slices 1-3 have their trait and fake already (accounts is the exception: not yet defined). They come before the Sysinfo-style kernel slices of steps 7+
 only where a tile needs them; the two orders do not block each other. Decision 7 (wire format and remote auth) is refined, not settled: the
 contract fixes the shapes; the choice of relay protocol stays open until step 9.
+
+### Step 5 design delta (2026-11-13, lane P-B: checked against the tree, nothing built)
+
+What changed since the step was written, and what the first slice is. This is design only; F-ARCH-05 stays `planned`.
+
+* **The ratchet already fell.** `crates/iyakki-core/tests/data/shell_kernel_access.allow` has 19 lines now (the plan counted 89). Most of the call sites listed above
+  moved by other work; the ones still reading the kernel are the ones the allow-list names, so the list, not the table above, is the work list for this step.
+* **Gates a new crate touches, checked.** `iyakki-core-local` has no external dependency (core-api only), so `Cargo.lock` gets one new `[[package]]` block and the
+  workspace member line in `Cargo.toml` (like `iyakki-core-fake`, which is a member and a workspace dependency). `SBOM.json` and `THIRD_PARTY_LICENSES.txt` list
+  third-party packages only (`iyakki-core-fake` is in neither), so they do not change. `cargo test --locked` needs the lock updated once with a plain
+  `cargo update -w`. `boundary` and `dependency_ratchet` need the crate named in their tables; `core_surface` (core-api's public items) changes for the `Os` trait
+  and needs `IYAKKI_CORE_SURFACE_WRITE=1` with a note. None of these is a blocker.
+* **The real blocker is ownership, not gates.** `AppCx.os` is a new field of a struct built in `shell.rs` (one literal) and in `apps/mod.rs::tests::cx_with_admin_store`.
+  Adding a field breaks every other branch that builds an `AppCx` literal. Do the field in ONE commit with no other change to `shell.rs`, merged before the
+  next round of shell work starts, with the two literals given `FakeOs` (tests) and `LocalOs` (device).
+* **First slice (one commit, size S):** (1) `trait Os { fn sysinfo(&self) -> &dyn Sysinfo; }` in core-api and `impl Os for FakeOs`; (2) `iyakki-core-local` with
+  `LocalOs` over `/proc` and `/sys/class/dmi` (a root path field, so tests use a fake tree; reuse the parsers of core-api); (3) `AppCx.os` and the two literals;
+  (4) move exactly the call sites still named in the allow-list for `/proc/meminfo`, `/proc/cmdline`, `/proc/uptime` and `memgate::read_mem_now` and lower the
+  allow-list in the same commit. Slices 6 and 7 stay as written.
+* **Proof for the slice:** for each moved site a test builds a `LocalOs` over a temporary tree and gets the value the old code gave; the tile tests named in step 5 pass
+  unchanged; `shell_kernel_access.allow` is lower; `./run.sh compat-check` and the three scans pass.
+
+### Step 6 first slice (2026-11-13, lane P-B, F-ARCH-06)
+
+Built: the `Audio` trait and its types (`SoundCard`, `PlaybackVolume`) in `iyakki-core-api`; `Os` now also hands out `audio()`, `disks()` and `net()`; `FakeOs` answers all three
+(canned cards, a volume that moves, every call recorded); `LocalOs` implements them over `/proc/asound`, the mixer program (`amixer`, replaceable in tests) and the existing
+parsers of `/proc/partitions`, `/proc/mounts` and `/proc/net/dev`. **Not moved:** no tile reads through `cx.os.audio()`, `disks()` or `net()` yet; `devices.rs` still holds its own
+`Control` environment and the 33 lines of the allow-list are unchanged. The next commits move one tile at a time (the volume row of DEVICES first) and lower the list in the same commit.
+\n
+
+### Round 6 moves (2026-11-13, lane P-B, F-ARCH-05 and F-ARCH-06)
+
+`Disks::space(path)` (free and total bytes) and `Net::ipv4_addresses()` joined the traits (FakeOs, `iyakki-core-local::LocalOs` and the older `iyakki-agent::localos::LocalOs` implement them).
+Tiles that now read through `cx.os`, each with a FakeOs-driven test: the SYSTEM overview's disk rows (`system.rs`), the pairing card of Settings -> Developer (`settings_developer.rs`), the memory line of
+Settings -> Displays (`memgate::read_mem_os`), the browser's machine figures (`browser_speed::machine_os`: memory, free space, processors, used by Settings -> Browser and the browser's start)
+and the browser's download space check. Four allow-list files left it and `system.rs` fell from 5 to 4: `settings_developer.rs`, `settings_devcluster.rs`, `disks_tile.rs` and `disks_tile_ui.rs`
+(the last three only formatted a size with `iyakki_storage::human`, which is the same function as `iyakki_agent::sysinfo::human_bytes`). **Still open:** the 33 lines of `devices.rs` (its own `Control`
+environment: links, rfkill, Bluetooth, sound cards and volume), `settings_memory.rs` (12, the zram `Env`), the storage and installer tiles, and `shell_panes.rs` / `backend.rs`, which have no `AppCx`.
+There are now two `LocalOs` types (this crate's and the agent's older one, F-ARCH-03); folding them into one is part of step 7.
+\n
+## Round 8 moves (lane P-B, 2026-11-13)
+
+The Memory page (settings_memory.rs, 12 allow-list lines) now asks `cx.os.memory()`: the `Memory` trait in `iyakki_core_api::memory` (kernel figures, `system.conf`, zram reconfigure, swap file, data free space, data on disk). `iyakki_core_local::LocalMemory` is the device's, `iyakki_core_fake::FakeMemory` (through `FakeOs::memory_fake()`) the test's. The data types and pure rules stay in `iyakki-zram` and are re-exported by the core API, so a tile names them through the interface.

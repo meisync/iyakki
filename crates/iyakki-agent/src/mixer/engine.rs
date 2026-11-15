@@ -69,6 +69,10 @@ pub struct EngineCfg {
     /// Speech: the same two numbers.
     pub speech_prefill_ms: u32,
     pub speech_resume_ms: u32,
+    /// A live source (the browser's sound, see `Mixer::open_live_source`): how much it may queue, and the level at which it
+    /// starts and restarts. Small on purpose: picture and sound must stay together, and the page can wait (its pipe is the clock).
+    pub live_ring_ms: u32,
+    pub live_prefill_ms: u32,
     /// How long a source keeps ducking others after its last audible sample (bridges the gaps between sentences).
     pub hang_ms: u32,
     /// Ducking goes down in this time ...
@@ -79,7 +83,7 @@ pub struct EngineCfg {
 
 impl Default for EngineCfg {
     fn default() -> Self {
-        EngineCfg { rate: 48_000, channels: 2, period_frames: 960, prebuffer_ms: 40, media_prefill_ms: 800, media_resume_ms: 400, speech_prefill_ms: 250, speech_resume_ms: 250, hang_ms: 300, attack_ms: 30, release_ms: 400 }
+        EngineCfg { rate: 48_000, channels: 2, period_frames: 960, prebuffer_ms: 40, media_prefill_ms: 800, media_resume_ms: 400, speech_prefill_ms: 250, speech_resume_ms: 250, live_ring_ms: 20, live_prefill_ms: 20, hang_ms: 300, attack_ms: 30, release_ms: 400 }
     }
 }
 
@@ -94,6 +98,7 @@ impl EngineCfg {
         self.media_resume_ms = 0;
         self.speech_prefill_ms = 0;
         self.speech_resume_ms = 0;
+        self.live_prefill_ms = 0;
         self
     }
     /// (first start, restart after running dry) in ms for a kind of source.
@@ -103,6 +108,10 @@ impl EngineCfg {
             SourceKind::Speech => (self.speech_prefill_ms, self.speech_resume_ms),
             SourceKind::Notification | SourceKind::Alarm => (self.prebuffer_ms, self.prebuffer_ms),
         }
+    }
+    /// (first start, restart after running dry) for this very source: a live source has its own small numbers.
+    pub(crate) fn prefill_for(&self, s: &SourceShared) -> (u32, u32) {
+        if s.live { (self.live_prefill_ms, self.live_prefill_ms) } else { self.prefill_ms(s.kind) }
     }
     fn period_ms(&self) -> f32 {
         self.period_frames as f32 * 1000.0 / self.rate.max(1) as f32
@@ -164,6 +173,8 @@ pub(crate) struct SourceShared {
     pub rate: u32,
     pub channels: usize,
     pub exclusive: bool,
+    /// Low-latency source (the browser): small ring, small start level, the mixer shortens its lead while one is open.
+    pub live: bool,
     ring: Mutex<Ring>,
     space: Condvar,
     gain: AtomicU32,
@@ -187,8 +198,15 @@ pub(crate) struct SourceShared {
 }
 
 impl SourceShared {
+    #[cfg(test)]
     pub(crate) fn new(id: u64, kind: SourceKind, label: &str, rate: u32, channels: usize, exclusive: bool, wake: Arc<Wake>) -> Arc<SourceShared> {
-        let cap = (rate as usize * channels * ring_ms(kind) as usize / 1000).max(channels * 64);
+        Self::new_with(id, kind, label, rate, channels, exclusive, wake, None)
+    }
+
+    /// `live_ring_ms`: Some makes a live source whose ring holds that many ms.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with(id: u64, kind: SourceKind, label: &str, rate: u32, channels: usize, exclusive: bool, wake: Arc<Wake>, live_ring_ms: Option<u32>) -> Arc<SourceShared> {
+        let cap = (rate as usize * channels * live_ring_ms.unwrap_or_else(|| ring_ms(kind)) as usize / 1000).max(channels * 64);
         Arc::new(SourceShared {
             id,
             kind,
@@ -196,6 +214,7 @@ impl SourceShared {
             rate,
             channels,
             exclusive,
+            live: live_ring_ms.is_some(),
             ring: Mutex::new(Ring { data: VecDeque::new(), cap }),
             space: Condvar::new(),
             gain: AtomicU32::new(1.0f32.to_bits()),
@@ -514,6 +533,11 @@ impl Engine {
         }
     }
 
+    /// A live (low-latency) source is registered and not finished.
+    pub fn has_live(&self) -> bool {
+        self.slots.iter().any(|s| s.s.live && !s.s.is_closed())
+    }
+
     pub fn source_count(&self) -> usize {
         self.slots.len()
     }
@@ -532,7 +556,7 @@ impl Engine {
         self.acc.resize(n * ch, 0.0);
         let mut info = PeriodInfo::default();
         let pre_frames = |s: &SourceShared, resuming: bool| {
-            let (first, again) = cfg.prefill_ms(s.kind);
+            let (first, again) = cfg.prefill_for(s);
             (s.rate as usize * (if resuming { again } else { first }) as usize / 1000).max(1) * s.channels
         };
         // 1. pull
@@ -707,7 +731,7 @@ impl Engine {
                 return true;
             }
             // a source still filling its jitter buffer does not open the card (it would be reopened and closed again and again)
-            let (first, again) = cfg.prefill_ms(s.s.kind);
+            let (first, again) = cfg.prefill_for(&s.s);
             let need = (s.s.rate as usize * (if s.resuming { again } else { first }) as usize / 1000).max(1) * s.s.channels;
             q >= need || (s.s.is_closed() && q > 0)
         })

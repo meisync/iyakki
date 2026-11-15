@@ -16,7 +16,7 @@
 //! * **A transcript the assistant is unsure of** (the engine's confidence is low, or it is a single short word) gets "Did you say ...?"
 //!   and nothing runs until the person says yes.
 //! * **Approvals by voice**: a tool that asks shows its card and the assistant says what it wants to do. For an ordinary ask a
-//!   spoken "yes, do it" or "no" is enough; for the hard-ask list (`agent::hard_ask`, plus a conservative word list in
+//!   spoken "yes, do it" or "no" is enough only when the person turned spoken approvals on (`voice.spoken_approvals`, off by default; otherwise a tap or a key approves and only a spoken no works); for the hard-ask list (`agent::hard_ask`, plus a conservative word list in
 //!   [`is_hard`]) a spoken yes is **never** enough: only a tap or a key ([`Assistant::approve`]) approves. A spoken no always denies.
 //! * **No sound is kept**: the samples live in memory from the microphone to the speech engine and are dropped there; this file
 //!   touches no file (a test reads this source to prove it).
@@ -27,6 +27,20 @@ use crate::voicedesk::PauseDetector;
 
 /// The title of the one chat thread the voice conversation joins (the chat marks it as a voice thread).
 pub const THREAD_TITLE: &str = "Voice conversation";
+/// What a turn the person SPOKE starts with in the Voice conversation thread, so it can be told from one typed into the same thread
+/// later (F-VOICE-40). A transcript can hold recognition mistakes; the model sees the mark too and may ask when a word looks wrong.
+pub const SPOKEN_MARK: &str = "(spoken) ";
+
+/// The text a spoken turn is kept as in the thread: the transcript with the mark in front (once).
+pub fn spoken_turn(transcript: &str) -> String {
+    let t = transcript.trim();
+    if t.starts_with(SPOKEN_MARK.trim_end()) { t.to_string() } else { format!("{SPOKEN_MARK}{t}") }
+}
+
+/// Whether a message of the thread was spoken.
+pub fn is_spoken_turn(content: &str) -> bool {
+    content.starts_with(SPOKEN_MARK)
+}
 
 /// The addition to the system prompt of a voice session: how to answer when the answer is spoken.
 pub const SESSION_PROMPT: &str = "\nVOICE SESSION: the person is talking to you and your answer is read aloud. Answer in one to three short spoken sentences unless they ask for more. Use no markdown, no lists, no tables, no code and no links; write numbers, times and names the way a person would say them. When a result is long, give the gist aloud and say the full result is on the screen. When a tool needs a choice you do not have, ask one short clarifying question instead of guessing. Tools that ask for approval show a card and the person answers it; say plainly what you want to do. Never claim to have done something a tool did not do. The words you receive come from speech recognition and can be wrong: if they look odd, ask what they meant before acting.";
@@ -140,11 +154,13 @@ pub struct Config {
     /// Speaking over the answer stops it (the microphone is open, gated, while it speaks).
     pub barge_in: bool,
     pub min_confidence: f32,
+    /// A spoken "yes" may approve an ordinary ask (Settings -> Voice, off by default). Never for the hard-ask list ([`is_hard`]).
+    pub spoken_approvals: bool,
 }
 
 impl Default for Config {
     fn default() -> Config {
-        Config { pause_ms: 1500, follow_ms: DEFAULT_FOLLOW_MS, barge_in: true, min_confidence: MIN_CONFIDENCE }
+        Config { pause_ms: 1500, follow_ms: DEFAULT_FOLLOW_MS, barge_in: true, min_confidence: MIN_CONFIDENCE, spoken_approvals: false }
     }
 }
 
@@ -341,8 +357,50 @@ pub struct PendingApproval {
     pub id: String,
     pub name: String,
     pub summary: String,
-    /// A spoken yes does not approve this one: a tap or a key does.
+    /// On the hard-ask list: a spoken yes can never approve it.
     pub hard: bool,
+    /// A spoken yes may approve this one: it is not hard AND the person turned spoken approvals on. Otherwise only a tap or a key approves.
+    pub voice_ok: bool,
+}
+
+/// What the permanent microphone glyph in the top bar shows (F-VOICE-39): nothing while My IYAKKI is off or its microphone is closed,
+/// amber while it is muted, red while the microphone is really open. It follows the port's own answer, never a guess.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MicGlyph {
+    Off,
+    Muted,
+    Listening,
+}
+
+pub fn glyph_of(st: &Status) -> MicGlyph {
+    if st.mic_open {
+        MicGlyph::Listening
+    } else if st.muted {
+        MicGlyph::Muted
+    } else {
+        MicGlyph::Off
+    }
+}
+
+static GLYPHS: std::sync::Mutex<Vec<(u64, MicGlyph)>> = std::sync::Mutex::new(Vec::new());
+static NEXT_WORKER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+pub(crate) fn new_worker_id() -> u64 {
+    NEXT_WORKER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A worker's current glyph (`Off` removes it).
+pub(crate) fn set_worker_glyph(id: u64, g: MicGlyph) {
+    let mut v = GLYPHS.lock().unwrap_or_else(|e| e.into_inner());
+    v.retain(|(i, _)| *i != id);
+    if g != MicGlyph::Off {
+        v.push((id, g));
+    }
+}
+
+/// The glyph the top bar shows now: the strongest of the running workers (Listening over Muted over Off).
+pub fn mic_glyph() -> MicGlyph {
+    GLYPHS.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(_, g)| *g).max().unwrap_or(MicGlyph::Off)
 }
 
 #[derive(Clone, Debug)]
@@ -512,6 +570,20 @@ impl Assistant {
         self.phase = Phase::Think { since: self.now };
     }
 
+    /// Work the person was waiting for has ended (the waker's turn, F-VOICE-37): while the assistant is idle and not muted, the agent is
+    /// asked about it with no microphone and no person's turn in the thread, and its answer is spoken like any other. False when it
+    /// cannot start now (it is talking, listening, thinking or muted): the caller offers it again.
+    pub fn wake_turn(&mut self, now: u64, text: &str) -> bool {
+        self.now = now;
+        if self.muted || !matches!(self.phase, Phase::Idle) || text.trim().is_empty() {
+            return false;
+        }
+        self.note = "Something you were waiting for has finished.".into();
+        self.p.agent.ask(text);
+        self.phase = Phase::Think { since: now };
+        true
+    }
+
     fn send(&mut self, text: &str) {
         self.heard = text.to_string();
         self.p.log.record(Who::Person, text);
@@ -668,8 +740,8 @@ impl Assistant {
             return self.decide(false);
         }
         if is_yes(norm) {
-            if a.hard {
-                // the hard rule: a voice cannot approve this, so a TV or a passer-by cannot either
+            if !a.voice_ok {
+                // the hard rule (and the default for ordinary asks: spoken approvals are off): a voice cannot approve this, so a TV or a passer-by cannot either
                 self.note = SAID_TAP_ONLY.into();
                 return self.say_one(SAID_TAP_ONLY, After::Tap);
             }
@@ -679,12 +751,12 @@ impl Assistant {
     }
 
     fn approval_unclear(&mut self) {
-        let hard = self.approval.as_ref().is_some_and(|a| a.hard);
+        let tap_only = self.approval.as_ref().is_some_and(|a| !a.voice_ok);
         self.unclear += 1;
         if self.unclear < 2 {
             return self.say_one("Please say yes or no.", After::Approval);
         }
-        if hard {
+        if tap_only {
             self.say_one("Tap Allow or Deny on the card.", After::Tap);
         } else {
             self.note = "No clear answer, so I did not do it.".into();
@@ -750,10 +822,13 @@ impl Assistant {
             match ev {
                 AgentEvent::Approval { id, name, summary } => {
                     let hard = is_hard(&name);
-                    self.approval = Some(PendingApproval { id, name, summary: summary.clone(), hard });
+                    let voice_ok = !hard && self.cfg.spoken_approvals;
+                    self.approval = Some(PendingApproval { id, name, summary: summary.clone(), hard, voice_ok });
                     self.unclear = 0;
                     let ask = if hard {
                         format!("I would like to {}. This one needs a tap or a key on the screen; a spoken yes is not enough.", lower_first(&summary))
+                    } else if !voice_ok {
+                        format!("I would like to {}. Tap Allow or press Y on the screen; saying no also works.", lower_first(&summary))
                     } else {
                         format!("I would like to {}. Say yes, do it, or no.", lower_first(&summary))
                     };

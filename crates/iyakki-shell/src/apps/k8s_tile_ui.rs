@@ -573,7 +573,7 @@ impl K8sApp {
         // tabs
         let mut c = Cursor::new(x, y, w, fx::size::CAPTION * s * 1.9, 6.0 * s);
         for (i, t) in DTab::ALL.iter().enumerate() {
-            if *t == DTab::Logs && kind != Kind::Pods {
+            if (*t == DTab::Logs && kind != Kind::Pods) || (*t == DTab::Instances && kind != Kind::Crds) {
                 continue;
             }
             let sz = fx::size::CAPTION * s;

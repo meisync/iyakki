@@ -436,10 +436,11 @@ pub fn git_clone(url: &str, dest: &Path, allow: &str, branch: Option<&str>, dept
     cmd.arg("--").arg(url).arg(dest).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("git cannot be started: {e}"))?;
     let end = Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(s)) => break s,
-            Ok(None) if Instant::now() < end => std::thread::sleep(Duration::from_millis(50)),
+    // a status taken by the PID 1 reaper is not a failure: the clone counts as done when the repository folder is there
+    let state = loop {
+        match iyakki_core_api::child_status(&mut child) {
+            s if s.is_over() => break s,
+            _ if Instant::now() < end => std::thread::sleep(Duration::from_millis(50)),
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -448,7 +449,8 @@ pub fn git_clone(url: &str, dest: &Path, allow: &str, branch: Option<&str>, dept
             }
         }
     };
-    if !status.success() {
+    let finished = state.success() || (state == iyakki_core_api::ChildState::Gone && dest.join(".git").exists());
+    if !finished {
         let mut err = String::new();
         if let Some(mut e) = child.stderr.take() {
             use std::io::Read;

@@ -102,7 +102,8 @@ pub fn scan(html: &str, base: &Url, wants: Wants) -> Vec<Hint> {
                 push(&mut scripts, tree.attr(n, "src"), Kind::Script);
             }
             Some("img") if wants.images && images.len() < MAX_IMAGE_HINTS && !tree.attr(n, "loading").is_some_and(|l| l.eq_ignore_ascii_case("lazy")) => {
-                push(&mut images, tree.attr(n, "src"), Kind::Image);
+                let chosen = crate::imgsel::image_source(&tree, n);
+                push(&mut images, Some(chosen.as_str()), Kind::Image);
             }
             _ => {}
         }

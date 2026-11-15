@@ -265,6 +265,7 @@ fn a_sound_card_that_appears_late_brings_the_sound_apps_back() {
 #[test]
 fn detect_cloud_adds_back_exactly_the_tiles_the_connected_browser_stands_in_for_and_forgets_them_when_it_leaves() {
     use iyakki_agent::browsermedia::{register, unregister, BrowserMedia, Policy as MediaPolicy};
+    iyakki_agent::browsermedia::isolate_for_this_thread();
     let mut sh = signed_in("cloud-browser", bare());
     let base = cloudmode::detect(sh.env.services.cloud_setting());
     unregister("root");
@@ -318,13 +319,13 @@ fn the_boot_guard_skips_the_sound_probe_and_the_camera_look_without_the_hardware
     use super::{sound_boot_plan, wants_system_camera, SoundBoot};
     // the sound-output probe and soft-volume setup follow the mode that the boot reads from the setting and the machine
     let desktop = cloudmode::CloudMode::desktop();
-    assert_eq!(sound_boot_plan(Setting::Auto, &desktop), SoundBoot::Now);
-    assert_eq!(sound_boot_plan(Setting::Off, &desktop), SoundBoot::Now);
-    assert_eq!(sound_boot_plan(Setting::Auto, &bare()), SoundBoot::WhenReady, "a card that shows up late is still set up");
-    assert_eq!(sound_boot_plan(Setting::On, &forced()), SoundBoot::Never, "forced cloud mode never probes or watches");
+    assert_eq!(sound_boot_plan(false, Setting::Auto, &desktop), SoundBoot::Now);
+    assert_eq!(sound_boot_plan(false, Setting::Off, &desktop), SoundBoot::Now);
+    assert_eq!(sound_boot_plan(false, Setting::Auto, &bare()), SoundBoot::WhenReady, "a card that shows up late is still set up");
+    assert_eq!(sound_boot_plan(false, Setting::On, &forced()), SoundBoot::Never, "forced cloud mode never probes or watches");
     // the same decision from the real inputs of a machine with no sound card: detect() is what from_paths asks
     let mode = cloudmode::cloud_mode(Setting::On, &Facts { audio: false, ..Facts::full() });
-    assert_eq!(sound_boot_plan(Setting::On, &mode), SoundBoot::Never);
+    assert_eq!(sound_boot_plan(false, Setting::On, &mode), SoundBoot::Never);
     // the camera look: only on a real machine whose mode keeps the camera
     assert!(wants_system_camera(false, &desktop));
     assert!(!wants_system_camera(false, &bare()), "a machine with no camera is not looked at every second");

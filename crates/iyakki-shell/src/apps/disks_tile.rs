@@ -401,7 +401,7 @@ impl DisksApp {
             }
         }
         // a drive that was not there a moment ago
-        let names: Vec<(String, String, bool)> = self.snap.disks.iter().map(|d| (d.name.clone(), format!("{} ({})", d.title(), iyakki_storage::human(d.size_bytes)), d.removable_media())).collect();
+        let names: Vec<(String, String, bool)> = self.snap.disks.iter().map(|d| (d.name.clone(), format!("{} ({})", d.title(), iyakki_agent::sysinfo::human_bytes(d.size_bytes)), d.removable_media())).collect();
         if !first {
             for (n, t, removable) in &names {
                 if !self.seen.contains(n) && *removable {
@@ -1183,6 +1183,15 @@ pub(super) fn parse_size(t: &str) -> Result<Option<u64>, String> {
 }
 
 impl App for DisksApp {
+    fn dialog_title(&self) -> Option<String> {
+        match &self.modal {
+            Modal::None => None,
+            Modal::Form(_) => Some("Prepare a disk".into()),
+            Modal::Review(_) => Some("Review the change to the disk".into()),
+            Modal::Unlock(_) => Some("Unlock the disk".into()),
+        }
+    }
+
     fn title(&self) -> &'static str {
         "Disks"
     }

@@ -543,13 +543,12 @@ fn a_missing_part_shows_in_the_list_blocks_use_all_parts_and_offers_to_install_w
     assert!(text.contains("SD-Turbo") && text.contains("2.6 GB") && text.contains("127.0.0.1"), "{text}");
     let start = (cx.services.settings.lock().unwrap().get().voice.tts.clone(), picture_model(&cx));
     key(&mut a, &cx, Key::Char('y'));
-    for _ in 0..400 {
-        if cx.services.pull_status().iter().any(|p| p.done || p.error.is_some()) {
-            break;
-        }
+    // wall-clock limits: the pull runs on its own thread, which a busy machine may not schedule for several seconds
+    let t0 = std::time::Instant::now();
+    while t0.elapsed() < Duration::from_secs(30) && (fake.bodies("/api/v1/pull").is_empty() || !cx.services.pull_status().iter().any(|p| p.done || p.error.is_some())) {
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert!(fake.bodies("/api/v1/pull")[0].contains("\"model_name\":\"LMX-Omni-5.5B-Lite\""));
+    assert!(fake.bodies("/api/v1/pull").first().is_some_and(|b| b.contains("\"model_name\":\"LMX-Omni-5.5B-Lite\"")), "{:?}", fake.bodies("/api/v1/pull"));
     assert_eq!((cx.services.settings.lock().unwrap().get().voice.tts.clone(), picture_model(&cx)), start, "nothing is set while a part is missing");
 }
 

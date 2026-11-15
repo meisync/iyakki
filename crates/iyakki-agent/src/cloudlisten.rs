@@ -25,15 +25,25 @@
 //!   listener stops), so the caller can drive a firewall. A port that cannot be bound is an error that says so; no other port is ever used.
 //! * Mutual TLS (`mtls`): a host named in [`Options::client_ca`] needs a client certificate signed by that CA (403/503 otherwise).
 //!   Certificates and CAs are reloaded every [`Options::cert_reload`] when set. `gate::FirewallGate` is a [`PortGate`] that drives the firewall.
+//! * TLS to the pod (`podtls`): a host in [`Options::pod_tls`] is reached over TLS with the listener's client certificate, and the pod's
+//!   certificate must be the route's own (no fallback to plain HTTP; a failed link is a 502 before the request is sent).
 //! * Limits: a cap on concurrent connections (extra ones are closed at once), timeouts on connecting to and reading from the target.
 //!
 //! **What it does not do**
-//! * `Access::Members` is **not enforced**. A plain proxy cannot know who a person is; the listener serves a `members` route to anyone who
-//!   can reach the port, exactly like a `public` one. Every log line shows the route's access (`members (not enforced by this listener)`),
-//!   so nobody is led to think otherwise. Put a sign-in in front (the IYAKKI web service) or restrict the port with the firewall.
+//! * `Access::Members` is enforced **only when a [`MemberGate`] is set in [`Options::members`]** (the device's own listener sets one,
+//!   `domains.rs`): a request to a `members` route then needs an IYAKKI session (the cookie `iyakki_session` or `Authorization: Bearer`)
+//!   that the gate accepts, else it is answered 401 and the target is not contacted; the person's name is passed to the target as
+//!   `X-Iyakki-User` (what the client sent under that name is discarded). A TLS-passthrough route cannot show a cookie, so with a gate a
+//!   `members` passthrough route is closed (make it `public` and let the target ask for its own sign-in). Without a gate (a caller that
+//!   did not set one) a `members` route is served to anyone who can reach the port, exactly like a `public` one, and every log line says
+//!   `members (not enforced by this listener)`.
 //! * `Target::Service` (a Kubernetes Service) is reachable only through a [`ServiceDialer`] in [`Options::dialer`] (`pod::PortForward` or
 //!   `pod::ClusterDns`); without one requests to such a route get a 502 that says so.
-//! * Not supported: HTTP/1.0 (505), HTTP/2 (ALPN offers only `http/1.1`), trailers (dropped), `CONNECT`, absolute-form request targets, and paths with `..` segments (400). Routes are matched on the raw
+//! * HTTP/1.0 clients are served without keep-alive (a chunked answer reaches them as bare data that ends with the connection; chunked
+//!   requests, `Upgrade` and `Expect` are not part of 1.0). Trailer fields of a chunked body are passed on in both directions except those
+//!   that must never travel as a trailer (framing, routing, authentication, the names the listener sets: `trailer_ok`); the target is told
+//!   `TE: trailers` when the client said so.
+//! * HTTP/2 is served (`cloudlisten_h2serve.rs`): ALPN offers `h2` first on TLS ports and a plain port takes the HTTP/2 preface (prior knowledge); each request stream is run through this HTTP/1.1 code, so routing, the members gate, tenants and mutual TLS are the same (switch off with `Options::http2`). Not supported: server push, priorities, trailers, `CONNECT`, absolute-form request targets, and paths with `..` segments (400). Routes are matched on the raw
 //!   path, not a decoded one.
 //! * A ClientHello split over several TLS records is put together (up to 32 KiB) before the server name is read.
 //! * WebSocket and other tunnels over TLS keep one thread per connection, which sleeps in `poll(2)` on both sockets while nothing moves
@@ -67,6 +77,14 @@ pub trait CertSource: Send + Sync {
     /// [`Options::client_ca`]. A source that has none says so, and such a route then refuses every client.
     fn load_client_ca(&self, name: &str) -> Result<String, String> {
         Err(format!("this certificate source has no client CA \"{name}\""))
+    }
+    /// The listener's end of the TLS link to a pod (`podtls.rs`): the route's pod CA and the listener's own certificate and key.
+    fn load_pod_client(&self, name: &str) -> Result<podtls::Material, String> {
+        Err(format!("this certificate source has no pod link \"{name}\""))
+    }
+    /// The pod's end of the same link: the CA that signs the listener and the pod's own certificate and key.
+    fn load_pod_server(&self, name: &str) -> Result<podtls::Material, String> {
+        Err(format!("this certificate source has no pod link \"{name}\""))
     }
 }
 
@@ -106,6 +124,25 @@ impl CertSource for FileCerts {
         let f = self.dir.join(format!("{name}.ca"));
         std::fs::read_to_string(&f).map_err(|e| format!("{}: {e}", f.display()))
     }
+
+    /// `NAME.pod-ca`, `NAME.pod-client.crt` and `NAME.pod-client.key` (or `.pod-server.` for the pod's end).
+    fn load_pod_client(&self, name: &str) -> Result<podtls::Material, String> {
+        self.pod_files(name, "client")
+    }
+
+    fn load_pod_server(&self, name: &str) -> Result<podtls::Material, String> {
+        self.pod_files(name, "server")
+    }
+}
+
+impl FileCerts {
+    fn pod_files(&self, name: &str, end: &str) -> Result<podtls::Material, String> {
+        if !crate::cloudstorage::plain_name(name) {
+            return Err(format!("\"{name}\" is not a pod link name"));
+        }
+        let read = |f: String| std::fs::read_to_string(self.dir.join(&f)).map_err(|e| format!("{f}: {e}"));
+        Ok(podtls::Material { ca: read(format!("{name}.pod-ca"))?, chain: read(format!("{name}.pod-{end}.crt"))?, key: read(format!("{name}.pod-{end}.key"))? })
+    }
 }
 
 /// How a route whose target is a Kubernetes Service (a pod and its port) is reached from this machine: a connected socket, or the reason
@@ -125,6 +162,40 @@ fn dest_text(t: &Target) -> String {
 pub trait PortGate: Send + Sync {
     fn open(&self, port: u16) -> Result<(), String>;
     fn close(&self, port: u16);
+    /// Drop what an earlier run of this listener left in the firewall (a crash or SIGKILL gives it no chance to close its ports). Called once
+    /// before the first port is opened; a gate that holds nothing does nothing.
+    fn clear_stale(&self) {}
+}
+
+/// What a [`MemberGate`] decides for one request to a `members` route.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Member {
+    /// Signed in and allowed: the person's name (passed to the target as `X-Iyakki-User`).
+    Yes(String),
+    /// No session, an ended one, or a person of another tenant.
+    No,
+}
+
+/// Decides who may use a `members` route. `session` is the token from the cookie or the bearer header; `tenant` is the tenant of the
+/// route when the listener has tenants ([`Options::tenants`]), so a person who is signed in to another tenant is refused.
+pub trait MemberGate: Send + Sync {
+    fn check(&self, session: Option<&str>, tenant: Option<&str>) -> Member;
+}
+
+/// The session token of a request: the `iyakki_session` cookie, else `Authorization: Bearer`.
+pub fn session_token(headers: &[(String, String)]) -> Option<String> {
+    for (n, v) in headers {
+        if n.eq_ignore_ascii_case("cookie") {
+            for part in v.split(';') {
+                if let Some(t) = part.trim().strip_prefix("iyakki_session=") {
+                    if !t.is_empty() {
+                        return Some(t.to_string());
+                    }
+                }
+            }
+        }
+    }
+    headers.iter().find(|(n, _)| n.eq_ignore_ascii_case("authorization")).and_then(|(_, v)| v.trim().strip_prefix("Bearer ").map(|t| t.trim().to_string())).filter(|t| !t.is_empty())
 }
 
 /// A gate that does nothing, for a caller that manages the firewall itself.
@@ -168,6 +239,14 @@ pub struct Options {
     /// Requests and tunnels a tenant may have open at once (only with [`Options::tenants`]); beyond it requests get 503 and passthrough
     /// connections are closed. One tenant filling its share does not take the shared `max_conns` from the others for longer than it holds it.
     pub tenant_max_conns: usize,
+    /// Enforces `Access::Members` (see the module text). `None`: not enforced, and said so in the log.
+    pub members: Option<Arc<dyn MemberGate>>,
+    /// TLS to the pod: route host (as written in the route, lower case) -> the name of the pod link (`podtls.rs`; its CA and the
+    /// listener's certificate come from the [`CertSource`]). The listener then speaks only TLS with a client certificate to that target
+    /// and never falls back to plain HTTP. Not for passthrough routes (they are not opened).
+    pub pod_tls: BTreeMap<String, String>,
+    /// Serve HTTP/2 as well (ALPN `h2` on TLS ports, and prior knowledge on plain ports). Each request still runs through the HTTP/1.1 code (`cloudlisten_h2serve.rs`).
+    pub http2: bool,
 }
 
 impl Default for Options {
@@ -186,6 +265,9 @@ impl Default for Options {
             cert_reload: None,
             tenants: BTreeMap::new(),
             tenant_max_conns: 64,
+            members: None,
+            pod_tls: BTreeMap::new(),
+            http2: true,
         }
     }
 }
@@ -205,6 +287,7 @@ struct Inner {
     tls: Arc<rustls::ServerConfig>,
     active: AtomicUsize,
     auth: Arc<mtls::AuthState>,
+    pod: podtls::PodState,
     closed: AtomicBool,
     tenant_use: Mutex<HashMap<String, usize>>,
 }
@@ -262,6 +345,15 @@ fn now() -> i64 {
 }
 
 impl Inner {
+    /// The connection for a request of `route`: plain, or TLS with a client certificate when the route's host is in `Options::pod_tls`.
+    fn dial_route(&self, route: &Route) -> io::Result<podtls::Upstream> {
+        let tcp = self.dial(&route.target)?;
+        if self.opts.pod_tls.contains_key(&route.host.to_ascii_lowercase()) {
+            return podtls::connect(self, &route.host, tcp);
+        }
+        Ok(podtls::Upstream::plain(tcp))
+    }
+
     fn log(&self, line: &str) {
         (self.opts.log)(line)
     }
@@ -332,8 +424,20 @@ fn wanted_ports(t: &RouteTable, o: &Options) -> Result<BTreeMap<u16, Kind>, Stri
     Ok(m)
 }
 
+/// A restart (the bind address changed, or a port was given back a moment ago) can meet the old socket while the system is still
+/// closing it: "address in use" is tried again for up to a second before it is reported. A port someone else really holds still fails.
 fn bind(ip: IpAddr, port: u16) -> Result<TcpListener, String> {
-    TcpListener::bind((ip, port)).map_err(|e| {
+    let mut tries = 0;
+    let first = loop {
+        match TcpListener::bind((ip, port)) {
+            Err(e) if e.kind() == io::ErrorKind::AddrInUse && tries < 20 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            r => break r,
+        }
+    };
+    first.map_err(|e| {
         let hint = if port < 1024 && e.kind() == io::ErrorKind::PermissionDenied { " (ports below 1024 need the right to bind them, for example CAP_NET_BIND_SERVICE, or choose a listen port of 1024 or more)" } else { "" };
         format!("cannot listen on port {port}: {e}{hint}; no other port is used instead")
     })
@@ -348,6 +452,7 @@ impl Listener {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let auth = Arc::new(mtls::AuthState::default());
         let auth2 = auth.clone();
+        let http2 = opts.http2;
         let inner = Arc::new_cyclic(|weak: &std::sync::Weak<Inner>| {
             let resolver = LazyResolver(weak.clone());
             let mut cfg = rustls::ServerConfig::builder_with_provider(provider)
@@ -355,7 +460,7 @@ impl Listener {
                 .expect("ring supports TLS 1.2 and 1.3")
                 .with_client_cert_verifier(Arc::new(mtls::DynVerifier::new(auth.clone())))
                 .with_cert_resolver(Arc::new(resolver));
-            cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+            cfg.alpn_protocols = if http2 { vec![b"h2".to_vec(), b"http/1.1".to_vec()] } else { vec![b"http/1.1".to_vec()] };
             Inner {
                 table: RwLock::new(Arc::new(table)),
                 certs: RwLock::new(HashMap::new()),
@@ -366,6 +471,7 @@ impl Listener {
                 tls: Arc::new(cfg),
                 active: AtomicUsize::new(0),
                 auth: auth2,
+                pod: podtls::PodState::default(),
                 closed: AtomicBool::new(false),
                 tenant_use: Mutex::new(HashMap::new()),
             }
@@ -390,7 +496,7 @@ impl Listener {
                 Target::Service { name, port } if self.inner.opts.dialer.is_some() => format!("service {name}:{port} (through the cluster)"),
                 Target::Service { name, port } => format!("service {name}:{port} (NOT reachable from a local listener: requests get 502)"),
             };
-            self.inner.log(&format!("route {}{} on port {} ({:?}) -> {dest}, access {}", r.host, r.path_prefix, r.listen_port(), r.scheme, access_text(r.access)));
+            self.inner.log(&format!("route {}{} on port {} ({:?}) -> {dest}, access {}", r.host, r.path_prefix, r.listen_port(), r.scheme, access_text(r.access, self.inner.opts.members.is_some())));
         }
     }
 
@@ -521,6 +627,7 @@ fn reload(inner: &Inner) -> Vec<String> {
     *inner.certs.write().unwrap_or_else(|e| e.into_inner()) = fresh;
     *inner.refused.lock().unwrap_or_else(|e| e.into_inner()) = refused;
     lines.extend(mtls::reload_cas(inner, &t));
+    lines.extend(podtls::reload(inner, &t));
     lines
 }
 
@@ -629,10 +736,22 @@ fn accept_loop(inner: Arc<Inner>, port: u16, lis: TcpListener, stop: Arc<AtomicB
     }
 }
 
-fn access_text(a: Access) -> &'static str {
-    match a {
-        Access::Public => "public",
-        Access::Members => "members (not enforced by this listener)",
+fn access_text(a: Access, enforced: bool) -> &'static str {
+    match (a, enforced) {
+        (Access::Public, _) => "public",
+        (Access::Members, true) => "members (signed-in people only)",
+        (Access::Members, false) => "members (not enforced by this listener)",
+    }
+}
+
+/// The verdict for a route: `Ok(user)` (the person's name when a gate said yes, `None` when there is no gate or the route is public),
+/// or `Err(())` when the request must be refused.
+fn member_verdict(inner: &Inner, route: &Route, headers: &[(String, String)]) -> Result<Option<String>, ()> {
+    let Some(gate) = (route.access == Access::Members).then_some(inner.opts.members.as_ref()).flatten() else { return Ok(None) };
+    let tenant = inner.opts.tenants.get(&route.host.to_ascii_lowercase()).map(String::as_str);
+    match gate.check(session_token(headers).as_deref(), tenant) {
+        Member::Yes(u) => Ok(Some(u)),
+        Member::No => Err(()),
     }
 }
 
@@ -837,6 +956,10 @@ fn serve_connection(inner: &Arc<Inner>, tcp: TcpStream, peer: SocketAddr, port: 
     let tls = inner.table().routes.iter().any(|r| r.listen_port() == port && r.scheme != Scheme::Http);
     let _ = tcp.set_write_timeout(Some(Duration::from_secs(30)));
     if !tls {
+        if inner.opts.http2 && h2_prior_knowledge(inner, &tcp) {
+            h2serve::serve(inner, Box::new(tcp), Vec::new(), peer, port, false);
+            return;
+        }
         serve_http(inner, Box::new(tcp), peer, port, false);
         return;
     }
@@ -870,6 +993,10 @@ fn serve_connection(inner: &Arc<Inner>, tcp: TcpStream, peer: SocketAddr, port: 
             inner.log(&format!("{peer}: {} is a service of a cluster, not reachable from a local listener; closed", r.host));
             return;
         }
+        if r.access == Access::Members && inner.opts.members.is_some() {
+            inner.log(&format!("{peer} tls passthrough {}: a members route cannot be checked inside an untouched TLS tunnel, closed (make the route public to serve it)", r.host));
+            return;
+        }
         let _slot = match tenant_enter(inner, r) {
             Ok(s) => s,
             Err((code, why)) => {
@@ -879,7 +1006,7 @@ fn serve_connection(inner: &Arc<Inner>, tcp: TcpStream, peer: SocketAddr, port: 
         };
         match inner.dial(&r.target) {
             Ok(up) => {
-                inner.log(&format!("{peer} tls passthrough {} -> {dest} [access {}]", sni.unwrap_or_default(), access_text(r.access)));
+                inner.log(&format!("{peer} tls passthrough {} -> {dest} [access {}]", sni.unwrap_or_default(), access_text(r.access, inner.opts.members.is_some())));
                 tunnel_raw(tcp, up, &hello);
             }
             Err(e) => inner.log(&format!("{peer} tls passthrough {} -> {dest} failed: {e}", r.host)),
@@ -893,8 +1020,44 @@ fn serve_connection(inner: &Arc<Inner>, tcp: TcpStream, peer: SocketAddr, port: 
             return;
         }
     };
-    let stream = rustls::StreamOwned::new(conn, Replay { prefix: hello, pos: 0, tcp });
+    let mut stream = rustls::StreamOwned::new(conn, Replay { prefix: hello, pos: 0, tcp });
+    if inner.opts.http2 {
+        // finish the handshake to learn which protocol the client chose
+        let _ = stream.sock.tcp.set_read_timeout(Some(inner.opts.head_timeout));
+        while stream.conn.is_handshaking() {
+            if stream.conn.complete_io(&mut stream.sock).is_err() {
+                return;
+            }
+        }
+        if stream.conn.alpn_protocol() == Some(b"h2".as_slice()) {
+            h2serve::serve(inner, Box::new(stream), Vec::new(), peer, port, true);
+            return;
+        }
+    }
     serve_http(inner, Box::new(stream), peer, port, true);
+}
+
+/// Does a plain connection start with the HTTP/2 preface (a client that knows the server speaks it)? Looks without reading.
+fn h2_prior_knowledge(inner: &Arc<Inner>, tcp: &TcpStream) -> bool {
+    let _ = tcp.set_read_timeout(Some(inner.opts.head_timeout));
+    let deadline = Instant::now() + inner.opts.head_timeout;
+    let mut buf = [0u8; 24];
+    loop {
+        let n = match tcp.peek(&mut buf) {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+        if n == 0 || !crate::cloudlisten_h2::PREFACE.starts_with(&buf[..n]) {
+            return false;
+        }
+        if n == buf.len() {
+            return true;
+        }
+        if Instant::now() > deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
 }
 
 fn connect_local(port: u16, timeout: Duration) -> io::Result<TcpStream> {
@@ -1065,6 +1228,7 @@ fn reason(code: u16) -> &'static str {
         100 => "Continue",
         308 => "Permanent Redirect",
         400 => "Bad Request",
+        401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
@@ -1153,8 +1317,32 @@ fn crlf_line<R: BufRead>(r: &mut R, max: usize) -> io::Result<String> {
     }
 }
 
-/// A chunked body, chunk by chunk, forwarded as it arrives. Chunk extensions and trailers are dropped.
-fn copy_chunked<R: BufRead, W: Write>(r: &mut R, w: &mut W) -> io::Result<()> {
+/// How a chunked body is written on: as chunks, with the trailer fields that may be passed on (a client that speaks HTTP/1.1), or as the
+/// bare data (an HTTP/1.0 client knows no chunks; the body then ends with the connection and trailers are dropped).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ChunkOut {
+    Chunked,
+    Plain,
+}
+
+/// Trailer fields that are never passed on: framing, routing, request modifiers, authentication, payload processing and control data
+/// (RFC 9110 section 6.5.1), and the names the listener sets itself (a trailer must not be a way to make up who the caller is).
+fn trailer_ok(name: &str, value: &str) -> bool {
+    let l = name.to_ascii_lowercase();
+    let ln = l.replace('_', "-");
+    if !token(name) || value.bytes().any(|c| c == 0 || c == b'\r' || c == b'\n') {
+        return false;
+    }
+    const BLOCKED: [&str; 31] = [
+        "content-length", "transfer-encoding", "te", "trailer", "connection", "keep-alive", "upgrade", "host", "expect", "max-forwards", "cache-control", "if-match", "if-none-match", "if-modified-since", "if-unmodified-since",
+        "if-range", "range", "authorization", "proxy-authorization", "proxy-authenticate", "www-authenticate", "cookie", "set-cookie", "content-encoding", "content-type", "content-range", "location", "age", "date", "forwarded", "x-iyakki-user",
+    ];
+    !(BLOCKED.contains(&ln.as_str()) || ln.starts_with("x-forwarded-") || ln.starts_with("x-client-cert-") || ln.starts_with("proxy-"))
+}
+
+/// A chunked body, chunk by chunk, forwarded as it arrives. Chunk extensions are dropped; trailer fields that pass [`trailer_ok`] are
+/// forwarded (at most 100 lines, each at most 8 KB); the rest are read and dropped.
+fn copy_chunked<R: BufRead, W: Write>(r: &mut R, w: &mut W, out: ChunkOut) -> io::Result<()> {
     loop {
         let line = crlf_line(r, 1024)?;
         let hex = line.split(';').next().unwrap_or("").trim();
@@ -1163,29 +1351,47 @@ fn copy_chunked<R: BufRead, W: Write>(r: &mut R, w: &mut W) -> io::Result<()> {
         }
         let size = u64::from_str_radix(hex, 16).map_err(|_| bad_data("bad chunk size"))?;
         if size == 0 {
+            let mut kept = String::new();
             for _ in 0..100 {
-                if crlf_line(r, 8192)?.is_empty() {
-                    w.write_all(b"0\r\n\r\n")?;
+                let l = crlf_line(r, 8192)?;
+                if l.is_empty() {
+                    if out == ChunkOut::Chunked {
+                        w.write_all(format!("0\r\n{kept}\r\n").as_bytes())?;
+                    }
                     return w.flush();
+                }
+                if let Some((n, v)) = l.split_once(':') {
+                    let (n, v) = (n, v.trim());
+                    if !l.starts_with([' ', '\t']) && trailer_ok(n, v) {
+                        kept.push_str(&format!("{n}: {v}\r\n"));
+                    }
                 }
             }
             return Err(bad_data("too many trailer lines"));
         }
-        w.write_all(format!("{size:x}\r\n").as_bytes())?;
+        if out == ChunkOut::Chunked {
+            w.write_all(format!("{size:x}\r\n").as_bytes())?;
+        }
         copy_len(r, w, size)?;
         if !crlf_line(r, 2)?.is_empty() {
             return Err(bad_data("chunk not ended by CRLF"));
         }
-        w.write_all(b"\r\n")?;
+        if out == ChunkOut::Chunked {
+            w.write_all(b"\r\n")?;
+        }
         w.flush()?;
     }
 }
 
 fn copy_body<R: BufRead, W: Write>(r: &mut R, w: &mut W, b: Body) -> io::Result<()> {
+    copy_body_as(r, w, b, ChunkOut::Chunked)
+}
+
+fn copy_body_as<R: BufRead, W: Write>(r: &mut R, w: &mut W, b: Body, out: ChunkOut) -> io::Result<()> {
     match b {
         Body::None => Ok(()),
         Body::Len(n) => copy_len(r, w, n),
-        Body::Chunked => copy_chunked(r, w),
+        Body::Chunked => copy_chunked(r, w, out),
         Body::UntilClose => copy_to_end(r, w),
     }
 }
@@ -1232,9 +1438,11 @@ fn one_request(inner: &Arc<Inner>, rd: &mut BufReader<Box<dyn Sock>>, peer: Sock
     if parts.next().is_some() || !token(method) || target.is_empty() {
         return respond(rd.get_mut(), 400, &[], "bad request line\n", false);
     }
-    if version != "HTTP/1.1" {
-        return respond(rd.get_mut(), 505, &[], "only HTTP/1.1 is supported\n", false);
+    if !matches!(version, "HTTP/1.1" | "HTTP/1.0") {
+        return respond(rd.get_mut(), 505, &[], "only HTTP/1.1 and HTTP/1.0 are supported\n", false);
     }
+    // an HTTP/1.0 client: no keep-alive, no chunked framing in either direction, no 100-continue, no Upgrade
+    let http10 = version == "HTTP/1.0";
     if method == "CONNECT" {
         return respond(rd.get_mut(), 405, &[], "CONNECT is not supported\n", false);
     }
@@ -1252,8 +1460,11 @@ fn one_request(inner: &Arc<Inner>, rd: &mut BufReader<Box<dyn Sock>>, peer: Sock
         Ok(b) => b,
         Err((c, m)) => return respond(rd.get_mut(), c, &[], &format!("{m}\n"), false),
     };
+    if http10 && (body == Body::Chunked || !values(&headers, "upgrade").is_empty()) {
+        return respond(rd.get_mut(), 400, &[], "HTTP/1.0 has neither chunked bodies nor Upgrade\n", false);
+    }
     // a body not yet read means the connection cannot be reused after an early answer
-    let reusable = body == Body::None;
+    let reusable = body == Body::None && !http10;
     let client_close = tokens_of(&headers, "connection").iter().any(|t| t == "close");
     let keep = reusable && !client_close;
     let table = inner.table();
@@ -1276,7 +1487,7 @@ fn one_request(inner: &Arc<Inner>, rd: &mut BufReader<Box<dyn Sock>>, peer: Sock
                     break;
                 }
                 let loc = format!("https://{host}{}{target}", if hp == 443 { String::new() } else { format!(":{hp}") });
-                inner.log(&format!("{peer} {method} {host_header}{path} -> redirect to https [route {}{}, access {}] 308", r.host, r.path_prefix, access_text(r.access)));
+                inner.log(&format!("{peer} {method} {host_header}{path} -> redirect to https [route {}{}, access {}] 308", r.host, r.path_prefix, access_text(r.access, inner.opts.members.is_some())));
                 return respond(rd.get_mut(), 308, &[("Location", &loc)], "", keep);
             }
         }
@@ -1286,7 +1497,7 @@ fn one_request(inner: &Arc<Inner>, rd: &mut BufReader<Box<dyn Sock>>, peer: Sock
         inner.log(&format!("{peer} {method} {host_header}{path} on port {port}: no route, {}", if tls { 421 } else { 404 }));
         return if tls { respond(rd.get_mut(), 421, &[], "no route for this host on this port\n", keep) } else { respond(rd.get_mut(), 404, &[], "no route for this host and path\n", keep) };
     };
-    let label = format!("[route {}{}, access {}]", route.host, route.path_prefix, access_text(route.access));
+    let label = format!("[route {}{}, access {}]", route.host, route.path_prefix, access_text(route.access, inner.opts.members.is_some()));
     let dest = dest_text(&route.target);
     if matches!(route.target, Target::Service { .. }) && inner.opts.dialer.is_none() {
         inner.log(&format!("{peer} {method} {host_header}{path} {label}: the target is a cluster service, 502"));
@@ -1299,6 +1510,14 @@ fn one_request(inner: &Arc<Inner>, rd: &mut BufReader<Box<dyn Sock>>, peer: Sock
             return respond(rd.get_mut(), code, &[], &format!("{why}\n"), keep);
         }
     }
+    // who may use a members route: checked before the target is contacted
+    let signed_in = match member_verdict(inner, route, &headers) {
+        Ok(u) => u,
+        Err(()) => {
+            inner.log(&format!("{peer} {method} {host_header}{path} {label}: no signed-in person, 401"));
+            return respond(rd.get_mut(), 401, &[("WWW-Authenticate", "Bearer realm=\"IYAKKI\"")], "sign in to IYAKKI first (this address is for the people of this device)\n", keep);
+        }
+    };
     // the tenant of this connection is the one of the route it picked; its share of open requests is taken here
     let _slot = match tenant_enter(inner, route) {
         Ok(s) => s,
@@ -1312,7 +1531,7 @@ fn one_request(inner: &Arc<Inner>, rd: &mut BufReader<Box<dyn Sock>>, peer: Sock
         inner.log(&format!("{peer} {method} {host_header}{path} {label}: Upgrade refused, 403"));
         return respond(rd.get_mut(), 403, &[], "this route does not allow Upgrade (websocket is off)\n", keep);
     }
-    let up = match inner.dial(&route.target) {
+    let up = match inner.dial_route(route) {
         Ok(s) => s,
         Err(e) => {
             inner.log(&format!("{peer} {method} {host_header}{path} {label} -> {dest}: {e}, 502"));
@@ -1325,10 +1544,24 @@ fn one_request(inner: &Arc<Inner>, rd: &mut BufReader<Box<dyn Sock>>, peer: Sock
     // the request towards the target
     let hop = hop_by_hop(&headers);
     let mut head = format!("{method} {target} HTTP/1.1\r\n");
+    // a signed-in person's session token is the listener's business: the target behind a members route never receives it
+    let vouched = signed_in.is_some();
+    let session_in_cookie = headers.iter().any(|(n, v)| n.eq_ignore_ascii_case("cookie") && v.split(';').any(|p| p.trim().starts_with("iyakki_session=")));
     for (n, v) in &headers {
         let l = n.to_ascii_lowercase();
-        // a client cannot make up who it is: the identity headers are the listener's to set, never the client's
-        if hop.contains(&l) || l.starts_with("x-forwarded-") || l.starts_with("x-client-cert-") || matches!(l.as_str(), "forwarded" | "expect" | "content-length") {
+        // CGI and WSGI style targets read `X_Iyakki_User` as `X-Iyakki-User`: a client cannot make up who it is under either spelling
+        let ln = l.replace('_', "-");
+        if hop.contains(&l) || ln.starts_with("x-forwarded-") || ln.starts_with("x-client-cert-") || ln == "x-iyakki-user" || matches!(l.as_str(), "forwarded" | "expect" | "content-length") {
+            continue;
+        }
+        if vouched && l == "cookie" {
+            let kept: Vec<&str> = v.split(';').map(str::trim).filter(|p| !p.is_empty() && !p.starts_with("iyakki_session=")).collect();
+            if !kept.is_empty() {
+                head.push_str(&format!("{n}: {}\r\n", kept.join("; ")));
+            }
+            continue;
+        }
+        if vouched && !session_in_cookie && l == "authorization" {
             continue;
         }
         head.push_str(&format!("{n}: {v}\r\n"));
@@ -1338,11 +1571,17 @@ fn one_request(inner: &Arc<Inner>, rd: &mut BufReader<Box<dyn Sock>>, peer: Sock
         Body::Chunked => head.push_str("Transfer-Encoding: chunked\r\n"),
         _ => {}
     }
+    if let Some(u) = signed_in.as_deref().filter(|u| u.bytes().all(|c| c.is_ascii_graphic() && c != b':')) {
+        head.push_str(&format!("X-Iyakki-User: {u}\r\n"));
+    }
     head.push_str(&format!("X-Forwarded-For: {}\r\nX-Forwarded-Proto: {}\r\nX-Forwarded-Host: {host_header}\r\n", peer.ip(), if tls { "https" } else { "http" }));
     if tls && mtls::wanted(inner, &table).contains_key(&route.host.to_ascii_lowercase()) {
         if let Some(fp) = mtls::identity(&**rd.get_ref()) {
             head.push_str(&format!("X-Client-Cert-Sha256: {fp}\r\n"));
         }
+    }
+    if !http10 && tokens_of(&headers, "te").iter().any(|t| t == "trailers") {
+        head.push_str("TE: trailers\r\n");
     }
     match &upgrade {
         Some(u) => head.push_str(&format!("Connection: Upgrade\r\nUpgrade: {u}\r\n")),
@@ -1353,7 +1592,7 @@ fn one_request(inner: &Arc<Inner>, rd: &mut BufReader<Box<dyn Sock>>, peer: Sock
         let mut w = BufWriter::with_capacity(8192, up.try_clone()?);
         w.write_all(head.as_bytes())?;
         w.flush()?;
-        if values(&headers, "expect").iter().any(|v| v.eq_ignore_ascii_case("100-continue")) && body != Body::None {
+        if values(&headers, "expect").iter().any(|v| v.eq_ignore_ascii_case("100-continue")) && body != Body::None && !http10 {
             let c = rd.get_mut();
             c.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")?;
             c.flush()?;
@@ -1426,6 +1665,8 @@ fn one_request(inner: &Arc<Inner>, rd: &mut BufReader<Box<dyn Sock>>, peer: Sock
             Ok(b) => b,
         }
     };
+    // an HTTP/1.0 client gets a chunked answer as bare data that ends with the connection
+    let out_mode = if http10 && rbody == Body::Chunked { ChunkOut::Plain } else { ChunkOut::Chunked };
     let keep_after = keep && rbody != Body::UntilClose;
     let rhop = hop_by_hop(&rheaders);
     let mut out = format!("{status_line}\r\n");
@@ -1436,7 +1677,7 @@ fn one_request(inner: &Arc<Inner>, rd: &mut BufReader<Box<dyn Sock>>, peer: Sock
         }
         out.push_str(&format!("{n}: {v}\r\n"));
     }
-    if rbody == Body::Chunked {
+    if rbody == Body::Chunked && out_mode == ChunkOut::Chunked {
         out.push_str("Transfer-Encoding: chunked\r\n");
     }
     if !keep_after {
@@ -1448,7 +1689,7 @@ fn one_request(inner: &Arc<Inner>, rd: &mut BufReader<Box<dyn Sock>>, peer: Sock
     if c.write_all(out.as_bytes()).and_then(|_| c.flush()).is_err() {
         return false;
     }
-    if copy_body(&mut ur, c, rbody).is_err() {
+    if copy_body_as(&mut ur, c, rbody, out_mode).is_err() {
         return false;
     }
     keep_after
@@ -1470,7 +1711,7 @@ pub(crate) static TUNNEL_PASSES: std::sync::atomic::AtomicU64 = std::sync::atomi
 /// reads both sides with a 1 ms timeout; between passes that moved nothing the thread SLEEPS in `poll(2)` on both descriptors (at most a
 /// second, to notice the idle limit), so an idle tunnel costs one wake-up a second instead of a hundred. Data that rustls already holds is
 /// found by the pass itself (a pass that moved bytes is followed by another one without sleeping).
-fn tunnel_poll(client: &mut BufReader<Box<dyn Sock>>, up: &mut BufReader<TcpStream>) {
+fn tunnel_poll(client: &mut BufReader<Box<dyn Sock>>, up: &mut BufReader<podtls::Upstream>) {
     let poll = Some(Duration::from_millis(1));
     // bytes already read ahead on either side go first
     let ahead = client.buffer().to_vec();
@@ -1490,8 +1731,10 @@ fn tunnel_poll(client: &mut BufReader<Box<dyn Sock>>, up: &mut BufReader<TcpStre
     let mut moved = true;
     while last.elapsed() < Duration::from_secs(3600) {
         if !moved {
-            match (client.get_ref().fd(), Some(std::os::fd::AsRawFd::as_raw_fd(up.get_ref()))) {
-                (Some(a), Some(b)) if wait_readable(&[a, b], 1000) => {}
+            // TLS to the pod may hold decrypted bytes the socket no longer shows: look again soon
+            let wait = if up.get_ref().is_tls() { 20 } else { 1000 };
+            match (client.get_ref().fd(), Some(up.get_ref().raw_fd())) {
+                (Some(a), Some(b)) if wait_readable(&[a, b], wait) => {}
                 _ => std::thread::sleep(Duration::from_millis(10)),
             }
         }
@@ -1528,12 +1771,18 @@ fn tunnel_poll(client: &mut BufReader<Box<dyn Sock>>, up: &mut BufReader<TcpStre
     let _ = up.get_ref().shutdown(Shutdown::Both);
 }
 
+#[path = "cloudlisten_h2serve.rs"]
+mod h2serve;
 #[path = "cloudlisten_gate.rs"]
 pub mod gate;
 #[path = "cloudlisten_mtls.rs"]
 mod mtls;
 #[path = "cloudlisten_pod.rs"]
 pub mod pod;
+#[path = "cloudlisten_podspec.rs"]
+pub mod podspec;
+#[path = "cloudlisten_podtls.rs"]
+pub mod podtls;
 #[path = "cloudlisten_vault.rs"]
 pub mod vault;
 #[path = "cloudlisten_setup.rs"]

@@ -425,3 +425,61 @@ fn an_opened_table_has_an_open_in_data_viewer_link_that_asks_the_shell_for_the_d
     let (app2, _) = chat_with("lnk14", "done", Some(&format!("Opened {path} as d1: 1 rows")));
     assert!((0..app2.view.link_count()).all(|n| app2.view.link(n).is_none_or(|l| !l.url.ends_with("sales.csv"))));
 }
+
+#[test]
+fn a_tool_that_asks_for_the_pdf_viewer_reaches_the_shell_as_a_request_for_this_person_only() {
+    let (mut app, cx) = chat_with("lnk-pdfopen", "ok", None);
+    app.handle(&Event::Tick, &cx);
+    assert_eq!(request(&mut app), None);
+    iyakki_agent::appopen::request("someone-else", "pdf", "file:/x.pdf");
+    iyakki_agent::appopen::request(&cx.session.user, "pdf", "file:/home/me/a.pdf\npage:4");
+    assert_eq!(request(&mut app), Some(("pdf".to_string(), "file:/home/me/a.pdf\npage:4".to_string())));
+    assert_eq!(request(&mut app), None);
+    assert_eq!(iyakki_agent::appopen::take("someone-else"), Some(("pdf".to_string(), "file:/x.pdf".to_string())));
+}
+
+#[test]
+fn a_query_answer_is_drawn_as_a_table_and_has_the_open_in_data_viewer_link_at_four_sizes() {
+    let (cx, _d) = cx_with_backend("lnk-query", iyakki_agent::chat::Unconfigured);
+    let home = iyakki_agent::scope::home_root(&cx.session.user, cx.services.dir());
+    std::fs::write(home.join("sales.csv"), "region,qty\nnorth,3\n").unwrap();
+    let path = format!("{}/sales.csv", home.display());
+    let mut app = ChatApp::new();
+    app.msgs.push(Message::user("which regions sold the most"));
+    let call = iyakki_agent::chat::ToolCall { id: "t1".into(), name: "data_query".into(), args: serde_json::json!({"handle": "d1"}) };
+    app.msgs.push(Message::assistant_calls("", vec![call.clone()]));
+    app.msgs.push(Message::tool_result(&call, format!("| region | qty |\n|---|---|\n| north | 3 |\n| east | 12345 |\nRows 1-2 of 2.\nSource: {path}")));
+    app.msgs.push(Message::assistant("done".to_string()));
+    for (w, h) in [(1280, 720), (1920, 1080), (1024, 600), (800, 480)] {
+        render_with(&mut app, &cx, w, h);
+        let n = find(&app, "sales.csv");
+        assert!(!app.view.link_screen_rects(n).is_empty(), "{w}x{h}");
+        for (_, r) in app.view.link_screen_rects(n) {
+            assert!(r.x >= 0.0 && r.x + r.w <= w as f32 + 0.5, "{w}x{h}: the link is inside the width");
+        }
+    }
+    let n = find(&app, "sales.csv");
+    click(&mut app, &cx, n);
+    let req = request(&mut app).expect("the DATA app is asked for");
+    assert!(req.0 == "data" && req.1.ends_with("sales.csv"), "{req:?}");
+    // a query of a table with no file (a kept result) has no button
+    let (app2, _) = chat_with("lnk-query2", "done", Some("| a |\n|---|\n| 1 |"));
+    assert!((0..app2.view.link_count()).all(|n| app2.view.link(n).is_none_or(|l| !l.url.ends_with(".csv"))));
+}
+
+#[test]
+fn markdown_tables_in_an_answer_become_aligned_columns_with_a_rule_under_the_header() {
+    use super::chat_view::table_grid;
+    let g = table_grid("3 rows\n| region | qty |\n|---|---:|\n| north | 3 |\n| southeast | 12345 |\nRows 1-2 of 2.");
+    let lines: Vec<&str> = g.lines().collect();
+    assert_eq!(lines[0], "3 rows");
+    assert_eq!(lines[1], "region    │ qty");
+    assert_eq!(lines[2], "──────────┼──────");
+    assert_eq!(lines[3], "north     │ 3");
+    assert_eq!(lines[4], "southeast │ 12345");
+    assert_eq!(lines[5], "Rows 1-2 of 2.");
+    // text without a table, and a very long cell, are kept in shape
+    assert_eq!(table_grid("plain\nlines"), "plain\nlines");
+    let long = table_grid(&format!("| a |\n|---|\n| {} |", "x".repeat(60)));
+    assert!(long.lines().last().unwrap().chars().count() <= 28 && long.contains('…'));
+}

@@ -256,3 +256,16 @@ fn motion_through_the_shell_keeps_the_key_in_the_owners_vault_shows_the_red_sign
     iyakki_agent::camdetect::watch::for_hub(&hub).shutdown();
     hub.stop_all();
 }
+
+#[test]
+fn the_red_sign_text_covers_recordings_and_client_devices_in_one_sign() {
+    let rec = vec!["Front door".to_string(), "Hall (motion watch)".to_string()];
+    let client = "Maya's phone camera is in use by this machine";
+    assert_eq!(sign_text(&rec, None), "REC: Front door, Hall (motion watch). Click to stop.", "the old text is unchanged");
+    assert_eq!(sign_text(&[], Some(client)), "Maya's phone camera is in use by this machine.");
+    assert_eq!(sign_text(&rec[..1], Some(client)), "REC: Front door. Maya's phone camera is in use by this machine. Click to stop.");
+    assert_eq!(sign_text(&[], None), "");
+    // the text comes from clientmedia::indicator
+    let ind = iyakki_agent::clientmedia::Indicator { cameras: vec!["Maya's phone camera".into()], microphones: vec!["Maya's phone microphone".into()] };
+    assert_eq!(sign_text(&[], ind.text().as_deref()), "Maya's phone camera and Maya's phone microphone are in use by this machine.");
+}

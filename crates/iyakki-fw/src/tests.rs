@@ -205,11 +205,53 @@ fn golden_presets_and_the_ssh_boot_entry() {
     // with the SSH preset on as well, port 22 is not written twice
     c.set_preset(Preset::Ssh, true);
     let t = text(&c, &Resolved::default(), &Ctx { ssh_boot: true, ..Ctx::default() });
-    assert_eq!(t.matches("th dport 22 accept").count(), 6, "{t}");
+    assert_eq!(t.matches("th dport 22 counter accept").count(), 6, "{t}");
     // a cloud machine's web mode is reachable from anywhere; a chosen port is allowed as well
     let mut c = Config::default();
     c.presets = vec![Preset::RemoteDesktop];
     golden("remote_cloud", &only_user_rules(&text(&c, &Resolved::default(), &Ctx { cloud: true, remote_port: Some(9443), ..Ctx::default() })));
+}
+
+#[test]
+fn the_networks_of_a_vpn_count_as_local_only_when_asked_and_only_if_private() {
+    use crate::ruleset::{vpn_network, Addr};
+    let mut c = Config::default();
+    c.presets = vec![Preset::Ssh];
+    let nets = vec![vpn_network("100.64.1.2/24").unwrap()];
+    assert_eq!(nets[0], Addr::Cidr("100.64.1.0".parse().unwrap(), 24), "host bits are cleared");
+    let ctx = Ctx { vpn_nets: nets, ..Ctx::default() };
+    let peer: IpAddr = "100.64.1.5".parse().unwrap();
+    let ssh = |c: &Config, from: IpAddr| eval(&build(c, &Resolved::default(), &ctx).unwrap().ruleset, &Packet::new_tcp("wg0", from, 22));
+    assert!(!ssh(&c, peer), "off by default: a VPN peer is not trusted for being on the VPN");
+    c.vpn_local = true;
+    assert!(ssh(&c, peer), "on: the tunnel's network is the local network");
+    assert!(!ssh(&c, "100.64.2.5".parse().unwrap()), "only that network");
+    assert!(ssh(&c, "10.8.0.5".parse().unwrap()), "the ordinary private ranges stay local as before");
+    assert!(!ssh(&c, "203.0.113.9".parse().unwrap()));
+    // ping follows the same rule
+    c.ping = Ping::Local;
+    let ping = |c: &Config| eval(&build(c, &Resolved::default(), &ctx).unwrap().ruleset, &Packet { iif: "wg0".into(), ct: crate::ruleset::CT_NEW, src: peer, l4: 1, dport: 0, icmp_type: 8 });
+    assert!(ping(&c));
+    c.vpn_local = false;
+    assert!(!ping(&c));
+    // what may not count as local
+    for bad in ["8.8.8.0/24", "10.0.0.0/7", "0.0.0.0/0", "100.63.0.0/16", "2001:db8::/32", "10.0.0.1", "10.0.0.0/x", "fe80::/10"] {
+        assert!(vpn_network(bad).is_err(), "{bad}");
+    }
+    assert!(vpn_network("100.64.1.1/10").is_ok() && vpn_network("fd12:3456::1/64").is_ok() && vpn_network("192.168.7.9/32").is_ok());
+}
+
+#[test]
+fn turning_on_vpn_is_local_only_opens_and_turning_it_off_tightens() {
+    let old = Config::default();
+    let mut new = old.clone();
+    new.vpn_local = true;
+    assert!(new.only_opens_from(&old), "no lock-out from letting more in");
+    assert!(!old.only_opens_from(&new), "taking it away asks to be kept");
+    // an old export without the field still reads, with the setting off
+    let mut j: serde_json::Value = serde_json::from_str(&old.to_json()).unwrap();
+    j.as_object_mut().unwrap().remove("vpn_local");
+    assert!(!Config::from_json(&j.to_string()).unwrap().vpn_local);
 }
 
 #[test]
@@ -466,6 +508,43 @@ fn a_changed_ruleset_waits_sixty_seconds_for_keep_and_then_comes_back() {
 }
 
 #[test]
+fn every_step_of_the_sixty_seconds_is_written_to_the_audit_log_with_who_did_it_whether_the_session_is_local_or_the_remote_desktop() {
+    for who in ["admin", "remote desktop: admin"] {
+        let mut r = rig();
+        r.e.boot(false);
+        let first = r.audit.lock().unwrap().len();
+        let mut c = r.e.config().clone();
+        c.add(rule(Kind::Ip, "198.51.100.7"));
+        r.e.propose(c, who).unwrap();
+        // the sixty seconds count the same way for a remote session: not kept, so it comes back by itself
+        assert_eq!(r.e.status(), Status::Pending { secs_left: 60 }, "{who}");
+        r.advance(60);
+        r.e.tick();
+        assert_eq!(r.e.status(), Status::On, "{who}");
+        assert!(r.e.config().rules.is_empty(), "{who}");
+        let log: Vec<(String, String)> = r.audit.lock().unwrap()[first..].to_vec();
+        let find = |ev: &str| log.iter().find(|(e, _)| e == ev).map(|(_, d)| d.clone());
+        assert_eq!(find("firewall.apply").as_deref(), Some(format!("{who}: 1 rules, 1 presets; waiting 60 s for Keep").as_str()), "{log:?}");
+        assert!(log.iter().any(|(e, d)| e == "firewall.revert" && d == "not confirmed within 60 seconds"), "the revert says why: {log:?}");
+        assert!(find("firewall.keep").is_none(), "{log:?}");
+        // the same again, and this time the person keeps it: the keep line names who
+        let mut c = r.e.config().clone();
+        c.add(rule(Kind::Ip, "198.51.100.8"));
+        r.e.propose(c, who).unwrap();
+        r.advance(10);
+        r.e.tick();
+        r.e.keep(who).unwrap();
+        let log: Vec<(String, String)> = r.audit.lock().unwrap()[first..].to_vec();
+        assert!(log.iter().any(|(e, d)| e == "firewall.keep" && d == who), "{log:?}");
+        assert!(r.store.saved.lock().unwrap().is_some(), "{who}");
+        // the emergency switch names who pulled it
+        r.e.disable_now(who).unwrap();
+        let log: Vec<(String, String)> = r.audit.lock().unwrap()[first..].to_vec();
+        assert!(log.iter().any(|(e, d)| e == "firewall.disable" && d == &format!("{who}: emergency off")), "{log:?}");
+    }
+}
+
+#[test]
 fn only_a_change_that_lets_more_in_is_recognised_as_opening() {
     let mut r = rig();
     r.e.boot(false);
@@ -685,7 +764,7 @@ fn host_names_are_resolved_refreshed_and_keep_their_last_good_answer() {
     c.add(rule(Kind::Host, "NAS.local"));
     r.e.propose(c, "admin").unwrap();
     r.e.keep("admin").unwrap();
-    assert!(r.be.installed().unwrap().to_text().contains("ip saddr 192.168.1.9 accept"));
+    assert!(r.be.installed().unwrap().to_text().contains("ip saddr 192.168.1.9 counter accept"));
     assert_eq!(r.e.view().hosts[0].addrs, vec![ip("192.168.1.9")]);
     assert!(r.store.saved.lock().unwrap().as_ref().unwrap().resolved.addrs.contains_key("nas.local"), "the answer is saved for the next boot");
     // not due yet: nothing changes
@@ -756,6 +835,49 @@ fn rules_with_an_end_time_stop_working_on_time() {
 }
 
 #[test]
+fn a_change_that_cuts_off_the_remote_desktop_is_taken_back_after_sixty_seconds_without_anyone_pressing_anything_and_every_step_is_audited() {
+    let mut r = rig();
+    r.e.boot(false);
+    let lan = ip("192.168.1.20");
+    // the person works through the remote desktop: its preset is kept, the web port is reachable
+    assert!(r.e.would_allow_tcp(lan, crate::ruleset::REMOTE_PORT), "the default keeps the remote desktop reachable");
+    let mut c = r.e.config().clone();
+    c.set_preset(Preset::RemoteDesktop, true);
+    r.e.propose(c, "admin (remote desktop)").unwrap();
+    assert_eq!(r.e.status(), Status::On, "no change: nothing to confirm");
+    // then a change over that very connection switches the preset off: the connection is gone, nobody can press Keep
+    let mut c = r.e.config().clone();
+    c.set_preset(Preset::RemoteDesktop, false);
+    r.e.propose(c, "admin (remote desktop)").unwrap();
+    assert!(!r.e.would_allow_tcp(lan, crate::ruleset::REMOTE_PORT), "applied at once, so the cut-off is real while it waits");
+    assert_eq!(r.e.status(), Status::Pending { secs_left: 60 });
+    r.advance(59);
+    r.e.tick();
+    assert!(!r.e.would_allow_tcp(lan, crate::ruleset::REMOTE_PORT));
+    r.advance(1);
+    r.e.tick();
+    assert!(r.e.would_allow_tcp(lan, crate::ruleset::REMOTE_PORT), "the kept rules are back by themselves: the remote desktop can be reached again");
+    assert_eq!(r.e.status(), Status::On);
+    // the audit log names who did what, in order
+    let log = r.audit.lock().unwrap().clone();
+    let kinds: Vec<&str> = log.iter().map(|(e, _)| e.as_str()).collect();
+    let pos = |ev: &str| kinds.iter().rposition(|k| *k == ev).unwrap_or_else(|| panic!("no {ev} in {kinds:?}"));
+    assert!(pos("firewall.apply") < pos("firewall.revert"));
+    let applied = log.iter().rev().find(|(e, d)| e == "firewall.apply" && d.contains("Keep")).map(|(_, d)| d.clone()).expect("the change that waited for Keep");
+    assert!(applied.starts_with("admin (remote desktop):") && applied.contains("waiting 60 s for Keep"), "{applied}");
+    // a kept change is audited with its person as well
+    let mut c = r.e.config().clone();
+    c.add(rule(Kind::Ip, "198.51.100.7"));
+    r.e.propose(c, "admin").unwrap();
+    r.e.keep("admin").unwrap();
+    assert!(r.audit.lock().unwrap().iter().any(|(e, d)| e == "firewall.keep" && d == "admin"));
+    assert_eq!(log.iter().rev().find(|(e, _)| e == "firewall.revert").map(|(_, d)| d.as_str()), Some("not confirmed within 60 seconds"));
+    // the emergency switch is audited with its person too
+    r.e.disable_now("root").unwrap();
+    assert!(r.audit.lock().unwrap().iter().any(|(e, d)| e == "firewall.disable" && d == "root: emergency off"));
+}
+
+#[test]
 fn a_share_port_the_firewall_blocks_is_found_out() {
     let mut r = rig();
     r.e.boot(false);
@@ -819,7 +941,7 @@ fn the_netlink_batch_is_well_formed() {
 fn cidr_masks_are_exact() {
     let m = |l: u8, n: usize| {
         // through the public encoder: a /l source must produce a bitwise mask of l bits
-        let rs = crate::ruleset::Ruleset { rules: vec![crate::ruleset::RuleSpec { note: String::new(), steps: vec![crate::ruleset::Step::Saddr(crate::ruleset::Addr::Cidr(if n == 4 { ip("10.0.0.0") } else { ip("2001:db8::") }, l)), crate::ruleset::Step::Accept] }] };
+        let rs = crate::ruleset::Ruleset { rules: vec![crate::ruleset::RuleSpec { note: String::new(), steps: vec![crate::ruleset::Step::Saddr(crate::ruleset::Addr::Cidr(if n == 4 { ip("10.0.0.0") } else { ip("2001:db8::") }, l)), crate::ruleset::Step::Accept] }], sets: Vec::new() };
         crate::nl::encode_replace(&rs, 1).0
     };
     let b = m(13, 4);
@@ -1036,4 +1158,439 @@ fn the_sharing_zone_lets_in_only_dhcp_and_dns_on_the_shared_interface() {
     assert!(!crate::ruleset::eval(rs, &pkt("eth0", "10.42.0.10", 17, 67)), "only on the shared interface");
     let none = build(&Config::default(), &Resolved::default(), &Ctx { share_ifaces: vec!["a;b".into()], ..Ctx::default() }).unwrap();
     assert!(!none.ruleset.to_text().contains("sharing:"), "a made-up name never reaches a rule");
+}
+
+// ------------------------------------------------------------------ per-rule counters and sets for long lists (F-FW-10)
+
+mod counters_and_sets {
+    use super::*;
+    use crate::nl;
+    use crate::ruleset::{Addr, build_with, eval_counting, rule_counts, rule_id_of_note, Ruleset, Step, BLOCKED_NOTE, SET_MIN};
+
+    fn attr(t: u16, d: &[u8]) -> Vec<u8> {
+        let mut v = ((4 + d.len()) as u16).to_ne_bytes().to_vec();
+        v.extend(t.to_ne_bytes());
+        v.extend(d);
+        while v.len() % 4 != 0 {
+            v.push(0);
+        }
+        v
+    }
+
+    /// A dump reply the way the kernel lists the rules: one NEWRULE message per rule, a counter expression where there is a count.
+    fn dump_reply(per: &[Option<(u64, u64)>]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for c in per {
+            let elem = match c {
+                Some((pk, by)) => {
+                    let data = [attr(1, &by.to_be_bytes()), attr(2, &pk.to_be_bytes())].concat();
+                    [attr(1, b"counter\0"), attr(2, &data)].concat()
+                }
+                None => [attr(1, b"immediate\0"), attr(2, &[0; 4])].concat(),
+            };
+            let mut payload = vec![1, 0, 0, 0];
+            payload.extend(attr(4, &attr(1, &elem)));
+            let mut m = vec![0u8; 16];
+            m[4..6].copy_from_slice(&0xa06u16.to_ne_bytes());
+            m.extend(payload);
+            let l = m.len() as u32;
+            m[0..4].copy_from_slice(&l.to_ne_bytes());
+            out.extend(m);
+        }
+        out
+    }
+
+    fn expr_names(rule_payload: &[u8]) -> Vec<String> {
+        let list = nl::attrs(&rule_payload[4..]).into_iter().find(|(t, _)| *t == 4).map(|(_, v)| v).unwrap_or(&[]);
+        nl::attrs(list)
+            .into_iter()
+            .map(|(_, e)| {
+                let a = nl::attrs(e);
+                let n = a.iter().find(|(t, _)| *t == 1).map(|(_, v)| *v).unwrap_or(&[]);
+                String::from_utf8_lossy(n.split(|b| *b == 0).next().unwrap_or(&[])).into_owned()
+            })
+            .collect()
+    }
+
+    fn a_config() -> Config {
+        let mut c = Config::default();
+        c.presets.clear();
+        c.set_preset(Preset::Ssh, true);
+        let mut a = rule(Kind::Ip, "198.51.100.7");
+        a.proto = Proto::Tcp;
+        a.ports = "8080".into();
+        c.add(a);
+        let mut b = rule(Kind::Cidr, "203.0.113.0/24");
+        b.comment = "office".into();
+        c.add(b);
+        c
+    }
+
+    #[test]
+    fn rules_of_the_page_and_presets_count_what_they_let_in_and_the_blocked_counter_stays_last() {
+        let rs = build(&a_config(), &Resolved::default(), &Ctx::default()).unwrap().ruleset;
+        let mut counted = 0;
+        for r in &rs.rules {
+            let has = r.steps.contains(&Step::Counter);
+            let mine = r.note.starts_with("rule ") || r.note.starts_with("preset: ");
+            if mine {
+                let n = r.steps.len();
+                assert_eq!(r.steps[n - 2], Step::Counter, "the counter sits right before the verdict: {}", r.note);
+                assert_eq!(r.steps[n - 1], Step::Accept);
+                counted += 1;
+            } else if r.note != BLOCKED_NOTE {
+                assert!(!has, "only the rules of the page and the presets are counted, not {}", r.note);
+            }
+        }
+        assert!(counted >= 8, "two rules and the SSH preset on every local network: {counted}");
+        let last_counted = rs.rules.iter().rev().find(|r| r.steps.contains(&Step::Counter)).unwrap();
+        assert_eq!(last_counted.note, BLOCKED_NOTE, "counters_of_dump reads the blocked total from the last counted rule");
+    }
+
+    #[test]
+    fn what_the_kernel_would_report_per_rule_matches_what_the_evaluator_counts_and_the_blocked_total_stays_apart() {
+        let rs = build(&a_config(), &Resolved::default(), &Ctx::default()).unwrap().ruleset;
+        let mut hits: Vec<u64> = Vec::new();
+        let sources = [("198.51.100.7", 8080, 3), ("198.51.100.7", 9999, 2), ("203.0.113.9", 443, 4), ("192.168.1.5", 22, 5), ("8.8.8.8", 22, 6)];
+        for (src, port, n) in sources {
+            for _ in 0..n {
+                eval_counting(&rs, &Packet::new_tcp("eth0", ip(src), port), &mut hits);
+            }
+        }
+        let per: Vec<Option<(u64, u64)>> = rs.rules.iter().enumerate().map(|(i, r)| r.steps.contains(&Step::Counter).then(|| (hits[i], hits[i] * 60))).collect();
+        let reply = dump_reply(&per);
+        assert_eq!(nl::rule_counters_of_dump(&reply), per, "the reader gives back one entry per rule, in order");
+        let counts = rule_counts(&rs, &nl::rule_counters_of_dump(&reply));
+        let of = |note: &str| counts.iter().find(|c| c.note == note).map(|c| c.packets);
+        assert_eq!(of("rule 1"), Some(3), "only the port 8080 connections from the one address");
+        assert_eq!(of("rule 2: office"), Some(4));
+        assert_eq!(of("preset: SSH"), Some(5), "the six local networks of the preset add up under one note");
+        assert!(counts.iter().all(|c| c.note != BLOCKED_NOTE));
+        assert_eq!(rule_id_of_note("rule 2: office"), Some(2));
+        assert_eq!(rule_id_of_note("rule 14"), Some(14));
+        assert_eq!(rule_id_of_note("preset: SSH"), None);
+        // blocked: 2 (wrong port) + 6 (outside address) new connections reach the blocked counter and nothing else is mixed in
+        assert_eq!(nl::counters_of_dump(&reply), (8, 480));
+        // a list of another length (the table changed since) gives nothing instead of a wrong number
+        assert!(rule_counts(&rs, &per[1..]).is_empty());
+    }
+
+    #[test]
+    fn the_batch_for_the_kernel_has_a_counter_expression_in_exactly_the_rules_that_have_the_step() {
+        let rs = build(&a_config(), &Resolved::default(), &Ctx::default()).unwrap().ruleset;
+        let (bytes, acks) = nl::encode_replace(&rs, 10);
+        let rules: Vec<Vec<String>> = nl::split_messages(&bytes).into_iter().filter(|(t, _)| t & 0xff == 6 && t >> 8 == 10).map(|(_, p)| expr_names(p)).collect();
+        assert_eq!(rules.len(), rs.rules.len());
+        for (names, r) in rules.iter().zip(&rs.rules) {
+            assert_eq!(names.iter().filter(|n| *n == "counter").count(), r.steps.iter().filter(|s| **s == Step::Counter).count(), "{}", r.note);
+            if r.steps.contains(&Step::Counter) && r.steps.last() == Some(&Step::Accept) {
+                let at = names.iter().position(|n| n == "counter").unwrap();
+                assert_eq!(names[at + 1], "immediate", "the verdict follows the counter: {}", r.note);
+            }
+        }
+        assert_eq!(acks, 3 + 1 + rs.rules.len(), "table x3, chain, one per rule");
+    }
+
+    fn many(n: u8) -> Vec<IpAddr> {
+        (1..=n).map(|i| ip(&format!("198.51.100.{i}"))).collect()
+    }
+
+    fn host_config() -> (Config, Resolved) {
+        let mut c = Config::default();
+        c.presets.clear();
+        let mut h = rule(Kind::Host, "big.example.com");
+        h.proto = Proto::Tcp;
+        h.ports = "22".into();
+        c.add(h);
+        let mut r = Resolved::default();
+        let mut addrs = many(40);
+        addrs.extend([ip("2001:db8::1"), ip("2001:db8::2"), ip("2001:db8::3")]);
+        r.addrs.insert("big.example.com".into(), addrs);
+        (c, r)
+    }
+
+    #[test]
+    fn a_host_with_many_answers_is_one_rule_and_a_set_and_every_verdict_stays_the_same() {
+        let (c, r) = host_config();
+        let flat = build_with(&c, &r, &Ctx::default(), usize::MAX).unwrap().ruleset;
+        let set = build(&c, &r, &Ctx::default()).unwrap().ruleset;
+        assert!(flat.sets.is_empty());
+        assert_eq!(set.sets.len(), 1, "the forty IPv4 answers; the three IPv6 answers stay as rules");
+        assert_eq!(set.sets[0].members.len(), 40);
+        assert!(set.sets[0].v4);
+        assert_eq!(set.rules.len() + 39, flat.rules.len(), "forty rules became one");
+        let t = set.to_text();
+        assert!(t.contains("set l1 {") && t.contains("type ipv4_addr") && t.contains("saddr @l1 meta l4proto tcp th dport 22 counter accept  # rule 1"), "{t}");
+        let mut hits_flat = Vec::new();
+        let mut hits_set = Vec::new();
+        for last in 0..=60u8 {
+            for src in [format!("198.51.100.{last}"), format!("203.0.113.{last}"), format!("2001:db8::{last:x}")] {
+                for port in [22u16, 23, 8080] {
+                    let p = Packet::new_tcp("eth0", ip(&src), port);
+                    assert_eq!(eval(&flat, &p), eval(&set, &p), "{src} -> {port}");
+                    eval_counting(&flat, &p, &mut hits_flat);
+                    eval_counting(&set, &p, &mut hits_set);
+                }
+            }
+        }
+        let sum = |rs: &Ruleset, h: &[u64], note: &str| -> u64 { rs.rules.iter().zip(h).filter(|(r, _)| r.note == note).map(|(_, n)| n).sum() };
+        assert_eq!(sum(&flat, &hits_flat, "rule 1"), sum(&set, &hits_set, "rule 1"), "the rule's counter adds up the same");
+        assert_eq!(sum(&flat, &hits_flat, "rule 1"), 40 + 3, "forty IPv4 and three IPv6 sources on port 22");
+    }
+
+    #[test]
+    fn below_the_threshold_nothing_changes() {
+        let mut c = Config::default();
+        c.presets.clear();
+        let mut r = Resolved::default();
+        let mut h = rule(Kind::Host, "small.example.com");
+        h.proto = Proto::Tcp;
+        h.ports = "22".into();
+        c.add(h);
+        r.addrs.insert("small.example.com".into(), many((SET_MIN - 1) as u8));
+        let a = build(&c, &r, &Ctx::default()).unwrap().ruleset;
+        let b = build_with(&c, &r, &Ctx::default(), usize::MAX).unwrap().ruleset;
+        assert_eq!(a, b);
+        assert!(a.sets.is_empty());
+    }
+
+    #[test]
+    fn a_list_too_long_for_rules_fits_as_a_set() {
+        let mut c = Config::default();
+        c.presets.clear();
+        let mut r = Resolved::default();
+        c.add(rule(Kind::Host, "huge.example.com"));
+        let addrs: Vec<IpAddr> = (0..3500u32).map(|i| IpAddr::V4(std::net::Ipv4Addr::from(0x0a64_0000 + i))).collect();
+        r.addrs.insert("huge.example.com".into(), addrs);
+        assert!(build_with(&c, &r, &Ctx::default(), usize::MAX).is_err(), "3500 rules are over the limit");
+        let rs = build(&c, &r, &Ctx::default()).unwrap().ruleset;
+        assert_eq!(rs.sets.len(), 1);
+        assert_eq!(rs.sets[0].members.len(), 3500);
+        assert!(eval(&rs, &Packet::new_tcp("eth0", ip("10.100.13.0"), 80)), "an address inside the list");
+        assert!(!eval(&rs, &Packet::new_tcp("eth0", ip("10.100.13.200"), 80)), "just outside the list (3500 = 0xdac)");
+    }
+
+    fn saddr_rule(a: Addr) -> crate::ruleset::RuleSpec {
+        crate::ruleset::RuleSpec { steps: vec![Step::Saddr(a), Step::L4(6), Step::Dport(22, 22), Step::Accept], note: "rule 1".into() }
+    }
+
+    fn prefix_rules() -> Vec<crate::ruleset::RuleSpec> {
+        let mut v = Vec::new();
+        for i in 0..20u8 {
+            v.push(saddr_rule(Addr::Cidr(ip(&format!("10.{i}.0.0")), 16)));
+        }
+        v.push(saddr_rule(Addr::Range(ip("172.16.0.5"), ip("172.16.0.9"))));
+        v.push(saddr_rule(Addr::Range(ip("172.16.0.8"), ip("172.16.0.20")))); // overlaps the last one
+        v.push(saddr_rule(Addr::Exact(ip("192.168.1.1"))));
+        v
+    }
+
+    #[test]
+    fn prefixes_and_ranges_become_one_merged_interval_set_with_the_same_verdicts() {
+        let rules = prefix_rules();
+        let (collapsed, sets) = crate::ruleset::collapse_long_lists(rules.clone(), SET_MIN);
+        assert_eq!(collapsed.len(), 1);
+        assert_eq!(sets.len(), 1);
+        assert!(sets[0].members.is_empty());
+        // 20 adjacent /16s from 10.0 to 10.19 merge into one span; the two overlapping ranges merge; the single address stays
+        assert_eq!(sets[0].ranges, vec![(ip("10.0.0.0"), ip("10.19.255.255")), (ip("172.16.0.5"), ip("172.16.0.20")), (ip("192.168.1.1"), ip("192.168.1.1"))]);
+        let flat = Ruleset { rules, sets: vec![] };
+        let set = Ruleset { rules: collapsed, sets };
+        for src in ["10.0.0.0", "10.19.255.255", "10.20.0.0", "9.255.255.255", "172.16.0.4", "172.16.0.5", "172.16.0.20", "172.16.0.21", "192.168.1.1", "192.168.1.2", "2001:db8::1"] {
+            let p = Packet::new_tcp("eth0", ip(src), 22);
+            assert_eq!(eval(&flat, &p), eval(&set, &p), "{src}");
+        }
+        let t = set.to_text();
+        assert!(t.contains("flags interval") && t.contains("10.0.0.0-10.19.255.255") && t.contains("192.168.1.1,") == false, "{t}");
+    }
+
+    fn port_rule(a: Addr, lo: u16, hi: u16) -> crate::ruleset::RuleSpec {
+        crate::ruleset::RuleSpec { steps: vec![Step::Nfproto(2), Step::Saddr(a), Step::L4(6), Step::Dport(lo, hi), Step::Counter, Step::Accept], note: "rule 1".into() }
+    }
+
+    fn pair_rules() -> Vec<crate::ruleset::RuleSpec> {
+        let mut v: Vec<_> = (0..16u8).map(|i| port_rule(Addr::Cidr(ip(&format!("10.{i}.0.0")), 16), 80 + u16::from(i), 80 + u16::from(i))).collect();
+        v.push(port_rule(Addr::Range(ip("172.16.0.5"), ip("172.16.0.20")), 8000, 8100));
+        v.push(port_rule(Addr::Exact(ip("192.168.1.5")), 443, 443));
+        v
+    }
+
+    #[test]
+    fn address_and_port_pairs_become_one_rule_and_one_set_with_the_same_verdicts_only_when_asked() {
+        let rules = pair_rules();
+        let mut sets = Vec::new();
+        let collapsed = crate::ruleset::collapse_concat(rules.clone(), SET_MIN, &mut sets);
+        assert_eq!((collapsed.len(), sets.len()), (1, 1));
+        assert_eq!(collapsed[0].steps, vec![Step::Nfproto(2), Step::L4(6), Step::SaddrDportSet("c1".into()), Step::Counter, Step::Accept]);
+        assert_eq!(sets[0].concat.len(), 18);
+        let flat = Ruleset { rules, sets: vec![] };
+        let set = Ruleset { rules: collapsed, sets };
+        for src in ["10.0.0.0", "10.3.9.9", "10.15.255.255", "10.16.0.0", "172.16.0.4", "172.16.0.5", "172.16.0.20", "172.16.0.21", "192.168.1.5", "192.168.1.6", "2001:db8::1"] {
+            for port in [22, 79, 80, 83, 95, 443, 444, 8000, 8050, 8100, 8101] {
+                let p = Packet::new_tcp("eth0", ip(src), port);
+                assert_eq!(eval(&flat, &p), eval(&set, &p), "{src}:{port}");
+            }
+        }
+        let mut udp = Packet::new_tcp("eth0", ip("192.168.1.5"), 443);
+        udp.l4 = 1;
+        assert!(!eval(&set, &udp));
+        // not asked: the plain builder never makes one; asked, a host with many answers and two ports becomes one rule and one pair set
+        let mut c = Config::default();
+        c.presets.clear();
+        let mut h = Rule::new(Kind::Host, "big.example.com");
+        h.proto = Proto::Tcp;
+        h.ports = "80,443".into();
+        c.add(h);
+        let mut r = Resolved::default();
+        r.addrs.insert("big.example.com".into(), (1..=20u8).map(|i| format!("198.51.100.{i}").parse().unwrap()).collect());
+        let plain = build(&c, &r, &Ctx::default()).unwrap().ruleset;
+        assert!(plain.sets.iter().all(|s| s.concat.is_empty()) && !plain.rules.iter().any(|r| r.steps.iter().any(|s| matches!(s, Step::SaddrDportSet(_)))));
+        assert!(!crate::ruleset::BuildOptions::default().concat_sets);
+        let on = crate::ruleset::build_opts(&c, &r, &Ctx::default(), crate::ruleset::BuildOptions { concat_sets: true, ..Default::default() }).unwrap().ruleset;
+        assert_eq!(on.sets.iter().filter(|s| !s.concat.is_empty()).map(|s| s.concat.len()).collect::<Vec<_>>(), vec![40], "{}", on.to_text());
+        assert!(on.rules.len() < plain.rules.len());
+        for src in ["198.51.100.1", "198.51.100.20", "198.51.100.21", "9.9.9.9"] {
+            for port in [79, 80, 81, 442, 443, 22] {
+                let p = Packet::new_tcp("eth0", ip(src), port);
+                assert_eq!(eval(&plain, &p), eval(&on, &p), "{src}:{port}");
+            }
+        }
+    }
+
+    /// Writes the batch that the pair-set ruleset makes to the file named by `IYAKKI_FW_DUMP` (a tool for loading it into a real kernel
+    /// with a few lines of script in a scratch network namespace; see the F-FW-14 notes). Ignored: it needs the variable.
+    #[test]
+    #[ignore = "writes a netlink batch to the path in IYAKKI_FW_DUMP"]
+    fn dump_the_pair_set_batch_for_a_kernel_run() {
+        let Ok(path) = std::env::var("IYAKKI_FW_DUMP") else { return };
+        let mut c = Config::default();
+        c.presets.clear();
+        let mut h = Rule::new(Kind::Host, "big.example.com");
+        h.proto = Proto::Tcp;
+        h.ports = "80,443".into();
+        c.add(h);
+        let mut r = Resolved::default();
+        r.addrs.insert("big.example.com".into(), (1..=20u8).map(|i| format!("198.51.100.{i}").parse().unwrap()).collect());
+        let rs = crate::ruleset::build_opts(&c, &r, &Ctx::default(), crate::ruleset::BuildOptions { concat_sets: true, ..Default::default() }).unwrap().ruleset;
+        assert!(rs.sets.iter().any(|s| !s.concat.is_empty()));
+        let (bytes, acks) = nl::encode_replace(&rs, 1);
+        std::fs::write(&path, &bytes).unwrap();
+        std::fs::write(format!("{path}.acks"), acks.to_string()).unwrap();
+    }
+
+    #[test]
+    fn pairs_that_overlap_are_left_as_separate_rules() {
+        let mut rules = pair_rules();
+        rules.push(port_rule(Addr::Cidr(ip("10.0.0.0"), 8), 80, 90)); // intersects the first elements in both
+        let mut sets = Vec::new();
+        let out = crate::ruleset::collapse_concat(rules.clone(), SET_MIN, &mut sets);
+        assert_eq!((out.len(), sets.len()), (rules.len(), 0));
+        // fewer than the minimum stays as it is too
+        let few = crate::ruleset::collapse_concat(pair_rules()[..5].to_vec(), SET_MIN, &mut sets);
+        assert_eq!(few.len(), 5);
+    }
+
+    #[test]
+    fn the_address_and_port_set_is_written_byte_for_byte_as_nft_writes_it() {
+        // the bytes below are what nft 1.1.6 sent to a 7.0 kernel for
+        //   set c1 { type ipv4_addr . inet_service; flags interval; elements = { 10.0.0.0/8 . 80-90, 192.168.1.5 . 443 } }
+        //   ip saddr . th dport @c1 accept
+        let set = crate::ruleset::AddrSet { name: "c1".into(), v4: true, members: vec![], ranges: vec![], concat: vec![((ip("10.0.0.0"), ip("10.255.255.255")), (80, 90)), ((ip("192.168.1.5"), ip("192.168.1.5")), (443, 443))] };
+        let rs = Ruleset { rules: vec![crate::ruleset::RuleSpec { steps: vec![Step::Nfproto(2), Step::SaddrDportSet("c1".into()), Step::Accept], note: String::new() }], sets: vec![set.clone()] };
+        let (bytes, _) = nl::encode_replace(&rs, 1);
+        let m = nl::split_messages(&bytes);
+        let newset = m.iter().find(|(t, _)| t & 0xff == 9).expect("a set is made").1;
+        let has = |hay: &[u8], needle: &[u8]| hay.windows(needle.len()).any(|w| w == needle);
+        assert!(has(newset, &[8, 0, 3, 0, 0, 0, 0, 0x84]), "flags interval + concatenation");
+        assert!(has(newset, &[8, 0, 4, 0, 0, 0, 1, 0xcd]), "key type (ipaddr << 6) | service");
+        assert!(has(newset, &[8, 0, 5, 0, 0, 0, 0, 8]), "padded key length");
+        assert!(has(newset, &[8, 0, 10, 0, 0, 0, 0, 1]), "set id");
+        assert!(has(newset, &[0x1c, 0, 2, 0x80, 0x0c, 0, 1, 0x80, 8, 0, 1, 0, 0, 0, 0, 4, 0x0c, 0, 1, 0x80, 8, 0, 1, 0, 0, 0, 0, 2]), "field lengths 4 and 2");
+        let elems = m.iter().find(|(t, _)| t & 0xff == 12).expect("elements").1;
+        let want: [u8; 72] = [
+            0x24, 0, 1, 0x80, 0x10, 0, 1, 0x80, 0x0c, 0, 1, 0, 0x0a, 0, 0, 0, 0, 0x50, 0, 0, 0x10, 0, 0x0a, 0x80, 0x0c, 0, 1, 0, 0x0a, 0xff, 0xff, 0xff, 0, 0x5a, 0, 0, //
+            0x24, 0, 1, 0x80, 0x10, 0, 1, 0x80, 0x0c, 0, 1, 0, 0xc0, 0xa8, 1, 5, 0x01, 0xbb, 0, 0, 0x10, 0, 0x0a, 0x80, 0x0c, 0, 1, 0, 0xc0, 0xa8, 1, 5, 0x01, 0xbb, 0, 0,
+        ];
+        assert!(has(elems, &[0x4c, 0, 3, 0x80]) && has(elems, &want), "elements: start key, then the last key as attribute 10");
+        // the rule: address into register 1, port into register 9 (the next word), lookup of register 1
+        let rule = m.iter().find(|(t, _)| t & 0xff == 6).expect("a rule").1;
+        assert!(has(rule, &[8, 0, 1, 0, 0, 0, 0, 9, 8, 0, 2, 0, 0, 0, 0, 2, 8, 0, 3, 0, 0, 0, 0, 2, 8, 0, 4, 0, 0, 0, 0, 2]), "port: 2 bytes at the transport header + 2 into register 9");
+        assert!(has(rule, b"lookup\0"));
+        // the same set in nft's own words
+        assert_eq!(set.concat_text(), "  set c1 {\n    type ipv4_addr . inet_service\n    flags interval\n    elements = { 10.0.0.0-10.255.255.255 . 80-90, 192.168.1.5 . 443 }\n  }\n");
+    }
+
+    #[test]
+    fn an_interval_set_is_written_with_the_interval_flag_and_end_elements() {
+        let (_, sets) = crate::ruleset::collapse_long_lists(prefix_rules(), SET_MIN);
+        let mut rs = Ruleset { rules: vec![], sets };
+        rs.rules.push(crate::ruleset::RuleSpec { steps: vec![Step::SaddrSet("l1".into()), Step::Accept], note: String::new() });
+        let (bytes, _) = nl::encode_replace(&rs, 1);
+        let m = nl::split_messages(&bytes);
+        let newset = m.iter().find(|(t, _)| t & 0xff == 9).expect("a set is made").1.to_vec();
+        // attribute 3 (flags) is 4 = NFT_SET_INTERVAL
+        assert!(newset.windows(8).any(|w| w == [8, 0, 3, 0, 0, 0, 0, 4]), "{newset:?}");
+        let elems: Vec<&[u8]> = m.iter().filter(|(t, _)| t & 0xff == 12).map(|(_, p)| *p).collect();
+        assert_eq!(elems.len(), 1);
+        // an end element for the first span is the address after it, 10.20.0.0, with flag 1
+        assert!(elems[0].windows(4).any(|w| w == [10, 20, 0, 0]));
+        assert!(elems[0].windows(8).any(|w| w == [8, 0, 3, 0, 0, 0, 0, 1]), "interval end flag");
+        // the set is filled before the chain, as for plain sets
+        let kinds: Vec<u16> = m.iter().map(|(t, _)| t & 0xff).collect();
+        assert!(kinds.iter().position(|k| *k == 12) < kinds.iter().position(|k| *k == 3));
+    }
+
+    #[test]
+    fn a_span_to_the_last_address_closes_with_an_all_zero_end_key_and_any_stays_a_rule() {
+        let mut rules: Vec<_> = (0..16u8).map(|i| saddr_rule(Addr::Cidr(ip(&format!("{}.0.0.0", 240 + i)), 8))).collect();
+        rules.push(saddr_rule(Addr::Cidr(ip("0.0.0.0"), 0)));
+        let (collapsed, sets) = crate::ruleset::collapse_long_lists(rules, SET_MIN);
+        assert_eq!(collapsed.len(), 2, "the any-address rule is kept as it is");
+        assert_eq!(sets[0].ranges, vec![(ip("240.0.0.0"), ip("255.255.255.255"))]);
+        let rs = Ruleset { rules: collapsed, sets };
+        let (bytes, _) = nl::encode_replace(&rs, 1);
+        let m = nl::split_messages(&bytes);
+        let e = m.iter().find(|(t, _)| t & 0xff == 12).unwrap();
+        assert!(e.1.windows(8).any(|w| w == [8, 0, 3, 0, 0, 0, 0, 1]));
+    }
+
+    #[test]
+    fn the_batch_makes_the_set_and_fills_it_before_the_chain_and_the_rule_looks_it_up() {
+        let (c, r) = host_config();
+        let rs = build(&c, &r, &Ctx::default()).unwrap().ruleset;
+        let (bytes, acks) = nl::encode_replace(&rs, 1);
+        let m = nl::split_messages(&bytes);
+        let kinds: Vec<u16> = m.iter().map(|(t, _)| t & 0xff).collect();
+        let newset = kinds.iter().position(|k| *k == 9).expect("a set is made");
+        let elems = kinds.iter().position(|k| *k == 12).expect("and filled");
+        let chain = kinds.iter().position(|k| *k == 3).unwrap();
+        let first_rule = kinds.iter().position(|k| *k == 6).unwrap();
+        assert!(newset < elems && elems < chain && chain < first_rule);
+        let payload = &m[elems].1;
+        let list = nl::attrs(&payload[4..]).into_iter().find(|(t, _)| *t == 3).unwrap().1;
+        assert_eq!(nl::attrs(list).len(), 40, "forty elements");
+        let n_rules = m.iter().filter(|(t, _)| t & 0xff == 6).count();
+        assert_eq!(acks, 3 + 2 + 1 + n_rules);
+        let with_lookup = m.iter().filter(|(t, _)| t & 0xff == 6).filter(|(_, p)| expr_names(p).iter().any(|n| n == "lookup")).count();
+        assert_eq!(with_lookup, 1, "one rule looks the source up");
+    }
+
+    #[test]
+    fn the_engine_hands_out_the_counts_of_the_installed_rules_only() {
+        let mut r = rig();
+        assert!(r.e.rule_counts().is_empty(), "nothing before the firewall is in force");
+        r.e.boot(false);
+        let mut c = r.e.config().clone();
+        c.add(rule(Kind::Ip, "198.51.100.7"));
+        r.e.propose(c, "admin").unwrap();
+        let installed = r.be.installed().unwrap();
+        let per: Vec<Option<(u64, u64)>> = installed.rules.iter().map(|x| x.steps.contains(&Step::Counter).then_some((5, 300))).collect();
+        r.be.0.lock().unwrap().rule_counters = per.clone();
+        let counts = r.e.rule_counts();
+        let one = counts.iter().find(|c| c.note == "rule 1").expect("the rule of the page");
+        assert_eq!((one.packets, one.bytes), (5, 300));
+        assert!(counts.iter().all(|c| c.note != BLOCKED_NOTE));
+        r.be.0.lock().unwrap().rule_counters = per[1..].to_vec();
+        assert!(r.e.rule_counts().is_empty(), "a list for another table gives nothing");
+    }
 }

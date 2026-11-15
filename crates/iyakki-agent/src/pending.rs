@@ -105,6 +105,8 @@ pub enum Probe {
     File { path: String },
     /// This machine's port accepts a connection (loopback only).
     Port { host: String, port: u16 },
+    /// This machine's http address answers with this status (0: any 2xx).
+    Http { url: String, expect: u16 },
 }
 
 impl Probe {
@@ -112,6 +114,7 @@ impl Probe {
         match self {
             Probe::File { path } => format!("file {path} exists"),
             Probe::Port { host, port } => format!("{host}:{port} accepts connections"),
+            Probe::Http { url, expect } => if *expect == 0 { format!("{url} answers OK") } else { format!("{url} answers {expect}") },
         }
     }
 
@@ -119,6 +122,7 @@ impl Probe {
     pub fn holds(&self) -> bool {
         match self {
             Probe::File { path } => Path::new(path).exists(),
+            Probe::Http { url, expect } => crate::pendingplus::http_holds(url, *expect),
             Probe::Port { host, port } => {
                 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
                 let Ok(addrs) = (host.as_str(), *port).to_socket_addrs() else { return false };
@@ -207,11 +211,13 @@ pub struct Settings {
     pub max_wakes_per_day: u32,
     /// The longest any wait lasts, in seconds.
     pub max_wait_secs: u64,
+    /// A wake opens a follow-up thread instead of continuing the current one.
+    pub separate_thread: bool,
 }
 
 impl Default for Settings {
     fn default() -> Settings {
-        Settings { auto_continue: true, max_wakes_per_day: 20, max_wait_secs: MAX_WAIT_SECS }
+        Settings { auto_continue: true, max_wakes_per_day: 20, max_wait_secs: MAX_WAIT_SECS, separate_thread: false }
     }
 }
 
@@ -469,7 +475,7 @@ impl Ledger {
             None => vec![],
         };
         // phase 1: states, under the lock
-        let mut to_check: Vec<(String, String, String)> = Vec::new();
+        let mut to_check: Vec<(String, String, String, String)> = Vec::new();
         {
             let _g = self.guard();
             let mut f = self.load();
@@ -508,7 +514,7 @@ impl Ledger {
                                     _ => j.last_line.clone(),
                                 };
                                 if t.state == State::FinishedOk && !t.check.is_empty() && !t.checked {
-                                    to_check.push((t.id.clone(), t.check.clone(), t.check_cwd.clone()));
+                                    to_check.push((t.id.clone(), t.check.clone(), t.check_cwd.clone(), t.detail.clone()));
                                 }
                             }
                             // the assistant already has a plain job's result (a note, a wait, a stop): nothing to wake it for
@@ -561,8 +567,8 @@ impl Ledger {
             self.save(&f);
         }
         // phase 2: acceptance checks, outside the lock (a command may take a while)
-        let results: Vec<(String, bool, String)> = to_check.iter().map(|(id, cmd, cwd)| {
-            let (ok, line) = run_check(cmd, cwd);
+        let results: Vec<(String, bool, String)> = to_check.iter().map(|(id, cmd, cwd, detail)| {
+            let (ok, line) = if cmd.starts_with(crate::pendingplus::JUDGE_PREFIX) { crate::pendingplus::judge_check(cmd, detail) } else { run_check(cmd, cwd) };
             (id.clone(), ok, line)
         }).collect();
         if !results.is_empty() {
@@ -811,9 +817,9 @@ pub fn promises_to_report(text: &str) -> bool {
     ];
     const DENIALS: &[&str] = &["can't", "cannot", "can not", "won't", "unable", "not able", "no way to", "don't have a way", "do not have a way", "if you want", "if you'd like", "if you like", "should i", "shall i", "would you like", "do you want", "you can ask"];
     let l = text.to_lowercase().replace(['\u{2019}', '\u{2018}'], "'");
-    l.split(['.', '!', '\n', ';']).any(|s| {
+    l.split(['.', '!', '\n', ';', '।']).any(|s| {
         let s = s.trim();
-        !s.is_empty() && !s.ends_with('?') && PROMISES.iter().any(|p| s.contains(p)) && !DENIALS.iter().any(|d| s.contains(d))
+        !s.is_empty() && !s.ends_with('?') && ((PROMISES.iter().any(|p| s.contains(p)) && !DENIALS.iter().any(|d| s.contains(d))) || crate::phrases::promises(s))
     })
 }
 

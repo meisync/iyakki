@@ -277,6 +277,29 @@ fn a_session_is_watched_from_one_window_at_a_time() {
 }
 
 #[test]
+fn a_members_route_of_the_domain_listener_accepts_the_cookie_of_a_desktop_session_and_only_while_the_server_runs() {
+    use iyakki_agent::cloudlisten::{Member, MemberGate};
+    use iyakki_agent::cloudmembers::RegistryGate;
+    let (s, _log) = start();
+    let (cookie, csrf) = signed_in(s.local_addr());
+    let token = cookie.strip_prefix("iyakki_session=").expect("the session cookie").to_string();
+    assert_eq!(RegistryGate.check(Some(&token), None), Member::Yes("ann".into()), "the person who signed in on this computer");
+    assert_eq!(RegistryGate.check(Some(&token), Some("blue")), Member::No, "a desktop session belongs to no cloud tenant");
+    assert_eq!(RegistryGate.check(Some("0123456789abcdef"), None), Member::No, "an unknown cookie");
+    assert_eq!(RegistryGate.check(None, None), Member::No, "no cookie");
+    // signing out ends it for the listener too
+    let (code, _, _) = http(s.local_addr(), &format!("POST /api/logout HTTP/1.1\r\nHost: {}\r\nCookie: {cookie}\r\nX-CSRF: {csrf}\r\nContent-Length: 0\r\n\r\n", s.local_addr()));
+    assert_eq!(code, 200);
+    assert_eq!(RegistryGate.check(Some(&token), None), Member::No, "signed out");
+    // a second session, then the server stops: its cookie is not accepted any more
+    let (cookie2, _) = signed_in(s.local_addr());
+    let token2 = cookie2.strip_prefix("iyakki_session=").unwrap().to_string();
+    assert_eq!(RegistryGate.check(Some(&token2), None), Member::Yes("ann".into()));
+    s.stop();
+    assert_eq!(RegistryGate.check(Some(&token2), None), Member::No, "a stopped server vouches for nobody");
+}
+
+#[test]
 fn signing_out_needs_the_csrf_token_and_ends_the_session() {
     let (srv, _) = start();
     let a = srv.local_addr();

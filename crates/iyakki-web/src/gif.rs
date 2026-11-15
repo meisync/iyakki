@@ -22,6 +22,20 @@ pub struct Animation {
     pub width: u32,
     pub height: u32,
     pub frames: Vec<Frame>,
+    /// From the NETSCAPE2.0 application block: `None` when the file has none (the animation plays once), `Some(0)` to repeat
+    /// forever, `Some(n)` to repeat n more times after the first play.
+    pub loops: Option<u32>,
+}
+
+impl Animation {
+    /// How many times the animation plays in all, or `None` for forever.
+    pub fn plays(&self) -> Option<u32> {
+        match self.loops {
+            None => Some(1),
+            Some(0) => None,
+            Some(n) => Some(n.saturating_add(1)),
+        }
+    }
 }
 
 /// The first frame of a GIF, on a transparent canvas the size of the logical screen.
@@ -58,6 +72,7 @@ fn decode_frames(d: &[u8], max_frames: usize) -> Result<Animation, String> {
     let (mut delay_ms, mut disposal) = (100u32, 0u8);
     let mut canvas = vec![0u8; sw * sh * 4];
     let mut frames: Vec<Frame> = Vec::new();
+    let mut loops: Option<u32> = None;
     let result: Result<(), String> = (|| loop {
         match *d.get(pos).ok_or("the GIF is cut short")? {
             0x21 => {
@@ -68,6 +83,12 @@ fn decode_frames(d: &[u8], max_frames: usize) -> Result<Animation, String> {
                     transparent = if d[pos + 1] & 1 == 1 { Some(d[pos + 4]) } else { None };
                     let hundredths = u16::from_le_bytes([d[pos + 2], d[pos + 3]]) as u32;
                     delay_ms = if hundredths < 2 { 100 } else { hundredths * 10 };
+                }
+                if label == 0xFF && d.get(pos) == Some(&11) && d.get(pos + 1..pos + 12).is_some_and(|n| n == b"NETSCAPE2.0" || n == b"ANIMEXTS1.0") {
+                    // the loop count sits in the first sub-block after the name: 3, 1, count (little endian)
+                    if d.get(pos + 12) == Some(&3) && d.get(pos + 13) == Some(&1) && pos + 15 < d.len() {
+                        loops = Some(u16::from_le_bytes([d[pos + 14], d[pos + 15]]) as u32);
+                    }
                 }
                 pos = skip_blocks(d, pos)?;
             }
@@ -153,7 +174,7 @@ fn decode_frames(d: &[u8], max_frames: usize) -> Result<Animation, String> {
             Ok(()) => "the GIF has no picture".into(),
         });
     }
-    Ok(Animation { width: sw as u32, height: sh as u32, frames })
+    Ok(Animation { width: sw as u32, height: sh as u32, frames, loops })
 }
 
 fn palette(d: &[u8], pos: usize, n: usize) -> Result<Vec<[u8; 3]>, String> {
@@ -398,5 +419,25 @@ mod tests {
         let a = decode_animated(&g).unwrap();
         assert_eq!(a.frames.len(), 1);
         assert_eq!(a.frames[0].rgba, decode(&g).unwrap().rgba);
+    }
+
+    #[test]
+    fn the_loop_count_is_read_from_the_netscape_block() {
+        let g = build(&[(0, 0, 4, 4, 0, 10, 0, None), (0, 0, 4, 4, 1, 10, 0, None)]);
+        // build() writes a count of 0: forever
+        let a = decode_animated(&g).unwrap();
+        assert_eq!((a.loops, a.plays()), (Some(0), None));
+        let at = g.windows(11).position(|w| w == b"NETSCAPE2.0").unwrap() + 11;
+        let mut twice = g.clone();
+        twice[at + 2] = 2;
+        let a = decode_animated(&twice).unwrap();
+        assert_eq!((a.loops, a.plays()), (Some(2), Some(3)), "a count of 2 means two more plays after the first");
+        // no block at all: once
+        let mut none = g.clone();
+        let start = at - 11 - 3;
+        none.drain(start..start + 3 + 11 + 5);
+        let a = decode_animated(&none).unwrap();
+        assert_eq!((a.loops, a.plays()), (None, Some(1)));
+        assert_eq!(a.frames.len(), 2, "the frames are the same without the block");
     }
 }

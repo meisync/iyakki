@@ -255,7 +255,8 @@ impl Permission {
             return Ok(Permission::Run(p.into()));
         }
         if let Some(t) = s.strip_prefix("tile:") {
-            return if TILE_PERMS.contains(&t) { Ok(Permission::Tile(t.into())) } else { Err(format!("permission {s:?}: tile:{}", TILE_PERMS.join(" | tile:"))) };
+            // SDK 1.2 capabilities carry their parameters: tile:flows=a,b  tile:money=USD  tile:markdown
+            return if TILE_PERMS.contains(&t) || iyakki_core_api::sdkbridge::parse_permission(t).is_some() { Ok(Permission::Tile(t.into())) } else { Err(format!("permission {s:?}: tile:{}", TILE_PERMS.join(" | tile:"))) };
         }
         Cap::parse(s).map(Permission::Cap)
     }
@@ -273,6 +274,7 @@ impl Permission {
                 "files" => "open and save files you pick in the file dialog (it never sees other files)".into(),
                 "llm" => "use your AI model for its own questions, with no tools and no access to your files (you are asked once; it has a daily limit; the model is the one you chose in Settings, which may send the text to another computer)".into(),
                 "speech" => "read text aloud with your voice settings (you are asked once; a voice that runs on another computer gets the text)".into(),
+                v2 if iyakki_core_api::sdkbridge::parse_permission(v2).is_some() => iyakki_core_api::sdkbridge::parse_permission(v2).and_then(|(k, g)| iyakki_core_api::sdkbridge::grant_words(&k, &g)).unwrap_or_default(),
                 _ => "ask the assistant questions, each one only after you allow it".into(),
             },
         }
@@ -280,7 +282,7 @@ impl Permission {
 
     /// Network, vault, run and writing files are the ones that ask the person again whatever the autonomy setting.
     pub fn sensitive(&self) -> bool {
-        !matches!(self, Permission::Cap(Cap::Read(_))) && !matches!(self, Permission::Tile(t) if t != "llm" && t != "speech")
+        !matches!(self, Permission::Cap(Cap::Read(_))) && !matches!(self, Permission::Tile(t) if t != "llm" && t != "speech" && !iyakki_core_api::sdkbridge::parse_permission(t).is_some_and(|(k, _)| iyakki_core_api::sdkbridge::capability(&k).is_some_and(|c| c.sensitive)))
     }
 
     pub fn canonical(&self) -> String {

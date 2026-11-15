@@ -10,6 +10,7 @@
 //! tenants signed in to (Show), the remembered ones (sign in), Add a tenant, and Personal. The model (sessions, which one is shown, key and geometry mapping) is `cloudsession.rs`; the remembered list is
 //! `iyakki_agent::cloudtenants`. Nothing of a tenant (picture, titles) is drawn while Personal is shown, only the chip's name and dot.
 
+use crate::stale_stats::mark_stale;
 use crate::safeclamp::SafeClamp;
 use super::*;
 use crate::cloudsession::{self as cs, Connector, Dot, Hub, Session};
@@ -209,7 +210,7 @@ impl Shell {
     pub(super) fn open_cloud_dialog(&mut self) {
         if self.screen_allows_tenants() {
             self.tenants.panel = Panel::Pick { sel: 0, error: None };
-            self.stale = true;
+            mark_stale!(self);
         }
     }
 
@@ -237,7 +238,7 @@ impl Shell {
         if let Some(d) = done {
             self.tenants.busy = None;
             self.tenant_done(d);
-            self.stale = true;
+            mark_stale!(self);
         }
         if self.tenants.hub.sessions.is_empty() {
             return;
@@ -245,7 +246,7 @@ impl Shell {
         let dots: Vec<Dot> = self.tenants.hub.sessions.iter().map(|x| x.dot()).collect();
         if dots != self.tenants.last_dots {
             self.tenants.last_dots = dots;
-            self.stale = true;
+            mark_stale!(self);
         }
         let (w, h) = self.size;
         let area = self.tenant_area(w, h, scale_for(w, h));
@@ -253,7 +254,7 @@ impl Shell {
         let shown = self.tenants.hub.active;
         if let (Some(_), Some(sess)) = (shown, self.tenants.hub.current_mut()) {
             if sess.generation() != sess.drawn {
-                self.stale = true;
+                mark_stale!(self);
             }
             // the window's size, told to the tenant once it has settled
             let want = (area.w as u32, area.h as u32);
@@ -379,7 +380,7 @@ impl Shell {
     }
 
     fn tenant_act(&mut self, a: Act) {
-        self.stale = true;
+        mark_stale!(self);
         match a {
             Act::Machine => {
                 self.tenants.hub.show(None);
@@ -507,7 +508,7 @@ impl Shell {
         }
         if !matches!(self.tenants.panel, Panel::Closed) {
             self.tenant_panel_event(ev);
-            self.stale = true;
+            mark_stale!(self);
             return true;
         }
         if let Event::MouseDown(x, y) = ev {
@@ -525,7 +526,7 @@ impl Shell {
                 self.tenants.hub.cycle();
                 self.tenants.pressed = false;
             }
-            self.stale = true;
+            mark_stale!(self);
             return true;
         }
         // the shell's own popups (the IYAKKI menu, Devices, the installer list) and its function keys are not the tenant's
@@ -739,7 +740,7 @@ impl Shell {
             let tw = g.text_width(size, &n, Face::Bold);
             let (bw, bh) = (tw + 28.0 * s, size * 2.4);
             let (bx, by) = (area.x + (area.w - bw) / 2.0, area.y + 12.0 * s);
-            g.rrect(bx, by, bw, bh, bh / 2.0, [14, 18, 32, 235]);
+            g.rrect(bx, by, bw, bh, bh / 2.0, crate::fx::panel_alpha(235));
             g.text(bx + 14.0 * s, by + (bh - g.line_height(size, Face::Bold)) / 2.0, size, if matches!(status, Status::Reconnecting | Status::Connecting) { crate::fx::AMBER } else { ERR }, &n, Face::Bold);
         }
         g.hit(area, Event::Tab(DESKTOP_FIELD), "tenant desktop");

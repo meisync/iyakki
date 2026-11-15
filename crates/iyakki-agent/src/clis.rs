@@ -787,7 +787,7 @@ fn resolve(base: &str, loc: &str) -> Option<String> {
 /// The published SHA-256 of `file` in a [`Checksum::Fixed`] table (tests can stand in a value for a file they build themselves).
 fn fixed_hash(table: &[(&str, &str)], file: &str) -> Option<String> {
     #[cfg(test)]
-    if let Some((_, h)) = TEST_FIXED.lock().unwrap().iter().find(|(n, _)| n == file) {
+    if let Some((_, h)) = TEST_FIXED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().find(|(n, _)| n == file) {
         return Some(h.clone());
     }
     table.iter().find(|(n, _)| *n == file).map(|(_, h)| h.to_string())

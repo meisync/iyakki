@@ -34,7 +34,7 @@ fn put(root: &std::path::Path, rel: &str, text: &str) {
 }
 
 fn beacon(host: &str, mac: &str, id: &str, dev_on: bool, pairing: bool) -> Beacon {
-    Beacon { host: host.into(), version: "0.1.0-test".into(), role: if dev_on { "target" } else { "host" }.into(), dev_on, pairing_open: pairing, mac: mac.into(), id: id.into(), port: 7979 }
+    Beacon { host: host.into(), version: "0.1.0-test".into(), role: if dev_on { "target" } else { "host" }.into(), dev_on, pairing_open: pairing, mac: mac.into(), id: id.into(), port: 7979, ip6: None }
 }
 
 fn xdomain() -> Device {
@@ -734,4 +734,26 @@ fn the_command_line_shows_the_steps_pairs_with_a_code_and_changes_the_link_setti
     cli::gadget_run(true, &udc, &fs, &mut |l| said.push(l.to_string())).unwrap();
     assert!(said[0].contains("fe800000.usb") && !fs.ops.lock().unwrap().is_empty());
     let _ = std::fs::remove_dir_all(udc);
+}
+
+#[test]
+fn an_ipv6_beacon_carries_a_link_local_address_made_from_the_mac_and_refuses_any_other() {
+    let me = mac(MAC_A);
+    let a = linklocal::eui64_link_local(&me);
+    assert_eq!(a.to_string(), "fe80::11:22ff:fe33:4455");
+    assert!(linklocal::is_link_local6(a) && !linklocal::is_link_local6("2001:db8::1".parse().unwrap()));
+    let mut bk = beacon("dev-pc", MAC_A, "00112233445566778899aabbccddeeff", true, false);
+    bk.ip6 = Some(a);
+    let wire = bk.encode();
+    assert!(std::str::from_utf8(&wire).unwrap().contains(&format!("ip6={a}\n")));
+    assert_eq!(Beacon::parse(&wire).unwrap(), bk);
+    // without the line it is the old beacon, and an old reader skips the line
+    bk.ip6 = None;
+    assert!(!std::str::from_utf8(&bk.encode()).unwrap().contains("ip6"));
+    // a global, multicast or malformed address is a bad field
+    for bad in ["2001:db8::1", "ff02::1", "::1", "fe80::zz"] {
+        let t = format!("{}ip6={bad}\n", std::str::from_utf8(&bk.encode()).unwrap());
+        assert_eq!(Beacon::parse(t.as_bytes()), Err(BeaconError::Field("ip6")), "{bad}");
+    }
+    assert_eq!(linklocal::BEACON_GROUP6.to_string(), "ff02::1");
 }

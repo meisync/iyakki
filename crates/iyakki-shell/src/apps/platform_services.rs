@@ -150,7 +150,7 @@ enum Done {
     Profiles(Vec<ListedProfile>),
     Plan(Result<Box<Plan>, String>),
     Applied(Result<Applied, String>),
-    Status(HashMap<String, String>, Option<bool>),
+    Status(HashMap<String, String>, iyakki_agent::clusterprobe::Probe),
     UpgradePlan(Result<Box<UpgradePlan>, String>),
     ConnectPlan(Result<Box<ConnectPlan>, String>),
     PushPlan(Result<Box<PushPlan>, String>),
@@ -191,7 +191,8 @@ pub struct PlatformPanel {
     inbox: Arc<Mutex<Vec<Done>>>,
     busy: Arc<AtomicUsize>,
     statuses: HashMap<String, String>,
-    registry_up: Option<bool>,
+    /// What the chosen cluster runs (asked of the cluster, kept a few seconds).
+    probe: Option<(std::time::Instant, iyakki_agent::clusterprobe::Probe)>,
     wiz: Option<Wizard>,
     log: ScrollLog,
     progress: Arc<Mutex<Vec<String>>>,
@@ -230,6 +231,7 @@ pub struct PlatformPanel {
     reg_launch: Option<quickinstall::Launch>,
     choose: TextField,
     choose_err: String,
+    choose_pick: crate::pathpick::PathPick,
     show_docs: bool,
     result_text: String,
     /// The private store's report on the Store page, and the reset or removal job being followed.
@@ -242,6 +244,9 @@ pub struct PlatformPanel {
 }
 
 /// The review text of a store action: the agent's exact list plus the choices of this screen.
+/// Click code of the Browse button on the "path of the program" page.
+const CHOOSE_BROWSE: usize = 49_920;
+
 fn store_confirm_text(rep: &pm::Report, action: &pm::Action, force: bool) -> String {
     let mut t = pm::preview(rep, action);
     if matches!(action, pm::Action::Reset) {
@@ -285,7 +290,7 @@ impl PlatformPanel {
             inbox: Arc::default(),
             busy: Arc::default(),
             statuses: HashMap::new(),
-            registry_up: None,
+            probe: None,
             wiz: None,
             log: ScrollLog::default(),
             progress: Arc::default(),
@@ -316,6 +321,7 @@ impl PlatformPanel {
             reg_launch: None,
             choose: TextField::new("/path/to/iyakki-store-server-x86_64", false),
             choose_err: String::new(),
+            choose_pick: Default::default(),
             show_docs: false,
             result_text: String::new(),
             store_rep: None,
@@ -400,7 +406,7 @@ impl PlatformPanel {
         for d in platform::specs() {
             let mine: Vec<&Installed> = inst.iter().filter(|i| i.service == d.id()).collect();
             let mut chips = vec![(d.kind().to_string(), MUTED)];
-            chips.push(if mine.is_empty() { ("not installed".into(), DIM) } else { (format!("{} installed", mine.len()), OK) });
+            chips.push(if !mine.is_empty() { (format!("{} installed", mine.len()), OK) } else if self.probe.as_ref().is_some_and(|(_, p)| p.has(d.id())) { ("running (installed outside Store)".into(), OK) } else { ("not installed".into(), DIM) });
             rows.push(ListRow { kind: RowKind::Spec(d.id().into()), title: d.title(), sub: d.card(), chips });
             for i in mine {
                 let live = self.statuses.get(&i.id).cloned().unwrap_or_else(|| "checking…".into());
@@ -412,24 +418,24 @@ impl PlatformPanel {
                 rows.push(ListRow { kind: RowKind::Inst(i.id.clone()), title: format!("   {}", i.id), sub: format!("   {place} · {}", i.web_url().unwrap_or("no address")), chips });
             }
         }
-        let reg = match self.registry_up {
-            Some(true) => ("installed".to_string(), OK),
-            Some(false) => ("not installed".to_string(), DIM),
+        let reg = match &self.probe {
+            Some((_, p)) => (p.registry_text(), if p.registry_text() == "installed" { OK } else { DIM }),
             None => ("checking…".to_string(), DIM),
         };
         rows.push(ListRow { kind: RowKind::Registry, title: "Registry".into(), sub: "where images built on this device go; Enter creates it in one step (or shows it and offers Remove)".into(), chips: vec![("registry".into(), MUTED), reg] });
         self.rows = rows;
         self.sel = self.sel.min(self.rows.len().saturating_sub(1));
         let ids: Vec<Installed> = inst;
+        let cached = self.probe.as_ref().filter(|(at, _)| iyakki_agent::clusterprobe::fresh(Some(*at))).map(|(_, p)| p.clone());
         self.spawn(move |pl| {
             let mut m = HashMap::new();
             for i in &ids {
                 m.insert(i.id.clone(), platform::status(pl, i, false).line());
             }
-            let reg = devcluster::Choice::load(&pl.dir, &pl.user).map(|c| {
-                let kc = devcluster::Kc::new(pl.run.clone(), &c.kubeconfig, &c.context);
-                kc.read(&["get", "service", iyakki_agent::regsetup::IN_NAME, "-n", iyakki_agent::regsetup::IN_NS, "-o", "name"]).ok()
-            });
+            let reg = match cached {
+                Some(p) => p,
+                None => iyakki_agent::clusterprobe::probe(pl.run.clone(), devcluster::Choice::load(&pl.dir, &pl.user).as_ref()),
+            };
             Done::Status(m, reg)
         });
     }
@@ -614,7 +620,7 @@ impl PlatformPanel {
                 Key::Char('r') => {
                     self.say("Looking again…", true);
                     self.statuses.clear();
-                    self.registry_up = None;
+                    self.probe = None;
                     self.reload();
                 }
                 Key::Char('c') => self.existing_form(),
@@ -1251,7 +1257,21 @@ impl PlatformPanel {
     }
 
     fn choose_event(&mut self, ev: &Event) {
+        // the file picker, when Browse opened it, takes every event until it answers
+        match self.choose_pick.event(ev) {
+            crate::pathpick::Picked::NotOpen => {}
+            crate::pathpick::Picked::Taken => return,
+            crate::pathpick::Picked::Chosen(p) => {
+                self.choose.set(&p.display().to_string());
+                self.choose_err.clear();
+                return;
+            }
+        }
         match ev {
+            Event::Tab(CHOOSE_BROWSE) | Event::Key(Key::Ctrl('o')) => {
+                let start = self.choose.value.clone();
+                self.choose_pick.open(crate::filepicker::PathKind::File, &[], "Choose the program", &start);
+            }
             Event::Key(Key::Esc) => {
                 self.page = Page::Result;
                 self.choose_err.clear();
@@ -1853,7 +1873,7 @@ impl PlatformPanel {
                 }
                 Done::Status(m, reg) => {
                     self.statuses = m;
-                    self.registry_up = reg;
+                    self.probe = Some((std::time::Instant::now(), reg));
                     if self.page == Page::List {
                         self.reload_rows_only();
                     }
@@ -2000,7 +2020,7 @@ impl PlatformPanel {
         for d in platform::specs() {
             let mine: Vec<&Installed> = inst.iter().filter(|i| i.service == d.id()).collect();
             let mut chips = vec![(d.kind().to_string(), MUTED)];
-            chips.push(if mine.is_empty() { ("not installed".into(), DIM) } else { (format!("{} installed", mine.len()), OK) });
+            chips.push(if !mine.is_empty() { (format!("{} installed", mine.len()), OK) } else if self.probe.as_ref().is_some_and(|(_, p)| p.has(d.id())) { ("running (installed outside Store)".into(), OK) } else { ("not installed".into(), DIM) });
             rows.push(ListRow { kind: RowKind::Spec(d.id().into()), title: d.title(), sub: d.card(), chips });
             for i in mine {
                 let live = before.get(&i.id).cloned().unwrap_or_else(|| "checking…".into());
@@ -2012,9 +2032,8 @@ impl PlatformPanel {
                 rows.push(ListRow { kind: RowKind::Inst(i.id.clone()), title: format!("   {}", i.id), sub: format!("   {place} · {}", i.web_url().unwrap_or("no address")), chips });
             }
         }
-        let reg = match self.registry_up {
-            Some(true) => ("installed".to_string(), OK),
-            Some(false) => ("not installed".to_string(), DIM),
+        let reg = match &self.probe {
+            Some((_, p)) => (p.registry_text(), if p.registry_text() == "installed" { OK } else { DIM }),
             None => ("checking…".to_string(), DIM),
         };
         rows.push(ListRow { kind: RowKind::Registry, title: "Registry".into(), sub: "where images built on this device go; Enter creates it in one step (or shows it and offers Remove)".into(), chips: vec![("registry".into(), MUTED), reg] });
@@ -2412,6 +2431,10 @@ impl PlatformPanel {
     }
 
     fn draw_choose(&mut self, g: &mut Gfx, body: R, s: f32) {
+        if self.choose_pick.is_open() {
+            self.choose_pick.render(g, body, s, ACCENT, crate::apps::blink(self.tick));
+            return;
+        }
         let want = self.fail.as_ref().map(|f| (f.lb.file, f.disc.want.uname())).unwrap_or(("the program", "x86_64"));
         let help = format!("Type the path of {}-{} (a prebuilt static file, for example the one from the release page). IYAKKI reads its ELF header to check that it is static and built for {}; it is never run. A good file is copied into your IYAKKI data folder and the deploy continues.", want.0, want.1, want.1);
         let mut y = body.y;
@@ -2421,8 +2444,10 @@ impl PlatformPanel {
         }
         y += 10.0 * s;
         g.text(body.x, y, 13.0 * s, TEXT, "Path of the file", Face::Bold);
-        let r = R::new(body.x, y + 20.0 * s, body.w.min(700.0 * s), 36.0 * s);
+        let bw = g.text_width(12.0 * s, "Browse\u{2026}", Face::Bold) + 12.0 * s * 1.7 + 8.0 * s;
+        let r = R::new(body.x, y + 20.0 * s, (body.w - bw).min(700.0 * s).max(60.0 * s), 36.0 * s);
         self.choose.render(g, r, true, s, crate::apps::blink(self.tick), Face::Sans, 0);
+        crate::pathpick::PathPick::button(g, r.x + r.w + 8.0 * s, r.y + 3.0 * s, s, CHOOSE_BROWSE, ACCENT);
         y += 66.0 * s;
         if !self.choose_err.is_empty() {
             for l in g.wrap(13.0 * s, &self.choose_err, Face::Sans, body.w).iter().take(5) {

@@ -13,6 +13,8 @@ struct Fake {
     snap_result: RefCell<Result<String, String>>,
     save_result: RefCell<Result<String, String>>,
     asked_list: Cell<u32>,
+    released: Cell<u32>,
+    kept: RefCell<Vec<Vec<String>>>,
 }
 
 fn cam(id: &str, name: &str, kind: Kind, status: Status, manage: bool) -> CamInfo {
@@ -25,7 +27,7 @@ fn solid(seq: u64, c: [u8; 3]) -> Frame {
 
 impl Fake {
     fn new(n: usize) -> Fake {
-        let f = Fake { cams: RefCell::new(vec![]), frames: RefCell::new(HashMap::new()), viewed: RefCell::new(vec![]), saved: RefCell::new(vec![]), removed: RefCell::new(vec![]), snaps: RefCell::new(vec![]), snap_result: RefCell::new(Ok("/home/amy/Pictures/camera-x.jpg".into())), save_result: RefCell::new(Ok("id".into())), asked_list: Cell::new(0) };
+        let f = Fake { cams: RefCell::new(vec![]), frames: RefCell::new(HashMap::new()), viewed: RefCell::new(vec![]), saved: RefCell::new(vec![]), removed: RefCell::new(vec![]), snaps: RefCell::new(vec![]), snap_result: RefCell::new(Ok("/home/amy/Pictures/camera-x.jpg".into())), save_result: RefCell::new(Ok("id".into())), asked_list: Cell::new(0), released: Cell::new(0), kept: RefCell::new(vec![]) };
         for i in 0..n {
             f.cams.borrow_mut().push(cam(&format!("c{i}"), &format!("Cam {i}"), Kind::Network, Status::Live, true));
             f.frames.borrow_mut().insert(format!("c{i}"), solid(1, [10, 200, 10]));
@@ -59,6 +61,12 @@ impl CameraSource for Fake {
     fn people(&self) -> Vec<String> {
         vec!["bob".into(), "root".into()]
     }
+    fn release_local(&self) {
+        self.released.set(self.released.get() + 1);
+    }
+    fn release_local_except(&self, shown: &[String]) {
+        self.kept.borrow_mut().push(shown.to_vec());
+    }
 }
 
 struct NoUse;
@@ -72,7 +80,7 @@ impl iyakki_tile_api::usage::UsageSource for NoUse {
 }
 
 fn cx_of(f: &Fake) -> TileCx<'_> {
-    TileCx { user: "amy", manage_settings: false, usage: &NoUse, calendar: &iyakki_tile_api::calendar::NoCalendar, audit: &iyakki_tile_api::NoAudit, remote: &iyakki_tile_api::remote::NoRemote, cameras: f }
+    TileCx { user: "amy", manage_settings: false, usage: &NoUse, calendar: &iyakki_tile_api::calendar::NoCalendar, audit: &iyakki_tile_api::NoAudit, remote: &iyakki_tile_api::remote::NoRemote, cameras: f, radio: &iyakki_tile_api::radio::NoRadio }
 }
 
 fn draw_at(a: &mut CamerasApp, cx: &TileCx, tick: u64, w: u32, h: u32, s: f32) -> Gfx {
@@ -204,7 +212,9 @@ fn a_picture_is_drawn_and_a_click_enlarges_it_and_asks_for_the_big_size() {
     assert_eq!(a.enlarged(), Some("c0"), "arrows switch camera while enlarged");
     a.handle(&Event::Key(Key::Esc), &cx);
     assert!(a.enlarged().is_none());
+    assert_eq!(f.released.get(), 0, "going back to the grid keeps the cameras running");
     assert!(matches!(a.handle(&Event::Key(Key::Esc), &cx), Flow::Back), "Esc on the grid leaves the tile");
+    assert_eq!(f.released.get(), 1, "leaving the tile closes the computer's own cameras at once (KI-080)");
 }
 
 #[test]
@@ -356,4 +366,44 @@ fn help_and_hint_describe_the_current_screen() {
     a.handle(&Event::Row(0), &cx);
     assert!(a.hint().contains("Esc back"));
     assert_eq!((a.title(), a.accent()), ("CAMERAS", ACCENT));
+}
+
+#[test]
+fn a_black_picture_says_why_in_words() {
+    assert_eq!(Status::Dark("Is it covered?".into()).label(), "Black picture");
+    assert_eq!(Status::Dark("Is it covered?".into()).detail(), "Is it covered?");
+    let f = Fake::new(0);
+    f.cams.borrow_mut().push(cam("usb:video0", "HD Webcam", Kind::Usb, Status::Dark("The picture is black. Is the camera covered or the privacy shutter closed?".into()), false));
+    let cx = cx_of(&f);
+    let mut a = CamerasApp::new();
+    for size in [(1200, 700, 1.0), (640, 360, 0.6)] {
+        let g = draw_at(&mut a, &cx, 5, size.0, size.1, size.2);
+        assert!(g.hits.iter().filter(|h| matches!(h.ev, Event::Row(_))).count() >= 1);
+    }
+}
+
+#[test]
+fn every_frame_tells_the_source_which_cameras_it_drew_so_the_rest_of_the_computers_own_cameras_close_at_once() {
+    let f = Fake::new(2);
+    f.cams.borrow_mut().push(cam("usb:video0", "HD Webcam", Kind::Usb, Status::Live, false));
+    f.frames.borrow_mut().insert("usb:video0".into(), solid(1, [30, 30, 220]));
+    let cx = cx_of(&f);
+    let mut a = CamerasApp::new();
+    let last = |f: &Fake| f.kept.borrow().last().cloned().unwrap();
+    // four cells: all three cameras are drawn
+    draw(&mut a, &cx);
+    assert!(last(&f).contains(&"usb:video0".to_string()));
+    // two cells: the page with the two network cameras does not draw the own camera, so it is let go of in the same frame
+    key(&mut a, &cx, '2');
+    draw(&mut a, &cx);
+    assert_eq!(last(&f), vec!["c0".to_string(), "c1".to_string()]);
+    // enlarging a network camera draws only that one
+    a.handle(&Event::Key(Key::Enter), &cx);
+    draw(&mut a, &cx);
+    assert_eq!(last(&f).len(), 1);
+    a.handle(&Event::Key(Key::Esc), &cx);
+    // the form instead of the grid draws no camera
+    key(&mut a, &cx, 'a');
+    draw(&mut a, &cx);
+    assert!(last(&f).is_empty(), "the add form shows no live picture");
 }

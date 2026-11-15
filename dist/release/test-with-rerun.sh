@@ -8,15 +8,22 @@ set -uo pipefail
 OUT="${1:?usage: test-with-rerun.sh OUT_DIR}"; mkdir -p "$OUT"
 cd "$(git rev-parse --show-toplevel)"
 KNOWN="dist/release/known-flaky.txt"
+# Names of the failed tests in a cargo test log. Three sources, joined: the `test X ... FAILED` line (when a test or its child printed to stderr in between,
+# libtest's line is split and FAILED lands on a line of its own), the `---- X stdout ----` headings and the `failures:` name lists. A failed test is never lost to a split line.
+failed_names() {
+  { grep -E '^test .* \.\.\. FAILED$' "$1" | sed -E 's/^test (.*) \.\.\. FAILED$/\1/'
+    grep -E '^---- .* stdout ----$' "$1" | sed -E 's/^---- (.*) stdout ----$/\1/'
+    awk '/^failures:$/ {f=1; next} f && /^    [^ ]/ {sub(/^    /, ""); print; next} f && !/^    / {f=0}' "$1"; } | sort -u
+}
 : > "$OUT/test-flaky.txt"
 cargo test --workspace --locked --no-fail-fast >"$OUT/test.log" 2>&1; rc=$?
 if [ "$rc" = 0 ]; then echo "test-with-rerun: all passed in the first run"; exit 0; fi
 if grep -q '^error\(\[E[0-9]*\]\)\?: could not compile\|^error: failed to' "$OUT/test.log"; then echo "test-with-rerun: the build failed (see $OUT/test.log)" >&2; exit 1; fi
-mapfile -t FAILED < <(grep -E '^test .* \.\.\. FAILED$' "$OUT/test.log" | sed -E 's/^test (.*) \.\.\. FAILED$/\1/' | sort -u)
+mapfile -t FAILED < <(failed_names "$OUT/test.log")
 if [ "${#FAILED[@]}" = 0 ]; then echo "test-with-rerun: cargo test failed but no failed test was found (see $OUT/test.log)" >&2; exit 1; fi
 echo "test-with-rerun: ${#FAILED[@]} test(s) failed in parallel; running them again one at a time"
 cargo test --workspace --locked --no-fail-fast -- --exact --test-threads=1 "${FAILED[@]}" >"$OUT/test-rerun.log" 2>&1
-mapfile -t STILL < <(grep -E '^test .* \.\.\. FAILED$' "$OUT/test-rerun.log" | sed -E 's/^test (.*) \.\.\. FAILED$/\1/' | sort -u)
+mapfile -t STILL < <(failed_names "$OUT/test-rerun.log")
 if [ "${#STILL[@]}" -gt 0 ]; then
   echo "test-with-rerun: REAL failure (also failed alone):" >&2; printf '  %s\n' "${STILL[@]}" >&2; exit 1
 fi

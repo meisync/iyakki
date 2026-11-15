@@ -47,6 +47,7 @@
 #include <gbm.h>
 
 #define IYAKKI_MIC_WITH_ALSA 1
+#include "extsnap.h"
 #include "micscan.h"
 #include "proto.h"
 
@@ -55,6 +56,8 @@
 #define CAMSHARE_PLUGIN "/usr/lib/gstreamer-1.0/libgstiyakkicamshare.so"
 #endif
 #ifndef MIC_PLUGIN
+#define WEBEXT_DIR "/usr/lib/iyakki/webext"
+#define WEBEXT_FILE "libiyakkiwebext.so"
 #define MIC_PLUGIN "/usr/lib/gstreamer-1.0/libgstiyakkimic.so"
 #define WEBSINK_PLUGIN "/usr/lib/gstreamer-1.0/libgstiyakkiwebsink.so"
 #endif
@@ -72,6 +75,9 @@ typedef struct {
     struct wpe_view_backend_exportable_fdo *exportable;
     struct wpe_view_backend *backend;
     WebKitWebView *view;
+    WebKitWebContext *ctx;
+    /* the last extension snapshot (header values inside: never logged, never written to a file) */
+    uint8_t *ext; size_t ext_len;
     WebKitNetworkSession *session;
     WebKitUserContentManager *ucm;
     int filter_wait;                 /* a content filter is being loaded: the first page waits for it */
@@ -485,8 +491,35 @@ static char media_need_sent[8];   /* the last MediaUnsupported sent for this pag
 
 static void permission_deny_all(void);
 
+/* The response headers of the page that just committed, as the engine received them: one "Name: value" line each (F_RESPONSE_HEADERS 0x93).
+ * The shell scrubs them and keeps them only when the person turned developer tools for the chat agent on. */
+static void send_response_headers(WebKitWebView *v) {
+    WebKitWebResource *res = webkit_web_view_get_main_resource(v);
+    WebKitURIResponse *resp = res ? webkit_web_resource_get_response(res) : NULL;
+    if (!resp) return;
+    GString *text = g_string_new(NULL);
+    SoupMessageHeaders *h = webkit_uri_response_get_http_headers(resp);
+    if (h) {
+        SoupMessageHeadersIter it;
+        const char *name, *value;
+        soup_message_headers_iter_init(&it, h);
+        while (soup_message_headers_iter_next(&it, &name, &value)) {
+            if (text->len + strlen(name) + strlen(value) + 3 > 48000) break;
+            g_string_append_printf(text, "%s: %s\n", name, value);
+        }
+    }
+    Buf b = {0};
+    buf_str(&b, webkit_uri_response_get_uri(resp));
+    buf_u32(&b, (uint32_t)webkit_uri_response_get_status_code(resp));
+    buf_str(&b, text->str);
+    send_msg(F_RESPONSE_HEADERS, &b);
+    buf_free(&b);
+    g_string_free(text, TRUE);
+}
+
 static void on_load_changed(WebKitWebView *v, WebKitLoadEvent e, gpointer ud) {
-    (void)v; (void)ud;
+    (void)ud;
+    if (e == WEBKIT_LOAD_COMMITTED) send_response_headers(v);
     if (e == WEBKIT_LOAD_STARTED) permission_deny_all();   /* a question about the old page is void */
     if (e == WEBKIT_LOAD_FINISHED) send_bb(F_LOADING, 0, 100);
     else if (e == WEBKIT_LOAD_STARTED) { media_need_sent[0] = 0; dev_sent = 0; send_bb(F_LOADING, 1, 0); }
@@ -1022,6 +1055,39 @@ static void setup_filter(void) {
 }
 
 /* ---------------------------------------------------------------------------------------------- messages */
+/* ---- browser extensions (webext.c) ---------------------------------------------------------------------------------------------
+ * The snapshot is kept (replacing the last one) and sent to the running web processes as a user message; a web process that starts
+ * later gets it as its initialization user data. The helper only checks the size; the web process extension parses it and reports. */
+static GVariant *ext_variant(void) {
+    if (!G.ext || !G.ext_len) return g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, "", 0, 1);
+    return g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, G.ext, G.ext_len, 1);
+}
+static void set_extensions(const uint8_t *p, size_t n) {
+    if (n > XS_MAX_SNAPSHOT) { logf_("extensions: snapshot of %zu bytes is too long, ignored", n); return; }
+    free(G.ext);
+    G.ext = n ? malloc(n) : NULL;
+    if (n && !G.ext) abort();
+    if (n) memcpy(G.ext, p, n);
+    G.ext_len = n;
+    if (G.ctx) webkit_web_context_send_message_to_all_extensions(G.ctx, webkit_user_message_new("iyakki-extensions", ext_variant()));
+}
+static void on_initialize_web_extensions(WebKitWebContext *c, gpointer d) {
+    const char *dir = getenv("IYAKKI_WEBEXT_DIR");
+    if (!dir || !*dir) dir = WEBEXT_DIR;
+    char *so = g_build_filename(dir, WEBEXT_FILE, NULL);
+    if (access(so, R_OK) == 0) {
+        webkit_web_context_set_web_process_extensions_directory(c, dir);
+        webkit_web_context_set_web_process_extensions_initialization_user_data(c, ext_variant());
+    }
+    g_free(so);
+}
+static gboolean on_context_message(WebKitWebContext *c, WebKitUserMessage *m, gpointer d) {
+    if (g_strcmp0(webkit_user_message_get_name(m), "iyakki-extensions-report") != 0) return FALSE;
+    GVariant *v = webkit_user_message_get_parameters(m);
+    if (v && g_variant_is_of_type(v, G_VARIANT_TYPE_STRING)) logf_("extensions: %s", g_variant_get_string(v, NULL)); /* names and counts only */
+    return TRUE;
+}
+
 static void handle(uint8_t ty, const uint8_t *p, size_t n) {
     Rd r = { .p = p, .n = n };
     if (!G.view) return;
@@ -1077,6 +1143,7 @@ static void handle(uint8_t ty, const uint8_t *p, size_t n) {
     case T_STOP_CAPTURE: { uint8_t kinds = rd_u8(&r); if (!r.bad) stop_capture(kinds); break; }
     case T_SCREEN_SOURCE: { char *p = rd_str(&r); if (!r.bad) screen_source(p); g_free(p); break; }
     case T_PERMISSION_ANSWER: { uint32_t id = rd_u32(&r); uint8_t allow = rd_u8(&r); if (!r.bad) permission_answer(id, allow); break; }
+    case T_EXTENSIONS: set_extensions(p, n); break;
     case T_QUIT: quit_loop(); break;
     default: break;   /* unknown: skipped */
     }
@@ -1263,6 +1330,9 @@ static void setup_engine(void) {
     /* IYAKKI_WEBVIEW_CACHE_MODEL: "document" keeps smaller in-memory caches (a machine with little memory, or the person's Small
        choice), "viewer" the smallest (no back-forward cache: for a kiosk page), anything else WebKit's full browser model. */
     const char *cm = getenv("IYAKKI_WEBVIEW_CACHE_MODEL");
+    G.ctx = ctx;
+    g_signal_connect(ctx, "initialize-web-extensions", G_CALLBACK(on_initialize_web_extensions), NULL);
+    g_signal_connect(ctx, "user-message-received", G_CALLBACK(on_context_message), NULL);
     if (cm && !strcmp(cm, "document")) webkit_web_context_set_cache_model(ctx, WEBKIT_CACHE_MODEL_DOCUMENT_BROWSER);
     else if (cm && !strcmp(cm, "viewer")) webkit_web_context_set_cache_model(ctx, WEBKIT_CACHE_MODEL_DOCUMENT_VIEWER);
     if (cm && *cm) logf_("memory: cache model %s", cm);

@@ -19,7 +19,7 @@ use crate::agent::{Risk, ToolDef, Tools};
 use crate::chat::ToolSpec;
 use crate::sharedfolder::{Access, Draft, Mode, Scope, ShareCfg, ShareInfo, Shares, EXPIRIES};
 
-pub const PROMPT_RULE: &str = "\nSHARED FOLDERS: share_list shows the person's shared folders. share_create, share_start, share_stop and share_delete each ask the person on a card that says what becomes reachable and by whom. An administrator may share any folder of the disks; everyone else only folders inside their own home. For a password share first call vault_request for the password, then pass its entry name as password_entry; never ask for or type a password or a link secret in the chat, and never repeat a link's secret part (it is in Settings -> Shared folders). Prefer access `link` or `local`; `open` makes the files visible to everyone on the network.";
+pub const PROMPT_RULE: &str = "\nSHARED FOLDERS: share_list shows the person's shared folders. share_create, share_start, share_stop and share_delete each ask the person on a card that says what becomes reachable and by whom. An administrator may share any folder of the disks; everyone else only folders inside their own home. For a password share first call vault_request for the password, then pass its entry name as password_entry; never ask for or type a password or a link secret in the chat, and never repeat a link's secret part (it is in Settings -> Shared folders). A running listing share offers a whole folder as one zip: a folder's address followed by ?zip. Prefer access `link` or `local`; `open` makes the files visible to everyone on the network.";
 
 pub const WRITE_TOOLS: [&str; 4] = ["share_create", "share_start", "share_stop", "share_delete"];
 pub const READ_TOOL: &str = "share_list";
@@ -232,13 +232,19 @@ impl ShareTools {
             what(&c.clone()),
             c.access.label(),
             if i.running { "RUNNING" } else { "stopped" },
-            if i.running { format!(" at {}", self.address_lines(i)) } else { String::new() },
+            if i.running { format!(" at {}{}", self.address_lines(i), if c.mode == Mode::Files { " (a folder's address followed by ?zip downloads it as one zip)" } else { "" }) } else { String::new() },
             i.error.as_ref().map(|e| format!(" · {e}")).unwrap_or_default()
         )
     }
 }
 
 impl Tools for ShareTools {
+
+    fn inner_tools(&self) -> Option<&dyn Tools> {
+
+        Some(&*self.inner)
+
+    }
     fn defs(&self) -> Vec<ToolDef> {
         let mut v = self.inner.defs();
         v.retain(|d| !is_share_tool(&d.spec.name));

@@ -162,7 +162,7 @@ fn the_scanner_counts_what_it_says_and_skips_tests_and_comments() {
 // Crate-level rules for the split of the shell (docs/development/COMPILE-SPEED-PLAN.md, Phase 2; docs/development/COMPILE-SPLIT-PILOT.md).
 //
 // 1. `iyakki-uikit` (the toolkit: gfx, fx, ui, text fields ...) depends on no `iyakki-*` crate, so a tile crate that uses it never pulls in
-//    the agent. (It is not called `iyakki-ui`: that name is the older headless editor model that `iyakki-gui` uses.)
+//    the agent. (The older headless editor crate `iyakki-ui` was removed on 2026-11-13; `iyakki-gui` uses `iyakki-edit` directly.)
 // 2. A tile crate (`crates/iyakki-tile-*`) depends on `iyakki-uikit` and `iyakki-tile-api` and on no other `iyakki-*` crate, except the
 //    lines in `data/tile_crate_deps.allow` (which may only shrink). The tile-ABI crates and the facade are not tile crates; they are
 //    listed in `TILE_INFRA`.
@@ -171,8 +171,8 @@ fn the_scanner_counts_what_it_says_and_skips_tests_and_comments() {
 const TILE_ALLOW: &str = include_str!("data/tile_crate_deps.allow");
 const UI_CRATE: &str = "iyakki-uikit";
 const API_CRATE: &str = "iyakki-tile-api";
-/// Crates under `iyakki-tile-*` that are the WASM tile interface and its host, not tiles. Not covered by rule 2.
-const TILE_INFRA: [&str; 4] = ["iyakki-tile-abi", "iyakki-tile-host", "iyakki-tile-example", API_CRATE];
+/// Crates under `iyakki-tile-*` that are the WASM tile interface and its host, or WASM tiles built on the ABI (the example and Runs), not native toolkit tiles. Not covered by rule 2.
+const TILE_INFRA: [&str; 9] = ["iyakki-tile-abi", "iyakki-tile-host", "iyakki-tile-example", "iyakki-tile-runs", "iyakki-tile-kit", "iyakki-tile-settings", "iyakki-tile-edit", "iyakki-tile-chat", API_CRATE];
 
 /// The `iyakki-*` crates a manifest names in `[dependencies]`, `[dev-dependencies]`, `[build-dependencies]` (also `[target.*.…]`).
 fn iyakki_deps(manifest: &str) -> Vec<String> {
@@ -266,7 +266,7 @@ fn the_manifest_scanner_reads_dependency_tables_only() {
 #[test]
 fn the_crates_split_out_of_the_agent_depend_on_small_leaf_crates_only() {
     // PILOT 4 adds four (below). PILOT 3: iyakki-camdetect also takes iyakki-clock (events.rs); the others are std plus crates the agent already had
-    let allowed: [(&str, &[&str]); 14] = [
+    let allowed: [(&str, &[&str]); 15] = [
         ("iyakki-sshfs", &["iyakki-sec"]),
         ("iyakki-camdetect", &["iyakki-sec", "iyakki-volcrypt", "iyakki-clock"]),
         ("iyakki-diskcrypt", &[]),
@@ -282,10 +282,98 @@ fn the_crates_split_out_of_the_agent_depend_on_small_leaf_crates_only() {
         ("iyakki-macrecovery", &["iyakki-proxy", "iyakki-drivers"]),
         ("iyakki-regex", &[]),
         ("iyakki-openpgp", &[]),
+        // F-BROW-79: the filter matcher split out of iyakki-vpn (serde only)
+        ("iyakki-filter", &[]),
     ];
     for (krate, ok) in allowed {
         let deps = iyakki_deps(&manifest(krate));
         let extra: Vec<&String> = deps.iter().filter(|d| !ok.contains(&d.as_str())).collect();
         assert!(extra.is_empty(), "{krate} may depend on {ok:?} only (found {deps:?}); never on iyakki-agent, iyakki-shell or a tile crate");
     }
+}
+
+/// The owner's rule (docs/development/CORE-ACCESS-MODEL.md 6f): a tile gets the machine only as the guarded handle in `cx.os`; it does not
+/// make a raw one. Files under `apps/` may name `iyakki_core_local` (the raw implementation) only as listed here, and the numbers may only
+/// shrink. The shell (`shell.rs`, `shell_osguard.rs`) builds the raw handle once and hands out `GuardedOs`.
+const RAW_OS_ALLOWED: [(&str, usize); 2] = [("crates/iyakki-shell/src/apps/browser_speed.rs", 1), ("crates/iyakki-shell/src/apps/devices.rs", 2)];
+
+#[test]
+fn apps_do_not_name_the_raw_os_crate_and_the_shell_hands_out_only_the_guarded_one() {
+    let r = root();
+    let mut files = Vec::new();
+    rust_files(&r.join("crates/iyakki-shell/src/apps"), &mut files);
+    let mut found = BTreeMap::new();
+    for f in files {
+        let text = std::fs::read_to_string(&f).unwrap_or_default();
+        let n = non_test_code(&text).lines().filter(|l| !l.trim_start().starts_with("//") && l.contains("iyakki_core_local")).count();
+        if n > 0 {
+            found.insert(f.strip_prefix(&r).unwrap().to_string_lossy().into_owned(), n);
+        }
+    }
+    let allow: BTreeMap<String, usize> = RAW_OS_ALLOWED.iter().map(|(p, n)| (p.to_string(), *n)).collect();
+    assert_eq!(found, allow, "an app names the raw Os crate (new, or the list can shrink): ask `cx.os` instead");
+    // the shell builds the raw handle in one place only, and `cx()` hands the app the guarded one
+    let shell = std::fs::read_to_string(r.join("crates/iyakki-shell/src/shell.rs")).unwrap();
+    assert!(!non_test_code(&shell).contains("LocalOs"), "shell.rs must not build a raw LocalOs: only shell_osguard.rs does");
+    assert!(non_test_code(&shell).contains("self.osguard.os_for("), "AppCx.os must be made by the guard");
+    let guard = std::fs::read_to_string(r.join("crates/iyakki-shell/src/shell_osguard.rs")).unwrap();
+    assert_eq!(non_test_code(&guard).matches("LocalOs::system()").count(), 1);
+}
+
+// ---- migrated tiles stay clean (procedure section 10) ----------------------------------------------------------------------------
+
+const MIGRATED: &str = include_str!("data/migrated_tiles.list");
+const FORBIDDEN: [&str; 9] = ["Services", ".services", "cx.host", "cx.web", "cx.chat", "cx.store", "cx.session", "cx.audit", "iyakki_agent::services"];
+
+fn migrated() -> Vec<(String, usize)> {
+    MIGRATED
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| {
+            let (p, n) = l.rsplit_once(' ').unwrap_or_else(|| panic!("migrated_tiles.list: expected `path count`: {l}"));
+            (p.trim().to_string(), n.trim().parse().unwrap_or_else(|_| panic!("migrated_tiles.list: bad count: {l}")))
+        })
+        .collect()
+}
+
+/// What a migrated tile's non-test code names that it may not, and how often it names the shell context.
+fn tile_context_use(text: &str) -> (Vec<String>, usize) {
+    let code = non_test_code(text);
+    let mut bad = Vec::new();
+    let mut appcx = 0;
+    for (i, l) in code.lines().enumerate() {
+        if l.trim_start().starts_with("//") {
+            continue;
+        }
+        for f in FORBIDDEN {
+            if l.contains(f) {
+                bad.push(format!("line {}: `{f}` in `{}`", i + 1, l.trim().chars().take(80).collect::<String>()));
+            }
+        }
+        appcx += l.matches("AppCx").count();
+    }
+    (bad, appcx)
+}
+
+#[test]
+fn migrated_tiles_never_name_the_services_or_the_shell_context_and_the_list_is_real() {
+    let list = migrated();
+    assert!(!list.is_empty());
+    for (path, most) in &list {
+        let text = std::fs::read_to_string(root().join(path)).unwrap_or_else(|_| panic!("migrated_tiles.list names {path}, which does not exist"));
+        let (bad, appcx) = tile_context_use(&text);
+        assert!(bad.is_empty(), "{path} is a migrated tile and may not reach the services or the shell context directly (ask its port):\n  {}", bad.join("\n  "));
+        assert!(appcx <= *most, "{path} names AppCx {appcx} times, {most} allowed: a migrated tile takes the shell context only at the App trait's entry points");
+        assert!(appcx >= *most, "{path} names AppCx {appcx} times, {most} listed: lower the number so it cannot grow back");
+    }
+}
+
+#[test]
+fn the_migrated_tile_checker_sees_what_it_is_for() {
+    let (bad, n) = tile_context_use("use super::{App, AppCx};\nfn a(cx: &AppCx) { cx.services.radio.stop(); }\n// cx.services in a comment\nfn b(p: &dyn Port) { p.stop(); }\n#[cfg(test)]\nmod t { fn c(cx: &AppCx) { cx.services.x(); } }");
+    assert_eq!((bad.len(), n), (1, 2), "{bad:?}");
+    assert!(bad[0].contains("cx.services") || bad[0].contains(".services"));
+    assert_eq!(tile_context_use("fn a(s: Arc<Services>) {}").0.len(), 1);
+    assert_eq!(tile_context_use("fn a(p: &dyn RadioPort) { p.audit(\"x\", \"y\"); }").0.len(), 0);
 }

@@ -393,3 +393,16 @@ fn the_flows_scheduler_and_the_vpn_are_in_the_catalogue_and_report_through_their
     assert!(vpn.after.contains(&"network"));
     assert_eq!(row(&r, "vpn").state, StartupState::Disabled, "nothing enabled, nothing to wait for");
 }
+
+#[test]
+fn the_web_engine_reports_its_start_step_and_a_failed_start_with_the_reason() {
+    if crate::webengine::available() {
+        return; // a real engine would start
+    }
+    let (r, _) = reg();
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let e = crate::webengine::run_reporting(std::path::Path::new("/nonexistent-iyakki"), "ann", "https://example.org/", &stop, &r).unwrap_err();
+    assert_eq!(e, crate::webengine::NOT_INSTALLED);
+    assert_eq!(r.state("web"), Some(StartupState::Failed(crate::webengine::NOT_INSTALLED.into())));
+    assert_eq!(r.take_failures().len(), 1, "queued once");
+}

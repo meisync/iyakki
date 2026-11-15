@@ -348,7 +348,29 @@ pub fn plan_push(pl: &Platform, inst: &Installed, ws: &WsInfo) -> Result<PushPla
     if p.transport == Transport::Https && !pl.vault.has(inst.token_vault().unwrap_or("-")) {
         p.blockers.push("the IYAKKI token is not in your vault".into());
     }
+    if !remote.is_empty() {
+        p.blockers.extend(tenant_push_blocker(pl, &remote));
+    }
     Ok(p)
+}
+
+/// In a tenant pod the tenant's `git.remote` entries decide whether this address may be pushed to (`tenantconfig::runtime::git_push_guard`);
+/// elsewhere, or with no entry, nothing changes. The workspace has no team here, so only the tenant's own entries and the team-less ones count.
+fn tenant_push_blocker(pl: &Platform, remote: &str) -> Option<String> {
+    let dir = crate::tenantconfig::enforce::data_dir_from_env()?;
+    struct Sink<'a>(&'a Platform);
+    impl crate::tenantconfig::api::ConfigAudit for Sink<'_> {
+        fn record(&self, _who: &str, event: &str, detail: &str) {
+            (self.0.audit)(event, detail);
+        }
+    }
+    let env = crate::tenantconfig::api::Env { dir: &dir, vault: crate::tenantconfig::vault::for_user(&dir, &pl.user), audit: &Sink(pl) };
+    push_blocker_in(&env, &pl.user, remote)
+}
+
+/// The tenant's answer for one push, with the environment given (so tests need no pod).
+pub(crate) fn push_blocker_in(env: &crate::tenantconfig::api::Env, user: &str, remote: &str) -> Option<String> {
+    crate::tenantconfig::runtime::git_push_guard(env, None, user, remote).err()
 }
 
 pub fn preview_push(p: &PushPlan) -> String {
@@ -366,6 +388,10 @@ pub fn push(pl: &Platform, p: &PushPlan, approved: bool) -> Result<String, Strin
     }
     if !p.blockers.is_empty() {
         return Err(format!("not pushed: {}", p.blockers.join("; ")));
+    }
+    // asked again at the moment of the push: the tenant's settings may have changed since the plan was shown
+    if let Some(b) = tenant_push_blocker(pl, &p.remote) {
+        return Err(format!("not pushed: {b}"));
     }
     let mut env: Vec<(String, String)> = vec![("GIT_TERMINAL_PROMPT".into(), "0".into())];
     let token = if p.transport == Transport::Https { Some(token_of(pl, &p.inst)?) } else { None };
@@ -393,4 +419,112 @@ pub fn push(pl: &Platform, p: &PushPlan, approved: bool) -> Result<String, Strin
     }
     pl.audit("push", &format!("{}:{}:{} ok", p.inst.id, p.ws.name, p.branch));
     Ok(format!("pushed {} to {}", p.branch, p.remote))
+}
+
+// ------------------------------------------------------------------------------------------------ pull request
+
+/// A pull request from the workspace's current branch into `base`, opened through the service's API. Nothing is pushed here: the branch
+/// must already be on the service (its own approval, [`push`]), so the request is for what the service holds.
+#[derive(Clone, Debug)]
+pub struct PrPlan {
+    pub inst: Installed,
+    pub ws: WsInfo,
+    pub owner: String,
+    pub repo: String,
+    pub head: String,
+    pub base_branch: String,
+    pub title: String,
+    pub body: String,
+    pub api_base: String,
+    pub blockers: Vec<String>,
+}
+
+fn clean_line(s: &str) -> bool {
+    !s.chars().any(|c| c.is_control())
+}
+
+/// `owner` and `repo` from the repository address the connection stored (`<service>/<owner>/<repo>`).
+fn owner_repo(repo_url: &str, base: &str) -> Option<(String, String)> {
+    let rest = repo_url.trim_end_matches('/').strip_prefix(base)?.trim_start_matches('/');
+    let mut it = rest.split('/');
+    let (o, r) = (it.next()?, it.next()?);
+    (it.next().is_none() && !o.is_empty() && !r.is_empty() && o.chars().chain(r.chars()).all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))).then(|| (o.to_string(), r.to_string()))
+}
+
+/// Read the workspace and the service's record (no network, no change). `base` is the branch the change goes into.
+pub fn plan_pull_request(pl: &Platform, inst: &Installed, ws: &WsInfo, base: &str, title: &str, body: &str) -> Result<PrPlan, String> {
+    if inst.kind != "git" {
+        return Err(format!("{} is not a git service", inst.title));
+    }
+    let api_base = base_url(inst)?;
+    let link = inst.workspaces.iter().find(|w| w.workspace == ws.name).ok_or_else(|| format!("the workspace {} is not connected to {}: connect it first", ws.name, inst.title))?;
+    let (owner, repo) = owner_repo(&link.repo_url, &api_base).ok_or("the stored repository address is not one of this service's")?;
+    let (title, base) = (title.trim().to_string(), base.trim().to_string());
+    let br = git(&*pl.run, &ws.root, &["symbolic-ref", "--short", "HEAD"], &[]);
+    let mut p = PrPlan { inst: inst.clone(), ws: ws.clone(), owner, repo, head: br.stdout.trim().to_string(), base_branch: base, title, body: body.trim().to_string(), api_base, blockers: vec![] };
+    if p.head.is_empty() {
+        p.blockers.push("HEAD is detached: check out the branch first".into());
+    }
+    if p.base_branch.is_empty() || p.base_branch.starts_with('-') || !clean_line(&p.base_branch) || p.base_branch.contains(' ') || p.base_branch.len() > 200 {
+        p.blockers.push("the branch to merge into is not a branch name".into());
+    } else if p.base_branch == p.head {
+        p.blockers.push(format!("{} is the branch to merge into: switch to a task branch first", p.head));
+    }
+    if p.title.is_empty() || p.title.len() > 200 || !clean_line(&p.title) {
+        p.blockers.push("the title is empty, longer than 200 characters or has line breaks".into());
+    }
+    if p.body.len() > 8000 {
+        p.blockers.push("the description is longer than 8000 characters".into());
+    }
+    let up = git(&*pl.run, &ws.root, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], &[]);
+    if !up.ok() || up.stdout.trim().is_empty() {
+        p.blockers.push(format!("{} is not on the service yet: push it first (its own approval)", p.head));
+    } else {
+        let ahead = git(&*pl.run, &ws.root, &["rev-list", "--count", "@{upstream}..HEAD"], &[]);
+        let n: usize = ahead.stdout.trim().parse().unwrap_or(0);
+        if n > 0 {
+            p.blockers.push(format!("{n} commit(s) of {} are not on the service yet: push them first", p.head));
+        }
+    }
+    if !pl.vault.has(inst.token_vault().unwrap_or("-")) {
+        p.blockers.push("the IYAKKI token of this service is not in your vault (unlock the vault, or connect again)".into());
+    }
+    Ok(p)
+}
+
+pub fn preview_pull_request(p: &PrPlan) -> String {
+    let mut s = format!("OPEN A PULL REQUEST in {}/{} at {}: {} \u{2192} {}\n\nTitle: {}\n", p.owner, p.repo, p.api_base, p.head, p.base_branch, p.title);
+    if !p.body.is_empty() {
+        s.push_str(&format!("Description: {}\n", p.body.chars().take(300).collect::<String>()));
+    }
+    s.push_str(&format!("\nPOST {}/api/v1/repos/{}/{}/pulls with the IYAKKI token from your vault (never shown). Nothing is merged: people review it on the service.\n", p.api_base, p.owner, p.repo));
+    for b in &p.blockers {
+        s.push_str(&format!("CANNOT BE APPLIED: {b}\n"));
+    }
+    s.trim_end().to_string()
+}
+
+/// Open the request. Returns its address. `approved` must be true.
+pub fn create_pull_request(pl: &Platform, p: &PrPlan, approved: bool) -> Result<String, String> {
+    if !approved {
+        return Err("opening the pull request was not approved".into());
+    }
+    if !p.blockers.is_empty() {
+        return Err(format!("no pull request opened: {}", p.blockers.join("; ")));
+    }
+    let token = token_of(pl, &p.inst)?;
+    let url = format!("{}/api/v1/repos/{}/{}/pulls", p.api_base, p.owner, p.repo);
+    let body = serde_json::json!({"title": p.title, "body": p.body, "head": p.head, "base": p.base_branch}).to_string();
+    let r = pl.http.request("POST", &url, Some(&token), Some(&body)).map_err(|e| format!("could not reach {}: {e}", p.api_base))?;
+    match r.status {
+        201 => {
+            let link = json_str(&r.body, &["html_url"]).unwrap_or_else(|| format!("{}/{}/{}/pulls", p.api_base, p.owner, p.repo));
+            pl.audit("pull_request", &format!("{}:{}:{} ok", p.inst.id, p.ws.name, p.head));
+            Ok(link)
+        }
+        409 | 422 => Err(format!("the service did not open it (HTTP {}): {}. A pull request for {} may exist already.", r.status, first_line(&json_str(&r.body, &["message"]).unwrap_or_default()), p.head)),
+        401 | 403 => Err(format!("the service refused the IYAKKI token (HTTP {}): it lacks the repository write scope", r.status)),
+        404 => Err(format!("the service has no repository {}/{} or the branch is not there", p.owner, p.repo)),
+        s => Err(format!("opening the pull request failed (HTTP {s}): {}", first_line(&r.body))),
+    }
 }

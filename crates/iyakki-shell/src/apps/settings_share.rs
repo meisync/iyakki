@@ -12,7 +12,7 @@ use super::*;
 use iyakki_agent::sharing::control::{self, Backend, FileBackend};
 use iyakki_agent::sharing::plan::{apply_policy, make_plan};
 use iyakki_agent::sharing::policy::Who;
-use iyakki_agent::sharing::view::{choices, warnings, Choices};
+use iyakki_agent::sharing::view::{choices_with, warnings, Choices};
 use iyakki_agent::sharing::{human_duration, IfaceInfo, Request, State, Status, DEFAULT_IDLE_HOURS, MAX_IDLE_HOURS};
 use std::sync::Arc;
 use std::time::Instant;
@@ -24,6 +24,8 @@ pub(super) struct SharePanel {
     /// How long a look at the machine stays fresh (0 in tests).
     pub(super) ttl_ms: u128,
     seen: Option<(Instant, Vec<IfaceInfo>, bool, Status)>,
+    /// Why the Wi-Fi hotspot is not offered, asked together with the look at the machine (only while it is not offered).
+    wifi_why: Option<String>,
     pub(super) col: usize,
     pub(super) up_sel: usize,
     pub(super) down_sel: usize,
@@ -40,7 +42,7 @@ pub(super) struct SharePanel {
 
 impl Default for SharePanel {
     fn default() -> SharePanel {
-        SharePanel { open: false, backend: None, ttl_ms: 2000, seen: None, col: 1, up_sel: 0, down_sel: 0, hours: DEFAULT_IDLE_HOURS, isolate: true, allow_lan: false, armed: false, can_start: true, scroll: 0.0, max: 0.0 }
+        SharePanel { open: false, backend: None, ttl_ms: 2000, seen: None, wifi_why: None, col: 1, up_sel: 0, down_sel: 0, hours: DEFAULT_IDLE_HOURS, isolate: true, allow_lan: false, armed: false, can_start: true, scroll: 0.0, max: 0.0 }
     }
 }
 
@@ -53,7 +55,9 @@ impl SharePanel {
         let fresh = self.seen.as_ref().is_some_and(|(t, ..)| t.elapsed().as_millis() < self.ttl_ms);
         if !fresh {
             let b = self.backend(cx);
-            self.seen = Some((Instant::now(), b.interfaces(), b.wifi_ap(), b.status()));
+            let wifi = b.wifi_ap();
+            self.wifi_why = if wifi { None } else { b.wifi_ap_why() };
+            self.seen = Some((Instant::now(), b.interfaces(), wifi, b.status()));
         }
         let (_, i, w, s) = self.seen.clone().expect("just set");
         (i, w, s)
@@ -61,7 +65,7 @@ impl SharePanel {
 
     pub(super) fn choices(&mut self, cx: &AppCx) -> Choices {
         let (i, w, _) = self.look(cx);
-        choices(&i, w)
+        choices_with(&i, w, self.wifi_why.as_deref())
     }
 
     pub(super) fn status(&mut self, cx: &AppCx) -> Status {
@@ -93,6 +97,16 @@ impl SettingsApp {
         cx.audit.record(&cx.session.user, "settings.share.wifi", &format!("name {old_ssid} -> {ssid}; password {}", if form.raw(1).is_empty() { "kept" } else { "changed" }));
         self.share.forget();
         Ok("Saved. The new Wi-Fi name and password apply the next time sharing starts.".into())
+    }
+
+    pub(super) fn hotspot_country_submit(&mut self, cx: &AppCx, form: &Form) -> Result<String, String> {
+        if !self.admin(cx) {
+            return Err("Only administrators can change the hotspot.".into());
+        }
+        let c = form.value(0).trim().to_ascii_uppercase();
+        self.share.backend(cx).set_hotspot_country(&c)?;
+        cx.audit.record(&cx.session.user, "settings.share.country", if c.is_empty() { "none" } else { &c });
+        Ok(if c.is_empty() { "Saved. The hotspot uses the card's own rules.".into() } else { format!("Saved. The hotspot asks the radio for the rules of {c} the next time sharing starts.") })
     }
 
     pub(super) fn share_buttons(&self) -> Vec<Btn> {
@@ -231,6 +245,32 @@ impl SettingsApp {
                     }
                 }
             }
+            Key::Char('e') => {
+                if self.admin(cx) {
+                    let b = self.share.backend(cx);
+                    let next = match b.hotspot_security().as_str() {
+                        "wpa2" => "transition",
+                        "transition" => "wpa3",
+                        _ => "wpa2",
+                    };
+                    match b.set_hotspot_security(next) {
+                        Ok(()) => {
+                            cx.audit.record(&cx.session.user, "settings.share.security", next);
+                            self.ok(format!("Hotspot security: {}. It applies the next time sharing starts; a card that cannot do WPA3 itself keeps WPA2.", hotspot_security_text(next)));
+                        }
+                        Err(e) => self.fail(e),
+                    }
+                }
+            }
+            Key::Char('c') => {
+                if self.admin(cx) {
+                    let now = self.share.backend(cx).hotspot_country();
+                    let f = Form::new("Hotspot country")
+                        .with_note("The country sets the Wi-Fi channels and power the law allows there, and unlocks 5 GHz channels on many cards. Leave empty to use the card's own rules.")
+                        .text("Country code", &now, "two capital letters, for example DE or US");
+                    self.open_form(FormKind::HotspotCountry, f);
+                }
+            }
             Key::Char('n') => {
                 if self.admin(cx) {
                     let (ssid, _) = self.share.backend(cx).hotspot().unwrap_or_default();
@@ -361,6 +401,11 @@ impl SettingsApp {
                 }
                 line_hits.insert(lines.len(), Event::Key(Key::Char('w')));
                 lines.push((format!("Band: {band}  (w or a click changes it; takes effect when sharing starts)"), 13.0, TEXT, Face::Sans));
+                line_hits.insert(lines.len(), Event::Key(Key::Char('c')));
+                let country = self.share.backend(cx).hotspot_country();
+                lines.push((format!("Country: {}  (c or a click changes it; takes effect when sharing starts)", if country.is_empty() { "the card's own rules".to_string() } else { country }), 13.0, TEXT, Face::Sans));
+                line_hits.insert(lines.len(), Event::Key(Key::Char('e')));
+                lines.push((format!("Security: {}  (e or a click changes it; a card that cannot do WPA3 itself keeps WPA2)", hotspot_security_text(&self.share.backend(cx).hotspot_security())), 13.0, TEXT, Face::Sans));
                 lines.push(("It uses this computer's own Wi-Fi card next to its connection to your router. The internet comes from the source above; devices that join get the same protection as on a cable (isolated from each other unless you turn that off). Change the name or password with n (or: iyakki share wifi-set NAME PASSWORD).".into(), 12.0, DIM, Face::Sans));
             }
         }
@@ -448,3 +493,12 @@ impl SettingsApp {
 
 #[allow(dead_code)]
 fn _types(_: Request) {}
+
+/// The security choice in plain words.
+fn hotspot_security_text(s: &str) -> &'static str {
+    match s {
+        "transition" => "WPA2 and WPA3 together",
+        "wpa3" => "WPA3 only",
+        _ => "WPA2",
+    }
+}

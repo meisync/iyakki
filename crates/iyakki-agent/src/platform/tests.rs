@@ -1089,3 +1089,125 @@ fn deploying_again_never_widens_and_narrows_only_on_an_explicit_choice_shown_in_
     let f = plan(&w.pl, &*gitea(), &profile(&w), &opts(&[("exposure", "ClusterIP")])).unwrap();
     assert!(f.warnings.iter().all(|x| !x.contains("CLOSES")));
 }
+
+// ------------------------------------------------------------------------------------------------ pull request
+
+fn pr_answers(r: &FakeRunner, head: &str, upstream: Option<&str>, ahead: &str) {
+    r.answer("symbolic-ref --short HEAD", head);
+    match upstream {
+        Some(u) => r.answer("rev-parse --abbrev-ref --symbolic-full-name", u),
+        None => r.fail("rev-parse --abbrev-ref --symbolic-full-name", 128, "fatal: no upstream configured"),
+    };
+    r.answer("rev-list --count @{upstream}..HEAD", ahead);
+}
+
+fn linked_instance(w: &W, ws: &str) -> Installed {
+    let mut inst = connected_instance(w);
+    inst.workspaces.push(installed::WsLink { workspace: ws.into(), repo_url: "http://localhost:30300/casey/my-shop".into() });
+    installed::upsert(&w.dir, "alice", inst.clone()).unwrap();
+    inst
+}
+
+#[test]
+fn a_pushed_task_branch_becomes_a_pull_request_after_approval_with_the_token_only_in_the_header() {
+    let w = world("pr");
+    let ws = WsInfo { name: "My Shop".into(), root: w.dir.join("ws") };
+    let inst = linked_instance(&w, "My Shop");
+    pr_answers(&w.run, "task/fix-cart", Some("origin/task/fix-cart"), "0");
+    w.http.answer("POST http://localhost:30300/api/v1/repos/casey/my-shop/pulls", 201, r#"{"number":4,"html_url":"http://localhost:30300/casey/my-shop/pulls/4"}"#);
+    let p = connect::plan_pull_request(&w.pl, &inst, &ws, "main", " Fix the cart total ", "Rounds up.").unwrap();
+    assert!(p.blockers.is_empty(), "{:?}", p.blockers);
+    assert_eq!((p.owner.as_str(), p.repo.as_str(), p.head.as_str(), p.title.as_str()), ("casey", "my-shop", "task/fix-cart", "Fix the cart total"));
+    let v = connect::preview_pull_request(&p);
+    assert!(v.contains("task/fix-cart \u{2192} main") && v.contains("/api/v1/repos/casey/my-shop/pulls") && v.contains("Nothing is merged") && !v.contains(TOKEN), "{v}");
+    assert!(connect::create_pull_request(&w.pl, &p, false).is_err());
+    assert!(w.http.calls.lock().unwrap().iter().all(|c| c.0 != "POST"), "nothing is sent before the approval");
+    let link = connect::create_pull_request(&w.pl, &p, true).unwrap();
+    assert_eq!(link, "http://localhost:30300/casey/my-shop/pulls/4");
+    let post = w.http.calls.lock().unwrap().iter().find(|c| c.0 == "POST").cloned().unwrap();
+    let body: serde_json::Value = serde_json::from_str(post.3.as_deref().unwrap()).unwrap();
+    assert_eq!((body["head"].as_str(), body["base"].as_str(), body["title"].as_str(), body["body"].as_str()), (Some("task/fix-cart"), Some("main"), Some("Fix the cart total"), Some("Rounds up.")));
+    assert_eq!(post.2.as_deref(), Some(TOKEN));
+    assert!(!post.3.unwrap().contains(TOKEN));
+    scan_everything_ws(&w);
+}
+
+#[test]
+fn a_pull_request_is_refused_for_the_wrong_branch_an_unpushed_branch_a_bad_title_or_an_unconnected_workspace() {
+    let ws = WsInfo { name: "My Shop".into(), root: std::env::temp_dir() };
+    // the base branch itself
+    let w = world("pr-refuse1");
+    let inst = linked_instance(&w, "My Shop");
+    pr_answers(&w.run, "main", Some("origin/main"), "0");
+    let p = connect::plan_pull_request(&w.pl, &inst, &ws, "main", "T", "").unwrap();
+    assert!(p.blockers.iter().any(|b| b.contains("switch to a task branch")), "{:?}", p.blockers);
+    assert!(connect::create_pull_request(&w.pl, &p, true).unwrap_err().contains("no pull request opened"));
+    // no upstream, then commits ahead of it
+    let w = world("pr-refuse2");
+    let inst = linked_instance(&w, "My Shop");
+    pr_answers(&w.run, "task/a", None, "0");
+    assert!(connect::plan_pull_request(&w.pl, &inst, &ws, "main", "T", "").unwrap().blockers.iter().any(|b| b.contains("not on the service yet")));
+    let w = world("pr-refuse3");
+    let inst = linked_instance(&w, "My Shop");
+    pr_answers(&w.run, "task/a", Some("origin/task/a"), "3");
+    assert!(connect::plan_pull_request(&w.pl, &inst, &ws, "main", "T", "").unwrap().blockers.iter().any(|b| b.contains("3 commit(s)")));
+    // titles, base names, a detached HEAD
+    let w = world("pr-refuse4");
+    let inst = linked_instance(&w, "My Shop");
+    pr_answers(&w.run, "task/a", Some("origin/task/a"), "0");
+    for (base, title) in [("main", ""), ("main", "two\nlines"), ("--force", "T"), ("a b", "T"), ("", "T")] {
+        let p = connect::plan_pull_request(&w.pl, &inst, &ws, base, title, "").unwrap();
+        assert!(!p.blockers.is_empty(), "{base:?} {title:?}");
+    }
+    let long = "x".repeat(201);
+    assert!(!connect::plan_pull_request(&w.pl, &inst, &ws, "main", &long, "").unwrap().blockers.is_empty());
+    assert!(!connect::plan_pull_request(&w.pl, &inst, &ws, "main", "T", &"y".repeat(8001)).unwrap().blockers.is_empty());
+    let w = world("pr-refuse5");
+    let inst = linked_instance(&w, "My Shop");
+    pr_answers(&w.run, "", Some("origin/x"), "0");
+    assert!(connect::plan_pull_request(&w.pl, &inst, &ws, "main", "T", "").unwrap().blockers.iter().any(|b| b.contains("detached")));
+    // a workspace the service does not hold
+    let other = WsInfo { name: "Other".into(), root: std::env::temp_dir() };
+    assert!(connect::plan_pull_request(&w.pl, &inst, &other, "main", "T", "").unwrap_err().contains("not connected"));
+}
+
+#[test]
+fn the_service_answers_become_plain_sentences_and_a_second_request_for_the_same_branch_is_explained() {
+    let ws = WsInfo { name: "My Shop".into(), root: std::env::temp_dir() };
+    for (status, body, expect) in [(409, r#"{"message":"pull request already exists for these targets"}"#, "may exist already"), (403, "{}", "write scope"), (404, "{}", "no repository"), (500, "boom", "HTTP 500")] {
+        let w = world(&format!("pr-http-{status}"));
+        let inst = linked_instance(&w, "My Shop");
+        pr_answers(&w.run, "task/a", Some("origin/task/a"), "0");
+        w.http.answer("POST http://localhost:30300/api/v1/repos/casey/my-shop/pulls", status, body);
+        let p = connect::plan_pull_request(&w.pl, &inst, &ws, "main", "T", "").unwrap();
+        let e = connect::create_pull_request(&w.pl, &p, true).unwrap_err();
+        assert!(e.contains(expect) && !e.contains(TOKEN), "{status}: {e}");
+    }
+}
+
+#[test]
+fn the_pull_request_tool_finds_the_workspace_by_name_asks_and_says_what_it_did() {
+    use serde_json::json;
+    let w = world("pr-tool");
+    healthy(&w.run);
+    let root = w.dir.join("shop");
+    std::fs::create_dir_all(&root).unwrap();
+    let mut reg = crate::workspace::Registry::load(&w.dir, "alice");
+    reg.add("My Shop", &root).unwrap();
+    linked_instance(&w, "My Shop");
+    pr_answers(&w.run, "task/fix", Some("origin/task/fix"), "0");
+    w.http.answer("POST http://localhost:30300/api/v1/repos/casey/my-shop/pulls", 201, r#"{"html_url":"http://localhost:30300/casey/my-shop/pulls/9"}"#);
+    let t = tools::PlatformTools::new(Arc::new(clone_platform(&w)));
+    let d = t.defs().into_iter().find(|d| d.spec.name == "platform_pull_request").unwrap();
+    assert_eq!(d.risk, crate::agent::Risk::Ask);
+    let args = json!({"workspace": "My Shop", "title": "Fix it", "body": "why"});
+    assert!(t.describe("platform_pull_request", &args).contains("OPEN A PULL REQUEST") && t.describe("platform_pull_request", &args).contains("Fix it"));
+    let card = t.preview("platform_pull_request", &args).unwrap();
+    assert!(card.contains("task/fix") && card.contains("casey/my-shop"), "{card}");
+    let out = t.call("platform_pull_request", &args).unwrap();
+    assert!(out.contains("pulls/9") && out.contains("task/fix"), "{out}");
+    assert!(t.call("platform_pull_request", &json!({"workspace": "Nope", "title": "x"})).unwrap_err().contains("not one of the person's workspaces"));
+    assert!(t.call("platform_pull_request", &json!({"workspace": "My Shop", "title": "x", "instance": "other"})).unwrap_err().contains("not connected"));
+    assert!(t.preview("platform_pull_request", &json!({"workspace": "Nope", "title": "x"})).unwrap().contains("this would be refused"));
+    scan_everything(&w, &[out]);
+}

@@ -1,6 +1,6 @@
 //! `GET /api/v1/events`: the live event stream, one WebSocket per browser tab (plan: `docs/development/NOTIFICATIONS-PLAN.md`). The
 //! token is NOT in the address (it would land in logs): the first message is `{"type":"auth","token":"..."}` and must come within 10
-//! seconds. After that the server sends only this person's events: `ready`, `notification`, `count`, `approval`. A ping every 25
+//! seconds. After that the server sends only this person's events: `ready`, `notification`, `count`, `approval`, and `changed` (a request that changed something answered 2xx: the area name only, sent to every open stream of the volume; the page then asks the API, which checks who may see what). A ping every 25
 //! seconds is the heartbeat; a client that sends nothing for 90 seconds is dropped. A slow client loses its OLDEST queued events (the
 //! hub never waits for it). Connections are capped per person and per tenant (`notifyhub::events`).
 //!
@@ -161,6 +161,12 @@ impl Backing for RealBacking<'_> {
     fn auth(&self, token: &str) -> Option<Authed> {
         let user = self.sh.tokens.find(token)?;
         let p = self.sh.deps.auth.lookup(&user)?;
+        // a program's token (signed in with a paired developer key) opens the stream only with the `api:tiles` scope, like every other route
+        if let Some(route) = super::routes::ROUTES.iter().find(|r| r.id == "events") {
+            if super::server::program_refusal(self.sh, token, route).is_some() {
+                return None;
+            }
+        }
         let dir = super::tenants::data_dir_for(self.sh, Some(token), &p.user);
         Some(Authed { user: p.user, bus: crate::notifyhub::events::bus_for(&dir) })
     }
@@ -168,6 +174,12 @@ impl Backing for RealBacking<'_> {
         // tool-call approvals are in the run store; tenant requests are counted when the page asks (the stream only says "changed")
         self.sh.deps.store.pending_approvals(Some(&who.user)).len()
     }
+}
+
+/// Would this token be taken by the stream's first message? (the tests ask the real backing)
+#[cfg(test)]
+pub(super) fn token_opens_stream(sh: &super::server::Shared, token: &str) -> bool {
+    RealBacking { sh }.auth(token).is_some()
 }
 
 fn refuse<S: Write>(io: &mut S, status: u16, msg: &str) {

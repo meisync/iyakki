@@ -15,7 +15,7 @@ use crate::services::Services;
 use crate::skills::Scope;
 
 pub fn is_store_tool(name: &str) -> bool {
-    matches!(name, "store_search" | "store_info" | "store_install" | "store_outdated" | "store_update" | "store_remove" | "store_rollback")
+    matches!(name, "store_search" | "store_info" | "store_install" | "store_outdated" | "store_update" | "store_remove" | "store_rollback" | "store_data_snapshots" | "store_data_restore")
 }
 
 fn offered(p: &Policy) -> bool {
@@ -62,6 +62,20 @@ pub fn defs(p: &Policy) -> Vec<ToolDef> {
             "store_remove",
             "Uninstall an installed item by `id` (from store_outdated or store_search). By default its data and vault entries are KEPT. `delete_data` true also deletes them and needs `confirm`, which must be the item's name typed by the person (ask with ask_user; never fill it in). `acknowledge_dependents` true only after the person was told what uses it. Always asks, even in Auto mode, and the card says exactly what is deleted and what is kept. Built-in items cannot be removed; platform services are removed with platform_remove.",
             obj(json!({"id": {"type": "string"}, "delete_data": {"type": "boolean"}, "confirm": {"type": "string"}, "acknowledge_dependents": {"type": "boolean"}}), &["id"]),
+            Risk::Ask,
+            false,
+        ),
+        tool(
+            "store_data_snapshots",
+            "List the copies of an installed item's own data that the store took before each update (`id` from store_outdated or store_search; the newest three are kept). Read-only: names, when, how many files. Restore one with store_data_restore.",
+            obj(json!({"id": {"type": "string"}}), &["id"]),
+            Risk::Safe,
+            false,
+        ),
+        tool(
+            "store_data_restore",
+            "Put an installed item's data back as it was in one of its snapshots (`id` from store_outdated, `snapshot` from store_data_snapshots). What is there now is kept next to it as a folder named .rolled-back-<snapshot>, never deleted. Always asks, even in Auto mode.",
+            obj(json!({"id": {"type": "string"}, "snapshot": {"type": "string"}}), &["id", "snapshot"]),
             Risk::Ask,
             false,
         ),
@@ -176,6 +190,13 @@ pub fn describe(svc: &Services, p: &Policy, user: &str, name: &str, args: &Value
             })
         }
         "store_update" | "store_remove" | "store_rollback" => Some(describe_writer(svc, p, user, name, args)),
+        "store_data_restore" => {
+            let lives = lives_now(svc, p, user);
+            Some(match Store::find_life(&lives, s("id")) {
+                Ok(l) => format!("PUT BACK the data of “{}” as it was in snapshot {}. What is there now is kept next to it (.rolled-back-{}), nothing is deleted.", l.entry.title, s("snapshot"), s("snapshot")),
+                Err(_) => format!("put back the data of “{}” (not found among the installed items)", s("id")),
+            })
+        }
         _ => None,
     }
 }
@@ -279,6 +300,22 @@ pub fn call(name: &str, args: &Value, svc: &Services, p: &Policy, user: &str) ->
                 super::lifecycle::LifeError::NeedsConfirm(m) => format!("Not updated: {m} Tell the person to update it in the STORE tile, where the new permissions are shown."),
                 other => other.to_string(),
             })
+        }
+        "store_data_snapshots" => {
+            let lives = st.lifecycle(svc, p, user, &loaded, &super::lifecycle::Ctx::default());
+            let l = Store::find_life(&lives, s("id").ok_or("give the id")?)?;
+            let all = st.data_snapshots(&l.entry.key);
+            if all.is_empty() {
+                return Ok(format!("{} has no data snapshots (the store takes one before an update when the item keeps data).", l.entry.title));
+            }
+            Ok(all.iter().rev().map(|x| format!("{} — {} files, {} bytes, taken at {}", x.id, x.files.len(), x.bytes, x.created)).collect::<Vec<_>>().join("\n"))
+        }
+        "store_data_restore" => {
+            let lives = st.lifecycle(svc, p, user, &loaded, &super::lifecycle::Ctx::default());
+            let l = Store::find_life(&lives, s("id").ok_or("give the id")?)?;
+            Store::scope_ok(&a, &l.entry).map_err(|e| e.to_string())?;
+            let from = st.restore_data(&l.entry.key, s("snapshot").ok_or("give the snapshot name")?)?;
+            Ok(format!("The data of {} is back as it was in {}. What was there is kept as {}.", l.entry.title, s("snapshot").unwrap_or(""), from.display()))
         }
         "store_rollback" => {
             let lives = st.lifecycle(svc, p, user, &loaded, &super::lifecycle::Ctx::default());

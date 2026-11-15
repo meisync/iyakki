@@ -315,3 +315,54 @@ fn a_run_nobody_started_asks_for_the_separate_unattended_permission_with_its_own
     assert_eq!(done.grants, vec!["camera_unattended".to_string()]);
     assert!(!r.env.store.published(&flow).unwrap().defaults.camera.unattended);
 }
+
+// ------------------------------------------------------------------------------------------------ a client device's question
+
+#[test]
+fn a_client_devices_question_pops_up_with_two_answers_and_only_the_key_for_allow_this_time_allows() {
+    use iyakki_agent::accessbroker::broker::{CardAnswer, CardAsk, Caller, CallerKind};
+    let mut r = rig("perm-device");
+    let caller = |person: &str| Caller { app: "client".into(), kind: CallerKind::Client { device_id: "dev1".into() }, person: person.into(), device: "Maya's phone".into() };
+    let card = Arc::new(iyakki_agent::clientmedia::DeviceCard::new(r.sh.env.services.clone()).with_wait(Duration::from_secs(20)));
+    for (key, expect) in [('1', CardAnswer::Allow), ('2', CardAnswer::Deny)] {
+        let (c, who) = (card.clone(), caller(&r.user));
+        let t = std::thread::spawn(move || c.ask(&who, "client.camera.offer", "Maya's phone camera"));
+        let end = std::time::Instant::now() + Duration::from_secs(10);
+        while r.sh.env.services.browser.consent.pending(&r.user).is_empty() {
+            assert!(std::time::Instant::now() < end, "the question never arrived");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        r.tick();
+        let d = r.sh.permpop.clone().expect("the card is up over the screen");
+        assert!(d.req.title.contains("Maya's phone") && d.req.text.contains(&format!("signed in as {}", r.user)));
+        for (w, h) in SIZES {
+            let mut g = Gfx::new(w, h);
+            r.sh.render(&mut g);
+            for k in ['1', '2'] {
+                let hit = r.sh.hits().iter().find(|x| x.ev == Event::Key(Key::Char(k))).unwrap_or_else(|| panic!("{w}x{h}: no button {k}")).clone();
+                assert!(hit.rect.x >= 0.0 && hit.rect.y >= 0.0 && hit.rect.x + hit.rect.w <= w as f32 && hit.rect.y + hit.rect.h <= h as f32, "{w}x{h}: button {k} outside the window");
+            }
+        }
+        // a key that is not a choice does nothing; the answer key does
+        r.sh.handle(&Event::Key(Key::Char('x')));
+        assert!(r.sh.permpop.is_some());
+        r.sh.handle(&Event::Key(Key::Char(key)));
+        assert_eq!(t.join().unwrap(), expect);
+        r.tick();
+        assert!(r.sh.permpop.is_none(), "the card goes once answered");
+    }
+    // input from a paired computer (developer mode) cannot give the device its answer
+    let (c, who) = (card.clone(), caller(&r.user));
+    let t = std::thread::spawn(move || c.ask(&who, "client.camera.offer", "x"));
+    let end = std::time::Instant::now() + Duration::from_secs(10);
+    while r.sh.env.services.browser.consent.pending(&r.user).is_empty() {
+        assert!(std::time::Instant::now() < end);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let id = r.sh.env.services.browser.consent.pending(&r.user)[0].id.clone();
+    r.sh.env.services.browser.consent.set_synthetic(true);
+    assert!(r.sh.env.services.browser.consent.resolve(&r.user, &id, Answer::Allow).is_err());
+    r.sh.env.services.browser.consent.set_synthetic(false);
+    r.sh.env.services.browser.consent.resolve(&r.user, &id, Answer::Deny).unwrap();
+    assert_eq!(t.join().unwrap(), CardAnswer::Deny);
+}

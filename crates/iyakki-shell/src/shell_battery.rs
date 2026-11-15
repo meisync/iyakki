@@ -2,6 +2,7 @@
 //! popup's keys and the clean shutdown at the critical level. The decisions are `iyakki_agent::battery`'s (tested there); what
 //! the chip and popup look like is `batterybar.rs`.
 
+use crate::stale_stats::mark_stale;
 use super::*;
 use crate::batterybar as bb;
 use iyakki_agent::battery::Alert;
@@ -26,7 +27,7 @@ impl Shell {
         let was_counting = self.battery.counting_down();
         let alerts = self.battery.poll(now, false);
         if before != self.battery.reading || !alerts.is_empty() || was_counting || self.battery.counting_down() {
-            self.stale = true;
+            mark_stale!(self);
         }
         self.battery_apply(alerts);
     }
@@ -51,7 +52,7 @@ impl Shell {
                 Alert::CountdownCancelled => self.say_info("Shutdown cancelled."),
                 Alert::Shutdown => self.battery_shutdown(),
             }
-            self.stale = true;
+            mark_stale!(self);
         }
     }
 
@@ -76,7 +77,7 @@ impl Shell {
         self.brand.close();
         self.installs.close();
         self.battery.toggle();
-        self.stale = true;
+        mark_stale!(self);
     }
 
     /// Keys and clicks of the popup while it is open.
@@ -89,7 +90,7 @@ impl Shell {
             }
             _ => {}
         }
-        self.stale = true;
+        mark_stale!(self);
     }
 
     /// Cancel on the countdown card, or OK on the plug-in card.
@@ -106,7 +107,7 @@ impl Shell {
                 }
             }
         }
-        self.stale = true;
+        mark_stale!(self);
     }
 
     /// Look at a made-up /sys and read it now (tests).

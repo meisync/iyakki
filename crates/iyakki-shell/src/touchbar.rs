@@ -103,6 +103,8 @@ pub enum Action {
     Fn(FnKey),
     /// A key for the focused app.
     Key(Key),
+    /// A numbered button of the focused app (the browser's Back, Forward and Reload are tabs 0 to 2), in the view that is showing.
+    Tab(usize),
     /// Open (or return to) an app by id.
     Open(String),
     /// A slider moved to this fraction (0 to 1).
@@ -197,7 +199,7 @@ pub struct Ctx {
     pub signed_in: bool,
     /// Milliseconds since the last key, touch or click anywhere.
     pub idle_ms: u64,
-    /// The screen is blanked (no such feature yet; kept for when there is).
+    /// The screen is blanked by the screen saver's last stage (`Shell::saver_screen_off`); the strip goes dark with it.
     pub screen_off: bool,
     pub volume: f32,
     pub muted: bool,
@@ -288,12 +290,14 @@ impl Registry {
         let k = |id: &str, label: &str, g: Glyph, key: Key| Item::button(id, label, g, Action::Key(key), 120);
         let m = |id: &str, label: &str, g: Glyph, key: FnKey| Item::button(id, label, g, Action::Fn(key), 110);
         r.register("chat", vec![k("new", "New chat", Glyph::Plus, Key::Ctrl('n')), k("model", "Model", Glyph::None, Key::Ctrl('p')), k("agent", "Agent", Glyph::None, Key::Ctrl('g')), k("approvals", "Approvals", Glyph::Check, Key::Ctrl('q'))]);
-        r.register("ide", vec![k("run", "Run", Glyph::Run, Key::F(5)), k("save", "Save", Glyph::Save, Key::Ctrl('s')), k("open", "Open file", Glyph::None, Key::Ctrl('p')), k("tree", "Files", Glyph::None, Key::Ctrl('b')), k("panel", "Panel", Glyph::None, Key::Ctrl('j'))]);
+        // the IDE's own keys (its help lists them): F5 run, Ctrl+Shift+U run the tests, Ctrl+S save, Ctrl+Shift+I deploy (the deploy form, when a cluster is connected), Ctrl+P open a file, Ctrl+B the file tree
+        r.register("ide", vec![k("run", "Run", Glyph::Run, Key::F(5)), k("test", "Test", Glyph::Check, Key::Ctrl('U')), k("save", "Save", Glyph::Save, Key::Ctrl('s')), k("deploy", "Deploy", Glyph::None, Key::Ctrl('I')), k("open", "Open file", Glyph::None, Key::Ctrl('p')), k("tree", "Files", Glyph::None, Key::Ctrl('b'))]);
         r.register("tales", vec![k("play", "Play", Glyph::Play, Key::Char(' ')), k("save", "Save", Glyph::Save, Key::Ctrl('s')), k("model", "Model", Glyph::None, Key::Ctrl('p'))]);
         r.register("radio", vec![m("prev", "Prev", Glyph::Prev, FnKey::Prev), m("play", "Play", Glyph::Play, FnKey::PlayPause), m("next", "Next", Glyph::Next, FnKey::Next), m("stop", "Stop", Glyph::Stop, FnKey::Stop)]);
         r.register("media", vec![m("prev", "Prev", Glyph::Prev, FnKey::Prev), m("play", "Play", Glyph::Play, FnKey::PlayPause), m("next", "Next", Glyph::Next, FnKey::Next)]);
-        // the browser's own keys (its hint: b back, f forward, r reload, g address); they work in the built-in reader view
-        r.register("browser", vec![k("back", "Back", Glyph::Back, Key::Char('b')), k("forward", "Forward", Glyph::Forward, Key::Char('f')), k("reload", "Reload", Glyph::Reload, Key::Char('r')), k("address", "Address", Glyph::None, Key::Ctrl('l'))]);
+        // the browser's own buttons: Back, Forward and Reload are its numbered buttons (they work in the reader view and in the full page view alike, where the letter keys would be typed into the page); Ctrl+L is the address
+        let t = |id: &str, label: &str, g: Glyph, n: usize| Item::button(id, label, g, Action::Tab(n), 120);
+        r.register("browser", vec![t("back", "Back", Glyph::Back, 0), t("forward", "Forward", Glyph::Forward, 1), t("reload", "Reload", Glyph::Reload, 2), k("address", "Address", Glyph::None, Key::Ctrl('l'))]);
         r
     }
 }

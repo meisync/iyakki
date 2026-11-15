@@ -19,6 +19,16 @@ pub const CYAN: [u8; 4] = rgb(70, 225, 255);
 pub const MAGENTA: [u8; 4] = rgb(255, 80, 190);
 /// The darkest glass: players, charts, the sides of a screen.
 pub const PANEL: [u8; 4] = rgb(12, 14, 19);
+
+/// A see-through panel fill that follows the theme: [`PANEL`] mapped for the current theme, then made see-through.
+///
+/// [`crate::theme::themed`] deliberately leaves see-through colours alone, because a shadow or a dim behind a dialog
+/// has to stay dark on every theme. A *surface* drawn see-through therefore has to be themed first and made
+/// see-through afterwards, or it stays dark navy on a light desktop.
+pub fn panel_alpha(alpha: u8) -> [u8; 4] {
+    let c = crate::theme::themed(PANEL);
+    [c[0], c[1], c[2], alpha]
+}
 /// A step lighter than [`PANEL`]: inputs, chips and buttons at rest.
 pub const WELL: [u8; 4] = rgb(21, 23, 31);
 /// Amber for "needs attention" (warnings), next to [`ERR`] and [`OK`].
@@ -181,6 +191,9 @@ pub fn app_header(g: &mut Gfx, w: f32, hh: f32, s: f32, title: &str, subtitle: &
     g.ring(34.0 * s, hh / 2.0, 17.0 * s, 1.0 * s, with_alpha(accent, 150));
     g.icon(icon, 34.0 * s, hh / 2.0, 22.0 * s, accent);
     let ty = (hh - 22.0 * s) / 2.0 - 2.0 * s;
+    // the title keeps to the room before `right_limit` (a narrow window: the icons beside the clock)
+    let title = g.fit(size::HEADER_TITLE * s, title, Face::Bold, (right_limit - 60.0 * s).max(40.0 * s));
+    let title = title.as_str();
     g.text(60.0 * s, ty, size::HEADER_TITLE * s, TEXT, title, Face::Bold);
     if !subtitle.is_empty() {
         let tw = g.text_width(size::HEADER_TITLE * s, title, Face::Bold);
@@ -382,8 +395,20 @@ pub fn tab_strip(g: &mut Gfx, x: f32, y: f32, s: f32, max_w: f32, items: &[(Stri
 pub fn section_title(g: &mut Gfx, x: f32, y: f32, w: f32, s: f32, title: &str, accent: [u8; 4]) -> f32 {
     let sz = size::CAPTION * s;
     let mut cx = x + 4.0 * s;
-    for ch in title.to_uppercase().chars() {
+    // a title longer than the room (big text, a narrow window) ends in an ellipsis instead of running off the window
+    let limit = (x + w).min(g.visible_right() - if g.visible_right() >= g.width() as f32 { 22.0 * s } else { 4.0 * s });
+    let upper = title.to_uppercase();
+    let adv = |g: &mut Gfx, t: &str| g.text_width(sz, t, Face::Bold) + 1.2 * s;
+    let total: f32 = upper.chars().map(|c| adv(g, &c.to_string())).sum();
+    let cut = cx + total > limit;
+    let ell = adv(g, "…");
+    for ch in upper.chars() {
         let t = ch.to_string();
+        if cut && cx + adv(g, &t) + ell > limit {
+            g.text(cx, y, sz, readable(MUTED, rgb(14, 18, 34), 4.5), "…", Face::Bold);
+            cx += ell;
+            break;
+        }
         cx += g.text(cx, y, sz, readable(MUTED, rgb(14, 18, 34), 4.5), &t, Face::Bold) + 1.2 * s;
     }
     let ry = y + g.line_height(sz, Face::Bold) / 2.0;
@@ -480,18 +505,31 @@ pub fn table_header(g: &mut Gfx, x: f32, y: f32, w: f32, s: f32, cols: &[(&str, 
 /// An empty list: an icon in a soft ring, a title and a hint, centred in `r`.
 pub fn empty_state(g: &mut Gfx, r: R, s: f32, icon: Icon, title: &str, hint: &str, accent: [u8; 4]) {
     let cx = r.x + r.w / 2.0;
-    let cy = r.y + (r.h / 2.0 - 40.0 * s).max(40.0 * s);
-    g.radial_glow(cx, cy, 70.0 * s, with_alpha(accent, 30));
-    g.ring(cx, cy, 28.0 * s, 1.2 * s, with_alpha(accent, 130));
-    g.icon(icon, cx, cy, 26.0 * s, accent);
-    let t = g.fit(17.0 * s, title, Face::Bold, r.w - 40.0 * s);
-    let tw = g.text_width(17.0 * s, &t, Face::Bold);
-    g.text(cx - tw / 2.0, cy + 42.0 * s, 17.0 * s, TEXT, &t, Face::Bold);
-    let mut y = cy + 70.0 * s;
+    let tsz = 17.0 * s;
+    let compact = r.h < 150.0 * s;
+    // centred with the picture above; in an area too short for it (a small window, a large text size) the title and what fits of the hint
+    let (mut ty, cy) = if compact {
+        (r.y + 4.0 * s, r.y)
+    } else {
+        let cy = (r.y + (r.h / 2.0 - 40.0 * s).max(40.0 * s)).min(r.y + r.h - 130.0 * s).max(r.y + 34.0 * s);
+        (cy + 42.0 * s, cy)
+    };
+    if !compact {
+        g.radial_glow(cx, cy, 70.0 * s, with_alpha(accent, 30));
+        g.ring(cx, cy, 28.0 * s, 1.2 * s, with_alpha(accent, 130));
+        g.icon(icon, cx, cy, 26.0 * s, accent);
+    }
+    let t = g.fit(tsz, title, Face::Bold, r.w - 40.0 * s);
+    let tw = g.text_width(tsz, &t, Face::Bold);
+    g.text(cx - tw / 2.0, ty, tsz, TEXT, &t, Face::Bold);
+    ty += if compact { 26.0 * s } else { 28.0 * s };
     for line in g.wrap(14.0 * s, hint, Face::Sans, (r.w - 60.0 * s).min(560.0 * s)).into_iter().take(3) {
+        if ty + 18.0 * s > r.y + r.h {
+            break;
+        }
         let lw = g.text_width(14.0 * s, &line, Face::Sans);
-        g.text(cx - lw / 2.0, y, 14.0 * s, readable(MUTED, rgb(14, 18, 34), 4.5), &line, Face::Sans);
-        y += 20.0 * s;
+        g.text(cx - lw / 2.0, ty, 14.0 * s, readable(MUTED, rgb(14, 18, 34), 4.5), &line, Face::Sans);
+        ty += 20.0 * s;
     }
 }
 

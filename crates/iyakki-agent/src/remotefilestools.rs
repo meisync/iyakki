@@ -217,6 +217,12 @@ fn spec(name: &str, desc: &str, schema: Value) -> ToolSpec {
 }
 
 impl Tools for RemoteTools {
+
+    fn inner_tools(&self) -> Option<&dyn Tools> {
+
+        Some(&*self.inner)
+
+    }
     fn defs(&self) -> Vec<ToolDef> {
         let mut v = self.inner.defs();
         v.retain(|d| !is_remote_tool(&d.spec.name));

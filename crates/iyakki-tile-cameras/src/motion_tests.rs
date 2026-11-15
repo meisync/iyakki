@@ -158,7 +158,7 @@ fn cx_of(f: &MFake) -> TileCx<'_> {
         }
     }
     static NO_USE: NoUse = NoUse;
-    TileCx { user: "amy", manage_settings: false, usage: &NO_USE, calendar: &iyakki_tile_api::calendar::NoCalendar, audit: &iyakki_tile_api::NoAudit, remote: &iyakki_tile_api::remote::NoRemote, cameras: f }
+    TileCx { user: "amy", manage_settings: false, usage: &NO_USE, calendar: &iyakki_tile_api::calendar::NoCalendar, audit: &iyakki_tile_api::NoAudit, remote: &iyakki_tile_api::remote::NoRemote, cameras: f, radio: &iyakki_tile_api::radio::NoRadio }
 }
 
 fn draw(a: &mut CamerasApp, cx: &TileCx) -> Gfx {

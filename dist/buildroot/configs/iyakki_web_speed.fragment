@@ -1,0 +1,6 @@
+# DEFAULT for the web and macweb variants since 2026-11-14 (WEB_SPEED=0 leaves it out; docs/BROWSER-SPEED.md "Needs a rebuild"; no speed gain has been measured):
+#   Brotli: libsoup builds -Dbrotli=enabled (Buildroot's libsoup3.mk), WebKit sends `Accept-Encoding: br`; Google and YouTube answers shrink.
+#   WOFF2:  WebKit builds -DUSE_WOFF2=ON (wpewebkit.mk) and decodes the WOFF2 fonts pages ask for. WOFF2 needs the brotli package.
+# Both libraries are MIT. Changing them rebuilds libsoup and WPE WebKit (hours without ccache).
+BR2_PACKAGE_BROTLI=y
+BR2_PACKAGE_WOFF2=y

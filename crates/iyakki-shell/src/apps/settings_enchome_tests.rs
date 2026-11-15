@@ -212,21 +212,30 @@ fn recovery_text(a: &SettingsApp) -> String {
 
 #[test]
 fn make_runs_in_the_background_and_the_page_keeps_drawing_and_refuses_a_second_job() {
-    let (cx, mut a) = slow_page("ench-bg-make", Duration::from_millis(2500));
+    let (cx, mut a) = slow_page("ench-bg-make", Duration::from_millis(4000));
+    // Each slow step takes 4 s. A page that waited for a step would take that long for one call or frame; the bounds below sit at 3 s,
+    // so they still catch it, while a loaded machine (a frame was seen taking 1.3 s with the whole suite running) does not trip them.
     press(&mut a, &cx, 'c');
     type_in(&mut a, &cx, "rootpass12");
     let t0 = Instant::now();
     a.handle(&Event::Key(Key::Enter), &cx);
-    assert!(t0.elapsed() < Duration::from_millis(1200), "Enter must return at once, took {:?}", t0.elapsed());
+    assert!(t0.elapsed() < Duration::from_millis(3000), "Enter must return at once, took {:?}", t0.elapsed());
     assert!(a.is_busy() && a.modal.is_none());
     assert!(a.ench_buttons().is_empty(), "no button while it works");
     // the render loop is not blocked: frames keep coming in far less time than the slow step takes
+    // A page that waits for a step is slow in EVERY frame that meets a step; a loaded machine that keeps the test thread off the CPU
+    // for a few seconds once is slow in one frame, so one slow frame is a stall of the machine and a second one is the page.
     let mut frames = 0;
+    let mut slow = 0;
     while a.is_busy() && frames < 1000 {
         let f0 = Instant::now();
         let text = draw_text(&mut a, &cx);
+        let drawn = f0.elapsed();
         a.handle(&Event::Tick, &cx);
-        assert!(f0.elapsed() < Duration::from_millis(1200), "a frame took {:?}", f0.elapsed());
+        if f0.elapsed() >= Duration::from_millis(3000) {
+            slow += 1;
+            assert!(slow < 2, "a second frame took {:?} (drawing {drawn:?}, frame {frames}, since Enter {:?})", f0.elapsed(), t0.elapsed());
+        }
         frames += 1;
         if frames == 2 {
             assert!(text.contains("Working on your encrypted home"), "{text}");
@@ -333,7 +342,7 @@ fn open_with_the_password_runs_in_the_background_and_reports_in_plain_words() {
 
 #[test]
 fn a_move_shows_its_progress_while_it_copies_and_stays_responsive() {
-    let (cx, mut a) = page_with_home("ench-bg-move", Duration::from_millis(400), true);
+    let (cx, mut a) = page_with_home("ench-bg-move", Duration::from_millis(1500), true); // each step takes 1.5 s so that a frame (slow on a loaded machine) still falls into several of them
     press(&mut a, &cx, 'm');
     type_in(&mut a, &cx, "rootpass12");
     a.handle(&Event::Key(Key::Enter), &cx);
@@ -341,7 +350,7 @@ fn a_move_shows_its_progress_while_it_copies_and_stays_responsive() {
     assert!(matches!(a.modal, Some(Modal::Confirm(ConfirmKind::EncMove, _))), "{:?} {:?}", a.status, a.ench.flow.notice);
     let t0 = Instant::now();
     a.handle(&Event::Key(Key::Char('y')), &cx);
-    assert!(t0.elapsed() < Duration::from_millis(300), "pressing Move must return at once");
+    assert!(t0.elapsed() < Duration::from_millis(1000), "pressing Move must return at once");
     assert!(a.is_busy());
     let mut seen = vec![];
     while a.is_busy() {

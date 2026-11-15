@@ -35,10 +35,14 @@ pub enum StepId {
     Wifi,
     Bluetooth,
     Power,
+    /// The graphics card and what the dev cluster (k3s) sees of it (F-CHECKUP-04).
+    Gpu,
+    /// The USB devices that are plugged in (F-CHECKUP-04).
+    Usb,
 }
 
 impl StepId {
-    pub const ALL: [StepId; 12] = [StepId::Display, StepId::Touch, StepId::Keyboard, StepId::Pointer, StepId::Speaker, StepId::Microphone, StepId::Camera, StepId::Monitor, StepId::Network, StepId::Wifi, StepId::Bluetooth, StepId::Power];
+    pub const ALL: [StepId; 14] = [StepId::Display, StepId::Touch, StepId::Keyboard, StepId::Pointer, StepId::Speaker, StepId::Microphone, StepId::Camera, StepId::Monitor, StepId::Network, StepId::Wifi, StepId::Bluetooth, StepId::Power, StepId::Gpu, StepId::Usb];
 
     pub fn id(self) -> &'static str {
         match self {
@@ -54,6 +58,8 @@ impl StepId {
             StepId::Wifi => "wifi",
             StepId::Bluetooth => "bluetooth",
             StepId::Power => "power",
+            StepId::Gpu => "gpu",
+            StepId::Usb => "usb",
         }
     }
 
@@ -71,6 +77,8 @@ impl StepId {
             StepId::Wifi => "Wi-Fi",
             StepId::Bluetooth => "Bluetooth",
             StepId::Power => "Battery and power",
+            StepId::Gpu => "Graphics card for models",
+            StepId::Usb => "USB devices",
         }
     }
 
@@ -205,6 +213,59 @@ pub struct Inventory {
     pub bluetooth_blocked: bool,
     pub wifi_blocked: bool,
     pub power: PowerFacts,
+    /// The graphics cards the kernel lists (read-only sysfs).
+    pub gpus: Vec<crate::gpu::Gpu>,
+    /// What the dev cluster says about GPUs on its nodes (asked by the tile; `NotAsked` when nobody asked).
+    pub k3s_gpu: K3sSees,
+    /// The USB devices that are plugged in (hubs and root hubs left out).
+    pub usb: Vec<UsbDev>,
+}
+
+/// What the dev cluster sees of the graphics card: the sum of `iyakki.dev/gpu`, `nvidia.com/gpu` and `amd.com/gpu` over its nodes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum K3sSees {
+    #[default]
+    NotAsked,
+    /// The dev cluster is not running (its state word), so nothing could be asked.
+    NoCluster(String),
+    Count(u32),
+    /// The cluster is running but did not answer (one plain sentence).
+    Unreadable(String),
+}
+
+/// One USB device as the kernel lists it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UsbDev {
+    pub name: String,
+    /// `1d6b:0002`.
+    pub ids: String,
+    /// The speed it negotiated, in Mbit/s (1.5, 12, 480, 5000 ...); 0 when unknown.
+    pub speed: u32,
+    /// The device class byte (08: mass storage, 09: hub ...), 0 when unknown.
+    pub class: u8,
+    /// Interfaces that no driver took.
+    pub driverless: usize,
+}
+
+/// The USB devices under `<sys>/bus/usb/devices`: real devices only (root hubs `usbN` and hubs are left out), sorted by name.
+pub fn read_usb(sys: &Path) -> Vec<UsbDev> {
+    let dir = sys.join("bus/usb/devices");
+    let mut names: Vec<String> = std::fs::read_dir(&dir).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| !n.contains(':') && !n.starts_with("usb")).collect();
+    names.sort();
+    let rd = |p: &Path, f: &str| std::fs::read_to_string(p.join(f)).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let mut out = vec![];
+    for n in names {
+        let d = dir.join(&n);
+        let (Some(v), Some(p)) = (rd(&d, "idVendor"), rd(&d, "idProduct")) else { continue };
+        let class = rd(&d, "bDeviceClass").and_then(|c| u8::from_str_radix(&c, 16).ok()).unwrap_or(0);
+        if class == 9 {
+            continue; // a hub: not what the person plugged in
+        }
+        let name = rd(&d, "product").unwrap_or_else(|| format!("USB device {v}:{p}"));
+        let driverless = std::fs::read_dir(&dir).into_iter().flatten().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&format!("{n}:"))).filter(|e| !e.path().join("driver").exists()).count();
+        out.push(UsbDev { name: name.chars().filter(|c| !c.is_control()).take(60).collect(), ids: format!("{v}:{p}"), speed: rd(&d, "speed").and_then(|s| s.parse::<f32>().ok()).map_or(0, |s| s.round() as u32), class, driverless });
+    }
+    out
 }
 
 /// Count the keyboards, pointers and touch screens of `/proc/bus/input/devices`.
@@ -293,6 +354,9 @@ impl Inventory {
             bluetooth_blocked,
             wifi_blocked,
             power,
+            gpus: crate::gpu::detect(Path::new("/")),
+            k3s_gpu: K3sSees::NotAsked,
+            usb: read_usb(sys),
         }
     }
 }
@@ -588,6 +652,53 @@ pub fn power(inv: &Inventory) -> StepResult {
     }
     let ac = if p.ac_online == Some(true) { " It runs on mains power." } else { "" };
     res(id, Outcome::Skipped, format!("No battery: this is not a laptop.{ac}"), "Nothing to do.", None, None)
+}
+
+/// The graphics card step: is there a card a model could use, and does the dev cluster see it? "Verified" for the signed result needs
+/// the cluster to see it; a card that is fine but not asked about (no cluster) is `Skipped`, never `Pass`.
+pub fn gpu(inv: &Inventory) -> StepResult {
+    use crate::gpu::{vulkan_usable, vulkan_verdict};
+    let id = StepId::Gpu;
+    if inv.gpus.is_empty() {
+        return res(id, Outcome::Skipped, "No graphics card is listed.", "A computer with only a basic display adapter has nothing for local models to use.", None, None);
+    }
+    let usable = vulkan_usable(&inv.gpus);
+    if usable.is_empty() {
+        let g = &inv.gpus[0];
+        let (_, why) = vulkan_verdict(g);
+        if inv.gpus.iter().all(|g| g.is_virtual()) {
+            return res(id, Outcome::Skipped, format!("Only a virtual display adapter is listed: {}.", g.name), "Nothing to do: a virtual machine has no graphics card for models.", None, None);
+        }
+        return res(id, Outcome::Fail, format!("{}: {why}.", g.name), "The kernel driver did not set the card up for compute. Check the firmware line of DOCTOR and the kernel log in Share diagnostics.", None, Some("gpu"));
+    }
+    let g = usable[0];
+    let first = format!("{} ({})", g.name, g.driver.as_deref().unwrap_or("no driver"));
+    match &inv.k3s_gpu {
+        K3sSees::Count(n) if *n > 0 => res(id, Outcome::Pass, format!("{first}: the dev cluster sees {n} GPU{}.", if *n == 1 { "" } else { "s" }), "", None, None),
+        K3sSees::Count(_) => res(id, Outcome::Fail, format!("{first} can be used, but the dev cluster sees no GPU."), "Run the graphics card entry of Store -> Setup (Local models): it adds the device plug-in that shows the card to the cluster.", None, Some("gpu")),
+        K3sSees::NoCluster(state) => res(id, Outcome::Skipped, format!("{first} can be used; the dev cluster is {state}, so what it sees was not checked."), "Start the dev cluster (Settings -> Developer) and run this step again.", None, None),
+        K3sSees::Unreadable(why) => res(id, Outcome::Fail, format!("{first} can be used, but the dev cluster did not say what it sees: {why}"), "Look at the dev cluster page in Settings -> Developer.", None, None),
+        K3sSees::NotAsked => res(id, Outcome::Skipped, format!("{first} can be used; what the dev cluster sees was not asked."), "", None, None),
+    }
+}
+
+/// The USB step: what is plugged in, whether a driver took each device and whether a storage device runs slowly.
+pub fn usb(inv: &Inventory) -> StepResult {
+    let id = StepId::Usb;
+    if inv.usb.is_empty() {
+        return res(id, Outcome::Skipped, "No USB device is plugged in (hubs and the computer's own ports are not counted).", "Plug something in and run this step again.", None, None);
+    }
+    let list = |v: &[&UsbDev]| v.iter().take(6).map(|d| if d.speed > 0 { format!("{} ({} Mbit/s)", d.name, d.speed) } else { d.name.clone() }).collect::<Vec<_>>().join(", ");
+    let bare: Vec<&UsbDev> = inv.usb.iter().filter(|d| d.driverless > 0).collect();
+    if !bare.is_empty() {
+        return res(id, Outcome::Fail, format!("Plugged in, but nothing drives {}: {}.", if bare.len() == 1 { "it" } else { "them" }, list(&bare)), "The kernel has no driver for it (or the firmware it needs is missing). Share diagnostics shows the kernel lines about it.", None, None);
+    }
+    let slow: Vec<&UsbDev> = inv.usb.iter().filter(|d| d.class == 8 && d.speed > 0 && d.speed <= 12).collect();
+    if !slow.is_empty() {
+        return res(id, Outcome::Fail, format!("A storage device runs at USB 1.1 speed: {}.", list(&slow)), "Try another port, or another cable; a fast stick on a slow link is a hundred times slower.", None, None);
+    }
+    let all: Vec<&UsbDev> = inv.usb.iter().collect();
+    res(id, Outcome::Pass, format!("{} USB device{} listed, each with a driver: {}.", inv.usb.len(), if inv.usb.len() == 1 { "" } else { "s" }, list(&all)), "", None, None)
 }
 
 // ------------------------------------------------------------------------------------------------ the report

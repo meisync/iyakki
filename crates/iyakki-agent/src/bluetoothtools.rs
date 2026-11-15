@@ -1,7 +1,6 @@
 //! The assistant's tools for paired Bluetooth keyboards, mice and game pads (F-NET-14): `bluetooth_list` reads (free);
 //! `bluetooth_connect`, `bluetooth_disconnect` and `bluetooth_forget` each ask on a card, and forgetting asks every time (it removes the
-//! keys, so the device must be paired again). Pairing needs the person at the device (a number to compare, a PIN to type), so it is done
-//! in Settings -> Bluetooth, not by the assistant. Sending sound to headphones (A2DP source) is not built; a phone playing through this computer is `btaudiotools`.
+//! keys, so the device must be paired again). Pairing needs the person at the device (a number to compare, a PIN to type); the pairing tools are in `bluetoothpair`. Sending sound to headphones (A2DP source) is not built; a phone playing through this computer is `btaudiotools`.
 //!
 //! A paired phone is not an input device: `bluetooth_tether_status` (free), `bluetooth_tether_connect` and `bluetooth_tether_disconnect`
 //! (each asks) use its Bluetooth tethering as this computer's internet ([`iyakki_devctl::bt_pan`]); a failure comes back with its plain reason
@@ -19,7 +18,7 @@ use crate::chat::ToolSpec;
 use iyakki_devctl::bt_pan::{Tether, TetherState};
 use iyakki_devctl::bthid::{find_device, DeviceView, Devices, LinkState};
 
-pub const PROMPT_RULE: &str = "\nBluetooth: bluetooth_list shows the paired keyboards, mice and game pads and whether each is connected (and, when a connection failed, why). To connect, disconnect or forget one, call bluetooth_connect, bluetooth_disconnect or bluetooth_forget: each asks the person. Pairing a new device needs the person at the device: send them to Settings -> Bluetooth. Sending sound from this computer to Bluetooth headphones or speakers is not available yet: say so plainly (a phone playing through this computer is available, see the Bluetooth audio tools). A paired phone shares its internet with bluetooth_tether_connect (asks; Bluetooth tethering must be switched on in the phone, the person does that) and bluetooth_tether_disconnect (asks); bluetooth_tether_status shows whether it is up and, if not, why. Phone data may cost the person money: say that the traffic goes through the phone.";
+pub const PROMPT_RULE: &str = "\nBluetooth: bluetooth_list shows the paired keyboards, mice and game pads and whether each is connected (and, when a connection failed, why). To connect, disconnect or forget one, call bluetooth_connect, bluetooth_disconnect or bluetooth_forget: each asks the person. Pairing a new device needs the person at the device: use the pairing tools (bluetooth_scan, bluetooth_pair) or send them to Settings -> Bluetooth. Sending sound from this computer to Bluetooth headphones or speakers is not available yet: say so plainly (a phone playing through this computer is available, see the Bluetooth audio tools). A paired phone shares its internet with bluetooth_tether_connect (asks; Bluetooth tethering must be switched on in the phone, the person does that) and bluetooth_tether_disconnect (asks); bluetooth_tether_status shows whether it is up and, if not, why. Phone data may cost the person money: say that the traffic goes through the phone.";
 
 pub const WRITE_TOOLS: [&str; 5] = ["bluetooth_connect", "bluetooth_disconnect", "bluetooth_forget", "bluetooth_tether_connect", "bluetooth_tether_disconnect"];
 pub const READ_TOOL: &str = "bluetooth_list";
@@ -120,6 +119,12 @@ fn one_line(d: &DeviceView) -> String {
 }
 
 impl Tools for BluetoothTools {
+
+    fn inner_tools(&self) -> Option<&dyn Tools> {
+
+        Some(&*self.inner)
+
+    }
     fn defs(&self) -> Vec<ToolDef> {
         let mut v = self.inner.defs();
         v.retain(|d| !is_bluetooth_tool(&d.spec.name));

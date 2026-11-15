@@ -436,6 +436,109 @@ pub fn zlib_stored(data: &[u8]) -> Vec<u8> {
     out
 }
 
+const LEN_BASE_C: [u16; 29] = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
+const LEN_EXTRA_C: [u8; 29] = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
+const DIST_BASE_C: [u16; 30] = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577];
+const DIST_EXTRA_C: [u8; 30] = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
+
+struct BitOut {
+    out: Vec<u8>,
+    acc: u32,
+    n: u32,
+}
+
+impl BitOut {
+    /// Low bits first (header fields and extra bits).
+    fn put(&mut self, v: u32, bits: u32) {
+        self.acc |= v << self.n;
+        self.n += bits;
+        while self.n >= 8 {
+            self.out.push(self.acc as u8);
+            self.acc >>= 8;
+            self.n -= 8;
+        }
+    }
+    /// A Huffman code, most significant bit first.
+    fn code(&mut self, v: u32, bits: u32) {
+        for i in (0..bits).rev() {
+            self.put((v >> i) & 1, 1);
+        }
+    }
+    /// A literal or length symbol of the fixed table.
+    fn sym(&mut self, s: u32) {
+        match s {
+            0..=143 => self.code(0x30 + s, 8),
+            144..=255 => self.code(0x190 + s - 144, 9),
+            256..=279 => self.code(s - 256, 7),
+            _ => self.code(0xc0 + s - 280, 8),
+        }
+    }
+}
+
+/// Real compression for the writer: LZ77 with a hash chain and the fixed Huffman table, as a zlib stream.
+pub fn zlib_deflate(data: &[u8]) -> Vec<u8> {
+    const WINDOW: usize = 32768;
+    const HASH: usize = 1 << 15;
+    let mut b = BitOut { out: vec![0x78, 0x01], acc: 0, n: 0 };
+    b.put(1, 1);
+    b.put(1, 2);
+    let mut head = vec![usize::MAX; HASH];
+    let mut prev = vec![usize::MAX; data.len()];
+    let h = |i: usize| ((data[i] as usize) << 10 ^ (data[i + 1] as usize) << 5 ^ data[i + 2] as usize) & (HASH - 1);
+    let mut i = 0;
+    while i < data.len() {
+        let (mut best_len, mut best_dist) = (0usize, 0usize);
+        if i + 3 <= data.len() {
+            let mut cand = head[h(i)];
+            let mut tries = 32;
+            while cand != usize::MAX && i - cand <= WINDOW && tries > 0 {
+                let max = (data.len() - i).min(258);
+                let mut l = 0;
+                while l < max && data[cand + l] == data[i + l] {
+                    l += 1;
+                }
+                if l > best_len {
+                    best_len = l;
+                    best_dist = i - cand;
+                }
+                cand = prev[cand];
+                tries -= 1;
+            }
+        }
+        let step = if best_len >= 3 {
+            let k = LEN_BASE_C.iter().rposition(|&x| x as usize <= best_len).unwrap_or(0);
+            b.sym(257 + k as u32);
+            b.put((best_len - LEN_BASE_C[k] as usize) as u32, LEN_EXTRA_C[k] as u32);
+            let d = DIST_BASE_C.iter().rposition(|&x| x as usize <= best_dist).unwrap_or(0);
+            b.code(d as u32, 5);
+            b.put((best_dist - DIST_BASE_C[d] as usize) as u32, DIST_EXTRA_C[d] as u32);
+            best_len
+        } else {
+            b.sym(data[i] as u32);
+            1
+        };
+        for j in i..i + step {
+            if j + 3 <= data.len() {
+                let hv = h(j);
+                prev[j] = head[hv];
+                head[hv] = j;
+            }
+        }
+        i += step;
+    }
+    b.sym(256);
+    if b.n > 0 {
+        b.out.push(b.acc as u8);
+    }
+    let (mut a, mut c) = (1u32, 0u32);
+    for &x in data {
+        a = (a + x as u32) % 65521;
+        c = (c + a) % 65521;
+    }
+    b.out.extend_from_slice(&(c << 16 | a).to_be_bytes());
+    b.out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,6 +548,18 @@ mod tests {
         let data: Vec<u8> = (0..200_000u32).map(|i| (i * 7 % 251) as u8).collect();
         assert_eq!(inflate(&zlib_stored(&data), usize::MAX), data);
         assert_eq!(inflate(&zlib_stored(b""), 10), b"");
+    }
+
+    #[test]
+    fn deflate_round_trips_and_shrinks_repetitive_data() {
+        let text: Vec<u8> = b"BT /F1 12 Tf 72 700 Td (Hello world) Tj ET\n".iter().cycle().take(50_000).copied().collect();
+        let z = zlib_deflate(&text);
+        assert!(z.len() < text.len() / 10, "{} bytes", z.len());
+        assert_eq!(inflate(&z, usize::MAX), text);
+        let odd: Vec<u8> = (0..70_000u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        assert_eq!(inflate(&zlib_deflate(&odd), usize::MAX), odd);
+        assert_eq!(inflate(&zlib_deflate(b""), 10), b"");
+        assert_eq!(inflate(&zlib_deflate(b"ab"), 10), b"ab");
     }
 
     #[test]

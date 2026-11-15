@@ -868,9 +868,16 @@ fn check_batch(text: &str, local: LocalCheck) -> Result<(), String> {
     Ok(())
 }
 
-/// Runs `ssh`, `scp` or `sftp` for the person or the assistant. See the module comment for what is checked.
-#[allow(clippy::too_many_arguments)]
-pub fn run(env: &Env, mode: Mode, program: &str, args: &[String], cwd: &Path, seconds: u64, local: LocalCheck, sink: Option<Sink>) -> Result<String, String> {
+/// A command ready to start: every rule has been applied (allowed options, host list, trusted host key, local files in scope, keys
+/// written to a private folder that is removed when `tmp` is dropped).
+pub struct Prepared {
+    pub cmd: Command,
+    pub tmp: TempDir,
+    pub plan: Plan,
+}
+
+/// Applies every rule to a command line and builds the process to start. Nothing is started.
+pub fn prepare(env: &Env, mode: Mode, program: &str, args: &[String], cwd: &Path, local: LocalCheck) -> Result<Prepared, String> {
     let plan = plan(program, args, mode)?;
     if !cwd.is_dir() {
         return Err(format!("{} is not a folder", cwd.display()));
@@ -985,6 +992,13 @@ pub fn run(env: &Env, mode: Mode, program: &str, args: &[String], cwd: &Path, se
             cmd.env("SSH_AUTH_SOCK", v);
         }
     }
+    Ok(Prepared { cmd, tmp, plan })
+}
+
+/// Runs `ssh`, `scp` or `sftp` for the person or the assistant. See the module comment for what is checked.
+#[allow(clippy::too_many_arguments)]
+pub fn run(env: &Env, mode: Mode, program: &str, args: &[String], cwd: &Path, seconds: u64, local: LocalCheck, sink: Option<Sink>) -> Result<String, String> {
+    let Prepared { cmd, tmp, plan } = prepare(env, mode, program, args, cwd, local)?;
     let redacting: Option<Sink> = sink.map(|s| -> Sink { Arc::new(move |t: &str| s(&crate::bugs::redact(t))) });
     let result = crate::exec::run_prepared(cmd, program, seconds, redacting);
     drop(tmp);
@@ -999,6 +1013,24 @@ pub fn run(env: &Env, mode: Mode, program: &str, args: &[String], cwd: &Path, se
             }
         }
     }
+}
+
+/// What an interactive session needs to stay alive: the private folder with the keys, removed when the session is dropped.
+pub struct Keep(#[allow(dead_code)] TempDir);
+
+/// A login on a pseudo-terminal for the person (`ssh [options] [user@]host`): the same rules as [`run`] (host list, trusted host key,
+/// allowed options, vault keys by `-i uvault:ssh.<name>`), then the client is started on a terminal of `cols` x `rows`. Keys only:
+/// `BatchMode=yes` stays on, so the client never asks for a password (that is a later step). Linux and macOS.
+#[cfg(unix)]
+pub fn interactive(env: &Env, args: &[String], cwd: &Path, local: LocalCheck, cols: usize, rows: usize) -> Result<(iyakki_vt::session::PtyLink, Keep), String> {
+    let Prepared { cmd, tmp, plan: _ } = prepare(env, Mode::Person, "ssh", args, cwd, local)?;
+    let program = cmd.get_program().to_string_lossy().into_owned();
+    let argv: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+    let mut vars: Vec<(String, String)> = cmd.get_envs().filter_map(|(k, v)| v.map(|v| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned()))).collect();
+    vars.retain(|(k, _)| k != "TERM");
+    vars.push(("TERM".into(), "xterm-256color".into()));
+    let link = iyakki_vt::session::PtyLink::spawn(&program, &argv, &vars, cols, rows).map_err(|e| format!("could not start the SSH client: {e}"))?;
+    Ok((link, Keep(tmp)))
 }
 
 fn hosts_path(env: &Env) -> PathBuf {
@@ -1092,6 +1124,19 @@ impl Connection {
     /// `user@host`, or just the host.
     pub fn target(&self) -> String {
         if self.user.is_empty() { self.host.clone() } else { format!("{}@{}", self.user, self.host) }
+    }
+
+    /// The arguments of an interactive login: a terminal is asked for (`-t`, so also a saved default command gets one) and, without a
+    /// default command, the remote side gives the person its login shell. [`Connection::args`] is the other one: it ends in `true`.
+    pub fn login_args(&self) -> Vec<String> {
+        let mut a = vec!["-p".to_string(), self.port.to_string()];
+        if !self.key.is_empty() {
+            a.extend(["-i".to_string(), format!("uvault:{}", self.key)]);
+        }
+        a.push("-t".into());
+        a.push(self.target());
+        a.extend(crate::exec::split_words(&self.command).unwrap_or_default());
+        a
     }
 
     /// The arguments of the `ssh` command that connects (the default command, or `true` for a quick check).

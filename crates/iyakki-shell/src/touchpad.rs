@@ -11,7 +11,7 @@
 //! * contacts larger than half of the pad's contact-size range are a palm and ignored;
 //! * the first 40 ms of a touch do nothing (a finger settling, a brush of the pad), and a touch that ends within them is no tap.
 //!
-//! Not done: tap-and-drag, three-finger gestures, edge scrolling. The code is a pure state machine fed with raw events and a clock
+//! Three fingers moving drag (the left button is held while they move) when the choice is on. Not done: tap-and-drag, other three-finger gestures, edge scrolling. The code is a pure state machine fed with raw events and a clock
 //! in milliseconds, so the tests below replay synthetic sequences. Real values (contact size of a finger on the 14,1 pad, how
 //! fast the feel is) need the hardware; the constants are at the top.
 
@@ -66,11 +66,15 @@ impl PadRange {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PadConfig {
     pub tap_to_click: bool,
+    /// Pointer speed in percent (Settings -> Keyboard), a multiplier on the pad's own gain; 100 is as before.
+    pub speed_pct: u32,
+    /// Three fingers moving hold the left button down and drag (off unless chosen).
+    pub three_finger_drag: bool,
 }
 
 impl Default for PadConfig {
     fn default() -> PadConfig {
-        PadConfig { tap_to_click: true }
+        PadConfig { tap_to_click: true, speed_pct: 100, three_finger_drag: false }
     }
 }
 
@@ -120,6 +124,8 @@ pub struct Touchpad {
     /// Two-finger travel not yet sent while it is still under [`SCROLL_SLOP`] (a resting pair of fingers wobbles), and its total.
     scroll_pend: f32,
     scroll_travel: f32,
+    /// Three fingers are dragging (the left button is held down).
+    dragging: bool,
 }
 
 impl Default for Touchpad {
@@ -130,7 +136,7 @@ impl Default for Touchpad {
 
 impl Touchpad {
     pub fn new() -> Touchpad {
-        Touchpad { slots: [EMPTY; SLOTS], cur: 0, down_ms: None, max_fingers: 0, moved: false, clicked: false, click_right: false, button_down: false, last_ms: 0, rem: (0.0, 0.0), scrolling: false, scroll_pend: 0.0, scroll_travel: 0.0 }
+        Touchpad { slots: [EMPTY; SLOTS], cur: 0, down_ms: None, max_fingers: 0, moved: false, clicked: false, click_right: false, button_down: false, last_ms: 0, rem: (0.0, 0.0), scrolling: false, scroll_pend: 0.0, scroll_travel: 0.0, dragging: false }
     }
 
     /// One raw event at `now_ms` (any monotonic clock). `screen_w` is the width of the screen in pixels. Output comes at `SYN_REPORT`
@@ -190,6 +196,11 @@ impl Touchpad {
 
     fn frame(&mut self, now: u64, range: &PadRange, cfg: &PadConfig, screen_w: i32, out: &mut Vec<PadOut>) {
         let act = self.active(range);
+        // the drag ends when fewer or more than three fingers are down, or the choice is turned off
+        if self.dragging && (act.len() != 3 || !cfg.three_finger_drag) {
+            self.dragging = false;
+            out.push(PadOut::LeftUp);
+        }
         let dt_ms = now.saturating_sub(self.last_ms).clamp(1, 200);
         self.last_ms = now;
         if act.is_empty() {
@@ -249,7 +260,7 @@ impl Touchpad {
                 let (dx, dy) = (deltas[0].0 / w, deltas[0].1 / w);
                 let speed = dx.hypot(dy) / (dt_ms as f32 / 1000.0); // pad widths per second
                 let gain = BASE_GAIN + speed.min(2.0) * 0.9;
-                let k = gain * screen_w.max(1) as f32;
+                let k = gain * screen_w.max(1) as f32 * (cfg.speed_pct.clamp(25, 300) as f32 / 100.0);
                 self.rem.0 += dx * k;
                 self.rem.1 += dy * k;
                 let (px, py) = (self.rem.0.trunc(), self.rem.1.trunc());
@@ -266,6 +277,23 @@ impl Touchpad {
                 if self.scroll_travel >= SCROLL_SLOP {
                     self.scrolling = true;
                     out.push(PadOut::Scroll(std::mem::take(&mut self.scroll_pend)));
+                }
+            }
+            3 if cfg.three_finger_drag => {
+                if !self.dragging && !self.button_down {
+                    self.dragging = true;
+                    out.push(PadOut::LeftDown);
+                }
+                let (dx, dy) = ((deltas[0].0 + deltas[1].0 + deltas[2].0) / 3.0 / w, (deltas[0].1 + deltas[1].1 + deltas[2].1) / 3.0 / w);
+                let speed = dx.hypot(dy) / (dt_ms as f32 / 1000.0);
+                let k = (BASE_GAIN + speed.min(2.0) * 0.9) * screen_w.max(1) as f32 * (cfg.speed_pct.clamp(25, 300) as f32 / 100.0);
+                self.rem.0 += dx * k;
+                self.rem.1 += dy * k;
+                let (px, py) = (self.rem.0.trunc(), self.rem.1.trunc());
+                self.rem.0 -= px;
+                self.rem.1 -= py;
+                if px != 0.0 || py != 0.0 {
+                    out.push(PadOut::Move(px as i32, py as i32));
                 }
             }
             _ => {}

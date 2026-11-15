@@ -9,6 +9,8 @@ use iyakki_uikit::ui::{Event, R};
 
 pub mod calendar;
 pub mod cameras;
+pub mod pdf;
+pub mod radio;
 pub mod remote;
 pub mod usage;
 
@@ -34,6 +36,8 @@ pub struct TileCx<'a> {
     pub remote: &'a dyn remote::RemoteSource,
     /// Saved and USB cameras, their streams and pictures (the Cameras tile).
     pub cameras: &'a dyn cameras::CameraSource,
+    /// The player of the Radio tile (the other tiles carry [`radio::NoRadio`]).
+    pub radio: &'a dyn radio::RadioPort,
 }
 
 /// Where a tile records what the person did (the shell's audit log; a fake in tests).
@@ -53,6 +57,14 @@ pub trait App {
         self.hint().split(" · ").map(str::to_string).collect()
     }
     fn handle(&mut self, ev: &Event, cx: &TileCx) -> Flow;
+    /// A media key of the keyboard or a headset (play, pause, next, previous, stop) while this tile is open; true when it was used.
+    fn media_key(&mut self, _k: iyakki_uikit::keys::FnKey, _cx: &TileCx) -> bool {
+        false
+    }
+    /// A request for the shell to open another place: `(what, detail)`, once.
+    fn take_request(&mut self) -> Option<(String, String)> {
+        None
+    }
     /// Draw into `area` (below the header). `tick` advances ~30 times a second.
     fn render(&mut self, g: &mut Gfx, area: R, s: f32, cx: &TileCx, tick: u64);
 }

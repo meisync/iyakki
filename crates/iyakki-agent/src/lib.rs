@@ -12,6 +12,8 @@ pub mod assistrun;
 #[cfg(test)]
 mod assistrun_tests;
 #[cfg(test)]
+mod live_tests;
+#[cfg(test)]
 mod datatools_tests;
 #[doc(hidden)]
 pub mod testdir; // per-test temporary folders; used by the tests of this crate and of iyakki-shell
@@ -28,13 +30,27 @@ pub mod config;
 #[cfg(test)]
 mod upgrade_tests;
 #[cfg(test)]
+mod compat_tests;
+#[cfg(test)]
+mod compat_tests_schema;
+#[cfg(test)]
+mod compat_formats_tests;
+#[cfg(test)]
+mod svg_chrome_tests;
+#[cfg(test)]
+mod pdf_quartz_tests;
+#[cfg(test)]
+mod image_sips_tests;
+#[cfg(test)]
 mod childgone_tests;
 pub mod layout;
+pub mod views;
 pub mod cloudmode;
 pub mod webservice;
 pub mod context;
 pub mod camfw;
 pub mod fwextra;
+pub mod gemini;
 pub mod fwextra_cli;
 pub mod fwextra_net;
 pub mod sharing;
@@ -49,9 +65,16 @@ pub mod providererr;
 pub mod providers;
 pub mod vault;
 pub mod profilestore;
+pub mod profilepolicy;
+pub mod ddcci;
+pub mod camvision;
+pub mod audiostream;
+pub mod echocancel;
 pub mod rag;
 pub mod agenticrag;
 pub mod ragtools;
+pub mod ragrerank;
+pub mod ragraph;
 #[cfg(test)]
 mod agenticrag_tests;
 #[cfg(test)]
@@ -81,13 +104,44 @@ pub mod mediaserve;
 pub mod credguard;
 pub mod enginelog;
 pub mod doctor;
+pub mod doctor_gather;
+pub mod doctortools;
+pub mod twophase;
+pub mod wizardrun;
+pub mod wizardtools;
+pub mod bundlesnap;
+pub mod ocipush_root;
+pub mod imagebuild;
+pub mod imagebuildtools;
+pub mod linuxappimagetools;
+pub mod k8sexptools;
+#[cfg(test)]
+mod tools_forward_tests;
+pub mod linuxsandboxtools;
+pub mod linuxpod;
+pub mod linuxpodtools;
+pub mod mcpadmintools;
+pub mod skillstools;
+#[cfg(test)]
+pub(crate) mod linuxpod_tests;
+pub mod sysupdate;
+pub mod cloudmembers;
+pub mod backup_cli;
+pub mod backup_schedule;
+pub mod settingstools_backup;
+pub mod localos;
 pub mod checkup;
+pub mod checkup_result;
 pub mod pathcheck;
 pub mod diagshare;
 pub use iyakki_qr::qr;
 pub use iyakki_qr::qr_decode;
 pub mod sharedfolder;
 pub mod sharedsite;
+pub mod upnp;
+pub mod upnp_events;
+pub mod upnp_search;
+pub mod upnp_serve;
 #[cfg(test)]
 mod sharedfolder_tests;
 pub mod aacpipe;
@@ -96,6 +150,10 @@ pub mod hls;
 pub mod radio;
 pub mod radio_stations;
 pub mod radiotools;
+#[cfg(test)]
+mod radio_real_http_tests;
+#[cfg(test)]
+mod media_apple_decoder_tests;
 pub mod camtools;
 pub mod visionmodel;
 pub mod webtools;
@@ -103,7 +161,9 @@ pub mod datatools;
 pub mod dash;
 pub mod flows;
 pub mod hostfiles;
+pub mod hostservicetools;
 pub mod browserconsent;
+pub mod browserext;
 pub mod browserheaders;
 pub mod browserjobs;
 pub mod browsertools;
@@ -127,8 +187,27 @@ pub mod audiosink;
 pub use iyakki_battery as battery;
 pub mod power;
 pub mod screensaver;
+pub mod saverslides;
 pub mod lockscreen;
 pub mod lockscreentools;
+pub mod settingstools;
+pub mod settingstools_views;
+pub mod settingstools_notifs;
+pub mod settingstools_saver;
+pub mod settingstools_gemini;
+pub mod settingstools_startup;
+pub mod settingstools_wasmtiles;
+pub mod settingstools_sound;
+pub mod settingstools_memory;
+pub mod settingstools_linux;
+pub mod settingstools_access;
+pub mod settingstools_machine;
+pub mod settingstools_podtls;
+pub mod settingstools_net;
+pub mod settingstools_wifi;
+pub mod wifilink;
+#[cfg(test)]
+mod settingstools_tests;
 // Encrypted per-person home folders (F-STORE-05): the lifecycle crate re-exported, and the chat tools.
 pub use iyakki_enchome as enchome;
 pub mod enchometools;
@@ -160,6 +239,8 @@ pub mod httpmini;
 pub mod hostengines;
 pub mod voicehelper;
 pub mod story;
+pub mod storypdf;
+pub mod studypdf;
 pub mod piclog;
 pub mod lab;
 pub mod storyillus;
@@ -171,10 +252,14 @@ pub mod voicedesk;
 pub mod voiceassist;
 pub mod voiceassist_ports;
 pub mod voiceassisttools;
+pub mod voicebackend;
 pub mod wakelisten;
 #[cfg(test)]
 #[path = "voiceassist_tests.rs"]
 mod voiceassist_tests;
+#[cfg(test)]
+#[path = "voiceassist_cloud_tests.rs"]
+mod voiceassist_cloud_tests;
 pub mod recordings;
 pub mod voicepack;
 pub mod scene;
@@ -183,10 +268,15 @@ pub mod webgraphics;
 pub mod modelopts;
 #[cfg(test)]
 mod modelopts_tests;
+#[cfg(test)]
+mod providers_loopback_tests;
 pub mod modelopttools;
 #[cfg(test)]
 mod modelopttools_tests;
 pub mod webgraphicstools;
+pub mod browsershort;
+#[cfg(test)]
+mod browsershort_tests;
 #[cfg(test)]
 mod webgraphics_tests;
 #[cfg(test)]
@@ -210,31 +300,51 @@ pub use iyakki_sshfs::sftp_session;
 pub mod sftptools;
 pub mod remotefiles;
 pub mod remotefilestools;
+pub mod accessbroker;
+pub mod clientlink;
+pub mod clientmedia;
 pub mod cameras;
 pub mod camdetect;
 pub mod camerastools;
 pub mod camrec;
 pub use iyakki_camdetect::camrec_format;
+pub use iyakki_camdetect::camrec_seal;
 pub use iyakki_sshfs::rf_ftp;
 pub use iyakki_sshfs::rf_sftp;
 pub use iyakki_sshfs::rf_ssh;
 #[cfg(test)]
 mod sftp_tests;
+pub use iyakki_sshfs::sshalg;
 pub use iyakki_sshfs::sshkey;
 pub mod sshtunnel;
 pub mod sshtunnel_mgr;
 pub mod gitworktools;
 pub mod sshtunneltools;
+pub mod sshsessiontools;
 pub mod objectstoragetools;
 pub mod updatestools;
+pub mod sessionlogtools;
+#[cfg(test)]
+mod sessionlogtools_tests;
 pub mod componentstools;
+pub mod pdfnativetools;
+pub mod appopen;
 pub mod pdftools;
 pub mod tilestools;
 #[cfg(test)]
 mod pdftools_tests;
 #[cfg(test)]
+mod pdfnativetools_tests;
+#[cfg(test)]
+mod storypdf_tests;
+#[cfg(test)]
+mod studypdf_tests;
+#[cfg(test)]
 mod componentstools_tests;
 pub mod sharetools;
+pub mod sqlmini;
+#[cfg(test)]
+mod sqlmini_tests;
 #[cfg(test)]
 mod sharetools_tests;
 #[cfg(test)]
@@ -261,6 +371,7 @@ pub mod vpn_mgr;
 pub mod vpn_nft;
 pub mod vpn_sys;
 pub mod vpntools;
+pub mod bluetoothpair;
 pub mod bluetoothtools;
 pub mod btaudiotools;
 #[cfg(test)]
@@ -269,16 +380,23 @@ mod vpn_mgr_tests;
 mod vpntools_tests;
 #[cfg(test)]
 mod bluetoothtools_tests;
+
 #[cfg(test)]
 mod gitworktools_tests;
 #[cfg(test)]
 mod sshtunneltools_tests;
+#[cfg(test)]
+mod sshsessiontools_tests;
 #[cfg(test)]
 mod sharedvault_tests;
 #[cfg(test)]
 mod sharedvaulttools_tests;
 #[cfg(test)]
 mod sshtunnel_tests;
+#[cfg(test)]
+mod sshtunnel_real_tests;
+#[cfg(test)]
+mod ssh_real_tests;
 pub mod gitagent;
 pub mod gitsite;
 pub mod gitkeys;
@@ -334,6 +452,7 @@ pub mod dlmanifest;
 pub use iyakki_openpgp as openpgp;
 pub mod cluster;
 pub mod clusters;
+pub mod compatreport;
 pub mod quickinstall;
 pub mod pvcguard;
 pub mod vaultpending;
@@ -348,6 +467,7 @@ pub mod aiprofile_remote;
 pub mod gpu_nvidia;
 pub mod gpu_steps;
 pub mod gpu_workloads;
+pub mod gpu_rocm;
 pub mod gpucdi;
 pub mod devname;
 pub mod webaccess;
@@ -355,6 +475,7 @@ pub mod devwatch;
 pub mod release;
 pub mod relinfo;
 pub mod sysinfo;
+pub mod procowner;
 pub mod sysprocs;
 pub mod inbox;
 pub mod notifyhub;
@@ -372,6 +493,10 @@ pub mod rootfs;
 pub mod linuxapps;
 pub mod linuxapps_dist;
 pub mod linuxapps_init;
+pub mod linuxapps_net;
+pub mod oscompat;
+#[cfg(test)]
+mod macos_fallback_tests;
 pub mod linuxwin;
 #[cfg(test)]
 mod linuxwin_tests;
@@ -401,7 +526,10 @@ mod disks_tests;
 #[cfg(test)]
 mod disks_fmt_tests;
 pub mod k8sexp;
+pub mod k8scr;
+pub mod k8sforward;
 pub mod devcluster;
+pub mod clusterprobe;
 pub use iyakki_lint::deploylint;
 pub use iyakki_lint::dockerlint;
 pub mod k8stools;
@@ -410,6 +538,7 @@ pub mod exposure;
 pub mod k3sdev;
 pub mod startup;
 pub mod startup_probe;
+pub mod installstartup;
 pub mod touchfix;
 pub mod touchprobe;
 pub mod touchrecover;
@@ -426,8 +555,10 @@ pub mod cloudcontrol;
 pub mod cloudfiles;
 pub mod cloudflows;
 pub mod cloudsnapshot;
+pub mod cloudsnapshot_kms;
 pub mod cloudlaunch;
 pub mod cloudlisten;
+pub mod cloudlisten_h2;
 pub mod domains;
 pub mod domainstools;
 pub mod cloudroles;
@@ -443,6 +574,7 @@ pub mod cloudrotate;
 pub mod cloudvaultlink;
 pub mod sharedvault;
 pub mod sharedvaulttools;
+pub mod cloudstoragetools;
 pub mod toolrouting;
 #[cfg(test)]
 mod toolrouting_tests;
@@ -464,10 +596,17 @@ pub mod autopilot;
 pub mod boardtrack;
 pub mod tasks;
 pub mod tasktools;
+pub mod taskenv;
+#[cfg(test)]
+mod taskenv_tests;
 pub mod jobs;
 pub mod jobtools;
 pub mod pending;
+pub(crate) mod phrases;
 pub mod pendingtools;
+pub mod pendingplus;
+#[cfg(test)]
+mod pendingplus_tests;
 #[cfg(test)]
 mod pending_tests;
 #[cfg(test)]
@@ -479,10 +618,21 @@ pub mod history;
 pub mod projectstate;
 pub mod target;
 pub mod testresults;
+pub mod edittest;
+#[cfg(test)]
+mod edittest_tests;
 pub mod coverage;
 
 /// What the apps need from the running system. The trait now lives in `iyakki-core-api` (UI/OS split plan, step 2); re-exported so
 /// every `iyakki_agent::HostApi` path keeps working.
-pub use iyakki_core_api::HostApi;
+pub use iyakki_core_api::{HostApi, WasmIo, WasmTask};
 /// The core contract's types, for the tiles and the transports that call `contract_local` (no new dependency for them).
 pub use iyakki_core_api::contract as core_contract;
+#[cfg(test)]
+mod fuzzkit;
+#[cfg(test)]
+mod upnp_fuzz_tests;
+#[cfg(test)]
+mod checkup_fuzz_tests;
+#[cfg(test)]
+mod sdkmoney_fuzz_tests;

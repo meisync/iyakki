@@ -16,4 +16,4 @@ pub mod syntax;
 
 pub use buffer::{Buffer, EditError, Move, Pos};
 pub use diff::{apply_hunks, diff_hunks, Hunk};
-pub use syntax::{highlight_line, lang_for_path, HlState, Highlighter, Lang, Span, TokenKind};
+pub use syntax::{highlight_line, highlight_text, ByteSpan, lang_for_path, HlState, Highlighter, Lang, Span, TokenKind};

@@ -9,7 +9,7 @@ grep -q "$START" "$F" && grep -q "$END" "$F" || { echo "$F has no appendix marke
 TABLE="$(awk -F'|' '
   function trim(s) { gsub(/^ +| +$/, "", s); return s }
   function clean(s, n) { gsub(/\|/, "/", s); gsub(/`/, "", s); s = trim(s); if (length(s) > n) s = substr(s, 1, n) "..."; return s }
-  /^\| F-/ { st = trim($5); if (st != "done") print "| " trim($2) " | " st " | " clean($3, 90) " | " clean($9, 220) " |" }
+  /^\| F-/ { st = trim($5); if (st != "done") print "| " trim($2) " | " st " | " clean($3, 90) " | " clean($10, 220) " |" }
 ' "$ROOT/FEATURES.md")"
 N="$(printf '%s\n' "$TABLE" | grep -c '^| F-' || true)"
 {

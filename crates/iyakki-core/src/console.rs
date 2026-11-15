@@ -79,6 +79,18 @@ pub fn format_log(level: log::Level, args: &std::fmt::Arguments) -> String {
     format!("[iyakki {:5}] {}", level, args)
 }
 
+/// The same record as one JSON object on one line (`IYAKKI_LOG_FORMAT=json`, for a service that a log collector reads): fixed keys
+/// `time` (unix seconds), `level` and `msg`; whatever the message holds is escaped, so a line break or a quote in it cannot make a
+/// second record or a broken one.
+pub fn format_log_json(unix_secs: u64, level: log::Level, args: &std::fmt::Arguments) -> String {
+    serde_json::json!({"time": unix_secs, "level": level.as_str().to_ascii_lowercase(), "msg": args.to_string()}).to_string()
+}
+
+/// Is the structured form asked for (`IYAKKI_LOG_FORMAT=json`)?
+pub fn json_logs_asked(var: Option<&str>) -> bool {
+    var.is_some_and(|v| v.trim().eq_ignore_ascii_case("json"))
+}
+
 /// At most this many panics get a backtrace in the log per minute (a crash loop must not flood the log).
 pub const BACKTRACE_PER_MINUTE: usize = 5;
 /// Frames of our own crates that are logged for one panic.
@@ -181,6 +193,17 @@ mod tests {
     fn log_levels_map_to_kernel_levels_and_lines_are_formatted() {
         assert_eq!([log::Level::Error, log::Level::Warn, log::Level::Info, log::Level::Debug].map(level_to_kernel), [3, 4, 6, 7]);
         assert_eq!(format_log(log::Level::Info, &format_args!("supervisor up")), "[iyakki INFO ] supervisor up");
+    }
+
+    #[test]
+    fn the_structured_log_line_is_one_object_with_fixed_keys_and_escapes_what_it_is_given() {
+        let l = format_log_json(1_700_000_000, log::Level::Warn, &format_args!("service: GET whoami 200 user=\"x\"\nnext\u{1}"));
+        assert!(!l.contains('\n'), "one line: {l:?}");
+        let v: serde_json::Value = serde_json::from_str(&l).unwrap();
+        assert_eq!((v["time"].as_u64(), v["level"].as_str()), (Some(1_700_000_000), Some("warn")));
+        assert_eq!(v["msg"], "service: GET whoami 200 user=\"x\"\nnext\u{1}");
+        assert_eq!(v.as_object().unwrap().len(), 3);
+        assert!(json_logs_asked(Some("json")) && json_logs_asked(Some(" JSON ")) && !json_logs_asked(Some("text")) && !json_logs_asked(None));
     }
 
     #[test]

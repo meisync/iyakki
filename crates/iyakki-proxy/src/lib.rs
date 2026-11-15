@@ -133,6 +133,11 @@ fn pintls_split(url: &str) -> Option<(String, u16, String)> {
 
 pub mod certinfo;
 pub mod guard;
+pub mod h2;
+pub mod h2client;
+pub mod happy;
+pub mod hpack;
+pub mod hpack_table;
 #[cfg(any(test, feature = "testcerts"))]
 pub mod testcerts {
     //! Certificates for tests of code that shows or pins a server certificate.
@@ -159,9 +164,35 @@ pub mod testcerts {
         let key = KeyPair::generate().unwrap();
         p.self_signed(&key).unwrap().der().to_vec()
     }
+
+    /// A certificate for `name` issued by a (made-up) authority called `issuer`, so its issuer is not itself; with an optional
+    /// "CA Issuers" address. For chains of several levels.
+    pub fn issued_der(name: &str, issuer: &str, aia: Option<&str>) -> Vec<u8> {
+        let mut ip = CertificateParams::new(vec![issuer.to_string()]).unwrap();
+        ip.distinguished_name.push(DnType::CommonName, issuer);
+        ip.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ikey = KeyPair::generate().unwrap();
+        let icert = ip.self_signed(&ikey).unwrap();
+        let mut p = CertificateParams::new(vec![name.to_string()]).unwrap();
+        p.distinguished_name.push(DnType::CommonName, name);
+        if let Some(u) = aia {
+            let uri = u.as_bytes();
+            let mut ad = vec![0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x30, 0x02, 0x86, uri.len() as u8];
+            ad.extend_from_slice(uri);
+            let mut seq = vec![0x30, ad.len() as u8];
+            seq.extend(ad);
+            let mut outer = vec![0x30, seq.len() as u8];
+            outer.extend(seq);
+            p.custom_extensions.push(rcgen::CustomExtension::from_oid_content(&[1, 3, 6, 1, 5, 5, 7, 1, 1], outer));
+        }
+        let key = KeyPair::generate().unwrap();
+        p.signed_by(&key, &icert, &ikey).unwrap().der().to_vec()
+    }
 }
 #[cfg(feature = "https")]
 pub mod pintls;
+#[cfg(feature = "https")]
+pub mod certview;
 
 #[derive(Clone, Debug, Default)]
 pub struct HostPolicy {
@@ -397,9 +428,10 @@ pub mod https {
     }
 
     /// The transport for installs and other downloads: [`UreqStreamer`] with the stall limits of [`crate::guard::Limits::DOWNLOAD`], so a transfer
-    /// that never starts, sends no byte, or goes quiet ends as a "network problem" instead of hanging.
+    /// that never starts, sends no byte, or goes quiet ends as a "network problem" instead of hanging, and with no network at all it fails within 4 s
+    /// (see [`crate::guard::Preflight`]).
     pub fn download_streamer() -> std::sync::Arc<dyn crate::Streamer> {
-        std::sync::Arc::new(crate::guard::Guarded::new(UreqStreamer::default(), crate::guard::Limits::DOWNLOAD))
+        std::sync::Arc::new(crate::guard::Preflight::new(crate::guard::Guarded::new(UreqStreamer::default(), crate::guard::Limits::DOWNLOAD), std::time::Duration::from_secs(4)))
     }
 
     /// Streams over HTTP/HTTPS with no overall time limit (only connecting and the first answer are bounded).
@@ -464,6 +496,10 @@ pub mod https {
     /// no cookies, a size cap and a time limit.
     pub struct BrowserFetch {
         agent: ureq::Agent,
+        user_agent: String,
+        timeout: std::time::Duration,
+        /// HTTP/2 connections (F-BROX-10); `None` sends everything over HTTP/1.1.
+        h2: Option<crate::h2client::H2Pool>,
     }
 
     /// Unpack a gzip stream (RFC 1952) with the deflate decoder already in the workspace; the result is capped at `limit` bytes.
@@ -496,6 +532,8 @@ pub mod https {
     pub const MAX_PAGE: u64 = 12 << 20;
     /// How much of a video or audio file is read to describe it.
     pub const MEDIA_HEAD: u64 = 512 * 1024;
+    /// A video or song asked for with a `Range` header is read up to this much (the pieces of a streamed download are a megabyte).
+    pub const MEDIA_RANGE_MAX: u64 = 2 << 20;
 
     /// Idle connections kept for reuse: a browser opens up to six to one host and keeps them for the next page's files, so the
     /// pool must hold at least that many per host (ureq's own default is 3, which closed half of them after every burst and made
@@ -522,7 +560,15 @@ pub mod https {
                     return Ok(addrs);
                 }
             }
-            let addrs = self.inner.resolve(uri, config, timeout)?;
+            let mut addrs = self.inner.resolve(uri, config, timeout)?;
+            // Happy Eyeballs (F-BROX-11): with several addresses the one that connects first goes to the front, so a dead address
+            // (often an IPv6 one) does not stall every connection of the host; the answer is kept with the names for a minute
+            if addrs.len() > 1 {
+                let order = happy::fastest_first(&addrs);
+                for (i, a) in order.iter().enumerate().take(addrs.len()) {
+                    addrs[i] = *a;
+                }
+            }
             if let Ok(mut c) = self.cache.lock() {
                 if c.len() >= DNS_MAX {
                     c.retain(|_, (at, _)| at.elapsed() < DNS_TTL);
@@ -551,14 +597,82 @@ pub mod https {
 
     impl Default for BrowserFetch {
         fn default() -> Self {
-            Self { agent: browser_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Iyakki/0.1", 25) }
+            Self::with_options("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Iyakki/0.1", 25)
         }
     }
 
     impl BrowserFetch {
         /// The same transport with its own `User-Agent` and time limit (the assistant's web tools say who they are).
         pub fn with_options(user_agent: &str, timeout_secs: u64) -> BrowserFetch {
-            BrowserFetch { agent: browser_agent(user_agent, timeout_secs) }
+            let roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
+            let dial = crate::h2client::tls_dialer(roots, std::time::Duration::from_secs(10));
+            BrowserFetch { agent: browser_agent(user_agent, timeout_secs), user_agent: user_agent.to_string(), timeout: std::time::Duration::from_secs(timeout_secs), h2: Some(crate::h2client::H2Pool::new(dial)) }
+        }
+
+        /// The same transport that speaks HTTP/1.1 only.
+        pub fn http1_only(mut self) -> BrowserFetch {
+            self.h2 = None;
+            self
+        }
+
+        /// The same transport with another way to open HTTP/2 connections (tests use it to reach a server of their own).
+        pub fn with_h2_dialer(mut self, dial: crate::h2client::Dialer) -> BrowserFetch {
+            self.h2 = Some(crate::h2client::H2Pool::new(dial));
+            self
+        }
+
+        /// How many HTTP/2 connections are open.
+        pub fn h2_connections(&self) -> usize {
+            self.h2.as_ref().map_or(0, |p| p.connections())
+        }
+
+        /// The request as HTTP/2 headers (the same ones the HTTP/1.1 path sends).
+        fn h2_request(&self, req: &iyakki_web::Request, method: &str, authority: String, path: String) -> crate::h2client::H2Request {
+            let mut h: Vec<(String, String)> = vec![
+                ("user-agent".into(), self.user_agent.clone()),
+                ("accept".into(), "text/html,application/xhtml+xml,application/rss+xml;q=0.9,application/atom+xml;q=0.9,application/xml;q=0.8,text/plain;q=0.8,*/*;q=0.5".into()),
+                ("accept-language".into(), "en-US,en;q=0.9,*;q=0.5".into()),
+            ];
+            if method == "POST" || req.range.is_empty() {
+                h.push(("accept-encoding".into(), "gzip".into()));
+            }
+            for (n, v) in [("cookie", &req.cookie), ("referer", &req.referer), ("if-none-match", &req.if_none_match), ("if-modified-since", &req.if_modified_since), ("range", &req.range)] {
+                if !v.is_empty() {
+                    h.push((n.into(), v.clone()));
+                }
+            }
+            if method == "POST" {
+                h.push(("content-type".into(), if req.content_type.is_empty() { "application/x-www-form-urlencoded".into() } else { req.content_type.clone() }));
+            }
+            for (n, v) in &req.extra.0 {
+                h.push((n.to_ascii_lowercase(), v.clone()));
+            }
+            crate::h2client::H2Request { method: method.into(), authority, path, headers: h, body: if method == "POST" { req.body.clone() } else { Vec::new() }, max_body: MAX_PAGE as usize, media_cap: if req.range.is_empty() { MEDIA_HEAD as usize } else { MEDIA_RANGE_MAX as usize } }
+        }
+
+        /// The answer to a request sent over HTTP/2, in the shape the page reader takes.
+        fn h2_response(&self, req: &iyakki_web::Request, r: crate::h2client::H2Response) -> Result<iyakki_web::Response, String> {
+            let header = |name: &str| r.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.clone());
+            let status = r.status;
+            let (location, content_type) = (header("location"), header("content-type").unwrap_or_default());
+            let set_cookies: Vec<String> = r.headers.iter().filter(|(k, _)| k.eq_ignore_ascii_case("set-cookie")).map(|(_, v)| v.clone()).collect();
+            let cache_control = header("cache-control").unwrap_or_default();
+            let max_age = iyakki_web::cache::max_age(&cache_control);
+            let age = header("age").and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0);
+            let all_headers: Vec<(String, String)> = r.headers.iter().take(80).map(|(k, v)| (k.clone(), v.chars().take(1000).collect())).collect();
+            let announced = header("content-length").and_then(|v| v.trim().parse::<u64>().ok());
+            let ct = content_type.to_ascii_lowercase();
+            let media = ct.starts_with("video/") || ct.starts_with("audio/") || ct.starts_with("application/ogg");
+            if media && req.method.eq_ignore_ascii_case("GET") {
+                let content_length = announced.or(Some(r.body.len() as u64));
+                return Ok(iyakki_web::Response { status, location, content_type, set_cookies, body: r.body, content_length, max_age: None, headers: all_headers, ..Default::default() });
+            }
+            let gzip = header("content-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("gzip"));
+            let mut body = r.body;
+            if gzip {
+                body = gunzip(&body, MAX_PAGE as usize).map_err(|e| format!("the page was compressed and could not be unpacked ({e})"))?;
+            }
+            Ok(iyakki_web::Response { status, location, content_type, set_cookies, body, content_length: None, max_age, cache_control, etag: header("etag").unwrap_or_default(), last_modified: header("last-modified").unwrap_or_default(), vary: header("vary").unwrap_or_default(), expires: header("expires").unwrap_or_default(), age, headers: all_headers })
         }
     }
 
@@ -569,6 +683,17 @@ pub mod https {
 
         fn send(&self, req: &iyakki_web::Request) -> Result<iyakki_web::Response, String> {
             let target = req.url.to_string();
+            if let (Some(pool), Some((host, port, authority, path))) = (&self.h2, crate::h2client::split_https(&target)) {
+                let method = match req.method.to_ascii_uppercase().as_str() {
+                    "POST" => "POST",
+                    "HEAD" => "HEAD",
+                    _ => "GET",
+                };
+                let h2req = self.h2_request(req, method, authority, path);
+                if let crate::h2client::Pooled::Done(r) = pool.fetch(&host, port, &h2req, self.timeout) {
+                    return r.and_then(|r| self.h2_response(req, r));
+                }
+            }
             let accept = "text/html,application/xhtml+xml,application/rss+xml;q=0.9,application/atom+xml;q=0.9,application/xml;q=0.8,text/plain;q=0.8,*/*;q=0.5";
             let with = |mut r: ureq::RequestBuilder<ureq::typestate::WithBody>| {
                 r = r.header("Accept", accept).header("Accept-Language", "en-US,en;q=0.9,*;q=0.5").header("Accept-Encoding", "gzip");
@@ -642,7 +767,7 @@ pub mod https {
             if media && req.method.eq_ignore_ascii_case("GET") {
                 use std::io::Read;
                 let mut body = Vec::new();
-                let _ = resp.body_mut().as_reader().take(MEDIA_HEAD).read_to_end(&mut body);
+                let _ = resp.body_mut().as_reader().take(if req.range.is_empty() { MEDIA_HEAD } else { MEDIA_RANGE_MAX }).read_to_end(&mut body);
                 let content_length = announced.or(Some(body.len() as u64));
                 return Ok(iyakki_web::Response { status, location, content_type, set_cookies, body, content_length, max_age: None, headers: all_headers, ..Default::default() });
             }

@@ -3,7 +3,7 @@ name = "iyakki-connect"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Small connector program: pin a tenant's certificate, sign in (password or device key), show the desktop in the installed browser (serve), exchange files in one shared folder."
+description = "Small connector program: pin a tenant's certificate, sign in (password or device key), show the desktop in the installed browser (serve), open a client window for an instance (window, experimental), exchange files in one shared folder."
 
 [lib]
 name = "iyakki_connect"

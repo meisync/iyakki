@@ -46,6 +46,7 @@ pub fn make_runner(cx: &AppCx, root: &Path) -> Runner {
         })),
         history: None,
         audit: Some(Arc::new(move |k, d| audit.record(&user2, k, d))),
+        cluster: None,
     };
     autopilot_runner(parts)
 }
@@ -61,6 +62,8 @@ pub fn hooks(cx: &AppCx, workspace: &str) -> Hooks {
             let _ = svc.inbox.add(&user2, iyakki_agent::inbox::Kind::Agent, &format!("[{ws}] {title}"), text, "tasks", Some(iyakki_agent::inbox::Link::new("inbox", "")), iyakki_agent::clock::now_unix());
         })),
         cleanup: None,
+        // a task gets its own namespace in the machine's cluster when that cluster runs (made when the task is made, deleted with it)
+        cluster: Some(cx.services.cluster.clone() as Arc<dyn iyakki_agent::taskenv::TaskCluster>),
         // every run of a task is kept as a run log with the task, row and agent, so RUNS lists and opens it
         record: Some(Arc::new(move |r| {
             if r.run_id.is_empty() {
@@ -195,8 +198,31 @@ impl IdeApp {
             return;
         }
         if w.tasks.mgr.get(key).is_none() {
-            w.say("This agent runs in the chat (Autopilot or an external agent): stop or pause it there.", false);
-            return;
+            let autopilot = iyakki_agent::assign::load(&w.root()).get(key).is_some_and(|a| a.kind == "autopilot");
+            match c {
+                // an Autopilot of the chat: Stop from the board leaves a request the run reads at its next step; Open run opens its log
+                's' if autopilot => {
+                    let root = w.root();
+                    match iyakki_agent::assign::update(&root, |d| d.request_stop(key)) {
+                        Ok(()) => w.say("Stopping the Autopilot at the end of its step. Resume it in the chat.", true),
+                        Err(e) => w.say(e, false),
+                    }
+                    self.redraw = true;
+                    return;
+                }
+                'o' => {
+                    let run = iyakki_agent::assign::load(&w.root()).get(key).map(|a| a.run_id.clone()).filter(|r| !r.is_empty());
+                    match run {
+                        Some(id) => self.request = Some(("runs".into(), format!("run:{id}"))),
+                        None => w.say("This run has no log yet.", false),
+                    }
+                    return;
+                }
+                _ => {
+                    w.say("This agent runs in the chat (Autopilot or an external agent): pause, resume and message it there. Stop works from here for an Autopilot.", false);
+                    return;
+                }
+            }
         }
         let r = match c {
             's' => w.tasks.mgr.stop(key).map(|()| "Stopping the agent.".to_string()),

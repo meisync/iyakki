@@ -237,6 +237,11 @@ fn info_ps_dmesg_logs_and_status_read_the_made_up_machine_and_hide_credentials()
     assert_eq!(v["gpu"][0]["connected"], json!(["card0-eDP-1"]));
     assert!(v["sound"][0].as_str().unwrap().contains("HDA-Intel"));
     assert_eq!(v["hostname"], "iyakki-test");
+    // the compat report (F-CORE-19): the versions that meet here, in lines and as data
+    let lines: Vec<&str> = v["compat"]["lines"].as_array().unwrap().iter().filter_map(|x| x.as_str()).collect();
+    assert!(lines[0].starts_with("core ") && lines[0].contains("contract 0.2") && lines[0].contains("client protocol"), "{lines:?}");
+    assert!(lines.iter().any(|l| l.contains("deprecated other stream.chunk.data_as_numbers since 0.1.0-alpha.3")), "the table row shows: {lines:?}");
+    assert_eq!(v["compat"]["report"]["contract"].as_str().map(|c| c.starts_with("0.2")), Some(true));
     // kernel log: all, since, grep, newest kept, no continuation lines
     let d = jv(&call(&r, &k, &a, "GET", "/v1/dev/dmesg", &[], b"").unwrap());
     assert_eq!(d["records"].as_array().unwrap().len(), 5);
@@ -302,6 +307,17 @@ fn files_stay_inside_the_sandbox_links_and_dot_dot_do_not_escape_and_secrets_are
     let (s, home, sys) = sb(&r);
     // inside: push, list, stat, pull, remove
     assert!(push(&s, "notes/a.txt", b"hello", false).unwrap()["done"].as_bool().unwrap());
+    {
+        // KI-095: the home folder is 0700 and the granted `files` scope (served by the agent as the owner) still works through it
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(crate::scope::tighten_home(&home).unwrap());
+        assert_eq!(std::fs::metadata(&home).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(files::get(&s, "~/notes/a.txt", 0, 100).unwrap(), b"hello");
+        assert!(push(&s, "notes/b.txt", b"ok", false).unwrap()["done"].as_bool().unwrap());
+        assert_eq!(std::fs::metadata(home.join("notes/b.txt")).unwrap().permissions().mode() & 0o777, 0o600, "a pushed file is 0600");
+        assert!(files::ls(&s, "notes").is_ok());
+    }
     assert_eq!(std::fs::read(home.join("notes/a.txt")).unwrap(), b"hello");
     assert_eq!(files::get(&s, "~/notes/a.txt", 0, 100).unwrap(), b"hello");
     assert_eq!(files::get(&s, "notes/a.txt", 2, 100).unwrap(), b"llo", "a chunk from an offset");
@@ -474,6 +490,17 @@ fn input_events_are_validated_queued_in_order_bounded_and_refused_on_a_password_
     let kp = key("laptop", "root", &[Scope::Input, Scope::InputPassword]);
     assert_eq!(send(&kp, json!({"kind":"text","text":"x"})).status, 200);
     input::set_secret_focus(&r.dir, false);
+    input::take(&r.dir);
+    // an approval or power card is up: refused with the sentence, even with every scope (answer it on the device's own screen)
+    input::set_approval_card(&r.dir, true);
+    for body in [json!({"kind":"key","name":"a"}), json!({"kind":"text","text":"y"}), json!({"kind":"tap","x":5,"y":5})] {
+        let o = send(&kp, body);
+        assert_eq!(o.status, 403);
+        assert!(String::from_utf8_lossy(&o.body).contains("device's own screen"), "{}", String::from_utf8_lossy(&o.body));
+    }
+    assert!(input::take(&r.dir).is_empty());
+    input::set_approval_card(&r.dir, false);
+    assert_eq!(send(&kp, json!({"kind":"key","name":"a"})).status, 200);
     input::take(&r.dir);
     assert_eq!(send(&k, json!({"kind":"key","name":"Ctrl+c"})).status, 200);
     // typed text is logged by length only
@@ -680,4 +707,117 @@ fn commands_run_as_the_accounts_own_system_user_and_root_only_for_the_root_accou
     assert!(!i.root && i.uid == Some(65534) && i.user == "nobody", "{i:?}");
     // a broken passwd line is not a user
     assert!(identity("alice", false, "alice:x:abc:1::/h:/bin/sh\n", 0, tmp).is_err());
+}
+
+#[test]
+fn an_account_without_a_system_user_runs_as_the_owner_of_its_home_when_that_is_a_real_user_else_as_nobody_in_a_home_of_its_own() {
+    use super::shellexec::{identity_with_owner, FALLBACK_HOME};
+    let passwd = "root:x:0:0:root:/root:/bin/sh\n";
+    let home = Path::new("/home/admin");
+    // a root-owned home says nothing about a user: nobody, and a home of its own (never the root-owned one)
+    for owner in [None, Some((0, 0))] {
+        let i = identity_with_owner("admin", false, passwd, 0, home, owner).unwrap();
+        assert!(!i.root && i.uid == Some(65534) && i.gid == Some(65534) && i.user == "nobody" && i.home == Path::new(FALLBACK_HOME), "{i:?}");
+    }
+    // a home owned by a real user: commands run as that user, in that home
+    let i = identity_with_owner("admin", false, passwd, 0, home, Some((1000, 1000))).unwrap();
+    assert!(i.uid == Some(1000) && i.gid == Some(1000) && i.user == "admin" && i.home == home && !i.root, "{i:?}");
+    // a passwd entry beats the owner of the folder
+    let i = identity_with_owner("admin", false, "admin:x:1234:1234::/home/admin:/bin/sh\n", 0, home, Some((1000, 1000))).unwrap();
+    assert_eq!(i.uid, Some(1234));
+    // a process that is not root runs everything as itself whatever the owner says
+    assert_eq!(identity_with_owner("admin", false, passwd, 1000, home, Some((5, 5))).unwrap().uid, None);
+}
+
+#[test]
+fn a_folder_is_entered_as_the_identity_not_as_this_process_and_a_home_nobody_cannot_enter_is_replaced_by_its_own() {
+    use super::shellexec::{enterable_as, may_enter, start_dir, DirStat, Identity, FALLBACK_HOME};
+    // the Lenovo case: /home is open, /home/admin is root:root 0700, the fallback home belongs to nobody
+    let table: std::collections::HashMap<&str, DirStat> = [
+        ("/", (0, 0, 0o755, true)),
+        ("/home", (0, 0, 0o755, true)),
+        ("/home/admin", (0, 0, 0o700, true)),
+        ("/home/open", (0, 0, 0o755, true)),
+        ("/home/mine", (1000, 1000, 0o750, true)),
+        ("/home/file", (0, 0, 0o755, false)),
+        ("/tmp", (0, 0, 0o1777, true)),
+        (FALLBACK_HOME, (65534, 65534, 0o700, true)),
+    ]
+    .into_iter()
+    .collect();
+    let stat = |p: &Path| table.get(p.to_str().unwrap()).copied();
+    assert!(may_enter((0, 0, 0o700, true), 0, 0), "root enters anything");
+    assert!(!may_enter((0, 0, 0o700, true), 65534, 65534));
+    assert!(may_enter((0, 0, 0o701, true), 65534, 65534), "the others' execute bit");
+    assert!(may_enter((1000, 1000, 0o750, true), 5, 1000), "the group's execute bit");
+    assert!(!may_enter((1000, 1000, 0o750, true), 5, 6) && !may_enter((1000, 1000, 0o644, true), 1000, 1000) && !may_enter((0, 0, 0o755, false), 7, 7));
+    assert!(enterable_as(Path::new("/home/open"), 65534, 65534, &stat));
+    assert!(!enterable_as(Path::new("/home/admin"), 65534, 65534, &stat));
+    assert!(!enterable_as(Path::new("/home/missing"), 65534, 65534, &stat) && !enterable_as(Path::new("relative"), 0, 0, &stat));
+    let nobody = Identity { uid: Some(65534), gid: Some(65534), home: PathBuf::from(FALLBACK_HOME), user: "nobody".into(), root: false };
+    // the session started in the account's root-owned home: it starts in nobody's own home instead
+    assert_eq!(start_dir(&nobody, Path::new("/home/admin"), &stat), Path::new(FALLBACK_HOME));
+    // a folder nobody can enter, a file and a missing folder all give the same
+    assert_eq!(start_dir(&nobody, Path::new("/home/mine"), &stat), Path::new(FALLBACK_HOME));
+    assert_eq!(start_dir(&nobody, Path::new("/home/file"), &stat), Path::new(FALLBACK_HOME));
+    assert_eq!(start_dir(&nobody, Path::new("/home/gone"), &stat), Path::new(FALLBACK_HOME));
+    // a folder it can enter stays
+    assert_eq!(start_dir(&nobody, Path::new("/home/open"), &stat), Path::new("/home/open"));
+    // even its own home gone: the top folder, never a failed start
+    let none = |p: &Path| table.get(p.to_str().unwrap()).copied().filter(|_| p != Path::new(FALLBACK_HOME));
+    assert_eq!(start_dir(&nobody, Path::new("/home/admin"), &none), Path::new("/"));
+    // the account's own user in its own 0750 home
+    let me = Identity { uid: Some(1000), gid: Some(1000), home: PathBuf::from("/home/mine"), user: "admin".into(), root: false };
+    assert_eq!(start_dir(&me, Path::new("/home/mine"), &stat), Path::new("/home/mine"));
+    // a process that is not root: its own user, a folder that exists
+    let itself = Identity { uid: None, gid: None, home: PathBuf::from("/home/open"), user: "x".into(), root: false };
+    assert_eq!(start_dir(&itself, Path::new("/home/gone"), &stat), Path::new("/home/open"));
+}
+
+#[test]
+fn doctor_returns_the_report_for_administrators_only_and_says_when_the_live_state_was_not_read() {
+    let r = rig("doctor");
+    let k = key("laptop", "root", &[Scope::Debug]);
+    // an account that is not an administrator is refused, and nothing is gathered
+    let o = call(&r, &k, &userp(), "GET", "/v1/dev/doctor", &[], b"").unwrap();
+    assert_eq!(o.status, 403);
+    // an administrator gets text, a code and the flag that says whether the running system's own state was included (not in this rig)
+    let o = call(&r, &k, &admin(), "GET", "/v1/dev/doctor", &[("detail", "1")], b"").unwrap();
+    assert_eq!(o.status, 200);
+    let v = jv(&o);
+    assert_eq!(v["live"], false, "the rig has no services, so the live reads are absent and the answer says so");
+    assert!(v["text"].as_str().unwrap().contains("Not looked at from the command line"), "{v}");
+    assert!(matches!(v["code"].as_i64(), Some(0 | 1)));
+    // the scope is the debug scope: a key without it is refused before the route runs
+    let weak = key("phone", "root", &[Scope::Install]);
+    assert!(call(&r, &weak, &admin(), "GET", "/v1/dev/doctor", &[], b"").unwrap().status >= 400);
+}
+
+#[test]
+fn doctor_with_the_devices_own_services_reads_the_running_systems_state_and_leaves_out_the_command_line_note() {
+    struct Dead;
+    impl iyakki_proxy::Upstream for Dead {
+        fn request(&self, _: &str, _: &str, _: &[(String, String)], _: &[u8]) -> Result<iyakki_proxy::UpstreamResponse, String> {
+            Err("offline".into())
+        }
+    }
+    let r = rig("doctor-svc");
+    let svc = crate::services::Services::open(&r.dir.join("svc"), std::sync::Arc::new(Dead), std::sync::Arc::new(Dead)).unwrap();
+    let k = key("laptop", "root", &[Scope::Debug]);
+    let policy = admin();
+    let audit = |_: &str, _: &str| {};
+    let tail = |n: usize| vec!["1 root login ok".to_string(); n.min(3)];
+    let cx = Ctx { dm: &r.dm, key: &k, policy: &policy, role: "admin", hostname: "iyakki-test", paths: &r.paths, audit_tail: &tail, audit: &audit, firewall_file: r.dir.join("firewall.json"), home: None, svc: Some(&svc), ext: None, own_port: 7979, power: &|_| {}, boot: None, release: "", volatile: false, data_free: None, kube: None };
+    let qs = |n: &str| if n == "detail" { "1".to_string() } else { String::new() };
+    let o = api::handle(&cx, "GET", "/v1/dev/doctor", &qs, b"").unwrap();
+    assert_eq!(o.status, 200);
+    let v = jv(&o);
+    assert_eq!(v["live"], true, "the device's own services were there: the live reads (dev cluster, vault, VPN light) were included");
+    let text = v["text"].as_str().unwrap();
+    assert!(!text.contains("Not looked at from the command line"), "{text}");
+    assert!(matches!(v["code"].as_i64(), Some(0 | 1)));
+    // the same call by an account without administrator rights is refused whatever the services are
+    let weak = userp();
+    let cx2 = Ctx { policy: &weak, role: "user", ..cx };
+    assert_eq!(api::handle(&cx2, "GET", "/v1/dev/doctor", &qs, b"").unwrap().status, 403);
 }

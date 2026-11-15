@@ -19,7 +19,7 @@ impl BrowserApp {
             self.status = Some((e, false));
             return;
         }
-        let v = super::super::pdfview::PdfView::open_file(path);
+        let v = super::super::pdfview::PdfView::open_file_for(path, cx);
         cx.audit.record(&cx.session.user, "pdf.open", &path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
         self.pdf = Some(v);
         self.addr_focus = false;
@@ -31,6 +31,11 @@ impl BrowserApp {
             self.status = Some(("This is not a PDF file.".into(), false));
             return;
         };
+        if let Some(name) = self.pdf_offer.take() {
+            // the file is already in Downloads: open that copy
+            self.open_saved_pdf(&name, cx);
+            return;
+        }
         self.pdf_after = Some(String::new());
         self.start_download_of(page.url.clone(), page.ctype.clone(), None, cx);
         if self.download.is_none() {
@@ -40,9 +45,45 @@ impl BrowserApp {
         }
     }
 
-    /// A download finished: open it when it was asked for as a PDF to read.
+    /// A saved PDF by its file name (from the Downloads list or the offer after a download): opens in the viewer. The name is a
+    /// plain file name in the person's Downloads folder; anything with a folder in it is refused.
+    pub(super) fn open_saved_pdf(&mut self, name: &str, cx: &AppCx) {
+        if name.is_empty() || name.contains(['/', '\\']) || name.starts_with('.') || !name.to_ascii_lowercase().ends_with(".pdf") {
+            self.status = Some(("That is not a PDF in Downloads.".into(), false));
+            return;
+        }
+        match Self::downloads_dir(cx) {
+            Ok(d) if d.join(name).is_file() => self.open_pdf_file(&d.join(name), cx),
+            Ok(_) => self.status = Some((format!("{name} is not in Downloads any more."), false)),
+            Err(e) => self.status = Some((e, false)),
+        }
+    }
+
+    /// A saved file from the Downloads list that another tile opens: text in EDIT, a table in DATA, music and video in MEDIA. The name
+    /// is a plain file name in the person's Downloads folder, the account's file rules must let them read it, and the shell is asked to
+    /// open the tile (it keeps the browser aside, so Back returns here).
+    pub(super) fn open_saved_file(&mut self, name: &str, cx: &AppCx) {
+        let (tile, p) = match super::super::download_open::resolve(cx, name) {
+            Ok(r) => r,
+            Err(e) => {
+                self.status = Some((e, false));
+                return;
+            }
+        };
+        let item = super::super::download_open::item_for(tile, &p);
+        cx.audit.record(&cx.session.user, "browser.download.open", tile);
+        self.av_request = Some((tile.to_string(), item));
+    }
+
+    /// A download finished: open it when it was asked for as a PDF to read, else offer it (the status line says O opens it).
     pub(super) fn pdf_download_done(&mut self, name: &str, cx: &AppCx) {
         if self.pdf_after.take().is_none() {
+            if name.to_ascii_lowercase().ends_with(".pdf") {
+                self.pdf_offer = Some(name.to_string());
+                if let Some((m, true)) = self.status.as_mut() {
+                    m.push_str(" Press O to read it in the PDF viewer.");
+                }
+            }
             return;
         }
         match Self::downloads_dir(cx) {

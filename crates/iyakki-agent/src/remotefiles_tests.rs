@@ -44,6 +44,9 @@ struct MemServer {
     connects: u32,
     /// The first progress call signals `started` and waits for `go`.
     gate: Option<(std::sync::mpsc::Sender<()>, Arc<Mutex<std::sync::mpsc::Receiver<()>>>)>,
+    /// How many further downloads (after the one that takes the gate last) are held by the same gate: the gate is handed to this many
+    /// downloads as a copy before the next one takes it. Dropping the `go` sender releases every held download at once.
+    gate_extra: usize,
 }
 
 struct MemConnector(Arc<Mutex<MemServer>>);
@@ -109,14 +112,14 @@ impl RemoteFs for MemFs {
         let (data, gate) = {
             let mut s = self.0.lock().unwrap();
             s.downloads.push((remote.into(), offset));
-            (s.files.get(&clean_path(remote)).cloned().ok_or("no such file or folder")?, s.gate.take())
+            (s.files.get(&clean_path(remote)).cloned().ok_or("no such file or folder")?, if s.gate_extra > 0 { s.gate_extra -= 1; s.gate.clone() } else { s.gate.take() })
         };
         for (i, chunk) in data[offset as usize..].chunks(1000).enumerate() {
             out.write_all(chunk).map_err(|e| e.to_string())?;
             if i == 0 {
                 if let Some((started, go)) = &gate {
                     let _ = started.send(());
-                    let _ = go.lock().unwrap().recv_timeout(Duration::from_secs(5));
+                    let _ = go.lock().unwrap().recv_timeout(Duration::from_secs(20));
                 }
             }
             if !progress(chunk.len() as u64) {
@@ -450,27 +453,40 @@ fn at_most_two_transfers_run_at_once_and_the_rest_wait() {
     let s = open_ready(&r);
     let (tx, rx) = std::sync::mpsc::channel();
     let (go_tx, go_rx) = std::sync::mpsc::channel();
-    r.srv.lock().unwrap().gate = Some((tx, Arc::new(Mutex::new(go_rx))));
+    // all four downloads are held by the gate when they start: the test sees exactly which two run and which two wait, however the
+    // threads are scheduled (a gate that only held the first one left the state of the second to a race)
+    {
+        let mut srv = r.srv.lock().unwrap();
+        srv.gate = Some((tx, Arc::new(Mutex::new(go_rx))));
+        srv.gate_extra = 3;
+    }
     let ids: Vec<u64> = (0..4).map(|i| r.m.start_transfer(&TransferReq { session: s, download: true, remote: "/docs/a.bin".into(), local: r.dl.join(format!("f{i}.bin")).to_str().unwrap().into(), overwrite: false }).unwrap()).collect();
-    rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    rx.recv_timeout(Duration::from_secs(10)).unwrap();
     let states = || r.m.transfers().iter().map(|t| t.state).collect::<Vec<_>>();
     let running = states().iter().filter(|s| **s == State::Running).count();
     let queued = states().iter().filter(|s| **s == State::Queued).count();
     assert_eq!((running, queued), (2, 2), "{:?}", states());
-    go_tx.send(()).unwrap();
+    assert!(rx.try_recv().is_err(), "no third transfer started");
+    drop(go_tx); // releases every held download
     for id in ids {
         assert_eq!(wait_finished(&r.m, id).state, State::Done);
     }
     // a queued transfer can be cancelled before it starts
     let (tx, rx) = std::sync::mpsc::channel();
     let (go_tx, go_rx) = std::sync::mpsc::channel();
-    r.srv.lock().unwrap().gate = Some((tx, Arc::new(Mutex::new(go_rx))));
+    {
+        let mut srv = r.srv.lock().unwrap();
+        srv.gate = Some((tx, Arc::new(Mutex::new(go_rx))));
+        srv.gate_extra = 1;
+    }
     let a = r.m.start_transfer(&TransferReq { session: s, download: true, remote: "/docs/a.bin".into(), local: r.dl.join("g0.bin").to_str().unwrap().into(), overwrite: false }).unwrap();
     let b = r.m.start_transfer(&TransferReq { session: s, download: true, remote: "/docs/a.bin".into(), local: r.dl.join("g1.bin").to_str().unwrap().into(), overwrite: false }).unwrap();
     let c = r.m.start_transfer(&TransferReq { session: s, download: true, remote: "/docs/a.bin".into(), local: r.dl.join("g2.bin").to_str().unwrap().into(), overwrite: false }).unwrap();
-    rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    rx.recv_timeout(Duration::from_secs(10)).unwrap();
     r.m.cancel_transfer(c);
-    go_tx.send(()).unwrap();
+    drop(go_tx);
     assert_eq!(wait_finished(&r.m, c).state, State::Cancelled);
     assert_eq!(wait_finished(&r.m, a).state, State::Done);
     assert_eq!(wait_finished(&r.m, b).state, State::Done);

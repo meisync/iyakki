@@ -123,7 +123,7 @@ fn every_card_has_the_choices_it_says_and_marks_the_current_one() {
     assert_eq!(SettingsApp::ss_chips(SsRow::First, &c).0, ["Do nothing", "Screen saver", "Turn the screen off"]);
     assert_eq!(SettingsApp::ss_chips(SsRow::First, &c).1, Some(1));
     assert_eq!(SettingsApp::ss_chips(SsRow::Dim, &c).0, ["Do not dim", "50%", "25%", "10%"]);
-    assert_eq!(SettingsApp::ss_chips(SsRow::Style, &c).0.len(), 4);
+    assert_eq!(SettingsApp::ss_chips(SsRow::Style, &c).0.len(), Style::ALL.len());
     assert_eq!(SettingsApp::ss_chips(SsRow::Battery, &c).1, Some(0), "on by default");
     let _ = cx;
 }

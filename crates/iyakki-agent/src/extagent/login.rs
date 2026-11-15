@@ -535,10 +535,7 @@ fn pty_pair() -> std::io::Result<(File, File)> {
         if libc::grantpt(m) != 0 || libc::unlockpt(m) != 0 {
             return Err(std::io::Error::last_os_error());
         }
-        let mut name = [0 as libc::c_char; 128];
-        if libc::ptsname_r(m, name.as_mut_ptr(), name.len()) != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
+        let name = crate::oscompat::pts_name(m)?;
         let s = libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
         if s < 0 {
             return Err(std::io::Error::last_os_error());
@@ -634,6 +631,13 @@ impl LoginSession {
                         }
                     }
                 } else if sh.lock().unwrap_or_else(|e| e.into_inner()).exit.is_some() {
+                    // The program is gone. Its last words (the reason for a refusal) may have been written after the poll above timed
+                    // out and before the exit was seen: look once more, now that the exit is known, and only stop when nothing waits.
+                    let mut again = libc::pollfd { fd: rd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+                    // SAFETY: one valid pollfd
+                    if unsafe { libc::poll(&mut again, 1, 0) } > 0 {
+                        continue;
+                    }
                     break; // the program is gone and nothing more is waiting
                 }
             }

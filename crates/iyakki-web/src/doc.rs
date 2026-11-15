@@ -62,6 +62,8 @@ pub struct ImageRef {
     /// `float` and `object-fit` from style sheets.
     pub float: Float,
     pub fit: Fit,
+    /// `loading="lazy"`: the browser fetches it only when it is near the window.
+    pub lazy: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,6 +77,8 @@ pub enum ControlKind {
     Hidden,
     Select,
     Textarea,
+    /// `<input type=file>`: shown as a field for the path of a file; the browser sends the file when the form is sent.
+    File,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -263,7 +267,7 @@ pub struct Doc {
 
 const MAX_BLOCKS: usize = 20_000;
 const MAX_TEXT: usize = 2_000_000;
-const SKIP: [&str; 11] = ["script", "style", "noscript", "template", "svg", "head", "title", "iframe", "object", "embed", "canvas"];
+const SKIP: [&str; 10] = ["script", "style", "noscript", "template", "head", "title", "iframe", "object", "embed", "canvas"];
 const BLOCKISH: [&str; 17] = ["p", "div", "section", "article", "header", "footer", "nav", "aside", "main", "figure", "figcaption", "address", "details", "summary", "fieldset", "dl", "center"];
 
 /// Tags that are blocks by default (they can carry a box from style sheets).
@@ -327,11 +331,6 @@ fn build_with(tree: &Tree, cs: Option<&[Option<Computed>]>, pseudo: HashMap<(usi
     tree_a11y.attach(&doc.links, &doc.controls);
     doc.access = Some(std::sync::Arc::new(tree_a11y));
     doc
-}
-
-/// The first address in a `srcset` ("a.png 1x, b.png 2x" gives "a.png").
-fn first_srcset(v: &str) -> Option<&str> {
-    v.split(',').next().and_then(|c| c.split_whitespace().next()).filter(|u| !u.is_empty())
 }
 
 /// Parse and build in one step.
@@ -990,7 +989,8 @@ impl<'a> Builder<'a> {
             }
             "img" => {
                 if self.doc.images.len() < 500 && !self.full() {
-                    let src = tree.attr(n, "src").map(str::trim).filter(|v| !v.is_empty()).or_else(|| tree.attr(n, "data-src").map(str::trim).filter(|v| !v.is_empty())).or_else(|| first_srcset(tree.attr(n, "srcset").unwrap_or(""))).unwrap_or("");
+                    let src = crate::imgsel::image_source(tree, n);
+                    let lazy = crate::imgsel::is_lazy(tree, n);
                     let (float, fit) = self.computed(n).map_or((Float::None, Fit::Fill), |c| (c.fx.float, c.fx.fit));
                     // a size in pixels from style sheets counts like the attributes
                     let css_px = |l: Length| match l {
@@ -1000,11 +1000,32 @@ impl<'a> Builder<'a> {
                     let (css_w, css_h) = self.computed(n).map_or((None, None), |c| (css_px(c.width), css_px(c.height)));
                     let alt = collapse(tree.attr(n, "alt").unwrap_or("")).trim().to_string();
                     let dim = |k: &str| tree.attr(n, k).and_then(|v| v.trim().trim_end_matches("px").parse::<u32>().ok()).filter(|v| (1..=10_000).contains(v));
-                    self.doc.images.push(ImageRef { src: src.to_string(), alt, width: dim("width").or(css_w), height: dim("height").or(css_h), float, fit });
+                    self.doc.images.push(ImageRef { src, alt, width: dim("width").or(css_w), height: dim("height").or(css_h), float, fit, lazy });
                     let idx = self.doc.images.len() - 1;
                     let span = Span { text: String::new(), style: self.style, link: self.link, control: None, image: Some(idx), inline: None };
                     self.text_len += 1;
                     self.push_span(span);
+                }
+            }
+            "svg" => {
+                // an inline <svg>: drawn like a picture by the SVG renderer (F-BROX-06)
+                if self.doc.images.len() < 500 && !self.full() {
+                    let text = inline_svg_text(tree, n);
+                    if text.len() <= 1 << 20 {
+                        let (float, fit) = self.computed(n).map_or((Float::None, Fit::Fill), |c| (c.fx.float, c.fx.fit));
+                        let css_px = |l: Length| match l {
+                            Length::Px(p) if (1.0..=10_000.0).contains(&p) => Some(p as u32),
+                            _ => None,
+                        };
+                        let (css_w, css_h) = self.computed(n).map_or((None, None), |c| (css_px(c.width), css_px(c.height)));
+                        let alt = collapse(tree.attr(n, "aria-label").or_else(|| tree.attr(n, "alt")).unwrap_or("")).trim().to_string();
+                        let dim = |k: &str| tree.attr(n, k).and_then(|v| v.trim().trim_end_matches("px").parse::<u32>().ok()).filter(|v| (1..=10_000).contains(v));
+                        self.doc.images.push(ImageRef { src: svg_data_url(&text), alt, width: dim("width").or(css_w), height: dim("height").or(css_h), float, fit, lazy: false });
+                        let idx = self.doc.images.len() - 1;
+                        let span = Span { text: String::new(), style: self.style, link: self.link, control: None, image: Some(idx), inline: None };
+                        self.text_len += 1;
+                        self.push_span(span);
+                    }
                 }
             }
             "slot" => {
@@ -1035,7 +1056,7 @@ impl<'a> Builder<'a> {
                 self.flush();
                 if let Some(poster) = tree.attr(n, "poster").map(str::trim).filter(|v| !v.is_empty()) {
                     if self.doc.images.len() < 500 && !self.full() {
-                        self.doc.images.push(ImageRef { src: poster.to_string(), alt: String::new(), width: None, height: None, float: Float::None, fit: Fit::Fill });
+                        self.doc.images.push(ImageRef { src: poster.to_string(), alt: String::new(), width: None, height: None, float: Float::None, fit: Fit::Fill, lazy: false });
                         let idx = self.doc.images.len() - 1;
                         let saved = self.link;
                         if let Some(s) = &src {
@@ -1091,6 +1112,7 @@ impl<'a> Builder<'a> {
                     "password" => (ControlKind::Password, String::new()),
                     "checkbox" => (ControlKind::Checkbox, String::new()),
                     "radio" => (ControlKind::Radio, String::new()),
+                    "file" => (ControlKind::File, String::new()),
                     "submit" | "image" => (ControlKind::Submit, if value.is_empty() { tree.attr(n, "alt").filter(|a| !a.is_empty()).unwrap_or("Submit").to_string() } else { value.clone() }),
                     "button" | "reset" => (ControlKind::Button, if value.is_empty() { "Button".to_string() } else { value.clone() }),
                     _ => (ControlKind::Text, String::new()),
@@ -1287,6 +1309,58 @@ fn trim_spans(spans: &mut Vec<Span>) {
     }
 }
 
+/// The text of an inline `<svg>` of a page as an SVG file: the page's parser made names and attributes lower case, so the ones SVG spells with
+/// capitals are put back, and the namespace is added when the page left it out (an inline `<svg>` needs none in HTML).
+pub(crate) fn inline_svg_text(tree: &Tree, n: usize) -> String {
+    let mut t = tree.outer_html(n);
+    const FIX: [(&str, &str); 24] = [
+        ("viewbox=", "viewBox="),
+        ("preserveaspectratio=", "preserveAspectRatio="),
+        ("gradientunits=", "gradientUnits="),
+        ("gradienttransform=", "gradientTransform="),
+        ("patternunits=", "patternUnits="),
+        ("patterncontentunits=", "patternContentUnits="),
+        ("patterntransform=", "patternTransform="),
+        ("clippathunits=", "clipPathUnits="),
+        ("maskunits=", "maskUnits="),
+        ("maskcontentunits=", "maskContentUnits="),
+        ("stddeviation=", "stdDeviation="),
+        ("spreadmethod=", "spreadMethod="),
+        ("markerwidth=", "markerWidth="),
+        ("markerheight=", "markerHeight="),
+        ("refx=", "refX="),
+        ("refy=", "refY="),
+        ("<lineargradient", "<linearGradient"),
+        ("</lineargradient", "</linearGradient"),
+        ("<radialgradient", "<radialGradient"),
+        ("</radialgradient", "</radialGradient"),
+        ("<clippath", "<clipPath"),
+        ("</clippath", "</clipPath"),
+        ("<foreignobject", "<foreignObject"),
+        ("</foreignobject", "</foreignObject"),
+    ];
+    for (from, to) in FIX {
+        t = t.replace(from, to);
+    }
+    if !t.contains("xmlns=") {
+        t = t.replacen("<svg", "<svg xmlns=\"http://www.w3.org/2000/svg\"", 1);
+    }
+    t
+}
+
+/// `data:image/svg+xml,...` for an SVG text (percent-encoded, so no base64 and no quoting trouble).
+pub(crate) fn svg_data_url(svg: &str) -> String {
+    let mut out = String::from("data:image/svg+xml,");
+    for b in svg.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b' ' | b'/' | b':' | b'=' | b'<' | b'>' | b'"' | b'\'' | b',' | b';' | b'(' | b')' | b'#') {
+            if b == b' ' { out.push_str("%20") } else if b == b'#' { out.push_str("%23") } else { out.push(b as char) }
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1370,6 +1444,7 @@ mod tests {
         assert_eq!(lines("<p>a<img src=x alt='A cat'>b <img src=y></p><hr><blockquote><p>quoted</blockquote><p hidden>secret</p><button>Go</button><input type=submit value=Send><input type=text value=nope>"), vec!["ab ", "---", "quoted", ""]);
         let d = from_html("<p>a<img src=x alt='A  cat' width=64 height=\"32px\">b <img data-src=lazy.png><img srcset=\"s1.png 1x, s2.png 2x\"><a href=/z><img src=in-link.png></a></p>");
         assert_eq!(d.images.iter().map(|i| (i.src.as_str(), i.alt.as_str(), i.width, i.height)).collect::<Vec<_>>(), vec![("x", "A cat", Some(64), Some(32)), ("lazy.png", "", None, None), ("s1.png", "", None, None), ("in-link.png", "", None, None)]);
+        assert!(d.images.iter().all(|i| !i.lazy));
         let Block::Text(p) = &d.blocks[0] else { panic!() };
         assert_eq!(p.spans.iter().filter_map(|s| s.image).collect::<Vec<_>>(), vec![0, 1, 2, 3], "pictures sit in the text where they are");
         assert_eq!(p.spans.iter().find(|s| s.image == Some(3)).and_then(|s| s.link), Some(0), "a picture inside a link is part of the link");
@@ -1377,6 +1452,12 @@ mod tests {
         assert_eq!(d.controls.iter().map(|c| (c.kind, c.label.as_str())).collect::<Vec<_>>(), vec![(ControlKind::Submit, "Go"), (ControlKind::Submit, "Send"), (ControlKind::Text, "")], "buttons and fields are controls, not text");
         let d = from_html("<blockquote>q</blockquote>");
         assert!(matches!(&d.blocks[0], Block::Text(t) if t.quote));
+    }
+
+    #[test]
+    fn pictures_follow_picture_sources_srcset_and_lazy_loading() {
+        let d = from_html("<picture><source type='image/avif' srcset='a.avif'><source type='image/webp' srcset='a.webp'><img src=a.jpg alt=A></picture><img src=b.jpg srcset='b1.jpg 1x, b2.jpg 2x' loading=lazy><img src=c.jpg loading=eager>");
+        assert_eq!(d.images.iter().map(|i| (i.src.as_str(), i.lazy)).collect::<Vec<_>>(), vec![("a.webp", false), ("b1.jpg", true), ("c.jpg", false)]);
     }
 
     #[test]
@@ -1613,5 +1694,46 @@ mod tests {
         let aligns: Vec<Align> = d.blocks.iter().filter_map(|b| if let Block::Text(t) = b { Some(t.align) } else { None }).collect();
         assert_eq!(aligns.first(), Some(&Align::Center), "{:?}", d.blocks);
         assert_eq!(aligns.last(), Some(&Align::Center), "{aligns:?}");
+    }
+
+    #[test]
+    fn an_inline_svg_becomes_a_picture_drawn_by_the_svg_renderer_with_its_size() {
+        let d = from_html("<p>Before <svg width=\"40\" height=\"20\" viewBox=\"0 0 40 20\" aria-label=\"a red bar\"><rect width=\"40\" height=\"20\" fill=\"#ff0000\"/><text x=\"2\" y=\"10\">INSIDE</text></svg> after</p>");
+        assert_eq!(d.images.len(), 1);
+        let im = &d.images[0];
+        assert!(im.src.starts_with("data:image/svg+xml,"), "{}", im.src);
+        assert_eq!((im.width, im.height, im.alt.as_str()), (Some(40), Some(20), "a red bar"));
+        let (mime, bytes) = crate::image::parse_data_url(&im.src).expect("a data address the picture loader reads");
+        assert!(mime.contains("svg"), "{mime}");
+        let b = crate::image::decode(&bytes).expect("the SVG renderer draws it");
+        assert_eq!((b.width, b.height), (40, 20));
+        let mid = ((10 * b.width + 20) * 4) as usize;
+        assert_eq!(&b.rgba[mid..mid + 3], &[255, 0, 0], "the red rectangle");
+        // the words around it are text, the words inside the drawing are not page text
+        let text: String = d.blocks.iter().filter_map(|b| if let Block::Text(t) = b { Some(t.spans.iter().map(|s| s.text.clone()).collect::<String>()) } else { None }).collect();
+        assert!(text.contains("Before") && text.contains("after") && !text.contains("INSIDE"), "{text}");
+    }
+
+    #[test]
+    fn names_the_page_parser_made_lower_case_are_put_back_so_gradients_and_view_boxes_still_work() {
+        let html = "<svg width=\"20\" height=\"10\" viewBox=\"0 0 2 1\"><defs><linearGradient id=\"g\" x1=\"0\" x2=\"1\" y1=\"0\" y2=\"0\"><stop offset=\"0\" stop-color=\"#0000ff\"/><stop offset=\"1\" stop-color=\"#0000ff\"/></linearGradient></defs><rect width=\"2\" height=\"1\" fill=\"url(#g)\"/></svg>";
+        let d = from_html(html);
+        assert_eq!(d.images.len(), 1);
+        let (_, bytes) = crate::image::parse_data_url(&d.images[0].src).unwrap();
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        assert!(text.contains("viewBox=") && text.contains("<linearGradient") && text.contains("xmlns=\"http://www.w3.org/2000/svg\""), "{text}");
+        let b = crate::image::decode(&bytes).unwrap();
+        assert_eq!((b.width, b.height), (20, 10));
+        let px = &b.rgba[((5 * 20 + 10) * 4) as usize..][..4];
+        assert_eq!(px, &[0, 0, 255, 255], "the gradient's blue, scaled by the view box");
+    }
+
+    #[test]
+    fn many_inline_svgs_are_capped_and_a_huge_one_is_left_out() {
+        let one = "<svg width=\"4\" height=\"4\"><rect width=\"4\" height=\"4\"/></svg>";
+        let d = from_html(&one.repeat(600));
+        assert!(d.images.len() <= 500, "{}", d.images.len());
+        let big = format!("<svg width=\"4\" height=\"4\"><desc>{}</desc></svg>", "x".repeat(2 << 20));
+        assert!(from_html(&big).images.is_empty());
     }
 }

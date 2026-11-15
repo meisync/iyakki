@@ -20,7 +20,8 @@
 //! * The time stamp and flags stay readable (the file name says when it starts anyway): the timeline and the index work without the
 //!   key, and an index can be rebuilt from the files alone. What is visible to someone with the disk: when frames arrived, how
 //!   large they are, which are key frames. What is not: the pictures.
-//! * Not detected: frames removed from the END of a file (or whole files deleted). A power cut looks the same.
+//! * Frames removed from the END of a file, and whole files deleted, are not found by the file itself (a power cut looks the same);
+//!   the ledger of [`crate::camrec_seal`] beside the files finds both.
 //! * A record cut short by a power cut is simply not there: a scan stops at the first incomplete record and every earlier one reads.
 
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -105,6 +106,10 @@ impl RecKey {
         let r = RecKey(Zeroizing::new(k));
         k.zeroize();
         Ok(r)
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
     }
 
     pub fn from_bytes(b: [u8; 32]) -> RecKey {

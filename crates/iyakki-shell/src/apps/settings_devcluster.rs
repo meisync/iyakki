@@ -1050,7 +1050,8 @@ impl SettingsApp {
             g.text(a.x + a.w - 90.0 * s, a.y + card_h + 8.0 * s - 18.0 * s, 11.0 * s, DIM, &format!("{} of {n}", sel + 1), Face::Sans);
         }
         // ---- details of the selected profile, the namespace rule, the registry
-        let sy = a.y + a.h - strip_h + 4.0 * s;
+        // the notes sit at the bottom of the room; in a small window they follow the rows (and the "no cluster" line) instead of running over them
+        let sy = (a.y + a.h - strip_h + 4.0 * s).max(y + if n == 0 { 30.0 * s } else { 0.0 } + 4.0 * s);
         let ws_name = self.dc.ws.get(self.dc.ws_idx).map(|w| w.0.clone());
         let ns = self.dc_namespace();
         let detail = self.dc_row().map(|r| {
@@ -1099,7 +1100,7 @@ impl SettingsApp {
                 chips.push((if h.autostart { "autostart on".to_string() } else { "autostart off".to_string() }, DIM));
                 let mut d = h.line();
                 if let Some(b) = h.data_bytes {
-                    d.push_str(&format!(" · data {}", iyakki_storage::human(b)));
+                    d.push_str(&format!(" · data {}", iyakki_agent::sysinfo::human_bytes(b)));
                 }
                 if let Some(p) = h.disk_pct {
                     d.push_str(&format!(" · disk {p}%"));

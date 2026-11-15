@@ -10,6 +10,8 @@ pub mod wire;
 
 #[cfg(test)]
 mod tests;
+#[cfg(all(test, target_os = "linux"))]
+mod real_avahi_tests;
 
 /// The service types of IYAKKI devices.
 pub const DEV_SERVICE: &str = "_iyakki-dev._tcp";

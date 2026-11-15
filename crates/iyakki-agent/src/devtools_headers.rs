@@ -4,7 +4,15 @@
 //! same host policy, local-address refusal, rate limit, size and time caps apply. At most 5 redirects are followed by hand and every
 //! hop is listed. No cookies and no credentials are sent, so the headers can differ from what the signed-in browser received; the
 //! answer says so. Values of cookie, authentication and token-like headers are replaced by `<redacted>`, long values are cut and the
-//! number of headers is capped. A real engine-side list (WebKitURIResponse, `resource-load-started` in the helper) is a later option.
+//! number of headers is capped.
+//!
+//! When the page is shown by the full engine and the person's developer tools are on, the helper reports the response headers the
+//! engine itself received (`FromHelper::ResponseHeaders`, WebKitURIResponse): they are kept here per person, for the open page only,
+//! and `browser_headers` answers from them (with the engine's cookies and sign-in, so they are what the signed-in browser got) instead of
+//! sending a request of its own. The helper side is written but not run in a real engine.
+
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 use iyakki_sec::policy::Policy;
 use iyakki_web::Url;
@@ -62,6 +70,55 @@ pub fn security_summary(h: &[(String, String)], content_type: &str) -> String {
     )
 }
 
+/// The headers the engine received for a person's open page (replaced by the next page, dropped by [`forget_engine_headers`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EngineHeaders {
+    pub url: String,
+    pub status: u32,
+    pub headers: Vec<(String, String)>,
+}
+
+static ENGINE: Mutex<Option<HashMap<String, EngineHeaders>>> = Mutex::new(None);
+
+/// Keep what the engine reported for this person's page: `text` is one `Name: value` line per header (not trusted: at most
+/// [`MAX_HEADERS`] lines are kept, names must be plain header tokens).
+pub fn set_engine_headers(user: &str, url: &str, status: u32, text: &str) {
+    let headers: Vec<(String, String)> = text
+        .lines()
+        .filter_map(|l| l.split_once(':'))
+        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        .filter(|(k, _)| !k.is_empty() && k.len() <= 80 && k.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')))
+        .take(MAX_HEADERS * 2)
+        .collect();
+    let mut g = ENGINE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    g.get_or_insert_with(HashMap::new).insert(user.to_string(), EngineHeaders { url: url.chars().take(2000).collect(), status, headers });
+}
+
+pub fn forget_engine_headers(user: &str) {
+    if let Some(m) = ENGINE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_mut() {
+        m.remove(user);
+    }
+}
+
+/// What the engine reported for this person's page, only when it is for this address.
+pub fn engine_headers_for(user: &str, url: &str) -> Option<EngineHeaders> {
+    let g = ENGINE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    g.as_ref()?.get(user).filter(|e| e.url == url).cloned()
+}
+
+/// The answer text from what the engine itself received.
+fn engine_report(page_url: &str, e: &EngineHeaders) -> String {
+    let mut out = format!("Page: {}\n", scrub_url(page_url));
+    out.push_str("These headers were read from the browser engine itself for the page as the signed-in browser received it (the cookie and sign-in values are hidden). No extra request was made.\n");
+    out.push_str(&format!("Headers of the response (status {}, {} header{}{}):\n", e.status, e.headers.len(), if e.headers.len() == 1 { "" } else { "s" }, if e.headers.len() > MAX_HEADERS { format!(", the first {MAX_HEADERS} shown") } else { String::new() }));
+    for (k, v) in e.headers.iter().take(MAX_HEADERS) {
+        out.push_str(&format!("{k}: {}\n", scrub_header(k, v)));
+    }
+    let ct = find(&e.headers, "content-type").unwrap_or("");
+    out.push_str(&security_summary(&e.headers, ct));
+    out
+}
+
 /// Same site: the same host, or one is a subdomain of the other.
 fn same_site(a: &str, b: &str) -> bool {
     let (a, b) = (a.trim_start_matches("www.").to_ascii_lowercase(), b.trim_start_matches("www.").to_ascii_lowercase());
@@ -75,6 +132,12 @@ pub fn report(svc: &Services, p: &Policy, user: &str, args: &Value) -> String {
     };
     let page_url = Url::parse(&page.url).ok();
     let mut target = page.url.clone();
+    let asks_other = args.get("url").and_then(Value::as_str).map(str::trim).is_some_and(|u| !u.is_empty() && u != page.url);
+    if !asks_other {
+        if let Some(e) = engine_headers_for(user, &page.url) {
+            return engine_report(&page.url, &e);
+        }
+    }
     if let Some(u) = args.get("url").and_then(Value::as_str).map(str::trim).filter(|u| !u.is_empty()) {
         let (Ok(want), Some(open)) = (Url::parse(u), page_url.as_ref()) else {
             return format!("Page: {}\nThe address is not usable.", scrub_url(&page.url));

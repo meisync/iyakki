@@ -50,8 +50,21 @@ A tile calls `call(domain, method, json)`. The emulator answers these; anything 
 | `vault.get {name}` | a value from `secrets`, else a made-up one; asks the (emulated) person every time |
 | `net.fetch {url}` | only the canned answers in `net`; the emulator never touches the real network; asks first |
 | `notify.send {title, body}` | recorded |
-| `audio.*`, `camera.*` | `{"emulated": true, ...}`: nothing is played, recorded or photographed |
+| `audio.play`, `audio.record`, `camera.*` | `{"emulated": true, ...}`: nothing is played, recorded or photographed |
 | `chat.ask` | a fixed reply |
+| `sdk.capabilities`, `sdk.has {name}` | the device's own bridge manifest (`iyakki_core_api::sdkbridge`): namespaces, calls and the SDK version, `ready` for the domains the tile's manifest declares. Needs no permission; a name the manifest does not know is `Unsupported` |
+| `markdown.render {text, width?}` | the device's own analysis (lines, plain text, links, dangerous links counted, ignored arguments). `markdown.view`, `markdown.openFile`: `{id, emulated}` |
+| `embed.mount/update/call/unmount/list` | an in-memory list with the device's limits (120x80 to 900x2880, two embeds, one browser) |
+| `dash.sources/query/panel.add`, `flows.list/run/status/cancel`, `k3s.*`, `media.*`, `audio.pause/resume/stop/setVolume/outputs`, `speech.listen/cancel/say/stop` | canned answers marked `emulated`; the optional `sdk` section of `iyakki-emulator.json` sets them (see below). Nothing is played, listened to, started or applied |
+| `money.limits/spend/requestLimit` | the device's own limit arithmetic: the limit starts at **0**, so a spend is `BudgetStop` until `sdk.money.per_day_minor` is set (or `requestLimit` is called); no provider: after the checks a spend is `Unavailable` unless `sdk.money.provider` is true, which emulates a charge (nothing is ever paid). A day ends when the fake clock passes midnight UTC |
+
+The calls that ask the person on the device (the table `iyakki_core_api::sdkbridge` says which: `money.*`, `k3s.apply`, `flows.run`, `dash.panel.add`, `speech.listen`, `media.play`, `embed.mount`...) show up in the prompts list like `vault.get`, and `deny` can say no to them.
+In the manifest, name the domain or call as in the table (`markdown`, `money.spend`, `dash.panel.add`, `speech.listen`); the call names may be camelCase.
+
+```json
+{ "sdk": { "dash": {"sources": ["prom"], "rows": 5}, "flows": ["backup"], "k3s": {"objects": {"pods": [{"metadata": {"name": "web-1"}}]}},
+           "heard": "turn on the light", "money": {"currency": "USD", "per_day_minor": 1000, "provider": true} } }
+```
 
 ## What the window shows
 
@@ -92,5 +105,6 @@ refused with a message to run `--update`.
 * Prompts are answered by the settings file, not by a person; the real approval card, autonomy settings and the assistant are not part of it.
 * The wording of capabilities is a copy kept in the emulator; it matches the install card's words for storage, files and notifications, and
   may drift for the others until the card itself is shared.
+* The SDK 1.2 services are the fake side of the contract: their argument rules, limits and money arithmetic are the device's, but the host-side parts (the viewer, painting an embed, the cluster, the flow engine, the player, the microphone, a payment provider) are not there; do not read a pass here as proof of them.
 * Only WASM tiles. Web-bundle tiles run in a browser (`tile_test`, `iyakki dev push --watch`); Rust shell tiles use `TileHarness`. A passing run
   here is not a device test.

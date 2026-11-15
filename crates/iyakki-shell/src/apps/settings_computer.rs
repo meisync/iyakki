@@ -16,6 +16,13 @@ pub(super) enum CompAct {
     Reset,
     /// Delete the profile of this computer (its id).
     Forget(String),
+    /// Startup disk: make IYAKKI's own boot entry, put it first, start it once, or put the old order back.
+    StartRegister,
+    StartFirst,
+    StartNext,
+    StartRevert,
+    /// Startup disk: restarts through `iyakki dev reboot` start IYAKKI once (on or off).
+    RebootInto(bool),
 }
 
 /// What the list of computers is choosing.
@@ -55,7 +62,7 @@ impl SettingsApp {
     }
 
     pub(super) fn computer_buttons(&self) -> Vec<Btn> {
-        vec![("Copy settings from…", TEXT, 'c'), ("Reset this computer", TEXT, 'r'), ("Forget a computer…", ERR, 'f')]
+        vec![("Copy settings from…", TEXT, 'c'), ("Reset this computer", TEXT, 'r'), ("Forget a computer…", ERR, 'f'), ("Start IYAKKI first", TEXT, 'b'), ("Start IYAKKI next time", TEXT, 'n')]
     }
 
     fn comp_others(c: &hw::Computers) -> Vec<hw::Profile> {
@@ -64,7 +71,23 @@ impl SettingsApp {
 
     pub(super) fn handle_computer(&mut self, k: &Key, cx: &AppCx) {
         let Key::Char(ch) = k else { return };
-        if !"sdkmgpcrf".contains(*ch) || !self.admin(cx) {
+        if !"sdkmgpcrfebnvw".contains(*ch) || !self.admin(cx) {
+            return;
+        }
+        // the startup disk keys work without a per-computer profile folder
+        let start = match ch {
+            'e' => Some((CompAct::StartRegister, "Make IYAKKI's own entry in this computer's boot menu for the volume it is running from? One firmware boot entry described \"IYAKKI\" is written; other systems' entries and the boot order stay as they are (it is added last).")),
+            'b' => Some((CompAct::StartFirst, "Make IYAKKI start first on this computer? IYAKKI's entry goes first in the firmware's boot order (it is made when missing); the other entries keep their order and the old order is saved, `v` puts it back.")),
+            'n' => Some((CompAct::StartNext, "Start IYAKKI at the next restart only? The firmware's one-time next boot is set to IYAKKI; the boot order does not change.")),
+            'v' => Some((CompAct::StartRevert, "Put the earlier boot order back and cancel a pending one-time start? IYAKKI's entry stays in the boot menu.")),
+            'w' => {
+                let on = !Self::svc(cx).startup_reboot_into_iyakki();
+                Some((CompAct::RebootInto(on), if on { "Switch on \"Restart into IYAKKI\"? A restart asked through `iyakki dev reboot` then sets the firmware's one-time next boot to IYAKKI first, so a dual-boot computer does not start the other system." } else { "Switch off \"Restart into IYAKKI\"? A restart through `iyakki dev reboot` is left to the firmware's own order." }))
+            }
+            _ => None,
+        };
+        if let Some((act, text)) = start {
+            self.modal = Some(Modal::Confirm(ConfirmKind::Computer(act), text.to_string()));
             return;
         }
         let Some(c) = Self::comp_get(cx) else { return self.fail("This install keeps no per-computer settings here.") };
@@ -111,12 +134,27 @@ impl SettingsApp {
             return;
         }
         let svc = Self::svc(cx);
+        let sd_env = || {
+            let mut e = iyakki_agent::startupdisk::Env::real();
+            e.backup = svc.dir().to_path_buf();
+            e
+        };
         let r = match &act {
             CompAct::Copy(id) => hw::copy_from(svc, id),
             CompAct::Reset => hw::reset(svc),
             CompAct::Forget(id) => hw::forget(svc, id),
+            CompAct::StartRegister => iyakki_agent::startupdisk::register(&sd_env()),
+            CompAct::StartFirst => iyakki_agent::startupdisk::first(&sd_env()),
+            CompAct::StartNext => iyakki_agent::startupdisk::next(&sd_env()),
+            CompAct::StartRevert => iyakki_agent::startupdisk::revert(&sd_env()),
+            CompAct::RebootInto(on) => svc.set_startup_reboot_into_iyakki(*on).map(|()| if *on { "Restarts through `iyakki dev reboot` now start IYAKKI once.".to_string() } else { "Restarts through `iyakki dev reboot` are left to the firmware's own order.".to_string() }),
         };
         let what = match &act {
+            CompAct::StartRegister => "startup disk: register".to_string(),
+            CompAct::StartFirst => "startup disk: first".to_string(),
+            CompAct::StartNext => "startup disk: next".to_string(),
+            CompAct::StartRevert => "startup disk: revert".to_string(),
+            CompAct::RebootInto(on) => format!("startup disk: restart into IYAKKI {}", if *on { "on" } else { "off" }),
             CompAct::Copy(id) => format!("copy {id}"),
             CompAct::Reset => "reset".to_string(),
             CompAct::Forget(id) => format!("forget {id}"),
@@ -186,6 +224,15 @@ impl SettingsApp {
             line(g, &mut y, MUTED, 13.0, Face::Sans, "Only administrators change these.");
         }
         line(g, &mut y, DIM, 12.5, Face::Sans, "On: this kind of setting is remembered separately for each computer. Off: one value for all of them. Models, voice engines, the store, the firewall, the time zone and accounts always go with you.");
+        y += 6.0 * s;
+        // the startup disk: what the firmware starts, and the keys that change it (each asks first)
+        let sd_env = iyakki_agent::startupdisk::Env::real();
+        let sd_line = iyakki_agent::startupdisk::status_line(&sd_env, Self::svc(cx).startup_reboot_into_iyakki());
+        line(g, &mut y, TEXT, 14.0, Face::Bold, "Startup disk");
+        line(g, &mut y, MUTED, 13.0, Face::Sans, &sd_line);
+        if admin {
+            line(g, &mut y, DIM, 12.5, Face::Sans, "e makes IYAKKI's own boot entry · b starts IYAKKI first · n starts it at the next restart only · v puts the old order back · w restarts from developer mode into IYAKKI (on or off). Each asks first.");
+        }
         y += 6.0 * s;
         if y + 40.0 * s < limit {
             y += heading(g, a, y, s, "Computers this install has seen");

@@ -254,5 +254,16 @@ pub fn bar_text(addon: &Addon) -> &'static str {
     }
 }
 
+/// What Settings -> Browser and the chat say about the add-on: a short state and what to do about it. The installing itself (the review,
+/// the licence and patent confirmation, the build) is in Store -> Setup -> Browser audio and video and asks an administrator.
+pub fn settings_text(addon: &Addon) -> (String, String) {
+    match addon {
+        Addon::NotInImage => ("Audio and video add-on: not part of this image".into(), "This image has no bridge for H.264 and AAC, so pages that need them cannot play sound or pictures of that kind. Everything else plays.".into()),
+        Addon::Absent => ("Audio and video add-on: not installed".into(), "Pages with H.264 video or AAC sound need it. An administrator installs it in Store, Setup, Browser audio and video, after reading what is inside and its licence. IYAKKI does not ship or host these libraries.".into()),
+        Addon::Incomplete(missing) => (format!("Audio and video add-on: incomplete ({} of its libraries are missing)", missing.len()), "It does not work until it is installed again in Store, Setup, Browser audio and video. Missing: ".to_string() + &missing.iter().take(6).cloned().collect::<Vec<_>>().join(", ") + "."),
+        Addon::Ready => ("Audio and video add-on: installed".into(), "The full browser plays H.264 video and AAC or MP3 sound. An administrator can take it away in Store, Setup, Browser audio and video.".into()),
+    }
+}
+
 /// The page-side script of the media probe (`dist/webview/wpe-helper/media-probe.js`, built into the helper).
 pub const PROBE_JS: &str = include_str!("../../../dist/webview/wpe-helper/media-probe.js");

@@ -158,8 +158,8 @@ impl SettingsApp {
                 Form::new("Import a certificate you have")
                     .text("Name in the vault", "", "for example: my-store (lower case letters, digits, -)")
                     .text("Host it is for", self.dom_row(cx).map(|r| r.host).unwrap_or_default().as_str(), "store.example.org")
-                    .text("Certificate file (PEM chain)", "", "/path/to/fullchain.pem")
-                    .text("Private key file (PEM)", "", "/path/to/privkey.pem"),
+                    .path("Certificate file (PEM chain)", "", "/path/to/fullchain.pem", crate::filepicker::PathKind::File, &["pem", "crt", "cer"])
+                    .path("Private key file (PEM)", "", "/path/to/privkey.pem", crate::filepicker::PathKind::File, &["pem", "key"]),
             ),
             Key::Char('r') => {
                 self.dom_look(cx);

@@ -136,7 +136,7 @@ in slice order; their calls are a proposal to be fixed when the slice starts.
 | `time` | zone, clock (read); set zone (change) | `changed` | setting the hardware clock | planned | SETTINGS (time) | 11 |
 | `display` | modes, brightness (read); set brightness (change) | `changed` | the mode switch itself, drivers | planned | SETTINGS (display) | 11 |
 
-## 3. What is built (contract 0.1)
+## 3. What is built (contract 0.2; 0.2 adds the base64 chunk encoding of `stream/read`, F-CORE-18)
 
 `iyakki-core-api::contract`: `ContractVersion`/`CONTRACT_VERSION`, `Hello`/`DomainSupport`/`ClientHello`/`negotiate`; `Transport`, `Scope` (ids),
 `Risk`, `CallContext`, `guard`; `CallError`/`ErrorCode`/`IdempotencyKey`/`RateLimit`/`RateLimiter`; `Event`/`EventLog`/`EventBatch`/`Resume`;
@@ -193,3 +193,14 @@ Routes (signed requests as today): `POST /v1/dev/core/hello`, `POST /v1/dev/core
 `needs_consent`; an unlock attempt also raises a `vault_unlock` question on the machine's screen (one at a time). Each computer is limited
 by the `rate_limit` of `hello`. Every call goes to the developer-mode activity log, and every non-read call to the system audit log.
 
+## Relay transport: design delta (2026-11-13, lane P-B, F-CORE-17; design only, nothing built)
+
+The owner decided (2026-11-06) that the relay is run by the owner after the beta. What can be fixed now, so the code can be written the day there is a relay to point it at:
+
+* **The relay is a mailbox, not a computer.** A client and a machine that cannot reach each other both make OUTGOING connections to the relay and exchange small sealed envelopes addressed to a *mailbox id* (a hash of the machine's public key). The relay learns who talks to which mailbox and when, never what: every envelope is encrypted end to end between the client and the machine with the keys of their pairing (the same pairing as developer mode: the client's key is on the machine's list, an administrator granted it scopes).
+* **Envelope.** `{v, mailbox, from (a key id), seq (per sender, strictly increasing), sent_ms, ttl_ms (at most 24 h), body (AEAD ciphertext of one contract message: hello, call, event batch or stream chunk request)}`. The relay checks the size (at most 64 KiB), the ttl and a per-mailbox rate; it keeps nothing after delivery or expiry. A machine drops an envelope whose `seq` it has seen (replay) or whose `sent_ms + ttl_ms` is past.
+* **Consent at first use.** A machine answers over the relay only to a client it has paired AND only after the administrator switched the relay on for the machine and granted the contract scopes for that client (the same switch and scopes as the developer-mode channel; the relay adds a third switch: "Allow connections through the relay", off by default). The first call from a new client over the relay raises a question on the machine's screen; there is no remote path to answer it (as for `consent.answer` today).
+* **Queued requests.** A request sent while the machine is offline waits at the relay for at most 24 hours (the envelope's own ttl), then is dropped and the client is told "expired" at its next look. A machine that comes back does not run requests older than their ttl and answers a replayed `seq` with nothing.
+* **Contract version.** The relay carries contract messages unchanged; `hello` negotiates as over the TLS channel. The relay itself speaks a tiny versioned protocol (`relay 1`) with its own deprecation row when it changes.
+* **What can be built and tested without a relay (the first code):** the envelope codec and its limits, the replay window, the ttl and expiry rules, the AEAD sealing with the pairing keys, a fake in-memory relay for end-to-end tests of a client talking to a machine through it, and the three switches. **What needs the owner:** the relay's address, hosting, account and abuse policy (KI-725); until then the transport is not offered in any setting.
+\n

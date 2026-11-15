@@ -2,6 +2,7 @@
 //! detached jobs (creating a sandbox downloads and unpacks a base; apt installs packages), change a sandbox's switches and folders,
 //! open the CLI tile inside a sandbox, and run or stop an image app in the dev cluster. Every change is written to the audit logs.
 
+use crate::stale_stats::mark_stale;
 use super::*;
 use crate::brandmenu::{BoxRow, ImageRow, LinuxAction, LinuxFacts};
 use iyakki_agent::{imageapps, linuxapps, linuxapps_dist as dist, quickinstall as qi};
@@ -40,7 +41,7 @@ impl Shell {
         let boxes: Vec<BoxRow> = la
             .list()
             .into_iter()
-            .map(|s| BoxRow { title: s.title(), network: s.network, mounts: s.mounts.iter().map(|m| (m.src.clone(), m.dst.clone(), m.rw)).collect(), mb: sizes.iter().find(|x| x.0 == s.name).map_or(0, |x| x.1 >> 20), name: s.name })
+            .map(|s| BoxRow { title: s.title(), network: s.network, mode: la.net_policy(&s.name).map(|p| p.mode).unwrap_or_default(), mounts: s.mounts.iter().map(|m| (m.src.clone(), m.dst.clone(), m.rw)).collect(), mb: sizes.iter().find(|x| x.0 == s.name).map_or(0, |x| x.1 >> 20), name: s.name })
             .collect();
         let (apps, problems) = imageapps::catalog(&imageapps::dirs(svc.dir()));
         let states = STATES.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_default();
@@ -86,7 +87,7 @@ impl Shell {
                 STATES_BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
             });
         }
-        self.stale = true;
+        mark_stale!(self);
     }
 
     /// Every half second or so while the page is open: answers of the cluster actions, new states, the jobs' count.
@@ -99,7 +100,7 @@ impl Shell {
         let f = self.linux_facts(false);
         if Some(&f) != self.brand.linux.facts.as_ref() || had {
             self.brand.set_linux(f);
-            self.stale = true;
+            mark_stale!(self);
         }
     }
 
@@ -191,6 +192,26 @@ impl Shell {
                 audit(self, "linuxapps.upgrade", &name);
                 self.linux_start_job(&sess.user, &format!("Linux apps: apt upgrade in {name}"), &["upgrade".into(), name]);
             }
+            LinuxAction::SetNetMode { name, mode } => {
+                // the same rule as the command line: shared and open outbound reach any server and need an account allowed every host
+                let wanted = iyakki_agent::linuxapps_net::NetPolicy { mode, ..Default::default() };
+                if let Err(e) = iyakki_agent::linuxapps_net::host_gate(&wanted, &sess.policy.net_hosts) {
+                    return self.linux_note(format!("{e}."), false);
+                }
+                // the allow-list of an outbound sandbox is kept when the mode stays outbound-only (it is edited by command or by chat)
+                let (allow, dns): (Vec<String>, Vec<String>) = match la.net_policy(&name) {
+                    Ok(p) if p.mode == mode && mode == iyakki_agent::linuxapps_net::Mode::OutboundOnly => (p.allow.iter().map(|a| a.text()).collect(), p.dns.iter().map(|d| d.to_string()).collect()),
+                    _ => (vec![], vec![]),
+                };
+                match la.set_net_policy(&name, mode, &allow, &dns) {
+                    Ok(p) => {
+                        audit(self, "linuxapps.network", &format!("{name} {}", p.mode.id()));
+                        self.linux_note(format!("{name}: {}.", p.mode.label()), true);
+                        self.refresh_linux();
+                    }
+                    Err(e) => self.linux_note(e, false),
+                }
+            }
             LinuxAction::SetNetwork { name, on } => {
                 if on && !any_host {
                     return self.linux_note("A sandbox with its network on can reach any server; only an account allowed every host may turn it on.", false);
@@ -246,6 +267,29 @@ impl Shell {
                 }
                 Err(e) => self.linux_note(e, false),
             },
+            LinuxAction::ImageFromRoot { archive, name, port, licence, command, confirmed } => {
+                use iyakki_agent::agent::Tools;
+                let audit_fn = { let (a, u) = (self.env.audit.clone(), sess.user.clone()); Arc::new(move |w: &str, d: &str| a.record(&u, w, d)) };
+                let tools = iyakki_agent::linuxappimagetools::LinuxAppImageTools::new(Arc::new(iyakki_agent::extagent::NoTools), Arc::new(iyakki_agent::linuxappimagetools::RealBackend { svc: svc.clone(), policy: sess.policy.clone(), user: sess.user.clone(), audit: audit_fn }));
+                let args = serde_json::json!({"archive": archive, "name": name, "port": port, "licence": licence, "command": command});
+                let tool = iyakki_agent::linuxappimagetools::TOOL;
+                if let Some(why) = tools.refusal(tool, &args) {
+                    return self.linux_note(why, false);
+                }
+                if !confirmed {
+                    let card = tools.preview(tool, &args).unwrap_or_else(|| "Make the image app.".into());
+                    let yes = LinuxAction::ImageFromRoot { archive, name, port, licence, command, confirmed: true };
+                    self.brand.set_image_card(card, yes);
+                } else {
+                    match tools.call(tool, &args) {
+                        Ok(said) => {
+                            self.linux_note(said, true);
+                            self.refresh_linux();
+                        }
+                        Err(e) => self.linux_note(e, false),
+                    }
+                }
+            }
             LinuxAction::RunImage { id } => self.linux_image(&sess, id, false),
             LinuxAction::StopImage { id } => self.linux_image(&sess, id, true),
         }

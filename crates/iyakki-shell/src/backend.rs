@@ -363,7 +363,7 @@ impl FrameStats {
             let ms = |d: Duration| d.as_secs_f64() * 1000.0;
             let sys = |p: &str| std::fs::read_to_string(p).map(|s| s.trim().to_string()).unwrap_or_else(|_| "?".into());
             log::info!(
-                "shell: {} frames in {:.0}s, draw {:.1} ms, screen write {:.1} ms, slowest {:.0} ms (tile-only {:.0} ms), {} tile-only; cpu0 {} kHz, governor {}",
+                "shell: {} frames in {:.0}s, draw {:.1} ms, screen write {:.1} ms, slowest {:.0} ms (tile-only {:.0} ms), {} tile-only; cpu0 {} kHz, governor {}; by reason: {}",
                 self.frames,
                 self.since.elapsed().as_secs_f64(),
                 ms(self.render) / n as f64,
@@ -373,6 +373,7 @@ impl FrameStats {
                 self.live,
                 sys("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq"),
                 sys("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"),
+                crate::stale_stats::take_table(),
             );
             *self = FrameStats::new();
         }
@@ -552,6 +553,7 @@ fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &Ato
         Some(graphics)
     };
     let (w, h) = (fb.width, fb.height);
+    crate::display::set_driven(w, h);
     log::info!("shell: {}", fb.display_line());
     let mut gfx = Gfx::new(w, h);
     let t_gfx = t_start.elapsed();
@@ -742,6 +744,9 @@ fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &Ato
                 }
             }
             if dirty || first || timed || tried_live {
+                if !dirty && !first && !tried_live {
+                    crate::stale_stats::note("timed");
+                }
                 first = false;
                 let t0 = Instant::now();
                 shell.render(&mut gfx);
@@ -768,6 +773,8 @@ fn run_fb_once(shell: &mut Shell, fb_path: &str, stop: &AtomicBool, remode: &Ato
                     // the boot counter of a system update (F-UPD-02): this start reached its first picture, so the boot menu keeps it
                     let data = shell.services_for_demo().dir().to_path_buf();
                     std::thread::spawn(move || {
+                        // a restart done under a standing restart grant may be used again: the device started successfully
+                        iyakki_agent::devmode::DevMode::open(&data).restart_started();
                         if let Some(line) = iyakki_agent::devmode::centre::Centre::real(&data).confirm_boot(&iyakki_agent::devmode::centre::boot_id_now()) {
                             log::info!("shell: {line}");
                         }

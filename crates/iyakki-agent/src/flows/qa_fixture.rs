@@ -130,7 +130,7 @@ fn serve_one(mut c: TcpStream, hits: Arc<std::sync::Mutex<Vec<String>>>) {
     let text = String::from_utf8_lossy(&got).into_owned();
     let line = text.lines().next().unwrap_or("");
     let path = line.split_whitespace().nth(1).unwrap_or("/").to_string();
-    hits.lock().unwrap().push(line.to_string());
+    hits.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(line.to_string());
     let (status, headers, body) = route(&path);
     let mut head = format!("HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
     for (k, v) in headers {

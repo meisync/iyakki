@@ -236,5 +236,14 @@ fn dropping_the_runner_stops_the_thread_and_frees_the_port() {
     let run = start(b, Upstreams::default(), None, sink).unwrap();
     drop(run);
     assert!(t0.elapsed() < Duration::from_secs(2), "stops within a poll interval");
-    Bound::bind(port).expect("the port is free again");
+    // the sockets close when the thread ends (joined above); the system may take a moment to show the number as free, so wait for it (bounded) instead of one immediate try
+    let mut last = String::new();
+    for _ in 0..100 {
+        match Bound::bind(port) {
+            Ok(_) => return,
+            Err(e) => last = e,
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("the port is free again: {last}");
 }

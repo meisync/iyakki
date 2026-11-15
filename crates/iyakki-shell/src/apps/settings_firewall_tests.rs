@@ -264,18 +264,20 @@ fn presets_and_basics_are_one_form() {
     let (mut a, cx, r) = app("fw-presets");
     key(&mut a, &cx, 'p');
     let Some(Modal::Form(FormKind::Fw(FwForm::Presets), f)) = a.modal.take() else { panic!("presets form not open") };
-    assert_eq!(f.fields.len(), Preset::ALL.len() + 3);
+    assert_eq!(f.fields.len(), Preset::ALL.len() + 4);
     assert!(f.fields[0].hint.contains("SSH"), "{}", f.fields[0].hint);
     let mut f = f;
     let ssh = Preset::ALL.iter().position(|p| *p == Preset::Ssh).unwrap();
     f.set_choice(ssh, 1);
     f.set_choice(Preset::ALL.len(), 0);
+    f.set_choice(Preset::ALL.len() + 2, 1);
     a.fw_submit(&cx, &FwForm::Presets, &mut f).unwrap();
     assert!(a.fw_cfg().has(Preset::Ssh));
     assert_eq!(a.fw_cfg().ping, iyakki_fw::Ping::Off);
+    assert!(a.fw_cfg().vpn_local, "the VPN switch is saved");
     key(&mut a, &cx, 'y');
-    assert!(r.be.installed().unwrap().to_text().contains("th dport 22 accept"));
-    f.set_value(Preset::ALL.len() + 2, "0");
+    assert!(r.be.installed().unwrap().to_text().contains("th dport 22 counter accept"));
+    f.set_value(Preset::ALL.len() + 3, "0");
     assert!(a.fw_submit(&cx, &FwForm::Presets, &mut f).unwrap_err().contains("minutes"));
 }
 
@@ -626,4 +628,30 @@ fn advanced_is_one_fold_away_and_back_and_users_cannot_change_anything() {
     u.fw.writable = true;
     u.tab = 0;
     assert!(!u.tabs().contains(&Tab::Firewall));
+}
+
+#[test]
+fn each_counted_rule_shows_what_it_let_in_and_the_page_still_draws_with_the_counts() {
+    use iyakki_fw::ruleset::RuleCount;
+    let counts = vec![
+        RuleCount { note: "rule 3: office".into(), packets: 12, bytes: 3400 },
+        RuleCount { note: "rule 3: office".into(), packets: 5, bytes: 100 },
+        RuleCount { note: "rule 4: nas".into(), packets: 0, bytes: 0 },
+        RuleCount { note: "preset ping".into(), packets: 9, bytes: 900 },
+    ];
+    assert_eq!(super::firewall_page::let_in_text(&counts, 3).as_deref(), Some("17 let in"));
+    assert_eq!(super::firewall_page::let_in_text(&counts, 4).as_deref(), Some("0 let in"), "a counted rule with nothing yet says 0");
+    assert_eq!(super::firewall_page::let_in_text(&counts, 5), None, "a rule with no counter says nothing");
+    assert_eq!(super::firewall_page::let_in_text(&[], 3), None);
+    // the advanced page draws at several sizes with counts present (the page does not re-read them for 3 seconds)
+    let (mut a, cx, _r) = app("fw-counts");
+    add(&mut a, &cx, 1, "198.51.100.7").unwrap();
+    key(&mut a, &cx, 'y');
+    a.fw.advanced = true;
+    let id = a.fw_cfg().rules[0].id;
+    a.fw.rule_counts = vec![RuleCount { note: format!("rule {id}: x"), packets: 4, bytes: 10 }];
+    a.fw.counters_at = Some(std::time::Instant::now());
+    for (w, h) in [(360u32, 740u32), (800, 480), (1280, 720), (1920, 1080)] {
+        let _ = draw(&mut a, &cx, w, h);
+    }
 }

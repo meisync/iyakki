@@ -273,6 +273,28 @@ impl Store {
         let _ = iyakki_schema::write_atomic(&path, serde_json::to_string(&m).unwrap_or_default().as_bytes(), 0o600);
         Ok((p + 1, t + 1, mo + 1))
     }
+
+    /// Tokens a person has used today on `scope` (a provider entry) for `kind`.
+    pub fn tokens_today(&self, kind: &str, scope: &str, user: &str, now: u64) -> u64 {
+        let _g = lock();
+        let m: BTreeMap<String, u64> = std::fs::read_to_string(self.root.join("usage.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+        m.get(&format!("{kind}|{}|t:{scope}:{user}", now / 86_400)).copied().unwrap_or(0)
+    }
+
+    /// Adds the tokens an answer cost to the person's count for today; returns the new total. A count is kept even over the limit
+    /// (the answer is already paid for); the next request is refused by the gate.
+    pub fn add_tokens(&self, kind: &str, scope: &str, user: &str, now: u64, tokens: u64) -> u64 {
+        let _g = lock();
+        let path = self.root.join("usage.json");
+        let day = now / 86_400;
+        let mut m: BTreeMap<String, u64> = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+        m.retain(|k, _| k.split('|').nth(1).and_then(|d| d.parse::<u64>().ok()).is_some_and(|d| d + 31 >= day));
+        let k = format!("{kind}|{day}|t:{scope}:{user}");
+        let total = m.get(&k).copied().unwrap_or(0).saturating_add(tokens);
+        m.insert(k, total);
+        let _ = iyakki_schema::write_atomic(&path, serde_json::to_string(&m).unwrap_or_default().as_bytes(), 0o600);
+        total
+    }
 }
 
 /// A tiny object-safe "pretty JSON" so `commit` can write two different types with one closure.

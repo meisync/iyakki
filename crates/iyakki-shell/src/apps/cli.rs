@@ -29,6 +29,8 @@ fn render_plan(g: &mut Gfx, area: R, s: f32, name: &str, plan: &str) {
 
 #[path = "cli_conn.rs"]
 mod conn;
+#[path = "cli_term.rs"]
+mod term;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tab {
@@ -66,6 +68,10 @@ pub struct CliApp {
     conns: conn::Conns,
     /// The check for a newer download list on its own has been asked for once in this window.
     dl_auto: bool,
+    /// An interactive login drawn in the tile (it takes over the whole tile while it runs).
+    sess: Option<term::TermView>,
+    /// The session's screen changed since the last draw.
+    sess_dirty: bool,
 }
 
 impl CliApp {
@@ -73,7 +79,34 @@ impl CliApp {
         let cli = Cli::new(&cx.session.user, cx.session.policy.clone(), cx.host.clone()).with_skills(cx.services.skills.clone(), cx.services.packages.clone()).with_services(cx.services.clone());
         let mut log = ScrollLog::default();
         log.push(format!("IYAKKI terminal — {} ({}). Type `help`, or press F1 for the main commands.", cx.session.user, cx.session.role.name()), MUTED);
-        CliApp { tab: Tab::Terminal, sel: 0, list_top: 0, list_hover: false, mode: Mode::Browse, plan: None, status: None, cli, log, input: TextField::new("", false), history: vec![], hist_pos: None, conns: conn::Conns::new(), dl_auto: false }
+        CliApp { tab: Tab::Terminal, sel: 0, list_top: 0, list_hover: false, mode: Mode::Browse, plan: None, status: None, cli, log, input: TextField::new("", false), history: vec![], hist_pos: None, conns: conn::Conns::new(), dl_auto: false, sess: None, sess_dirty: false }
+    }
+
+    /// Open the session `ssh` connection `c` asks for (Linux and macOS: a pseudo-terminal).
+    #[cfg(unix)]
+    fn start_session(&mut self, c: &iyakki_agent::ssh::Connection, cx: &AppCx) -> Result<(), String> {
+        let env = iyakki_agent::ssh::Env::for_services(&cx.services, &cx.session.user);
+        let args = c.login_args();
+        cx.audit.record(&cx.session.user, "ssh.login", &c.name);
+        let cwd = std::env::temp_dir();
+        let (cols, rows) = (100, 30);
+        let (link, keep) = iyakki_agent::ssh::interactive(&env, &args, &cwd, &|_, _| Err("a login names no local files".into()), cols, rows)?;
+        let term: iyakki_vt::Terminal<Box<dyn iyakki_vt::Link>> = iyakki_vt::Terminal::new(Box::new(link) as Box<dyn iyakki_vt::Link>, cols, rows);
+        self.sess = Some(term::TermView::new(term, &format!("ssh {}", c.name), Some(Box::new(keep))));
+        self.sess_dirty = true;
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn start_session(&mut self, _c: &iyakki_agent::ssh::Connection, _cx: &AppCx) -> Result<(), String> {
+        Err("A login with a terminal needs Linux or macOS (IYAKKI's own images have it); Connect still runs a command here.".into())
+    }
+
+    /// Put a terminal in the tile (tests give it a fake program).
+    #[cfg(test)]
+    fn attach_session(&mut self, view: term::TermView) {
+        self.sess = Some(view);
+        self.sess_dirty = true;
     }
 
     pub fn tab(&self) -> Tab {
@@ -591,10 +624,16 @@ impl App for CliApp {
     fn icon(&self) -> Icon {
         Icon::Cli
     }
+    fn wants_redraw(&mut self) -> bool {
+        std::mem::take(&mut self.sess_dirty)
+    }
     fn accent(&self) -> [u8; 4] {
         ACCENT
     }
     fn hint(&self) -> String {
+        if self.sess.is_some() {
+            return "Every key goes to the other computer · F10 close the session · Shift+PgUp / PgDn or the wheel scroll back · Ctrl+V paste".into();
+        }
         match self.tab {
             Tab::Terminal => "Enter run · ↑↓ history · Ctrl+V paste · PgUp/PgDn scroll · Tab CLIs · Esc back".into(),
             Tab::Connections => self.conns.hint().into(),
@@ -635,6 +674,35 @@ impl App for CliApp {
     }
 
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
+        // the assistant asked (and the person approved) for a login to a saved connection: the same checks as the L key, then the session
+        if matches!(ev, Event::Tick) && self.sess.is_none() {
+            if let Some(name) = iyakki_agent::sshsessiontools::take_login(cx.services.dir(), &cx.session.user) {
+                self.tab = Tab::Connections;
+                self.conns.login_by_name(cx, &name);
+                if let Some(conn) = self.conns.login.take() {
+                    if let Err(e) = self.start_session(&conn, cx) {
+                        self.conns.say(&e, false);
+                    }
+                }
+                self.sess_dirty = true;
+            }
+        }
+        // a login in the tile takes every key (Esc and Tab too) until F10 closes it
+        if let Some(v) = self.sess.as_mut() {
+            if matches!(ev, Event::Tick) {
+                v.tick();
+                self.sess_dirty = true;
+                return Flow::Stay;
+            }
+            if v.event(ev) == term::Outcome::Close {
+                if let Some(mut v) = self.sess.take() {
+                    v.close();
+                }
+                cx.audit.record(&cx.session.user, "ssh.logout", "session closed");
+            }
+            self.sess_dirty = true;
+            return Flow::Stay;
+        }
         // the tabs (Tab key or a click) work from either side
         if matches!(self.mode, Mode::Browse) {
             match ev {
@@ -671,6 +739,11 @@ impl App for CliApp {
         let flow = if self.tab == Tab::Connections { Some(self.conns.handle(ev, cx)) } else { None };
         for (t, c) in self.conns.out.drain(..) {
             self.log.push(t, c);
+        }
+        if let Some(conn) = self.conns.login.take() {
+            if let Err(e) = self.start_session(&conn, cx) {
+                self.conns.say(&e, false);
+            }
         }
         if let Some(f) = flow {
             return f;
@@ -721,6 +794,10 @@ impl App for CliApp {
     }
 
     fn render(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx, tick: u64) {
+        if let Some(v) = self.sess.as_mut() {
+            v.render(g, R::new(area.x + 16.0 * s, area.y + 4.0 * s, area.w - 32.0 * s, area.h - 12.0 * s), s, tick);
+            return;
+        }
         let off = self.draw_tabs(g, area, s);
         let area = R::new(area.x, area.y + off, area.w, area.h - off);
         if self.tab == Tab::Connections {
@@ -1076,6 +1153,10 @@ mod agents_tests;
 #[cfg(test)]
 #[path = "cli_conn_tests.rs"]
 mod conn_tests;
+
+#[cfg(test)]
+#[path = "cli_term_tests.rs"]
+mod term_tests;
 
 #[cfg(test)]
 #[path = "cli_dlcheck_tests.rs"]

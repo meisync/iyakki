@@ -15,6 +15,9 @@ pub struct Config {
     pub net: Vec<(String, u16, String)>,
     /// Calls the emulated person says no to: `vault.get`, `net` or `net.*`.
     pub deny: Vec<String>,
+    /// The `sdk` section: canned answers for the SDK 1.2 services (dashboard sources, flows, cluster objects, what the microphone "heard", a money limit).
+    /// `Null` when absent. Documented in `services_v2.rs` and docs/SDK-EMULATOR.md.
+    pub sdk: Value,
 }
 
 impl Config {
@@ -41,6 +44,7 @@ impl Config {
         if let Some(a) = v.get("deny").and_then(Value::as_array) {
             c.deny = a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect();
         }
+        c.sdk = v.get("sdk").cloned().unwrap_or(Value::Null);
         Ok(c)
     }
 }
@@ -63,9 +67,11 @@ pub struct Project {
 /// Whether `c` is a well-formed capability: `domain`, `domain.*` or `domain.method`, lower case.
 pub fn valid_cap(c: &str) -> bool {
     let word = |w: &str| w.len() <= 32 && w.chars().next().is_some_and(|f| f.is_ascii_lowercase()) && w.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-');
+    // a call of the SDK 1.2 services may be camelCase and have a dot (`dash.panel.add`, `markdown.openFile`, `money.requestLimit`)
+    let method = |w: &str| w.len() <= 40 && w.chars().next().is_some_and(|f| f.is_ascii_lowercase()) && w.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == '.');
     match c.split_once('.') {
         None => word(c),
-        Some((d, m)) => word(d) && (m == "*" || word(m)),
+        Some((d, m)) => word(d) && (m == "*" || method(m)),
     }
 }
 
@@ -162,7 +168,7 @@ impl Project {
 }
 
 /// Domains the emulator has fake services for.
-pub const DOMAINS: [&str; 10] = ["clock", "settings", "storage", "files", "vault", "net", "notify", "audio", "camera", "chat"];
+pub const DOMAINS: [&str; 19] = ["clock", "settings", "storage", "files", "vault", "net", "notify", "audio", "camera", "chat", "sdk", "markdown", "embed", "dash", "flows", "k3s", "media", "speech", "money"];
 
 pub fn known_domain(d: &str) -> bool {
     DOMAINS.contains(&d)
@@ -171,6 +177,12 @@ pub fn known_domain(d: &str) -> bool {
 /// Sensitive: the person is asked again on the device (vault, network, camera, microphone, writing files).
 pub fn cap_sensitive(c: &str) -> bool {
     let (d, m) = c.split_once('.').unwrap_or((c, "*"));
+    use iyakki_core_api::sdkbridge::{find_op, namespace, Approval};
+    let asks = |a: Approval| !matches!(a, Approval::None);
+    // the SDK 1.2 services ask exactly where the bridge manifest says they do
+    if crate::services_v2::is_v2_domain(d) && d != "sdk" {
+        return if m == "*" { namespace(d).is_some_and(|n| n.ops.iter().any(|o| asks(o.approval))) } else { find_op(c).is_some_and(|(_, o)| asks(o.approval)) };
+    }
     matches!(d, "vault" | "net" | "camera") || (d == "audio" && matches!(m, "*" | "record")) || (d == "files" && matches!(m, "*" | "write"))
 }
 
@@ -188,6 +200,15 @@ pub fn cap_words(c: &str) -> String {
         "audio" => "play sound or use the microphone",
         "camera" => "use the camera (you are asked each time)",
         "chat" => "ask the assistant questions, each one only after you allow it",
+        "sdk" => "ask which features this IYAKKI has",
+        "markdown" => "show formatted text (Markdown) in a viewer",
+        "embed" => "show a viewer inside its own page (a web page asks you once)",
+        "dash" => "read from the dashboard data sources it names (read only)",
+        "flows" => "start flows you have published, each run only after you allow it",
+        "k3s" => "look at its own part of the cluster, and change it only after you allow it",
+        "media" => "list your music and videos and play them",
+        "speech" => "read aloud, and listen through the microphone only when you press Allow each time",
+        "money" => "spend money up to a daily limit that you set (it starts at nothing)",
         _ => return format!("call the service {c}"),
     };
     if m == "*" {

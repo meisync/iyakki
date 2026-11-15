@@ -21,7 +21,8 @@ impl TileManifest {
         TileManifest { name: name.into(), abi: ABI_VERSION, caps: caps.iter().map(|s| s.to_string()).collect() }
     }
     pub fn allows(&self, domain: &str, method: &str) -> bool {
-        self.caps.iter().any(|c| {
+        // asking which features this host has (`sdk.has`, `sdk.capabilities`) needs no permission: it reveals nothing and is how a tile degrades
+        domain == "sdk" || self.caps.iter().any(|c| {
             c == domain || *c == format!("{domain}.*") || *c == format!("{domain}.{method}")
         })
     }
@@ -245,6 +246,7 @@ impl TileRunner {
             WasmError::NoEntry(n) => TileError::MissingExport(n),
             WasmError::Trap(m) => TileError::Trap(m),
             WasmError::Load(m) => TileError::Load(m),
+            WasmError::Cancelled => TileError::Trap("stopped".into()),
         })?;
         let budget = match kind {
             Kind::Init => self.budgets.init_fuel,

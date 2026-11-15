@@ -729,6 +729,8 @@ pub struct Drawn {
     pub how: &'static str,
     pub note: Option<String>,
     pub log: String,
+    /// https links to pictures the model's reply held (not fetched): the person may approve one.
+    pub links: Vec<String>,
 }
 
 /// Draw a composition for a style and character sheet, as an SVG document of 400x240.
@@ -775,6 +777,7 @@ fn log_exchange(log: &mut String, what: &str, msgs: &[Message], reply: &Result<S
 pub fn draw_picture(chat: &dyn ChatBackend, title: &str, o: &StoryOptions, scene: &story::Scene, sheet: &CharacterSheet, cfg: &DrawCfg) -> Result<Drawn, String> {
     let base = story::image_prompt_with(title, o, scene, sheet, cfg.feedback);
     let mut log = String::new();
+    let mut links: Vec<String> = Vec::new();
     let mut transport: Option<String> = None;
     let mut answered = false;
     let mut why: Option<String> = None;
@@ -806,10 +809,15 @@ pub fn draw_picture(chat: &dyn ChatBackend, title: &str, o: &StoryOptions, scene
                                 reply::PicKind::Raster => ("image reply", "image"),
                                 reply::PicKind::Video => ("video reply", "video"),
                             };
-                            return Ok(Drawn { bytes: f.bytes, ext: f.ext, prompt: format!("SVG drawing, {label}: {base}").replace("SVG drawing, image", "Image from the writer").replace("SVG drawing, video", "Video from the writer"), how, note: None, log });
+                            return Ok(Drawn { bytes: f.bytes, ext: f.ext, prompt: format!("SVG drawing, {label}: {base}").replace("SVG drawing, image", "Image from the writer").replace("SVG drawing, video", "Video from the writer"), how, note: None, log, links: links.clone() });
                         }
                         Err(e) => {
                             log_exchange(&mut log, &format!("rich drawing, try {}", attempt + 1), &msgs, &reply, &format!("not used: {e}"));
+                            for l in reply::web_links(text) {
+                                if !links.contains(&l) && links.len() < 3 {
+                                    links.push(l);
+                                }
+                            }
                             problem = e;
                         }
                     }
@@ -833,7 +841,7 @@ pub fn draw_picture(chat: &dyn ChatBackend, title: &str, o: &StoryOptions, scene
                     Ok(c) => {
                         log_exchange(&mut log, &format!("scene, try {}", attempt + 1), &msgs, &reply, &format!("{} things in a {} at {:?}", c.objects.len(), c.setting.name(), c.time));
                         let note = why.map(|w| format!("The model's own drawing could not be used ({w}), so this is the built-in cartoon."));
-                        return Ok(Drawn { bytes: draw(&c, o.style, sheet).into_bytes(), ext: "svg", prompt: format!("SVG drawing, cartoon: {base}"), how: "composed", note, log });
+                        return Ok(Drawn { bytes: draw(&c, o.style, sheet).into_bytes(), ext: "svg", prompt: format!("SVG drawing, cartoon: {base}"), how: "composed", note, log, links: links.clone() });
                     }
                     Err(e) => log_exchange(&mut log, &format!("scene, try {}", attempt + 1), &msgs, &reply, &format!("not used: {e}")),
                 }
@@ -854,7 +862,7 @@ pub fn draw_picture(chat: &dyn ChatBackend, title: &str, o: &StoryOptions, scene
                 match story::sanitize_svg(text) {
                     Ok(svg) => {
                         log_exchange(&mut log, "plain drawing", &msgs, &reply, &format!("used ({} bytes)", svg.len()));
-                        return Ok(Drawn { bytes: svg.into_bytes(), ext: "svg", prompt: format!("SVG drawing: {base}"), how: "model svg", note: None, log });
+                        return Ok(Drawn { bytes: svg.into_bytes(), ext: "svg", prompt: format!("SVG drawing: {base}"), how: "model svg", note: None, log, links: links.clone() });
                     }
                     Err(e) => {
                         log_exchange(&mut log, "plain drawing", &msgs, &reply, &format!("not used: {e}"));
@@ -874,7 +882,7 @@ pub fn draw_picture(chat: &dyn ChatBackend, title: &str, o: &StoryOptions, scene
     let c = compose_from_keywords(&format!("{} {}", scene.title, scene.text), sheet.human);
     log.push_str(&format!("=== built-in sketch from the words ===\n{} things in a {}\n", c.objects.len(), c.setting.name()));
     let note = Some(format!("Built-in sketch: the model's drawing could not be used{}.", why.map_or(String::new(), |w| format!(" ({w})"))));
-    Ok(Drawn { bytes: draw(&c, o.style, sheet).into_bytes(), ext: "svg", prompt: format!("SVG drawing, sketch: {base}"), how: "keywords", note, log })
+    Ok(Drawn { bytes: draw(&c, o.style, sheet).into_bytes(), ext: "svg", prompt: format!("SVG drawing, sketch: {base}"), how: "keywords", note, log, links: links.clone() })
 }
 
 #[cfg(test)]

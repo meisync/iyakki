@@ -19,7 +19,7 @@ fn long_text_app(tag: &str) -> (StoryApp, AppCx, Arc<Mutex<Option<(usize, usize)
     }
     let bytes = big_picture(1344, 768);
     let sc = st::Scene { place_before: 3, title: "The river".into(), text: "a river".into() };
-    a.pics.push(Pic { scene: sc, state: PicState::Ready, bytes: Some(Arc::new(bytes)), ext: "png".into(), prompt: String::new(), mode: a.story_opts.pictures, style: a.story_opts.style, key: 77, call: None, how: String::new(), log: String::new(), feedback: String::new(), size: String::new(), look: illus::Look::default(), seed: None, provider: String::new(), model: String::new(), ms: 0, alts: Vec::new() });
+    a.pics.push(Pic { scene: sc, state: PicState::Ready, bytes: Some(Arc::new(bytes)), ext: "png".into(), prompt: String::new(), mode: a.story_opts.pictures, style: a.story_opts.style, key: 77, call: None, how: String::new(), log: String::new(), feedback: String::new(), size: String::new(), look: illus::Look::default(), seed: None, provider: String::new(), model: String::new(), ms: 0, alts: Vec::new(), links: Vec::new() });
     (a, cx, at)
 }
 

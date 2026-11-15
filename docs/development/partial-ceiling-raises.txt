@@ -1,0 +1,129 @@
+# Rows that may raise the partial ceiling (docs/development/partial-ceiling.txt), one `F-ID reason` per line.
+# A new feature row that starts out partial, or a `done` row honestly demoted because a change needs a new manual test, is listed here with
+# its reason, and the ceiling is raised by the number of newly listed ids in the same commit. Never list a row to hide a gap.
+F-CHAT-02 2026-11-12 new row: the chat tools for desktop views, notifications, screen saver, apps access, keyboard, time and more (unit-tested, not yet tried by a model)
+F-NET-06 2026-11-12 demoted from done: the Wi-Fi row now names the Broadcom 4360 card without a driver (KI-094); to re-check on the Mac mini 2014
+F-CLI-08 2026-11-12 planned -> partial: terminal engine and pseudo-terminal session built and tested; the tile that draws it is still open
+F-BROW-94 2026-11-12 planned -> partial: streamed downloads and file uploads are built and tested on fakes; a real server and a screen look are still to do
+F-BROW-96 2026-11-12 planned -> partial: name/address fill and sign-in removal built and tested on fixture pages; real sites not tried
+F-BROW-97 2026-11-12 planned -> partial: text-only zoom and Ctrl+wheel built and tested; a real mouse and screen not tried
+F-FW-13 2026-11-12 new row: VPN networks count as the local network (built and tested on fakes; a live tunnel with the real kernel table not tried)
+F-FLOW-14 2026-11-12 planned -> partial: Thrift over HTTP JSON built and tested against a scripted host; no real Thrift server tried
+F-MEDIA-02 2026-11-12 planned -> partial: UPnP/DLNA protocol half built and tested; no socket, no player tried
+F-WEBSVC-06 2026-11-12 planned -> partial: api scope families and the per-computer store built and tested; sign-in with a paired key, enforcement and Settings still open
+F-MSG-07 2026-11-12 moved from planned: the inbound mirror, its tools and the background round are built and unit-tested against a fake homeserver; no real homeserver or model has used it and the m key on the Notifications page awaits a look on a screen
+F-FILE-06 2026-11-12 moved from planned: the Settings controls, cards and fingerprint copy are built and tested with a fake firewall; the screen was not looked at and the real firewall opening was not tried from the page
+F-BOOT-30 2026-11-12 planner and controller built and unit-tested; the recording, the Linux advisor and the shell call remain
+F-BOOT-31 2026-11-12 setting, plan and gate arithmetic built; the Settings switch, boot step and a real-machine run remain
+F-PKG-05 2026-11-12 checker and budget file built; the ceilings come from documents, not yet from measured build outputs, and idle RAM has no ceiling
+F-INST-13 2026-11-12 planner and save/verify side built on image files; the --bios option, the write step and a BIOS boot test remain
+F-LINAPP-13 2026-11-12 policy, rule set and commands built; the Linux step, the page switch and a chat tool remain
+F-SCRN-05 2026-11-12 slideshow, starfield and the start-now chord built; video keep-awake and multi-display backlight remain, and the screens need eyes
+F-TOK-04 2026-11-12 new row: live harness for tool use by a small model; one model measured, run is opt-in and not in the normal tests
+F-PDF-14 2026-11-12 new row: the native_pdf_output field and the offer rule are built and tested; no Settings control or chat tool sets the field yet
+F-TALES-22 2026-11-12 new row: Save PDF is built and layout-tested at the four sizes; the screen and a real viewer were not looked at
+F-STUDY-08 2026-11-12 new row: Export PDF buttons built and layout-tested; the screens were not looked at
+F-PDF-11 2026-11-12 planned -> partial: embedded DejaVu subsets for Greek, Cyrillic and symbols built and tested with the repo's reader and an independent font reader; no real PDF viewer has opened a file
+F-ASSIST-47 2026-11-12 new screen: Settings -> Assistant is tested at four sizes, by keys and clicks, but a person has not looked at it
+F-ASSIST-46 2026-11-12 new screen: the stall limits and the footer token rate are tested but not looked at on a screen
+F-EXTA-17 2026-11-12 new chip: hit-tested at four sizes, not looked at on a screen
+F-DATA-08 2026-11-12 new table drawing and button in the chat: tested at four sizes, not looked at on a screen
+F-PDF-12 2026-11-12 new chat-to-viewer hand-off: each link is tested, the whole path was not seen on a screen
+F-SHELL-60 2026-11-12 forms converted to the file picker are tested but not looked at on a screen; the other fields are split to F-SHELL-61
+F-ASSIST-48 2026-11-12 new form field in the IDE project settings: tested, not looked at on a screen
+F-SHELL-61 2026-11-12 Browse on five path boxes: hit-tested at four sizes, not looked at on a screen
+F-BROX-01 2026-11-12 planned -> partial: the Downloads list opens text, tables and media in their tiles (request tested; the tile hand-over is not driven end to end)
+F-BROX-02 2026-11-12 planned -> partial: start page thumbnails built and tested on fixture sites; not seen on a real screen
+F-FW-14 2026-11-12 planned -> partial: per-rule counters and sets for long address lists built and tested on the generator, evaluator and netlink bytes; loaded into a real kernel once in a private namespace without traffic; counting under real packets not seen
+F-IDE-25 2026-11-12 moved from planned: the embed facility and the docked preview are built and tested at four sizes with a made-up app and the real tile app; the look was not seen on a screen
+F-DEV-16 2026-11-12 planned -> partial: the real terminal for `iyakki dev shell --tty` (pty, window size, Ctrl+C) is built and tested on a macOS pty; the Linux pty run and the client loop against a paired device have not been run
+F-WEBSVC-07 2026-11-12 stale planned row corrected to partial: the flow and tile routes already existed and are tested; data import is split into F-WEBSVC-08 and waits for an owner decision
+F-DEV-16 2026-11-12 listed at the M17 merge (round2 raised the partial count without listing it): real pty terminal built and tested on macOS only; the Linux run and a paired client from a real terminal are not tried
+F-WEBSVC-07 2026-11-12 listed at the M17 merge (round2 raised the partial count without listing it): flow routes ran on a fake engine only and one tile test fails on the Mac
+F-BROW-28 2026-11-12 planned -> partial: element sizes, getComputedStyle, matchMedia, IntersectionObserver and ResizeObserver are built and tested on small offline pages (estimated layout, not compared with a real browser); position, floats and real fonts are not done
+F-BROW-99 2026-11-12 planned -> partial: the engine compile cache on hosts without /proc and the href/src memo are built and measured in a release build on a Mac mini; the cost of the page scripts themselves is unchanged
+F-DISP-13 2026-11-12 new row: a display whose mode list is wrong (a 4K monitor listed at 1080p after the first USB-C plug) is read again by itself and by Look again; fake sysfs tests only, hardware re-test open (KI-160)
+F-KBD-20 2026-11-12 new row: pointer speed for a mouse and a touchpad (unit and page tests; not tried on a real mouse)
+F-RADIO-13 2026-11-13 planned -> partial: the search box is built and unit-tested in the shell's test rig; not looked at on a real screen
+F-VOICE-42 2026-11-13 new row: voice backend seam, `voice_backends` tool and the spoken-approvals setting (fakes only; the running session is not moved onto the registry yet)
+F-ASSIST-52 2026-11-13 new row: Google Gemini as the chat and tool-calling provider (experimental, optional, off by default); built and tested with a fake transport only (KI-460)
+F-VOICE-41 2026-11-13 new row: Google Gemini speech-to-text (experimental, optional, off by default); built and tested with a fake transport only, no real key and no call to Google (KI-460)
+F-CORE-19 2026-11-13 hello deprecations, update side and compat report built with fakes; peers are paired computers only
+F-CORE-22 2026-11-13 C interface rules and symbol gate built; the shared library itself does not exist yet
+F-BROX-04 2026-11-13 planned -> partial: animated WebP was already decoded and shown; the row was never updated: now tested through a page
+F-BROX-11 2026-11-13 planned -> partial: Happy Eyeballs built; tested with injected connects and on the loopback, not on a network with a dead IPv6 route
+F-BROX-12 2026-11-13 planned -> partial: async/defer order and parallel script fetching built; tested with a fake web, not on a real site
+F-BROX-13 2026-11-13 planned -> partial: decoded-picture cache built; tested on the cache and through a page, not measured on a real page
+F-BROX-14 2026-11-13 planned -> partial: parsed-style cache built; tested for identical results, not measured on a real page
+F-BROX-05 2026-11-13 planned -> partial: the row text was out of date: clipping, mask, blur and text were already built; patterns and other filters are not
+F-BROX-06 2026-11-13 planned -> partial: inline svg built; tested on the model and a page, not seen on a screen
+F-PICT-01 2026-11-13 planned -> partial: most already built (srcset, picture, lazy, gif loops) plus inline svg today; svg patterns missing
+F-WEB-05 2026-11-13 planned -> partial: iyakki-edit built as a WebAssembly module with a C-style interface and driven by node; no editor page uses it yet (KI-732)
+F-WEB-50 2026-11-13 planned -> partial: the audit route is paged and the Cloud access page shows older entries; tested in the service harness and under node, not in a real browser (KI-730)
+F-WEB-51 2026-11-13 planned -> partial: run and flow-run events on the event stream and the pages that refresh from it; tested in the harness and under node, not in a real browser (KI-730)
+F-WEB-52 2026-11-13 planned -> partial: the Chat page over the Runs routes; tested under node, not in a real browser (KI-730)
+F-WEBSVC-09 2026-11-13 planned -> partial: run progress and flow-run status on the services event WebSocket
+F-WEBSVC-09 2026-11-13 planned -> partial: run progress and flow-run status on the service event WebSocket; tested in the harness
+F-WEBSVC-10 2026-11-13 planned -> partial: GET /metrics with a small set of numbers and JSON logs; tested in the harness (KI-731)
+F-BROX-07 2026-11-13 planned -> partial: PDF passwords (RC4 and AES-128) built and tested with system-made files; AES-256 not supported (KI-710)
+F-DOCTOR-03 2026-11-13 dev doctor endpoint, verb and doctor_report chat tool built; live path untested without a device
+F-CORE-23 2026-11-13 golden fixtures for three binary formats built; the other fixtures and findings F-5, F-9, F-10 are open (KI-720)
+F-CORE-20 2026-11-13 two-phase migration library and boot-confirm wiring built; no real migration uses it yet
+F-CORE-24 2026-11-13 wizard engine state machine built; screen, chat tool and install hook not built (KI-721)
+F-BROX-10 2026-11-13 planned -> partial: HTTP/2 core (HPACK, framing, flow control) built and tested against the RFC examples; not connected to the browser's client (KI-712)
+F-BROW-98 2026-11-13 planned -> partial: mixed-content blocking for scripts and style sheets built; certificate view and known-bad list not (KI-713)
+F-CORE-25 2026-11-13 snapshot and migration runner with rollback built; WASM migrators, automatic snapshot before an update and chat tool not built (KI-722)
+F-UPD-01 2026-11-13 signed update bundle reader built; channel, official key, command and chat tool not built (KI-723)
+F-SDK-15 2026-11-13 dash and flows engine backends built; k3s namespace not built (KI-724)
+F-WEB-57 2026-11-13 planned -> partial: a tile call that asks first waits for the person's own click through the approvals routes; tested in the harness (KI-733)
+F-DASH-19 2026-11-13 planned -> partial: S3-compatible object storage as a DASH source with SigV4 signing; tested against the AWS examples and a fake server (KI-734)
+F-FLOW-16 2026-11-13 planned -> partial: run a flow on another IYAKKI through its web service (client library); tested against the real routes in one process (KI-735)
+F-FILE-14 2026-11-13 planned -> partial: ECDSA P-384 login keys for the SSH server, tried with a real OpenSSH client; RSA host key and P-521 not done (KI-736)
+F-VAULT-07 2026-11-13 planned -> partial: timed checkpoint of protected browser data built and tested with fake files and a fake clock; not tried with a real WPE profile
+F-VAULT-08 2026-11-13 planned -> partial: sealing at the lock screen built and tested on the module; the lock screen wiring is not driven by a shell test (KI-742)
+F-VAULT-09 2026-11-13 planned -> partial: never-keep and clear-on-exit built for site data; cookies are all or nothing (KI-740); fake files only
+F-VAULT-10 2026-11-13 planned -> partial: the reader browser data file inside the sealed profile, tested with fake files
+F-VOICE-36 2026-11-13 planned -> partial: echo canceller built and tested on synthetic signals; not in the audio path (KI-743)
+F-VOICE-37 2026-11-13 planned -> partial: finished work is spoken later through the waker, tested with fake ports; the live waker was compiled, not run
+F-VOICE-39 2026-11-13 planned -> partial: top-bar microphone glyph, tested as slot logic; not looked at on a screen
+F-VOICE-40 2026-11-13 planned -> partial: spoken turns are marked in the Voice conversation thread (text mark); unit-tested
+F-CORE-21 2026-11-13 rollback harness written, never run (KI-750)
+F-CORE-18 2026-11-13 contract 0.2 with base64 chunks built; pushed events not built (KI-751)
+F-BROX-08 2026-11-13 planned -> partial: PDF form fields filled in the viewer and the assistant and written as an incremental update; radio buttons, signatures, multi-line wrapping not done (KI-715)
+F-BJS-01 2026-11-13 planned -> partial: LivePage::interact (click, input, check, navigation after a click) built and tested at crate level; the browser does not use it yet (KI-716)
+F-SHARE-07 2026-11-13 planned -> partial: IPv6 loopback listener and IPv6 bind addresses for shares; HTTPS, .local, tool not done (KI-760)
+F-K8S-26 2026-11-13 planned -> partial: custom resource instances at the data layer against a fake kubectl; no tile page (KI-761)
+F-WEB-55 2026-11-13 planned -> partial: the Runs page as a wasm32 tile reading the person's runs through a read-only service domain; tested in the sandbox and the routes (KI-762)
+F-FLOW-16 2026-11-13 Impl 30 -> 60 (no new partial row): the remote_flow node, saved machines and chat tools
+F-WEBSVC-11 2026-11-13 planned -> partial: accounts moved into their own crate; no headless feature yet (KI-763)
+F-K3S-30 2026-11-13 Podman clock-step and certificate restart built, fake runner only
+F-LINAPP-16 2026-11-13 sandbox root to image library built; no command or tool yet, not run on a cluster (KI-781)
+F-RAG-14 2026-11-13 planned -> partial: second step that orders found passages (lexical and Lemonade reranker); fake server only
+F-RAG-15 2026-11-13 planned -> partial: Graph RAG with plain-rule name extraction; English-shaped (KI-745)
+F-RAG-16 2026-11-13 planned -> partial: single web pages kept as documents; fake page source
+F-PDF-08 2026-11-13 planned -> partial: reading order merged earlier, text from Identity-H TrueType fonts without ToUnicode now read; other font kinds not (KI-747)
+F-CAM-18 2026-11-13 planned -> partial: vision summary of a single motion event after opt-in; fake model only (KI-770)
+F-KBD-08 2026-11-13 planned -> partial: DDC/CI messages and rules against a fake monitor; no real bus (KI-748)
+F-NET-27 2026-11-13 planned -> partial: play, pause, stop and volume keys of a phone act on the player and volume; not tried on a phone (KI-771)
+F-GPU-02 2026-11-13 ROCm verdict, AMD plugin manifest and smoke pod built; no card, no pinned images, no Quick install entry (KI-782)
+F-WASM-12 2026-11-13 planned -> partial: picture table and both renderers built and equal in real Chrome; bundle manifest loader and service hand-over not built (KI-790)
+F-WEB-56 2026-11-13 planned -> partial: a read-only Settings overview as a wasm32 tile; tested in the sandbox and the routes (KI-764)
+F-WEB-54 2026-11-13 planned -> partial: a scratch editor as a wasm32 tile on iyakki-edit; no files (KI-765)
+F-WEB-53 2026-11-13 planned -> partial: one-conversation Chat as a wasm32 tile through chat.send and runs.get (KI-766)
+F-SHELL-62 2026-11-13 planned -> partial: theme files with readability rules, per-person choice and chat tools; no Settings listing and no live preview (KI-749); tested with temp files
+F-VAULT-11 2026-11-13 planned -> partial: the sealed browser data moves by export and import (chat tools, asks) with a one-session claim for the move; key not moved, running sessions do not hold the claim (KI-772); temp-folder tests
+F-BROW-33 2026-11-13 planned -> partial: the per-release site list and the script that runs it in the full engine are written and their specs parse; never run on the real sites; usability needs accounts (KI-791)
+F-IDE-25 2026-11-13 planned -> partial: the docked Preview was already built and tested (5 tests pass); never looked at on a screen
+F-VOICE-38 2026-11-13 planned -> partial: audio paths checked, whole loop over the page microphone tested with fakes (KI-810)
+F-ARCH-05 2026-11-13 planned -> partial: Os trait, LocalOs and AppCx.os built; no tile uses them yet (KI-812)
+F-BROX-15 2026-11-13 planned -> partial: speed report tool and the first fix (frame buffers share the parsed fonts); style and layout speed not changed (KI-840)
+F-WEBSVC-12 2026-11-13 planned -> partial: the flows-runner profile (sign-in and the person's flows) over the headless binary; tested in the harness and by script (KI-821)
+F-CHECKUP-04 2026-11-13 planned -> partial: GPU and USB steps built and tested on made-up machines; wording not judged on a real machine (KI-850)
+F-LINAPP-15 2026-11-13 planned -> partial: build job generator, packer, digest reader, image app writer and the image_build tool, with a fake cluster; no builder image, never run on a cluster (KI-851)
+F-CORE-26 2026-11-13 planned -> partial: the update-check badge text for needs-a-newer-IYAKKI built; the member kinds and the broker enforcement are open (KI-728)
+F-ARCH-06 2026-11-13 planned -> partial: Audio trait, Os::audio, disks and net, Fake and Local implementations; no tile moved (KI-852)
+F-DEVMODE-08 2026-11-13 reopened 2026-11-13 by owner decision: built by iyakki dev scan (F-NAME-04)
+F-LINAPP-12 2026-11-13 reopened 2026-11-13 by owner decision: the open gaps in its notes are real
+F-LINAPP-14 2026-11-13 reopened 2026-11-13 by owner decision: the pod fallback is not finished
+F-EDIT-17 2026-11-13 planned -> partial: iyakki-ui removed and iyakki-gui on iyakki-edit; the editor window compiles but was never started (Manual needed)
+F-SND-12 2026-11-13 planned -> partial: the media player's sound goes through the mixer when it is on, tested with a fake ffmpeg and sink; not run on a Linux sound card

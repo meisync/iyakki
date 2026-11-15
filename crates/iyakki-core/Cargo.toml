@@ -12,7 +12,9 @@ path = "src/main.rs"
 default = ["swarm", "egress", "shell", "web"]
 swarm = ["dep:iyakki-swarm", "dep:tokio"]
 egress = ["dep:iyakki-proxy"]
-shell = ["dep:iyakki-shell", "dep:iyakki-agent"]
+# `headless`: the web service without the desktop (`iyakki serve --profile ...`): the agent, no shell, no screen, no browser engine
+headless = ["dep:iyakki-agent"]
+shell = ["headless", "dep:iyakki-shell"]
 web = ["shell", "dep:iyakki-remote"]
 
 [dependencies]
@@ -24,6 +26,7 @@ iyakki-agent = { path = "../iyakki-agent", optional = true }
 iyakki-remote = { path = "../iyakki-remote", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"], optional = true }
 iyakki-sec.workspace = true
+iyakki-accounts = { path = "../iyakki-accounts" }
 iyakki-core-api.workspace = true
 iyakki-devctl.workspace = true
 iyakki-storage.workspace = true

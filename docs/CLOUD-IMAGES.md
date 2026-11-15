@@ -22,6 +22,20 @@ The ISO and the disk image come from one **repack** of the finished `web` and `m
 Buildroot configuration for a cloud variant (for example without the desktop's GUI libraries) would be a full build and is not started by the
 script; today the cloud image is the `web` image with Cloud mode on.
 
+## The headless container image (F-WEBSVC-11)
+
+`dist/cloud/build-cloud.sh docker --headless [--arm64]` makes a second, smaller image from the same recipe: the program is built with
+`--no-default-features --features headless` (the web service without the desktop: no shell, no screen, no remote front end, no toolkit),
+into its own cargo target folder (`target/headless`) so it never overwrites the full program. `dist/cloud/Dockerfile.headless` is
+`FROM scratch` like the other, starts `serve --profile cloud --config /etc/iyakki/service.cloud.example.json` (profiles: `agent-api`,
+`cloud`, `flows-runner`, `data-api`), has no pairing page (make the first account once with `user add NAME --role admin --password-stdin`
+against the volume) and is tagged `iyakki-cloud:<v>-headless[-arch]` with the tarball `iyakki-cloud-<v>-headless-<arch>.tar`. A plain
+`serve` without a profile is refused by this program. Signing the output still uses the full program (`release sign` is not in the headless
+one): run `docker` first. It has NOT been built or run: `dist/release/headless-check.sh` checks the script and the Dockerfile and runs the
+headless program on this machine over a temporary folder. Size, `fast` profile on macOS arm64: 43.3 MB against 93.1 MB; the figure for the
+release profile on Linux is for whoever builds the image (run `HEADLESS_PROFILE_DIR=release dist/release/headless-check.sh` there and note
+`ls -l` of the program). The Buildroot ISO and disk images have no headless variant.
+
 ## The container image
 
 `FROM scratch`: the static musl program `/iyakki`, the CA bundle, `/licenses`, two examples in `/etc/iyakki`. No shell, no package manager.

@@ -75,6 +75,23 @@ fn the_standard_lists_are_fetched_only_by_a_job_and_then_block() {
 }
 
 #[test]
+fn one_known_list_can_be_added_by_its_id_and_an_unknown_id_is_said_plainly() {
+    let cx = cx_with_admin_store("blk3k");
+    let store = store(&cx);
+    let srv = FakeServer::with(&[(KNOWN[2].url, "||ads2.example.com^\n##.sponsored\n")]);
+    let msg = run_job(&store, &srv, &Job::AddKnown("ublock-filters".into()), 50);
+    assert!(msg.starts_with("added uBlock filters (2 rules)"), "{msg}");
+    let m = store.list().into_iter().next().unwrap();
+    assert_eq!((m.id.as_str(), m.updated), ("ublock-filters", 50));
+    assert!(m.licence.contains("GPL") && m.url == KNOWN[2].url);
+    // a server that fails keeps the list and says which one failed
+    let none = FakeServer::with(&[]);
+    assert!(run_job(&store, &none, &Job::AddKnown("ublock-filters".into()), 60).starts_with("not added: uBlock filters"));
+    assert_eq!(store.list()[0].updated, 50);
+    assert!(run_job(&store, &srv, &Job::AddKnown("nope".into()), 1).contains("no list called nope"));
+}
+
+#[test]
 fn apply_puts_the_persons_lists_into_the_shared_filter_and_honours_the_switch() {
     let _turn = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let cx = cx_with_admin_store("blk4");

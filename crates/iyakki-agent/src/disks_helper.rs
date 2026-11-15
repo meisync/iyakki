@@ -112,7 +112,13 @@ impl Sys for RealSys {
                     return Err(format!("{prog} did not finish in {} seconds and was stopped", HELPER_TIMEOUT.as_secs()));
                 }
                 Ok(None) => std::thread::sleep(Duration::from_millis(40)),
-                Err(e) => return Err(format!("{prog}: {e}")),
+                Err(e) => {
+                    return Err(if iyakki_core_api::child_status(&mut child) == iyakki_core_api::ChildState::Gone {
+                        format!("{prog} ended and its exit status is not available (another reaper took it)")
+                    } else {
+                        format!("{prog}: {e}")
+                    })
+                }
             }
         };
         // a helper that goes to the background (dislocker) keeps its pipes open: take what has arrived, wait only briefly
@@ -369,52 +375,52 @@ pub struct FakeSys {
 impl FakeSys {
     pub fn with_programs(names: &[&str]) -> Arc<FakeSys> {
         let f = FakeSys::default();
-        *f.files.lock().unwrap() = names.iter().map(|n| format!("/usr/bin/{n}")).collect();
+        *f.files.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = names.iter().map(|n| format!("/usr/bin/{n}")).collect();
         Arc::new(f)
     }
     /// The next call of `prog` answers `out`; with none left it answers success with no output.
     pub fn answer(&self, prog: &str, code: i32, stdout: &str, stderr: &str) {
-        self.answers.lock().unwrap().push((prog.to_string(), ProcOut { code, stdout: stdout.into(), stderr: stderr.into() }));
+        self.answers.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((prog.to_string(), ProcOut { code, stdout: stdout.into(), stderr: stderr.into() }));
     }
     pub fn calls(&self) -> Vec<Seen> {
-        self.seen.lock().unwrap().clone()
+        self.seen.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 }
 
 impl Sys for FakeSys {
     fn is_file(&self, path: &str) -> bool {
-        self.files.lock().unwrap().iter().any(|f| f == path)
+        self.files.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().any(|f| f == path)
     }
     fn run(&self, prog: &str, args: &[String], stdin: Option<&[u8]>) -> Result<ProcOut, String> {
-        self.seen.lock().unwrap().push(Seen { prog: prog.to_string(), args: args.to_vec(), stdin_bytes: stdin.map(<[u8]>::to_vec) });
+        self.seen.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(Seen { prog: prog.to_string(), args: args.to_vec(), stdin_bytes: stdin.map(<[u8]>::to_vec) });
         let base = prog.rsplit('/').next().unwrap_or(prog);
-        let mut a = self.answers.lock().unwrap();
+        let mut a = self.answers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         match a.iter().position(|(p, _)| p == base) {
             Some(i) => Ok(a.remove(i).1),
             None => Ok(ProcOut::default()),
         }
     }
     fn symlink(&self, target: &str, at: &str) -> Result<(), String> {
-        self.links.lock().unwrap().push((at.to_string(), target.to_string()));
+        self.links.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((at.to_string(), target.to_string()));
         Ok(())
     }
     fn read_link(&self, at: &str) -> Option<String> {
-        self.links.lock().unwrap().iter().find(|(a, _)| a == at).map(|(_, t)| t.clone())
+        self.links.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().find(|(a, _)| a == at).map(|(_, t)| t.clone())
     }
     fn remove_file(&self, at: &str) -> Result<(), String> {
-        self.links.lock().unwrap().retain(|(a, _)| a != at);
+        self.links.lock().unwrap_or_else(std::sync::PoisonError::into_inner).retain(|(a, _)| a != at);
         Ok(())
     }
     fn make_private_dir(&self, path: &str) -> Result<(), String> {
-        self.dirs.lock().unwrap().push(path.to_string());
+        self.dirs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(path.to_string());
         Ok(())
     }
     fn remove_dir(&self, path: &str) -> Result<(), String> {
-        self.dirs.lock().unwrap().retain(|d| d != path);
+        self.dirs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).retain(|d| d != path);
         Ok(())
     }
     fn exists(&self, path: &str) -> bool {
-        self.present.lock().unwrap().iter().any(|p| p == path)
+        self.present.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().any(|p| p == path)
     }
 }
 
@@ -436,25 +442,25 @@ impl FakeCrypt {
         Arc::new(FakeCrypt { env, volumes: Mutex::new(Vec::new()), missing: Mutex::new(Vec::new()), log: Mutex::new(Vec::new()), busy_close: Mutex::new(false) })
     }
     pub fn add(&self, part: &str, key: &str, inner: Vec<u8>) {
-        self.volumes.lock().unwrap().push((part.into(), key.into(), inner));
+        self.volumes.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((part.into(), key.into(), inner));
     }
     pub fn log(&self) -> Vec<String> {
-        self.log.lock().unwrap().clone()
+        self.log.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 }
 
 impl CryptRunner for FakeCrypt {
     fn available(&self, kind: CryptKind) -> Result<(), String> {
-        if self.missing.lock().unwrap().contains(&kind) { Err(missing_words(kind)) } else { Ok(()) }
+        if self.missing.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains(&kind) { Err(missing_words(kind)) } else { Ok(()) }
     }
     fn open(&self, req: &OpenReq, secret: &Secret) -> Result<(), OpenError> {
-        self.log.lock().unwrap().push(format!("open {} ro={}", req.part, req.read_only));
-        let vols = self.volumes.lock().unwrap();
+        self.log.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(format!("open {} ro={}", req.part, req.read_only));
+        let vols = self.volumes.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some((_, key, inner)) = vols.iter().find(|(p, _, _)| p == req.part) else { return Err(OpenError::Failed("no such volume".into())) };
         if key.as_bytes() != secret.expose() {
             return Err(OpenError::WrongKey);
         }
-        let mut st = self.env.st.lock().unwrap();
+        let mut st = self.env.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let path = mapper_path(req.part);
         let mut data = inner.clone();
         data.resize(data.len().max(4096), 0);
@@ -463,11 +469,11 @@ impl CryptRunner for FakeCrypt {
         Ok(())
     }
     fn close(&self, _kind: CryptKind, part: &str) -> Result<(), String> {
-        self.log.lock().unwrap().push(format!("close {part}"));
-        if *self.busy_close.lock().unwrap() {
+        self.log.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(format!("close {part}"));
+        if *self.busy_close.lock().unwrap_or_else(std::sync::PoisonError::into_inner) {
             return Err("The volume is still in use. Close what uses it (or unmount it) and try again.".into());
         }
-        let mut st = self.env.st.lock().unwrap();
+        let mut st = self.env.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let path = mapper_path(part);
         st.devs.remove(&path);
         st.canon.remove(&path);

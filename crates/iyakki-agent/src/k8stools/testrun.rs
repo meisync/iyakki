@@ -63,6 +63,52 @@ fn number_before(line: &str, word: &str) -> Option<u64> {
     line[..i].trim_end().rsplit(|c: char| !c.is_ascii_digit()).next().and_then(|n| n.parse().ok())
 }
 
+/// The whole number right after `label` ("Failed: 3").
+fn number_after(line: &str, label: &str) -> Option<u64> {
+    let i = line.find(label)?;
+    line[i + label.len()..].trim_start().split(|c: char| !c.is_ascii_digit()).next().and_then(|n| n.parse().ok())
+}
+
+/// Counts from the summaries of mocha, vitest, Maven (surefire), .NET, RSpec and PHPUnit; `None` when none of them is there.
+fn other_frameworks(text: &str) -> Option<(u64, u64)> {
+    let has = |f: fn(&&str) -> bool| text.lines().find(f);
+    // mocha: "  5 passing (12ms)" and "  1 failing"
+    let passing = text.lines().find(|l| l.trim_start().ends_with(')') && l.contains(" passing"));
+    if let Some(l) = passing {
+        let failing = text.lines().find(|l| l.trim().ends_with(" failing") || l.trim_start().contains(" failing"));
+        return Some((number_before(l, " passing").unwrap_or(0), failing.and_then(|f| number_before(f, " failing")).unwrap_or(0)));
+    }
+    // vitest: "      Tests  1 failed | 5 passed (6)"
+    if let Some(l) = has(|l| l.trim_start().starts_with("Tests ") && !l.contains(':') && (l.contains(" passed") || l.contains(" failed"))) {
+        return Some((number_before(l, " passed").unwrap_or(0), number_before(l, " failed").unwrap_or(0)));
+    }
+    // dotnet: "Passed!  - Failed:     0, Passed:     5, Skipped:     0, Total:     5"
+    if let Some(l) = has(|l| (l.trim_start().starts_with("Passed!") || l.trim_start().starts_with("Failed!")) && l.contains("Total:")) {
+        return Some((number_after(l, "Passed:").unwrap_or(0), number_after(l, "Failed:").unwrap_or(0)));
+    }
+    // Maven surefire: the last "Tests run: 6, Failures: 1, Errors: 0, Skipped: 0" without a time is the total
+    if let Some(l) = text.lines().filter(|l| l.contains("Tests run:") && !l.contains("Time elapsed")).last() {
+        let (run, bad) = (number_after(l, "Tests run:").unwrap_or(0), number_after(l, "Failures:").unwrap_or(0) + number_after(l, "Errors:").unwrap_or(0));
+        let skipped = number_after(l, "Skipped:").unwrap_or(0);
+        return Some((run.saturating_sub(bad + skipped), bad));
+    }
+    // RSpec: "6 examples, 1 failure, 1 pending"
+    if let Some(l) = has(|l| l.contains(" examples, ") || l.contains(" example, ")) {
+        let n = number_before(l, " example").unwrap_or(0);
+        let failed = number_before(l, " failure").unwrap_or(0);
+        return Some((n.saturating_sub(failed + number_before(l, " pending").unwrap_or(0)), failed));
+    }
+    // PHPUnit: "OK (5 tests, 8 assertions)" or "Tests: 5, Assertions: 8, Failures: 1."
+    if let Some(l) = has(|l| l.trim_start().starts_with("OK (") && l.contains(" test")) {
+        return Some((number_before(l, " test").unwrap_or(0), 0));
+    }
+    if let Some(l) = has(|l| l.trim_start().starts_with("Tests: ") && l.contains("Assertions:")) {
+        let bad = number_after(l, "Failures:").unwrap_or(0) + number_after(l, "Errors:").unwrap_or(0);
+        return Some((number_after(l, "Tests:").unwrap_or(0).saturating_sub(bad), bad));
+    }
+    None
+}
+
 fn percent_in(s: &str) -> Option<f64> {
     s.split_whitespace().find_map(|t| t.trim_end_matches([',', ')', ';']).strip_suffix('%').and_then(|n| n.parse::<f64>().ok()))
 }
@@ -106,6 +152,9 @@ pub fn parse_outcome(text: &str) -> Outcome {
             }
         }
     }
+    if out.counts.is_none() {
+        out.counts = other_frameworks(text);
+    }
     // coverage: istanbul/jest "All files | 87.5 | ...", coverage.py "TOTAL  120  10  91%", go "coverage: 78.2% of statements"
     if let Some(l) = text.lines().find(|l| l.contains("All files") && l.contains('|')) {
         out.coverage = l.split('|').nth(1).and_then(|c| c.trim().parse::<f64>().ok());
@@ -137,7 +186,7 @@ impl Outcome {
             v.push(format!("Coverage: {c}%"));
         }
         if v.is_empty() {
-            "No pass/fail count or coverage line was recognised (npm/jest, pytest, go test and cargo test summaries are read); read the output below.".to_string()
+            "No pass/fail count or coverage line was recognised (npm/jest, mocha, vitest, pytest, go test, cargo test, Maven, .NET, RSpec and PHPUnit summaries are read); read the output below.".to_string()
         } else {
             v.join(". ")
         }
@@ -404,6 +453,27 @@ mod tests {
         assert_eq!(parse_outcome("5 passed in 0.10s").counts, Some((5, 0)));
         assert!(parse_outcome("nothing here").summary().contains("No pass/fail count"));
         assert_eq!(parse_outcome(JEST).summary(), "Tests: 5 passed, 1 failed. Coverage: 87.5%");
+    }
+
+    #[test]
+    fn mocha_vitest_maven_dotnet_rspec_and_phpunit_summaries_are_read_too() {
+        let c = |t: &str| parse_outcome(t).counts;
+        assert_eq!(c("  5 passing (12ms)\n  1 failing\n"), Some((5, 1)));
+        assert_eq!(c("  3 passing (4ms)\n"), Some((3, 0)));
+        assert_eq!(c(" Test Files  1 failed (1)\n      Tests  1 failed | 5 passed (6)\n"), Some((5, 1)));
+        assert_eq!(c("      Tests  6 passed (6)\n"), Some((6, 0)));
+        let mvn = "[INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.1 s - in A\n[INFO] Tests run: 3, Failures: 1, Errors: 0, Skipped: 1, Time elapsed: 0.1 s - in B\n[ERROR] Tests run: 6, Failures: 1, Errors: 0, Skipped: 1\n";
+        assert_eq!(c(mvn), Some((4, 1)));
+        assert_eq!(c("Failed!  - Failed:     1, Passed:     4, Skipped:     0, Total:     5, Duration: 3 ms\n"), Some((4, 1)));
+        assert_eq!(c("Passed!  - Failed:     0, Passed:     5, Skipped:     0, Total:     5\n"), Some((5, 0)));
+        assert_eq!(c("Finished in 0.1 seconds\n6 examples, 1 failure, 1 pending\n"), Some((4, 1)));
+        assert_eq!(c("OK (5 tests, 8 assertions)\n"), Some((5, 0)));
+        assert_eq!(c("Tests: 5, Assertions: 8, Failures: 1.\n"), Some((4, 1)));
+        // the older readers still win when their line is there, and plain text is still not recognised
+        assert_eq!(c(JEST), Some((5, 1)));
+        assert_eq!(c(CARGO), Some((7, 2)));
+        assert_eq!(c("compiling...\nall good\n"), None);
+        assert!(parse_outcome("nothing here").summary().contains("RSpec and PHPUnit"));
     }
 
     #[test]

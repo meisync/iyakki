@@ -105,6 +105,18 @@ pub struct DiskMeta {
     pub swap_parts: Vec<String>,
 }
 
+/// A value that is part of a struct but not of its identity: it is not written to the plan file and two structs are equal whatever it holds.
+#[derive(Clone, Debug, Default)]
+pub struct Local<T>(pub T);
+
+impl<T> PartialEq for Local<T> {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl<T> Eq for Local<T> {}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiskModel {
     pub name: String,
@@ -129,6 +141,8 @@ pub struct DiskModel {
     /// A GPT with an entry array other than 128 x 128 bytes: rewriting it would change its geometry.
     pub unusual_gpt: bool,
     pub disk_guid: Option<Guid>,
+    /// Sector 0 and the gap or BIOS boot partition behind it, for the legacy BIOS option (not in the plan file).
+    pub bios: Local<Option<crate::biosshared::Facts>>,
     /// SHA-256 over the sizes and the table sectors: any change in the table changes it.
     pub fingerprint: String,
 }
@@ -305,6 +319,56 @@ const MBR_TYPES: &[(u8, &str)] = &[
     (0xFD, "Linux RAID"),
 ];
 
+/// Most logical partitions followed in one extended partition (the chain is a linked list; a loop or a very long one is cut off).
+const MAX_LOGICALS: usize = 128;
+
+/// Walk the chain of extended boot records of the extended partition `[ext_start, ext_start + ext_len)` (in sectors). Returns
+/// `(first_lba, mbr_type, sectors)` of each logical partition in chain order, the records read (for the table fingerprint) and
+/// notes about anything odd (a record outside the container, a loop, a bad signature, too many). Never fails: what cannot be
+/// followed is left out and said.
+pub fn read_logicals<R: Read + Seek>(r: &mut R, ext_start: u64, ext_len: u64, ss: u64, disk_sectors: u64) -> (Vec<(u64, u8, u64)>, Vec<Vec<u8>>, Vec<String>) {
+    let mut out = Vec::new();
+    let mut ebrs = Vec::new();
+    let mut notes = Vec::new();
+    let ext_end = (ext_start + ext_len).min(disk_sectors.max(ext_start));
+    let mut ebr = ext_start;
+    let mut last = None;
+    for n in 0..=MAX_LOGICALS {
+        if n == MAX_LOGICALS {
+            notes.push(format!("the extended partition lists more than {MAX_LOGICALS} logical partitions; the rest are not shown"));
+            break;
+        }
+        if last.is_some_and(|l| ebr <= l) || ebr < ext_start || ebr >= ext_end {
+            notes.push("the chain of logical partitions loops or leaves the extended partition; the rest are not shown".into());
+            break;
+        }
+        last = Some(ebr);
+        let b = read_at(r, ebr * ss, 512);
+        if b.len() < 512 || b[510] != 0x55 || b[511] != 0xAA {
+            notes.push("a logical partition record has no 55AA signature; the rest are not shown".into());
+            break;
+        }
+        // entry 0 describes the logical partition (start relative to this record), entry 1 links to the next record
+        // (start relative to the start of the extended partition)
+        let (t0, rel0, n0) = (b[446 + 4], le32(&b, 446 + 8), le32(&b, 446 + 12));
+        let (t1, rel1) = (b[462 + 4], le32(&b, 462 + 8));
+        ebrs.push(b[..512].to_vec());
+        if t0 != 0 && n0 != 0 && !matches!(t0, 0x05 | 0x0F | 0x85) {
+            let first = ebr + rel0;
+            if first + n0 > ext_end {
+                notes.push(format!("a logical partition at sector {first} reaches past the extended partition; it is not shown"));
+            } else {
+                out.push((first, t0, n0));
+            }
+        }
+        if t1 == 0 || rel1 == 0 {
+            break;
+        }
+        ebr = ext_start + rel1;
+    }
+    (out, ebrs, notes)
+}
+
 /// Read the table and the contents of a disk. `mounts` is `/proc/mounts` parsed ([`drives::parse_proc_mounts`]); `boot_media`
 /// the name of the disk IYAKKI booted from, when known. Never fails: oddities become `notes`.
 pub fn read_model<R: Read + Seek>(r: &mut R, meta: &DiskMeta, size_bytes: u64, sector: u32, mounts: &[(String, String)], boot_media: Option<&str>) -> DiskModel {
@@ -328,6 +392,7 @@ pub fn read_model<R: Read + Seek>(r: &mut R, meta: &DiskMeta, size_bytes: u64, s
         raw_data: false,
         unusual_gpt: false,
         disk_guid: None,
+        bios: Local(None),
         fingerprint: String::new(),
     };
     let s0 = read_at(r, 0, 512.max(sector as usize));
@@ -392,6 +457,18 @@ pub fn read_model<R: Read + Seek>(r: &mut R, meta: &DiskMeta, size_bytes: u64, s
                 let name = MBR_TYPES.iter().find(|(c, _)| *c == t).map_or("other", |(_, n)| *n).to_string();
                 let ext = matches!(t, 0x05 | 0x0F | 0x85);
                 push(&mut m, r, i as u32 + 1, start, n, name, None, Some(t), String::new(), ext);
+                if ext {
+                    // the logical partitions inside the container are listed as slots 5, 6, ... like the kernel does
+                    let (logicals, ebrs, notes) = read_logicals(r, start, n, ss, size_bytes / ss);
+                    for (idx, l) in logicals.into_iter().enumerate() {
+                        let kind = MBR_TYPES.iter().find(|(c, _)| *c == l.1).map_or("other", |(_, n)| *n).to_string();
+                        push(&mut m, r, 5 + idx as u32, l.0, l.2, kind, None, Some(l.1), String::new(), false);
+                    }
+                    for e in ebrs {
+                        hash.update(e);
+                    }
+                    m.notes.extend(notes);
+                }
             }
         }
         gpt::Kind::None => {
@@ -400,6 +477,7 @@ pub fn read_model<R: Read + Seek>(r: &mut R, meta: &DiskMeta, size_bytes: u64, s
     }
     m.parts.sort_by_key(|p| p.first_lba);
     m.running_system = mounts.iter().any(|(d, mp)| drives::belongs_to(d, &meta.name) && (drives::critical_mount(mp) || mp.contains("iyakki")));
+    m.bios = Local(crate::biosshared::read_facts(r, sector, size_bytes).ok());
     m.fingerprint = Sha256::digest(hash.finalize()).iter().map(|b| format!("{b:02x}")).collect();
     m
 }
@@ -467,11 +545,16 @@ pub struct Request {
     pub zram: String,
     pub swapfile: String,
     pub hostname: Option<String>,
+    /// Also set up legacy BIOS boot on this shared disk (`--bios`): GRUB into the gap behind sector 0 or the BIOS boot partition, with sector 0
+    /// and that area saved first to `bios_save`. `bios_replace` allows replacing another system's boot code in sector 0.
+    pub bios: bool,
+    pub bios_replace: bool,
+    pub bios_save: String,
 }
 
 impl Default for Request {
     fn default() -> Request {
-        Request { mode: Mode::WholeDisk, gap_start: None, boot_part: None, data_part: None, keep_esp: false, boot_mib: None, data_mib: None, table: TableChoice::Auto, confirm_running_disk: false, delete_parts: vec![], zram: "auto".into(), swapfile: "off".into(), hostname: None }
+        Request { mode: Mode::WholeDisk, gap_start: None, boot_part: None, data_part: None, keep_esp: false, boot_mib: None, data_mib: None, table: TableChoice::Auto, confirm_running_disk: false, delete_parts: vec![], zram: "auto".into(), swapfile: "off".into(), hostname: None, bios: false, bios_replace: false, bios_save: String::new() }
     }
 }
 
@@ -496,6 +579,9 @@ impl Request {
             ("zram", Json::str(&self.zram)),
             ("swapfile", Json::str(&self.swapfile)),
             ("hostname", self.hostname.as_deref().map_or(Json::Null, Json::str)),
+            ("bios", Json::Bool(self.bios)),
+            ("bios_replace", Json::Bool(self.bios_replace)),
+            ("bios_save", Json::str(&self.bios_save)),
         ])
     }
 
@@ -522,6 +608,9 @@ impl Request {
             r.swapfile = z.into();
         }
         r.hostname = s("hostname").map(String::from);
+        r.bios = b("bios");
+        r.bios_replace = b("bios_replace");
+        r.bios_save = s("bios_save").unwrap_or("").into();
         r.choices().validate()?;
         Ok(r)
     }
@@ -535,6 +624,8 @@ pub struct SourceSpec {
     pub boot_bytes: u64,
     /// Kernel + initial RAM disk, the files "keep the existing ESP" copies.
     pub payload_bytes: u64,
+    /// GRUB's core image, for the legacy BIOS option (0: none).
+    pub core_bytes: u64,
     pub secure_boot: bool,
 }
 
@@ -635,6 +726,8 @@ pub struct Plan {
     pub running_disk: bool,
     pub internal: bool,
     pub source: PathBuf,
+    /// Legacy BIOS boot is set up here (the `--bios` option was given and the disk allows it).
+    pub bios: Option<crate::biosshared::Method>,
 }
 
 impl Plan {
@@ -671,6 +764,10 @@ impl Plan {
             s.push_str("\nNothing that exists now is erased or changed.\n");
         } else {
             s.push_str(&format!("\nErased or reformatted: {}\n", d.join(", ")));
+        }
+        if let Some(m) = self.bios {
+            let c = crate::biosshared::Check { method: Some(m), refusals: vec![], warnings: vec![] };
+            s.push_str(&format!("\n{}\nThe save file: {}\n", crate::biosshared::describe(&c).join("\n"), self.request.bios_save));
         }
         for w in &self.warnings {
             s.push_str(&format!("\nNote: {w}\n"));
@@ -840,6 +937,9 @@ fn pick_part<'a>(d: &'a DiskModel, idx: u32, what: &str) -> Result<&'a Part, Str
     if p.extended {
         return Err(format!("{what}: {} is an extended partition (a container); choose a primary partition", p.name));
     }
+    if d.table == Some(TableKind::Mbr) && p.index > 4 {
+        return Err(format!("{what}: {} is a logical partition inside an extended partition; choose a primary partition (the firmware boots from a primary one)", p.name));
+    }
     Ok(p)
 }
 
@@ -905,6 +1005,7 @@ pub fn build_plan(d: &DiskModel, req: &Request, src: &SourceSpec, uefi: bool) ->
         running_disk: d.running_system,
         internal: d.internal(),
         source: src.path.clone(),
+        bios: None,
     };
     if src.secure_boot {
         warnings.push(crate::install::SECURE_BOOT_NOTE.to_string());
@@ -937,6 +1038,11 @@ pub fn build_plan(d: &DiskModel, req: &Request, src: &SourceSpec, uefi: bool) ->
         }
     }
     // the keep-ESP target is not touched by a format, but it must not be mounted either
+    if req.bios && req.mode != Mode::WholeDisk {
+        bios_option(d, req, src, &mut plan, &mut warnings)?;
+    } else if req.bios {
+        warnings.push("--bios does nothing in whole-disk mode: the whole-disk install already sets up legacy BIOS boot.".into());
+    }
     plan.warnings = warnings;
     let _ = ss;
     check_plan(d, &plan)?;
@@ -1083,7 +1189,9 @@ fn free_space(d: &DiskModel, req: &Request, src: &SourceSpec, uefi: bool, plan: 
     };
     let room = gap.bytes(d.sector);
     // a GPT disk gets the 1 MiB BIOS boot partition too (as a whole-disk install does), unless the existing EFI partition is kept
-    let bios_bytes = if kind == TableKind::Gpt && esp.is_none() { MIB } else { 0 };
+    // --bios on a GPT disk whose kept EFI partition leaves GRUB no BIOS boot partition: one is made in the free space too (never moving or shrinking anything)
+    let has_bios_part = d.bios.0.as_ref().is_some_and(|f| f.bios_boot.is_some());
+    let bios_bytes = if kind == TableKind::Gpt && (esp.is_none() || (req.bios && d.sector == 512 && !has_bios_part)) { MIB } else { 0 };
     let room_after_bios = room.saturating_sub(bios_bytes);
     let data_bytes = match req.data_mib {
         Some(m) => m * MIB,
@@ -1097,7 +1205,8 @@ fn free_space(d: &DiskModel, req: &Request, src: &SourceSpec, uefi: bool, plan: 
     }
     // partition slots
     let new_count = if esp.is_some() { 1 } else if bios_bytes > 0 { 3 } else { 2 };
-    let used: Vec<u32> = d.parts.iter().map(|p| p.index).collect();
+    // logical partitions (slots 5 and up) live inside an extended partition and take none of the four primary slots
+    let used: Vec<u32> = d.parts.iter().map(|p| p.index).filter(|i| kind == TableKind::Gpt || *i <= 4).collect();
     let mut free_slots: Vec<u32> = Vec::new();
     let max_slot = if kind == TableKind::Gpt { 128 } else { 4 };
     for i in 1..=max_slot {
@@ -1218,6 +1327,45 @@ fn format_step(p: &Part, ss: u32, role: Role, what: &str) -> Step {
     Step { action: Action::Format, part: p.name.clone(), index: p.index, first_lba: p.first_lba, sectors: p.sectors, bytes: p.bytes(ss), role: Some(role), what: what.into(), loses }
 }
 
+/// `--bios` on a shared disk: decide with the disk's own first sectors, and refuse (never skip silently) when it cannot be done.
+fn bios_option(d: &DiskModel, req: &Request, src: &SourceSpec, plan: &mut Plan, warnings: &mut Vec<String>) -> Result<(), String> {
+    use crate::biosshared as bs;
+    let save = std::path::Path::new(&req.bios_save);
+    if req.bios_save.is_empty() || !save.is_absolute() || save.file_name().is_none() {
+        return Err("--bios needs --bios-save <file>: an absolute path, on another disk, where sector 0 and the area GRUB takes are saved first".into());
+    }
+    if save.exists() {
+        return Err(format!("{} exists already; the save file is never overwritten. Choose another name.", save.display()));
+    }
+    if !save.parent().is_some_and(|p| p.is_dir()) {
+        return Err(format!("the folder for the save file ({}) does not exist", save.parent().map_or(String::new(), |p| p.display().to_string())));
+    }
+    if src.core_bytes == 0 {
+        return Err("this image has no GRUB core for legacy BIOS boot (it starts through UEFI only)".into());
+    }
+    let facts = d.bios.0.as_ref().ok_or("the disk's first sectors could not be read, so legacy BIOS boot cannot be checked")?;
+    // a GPT disk without a BIOS boot partition: the one this plan creates (zeroed when written) is the place for GRUB's core image
+    let mut planned_facts;
+    let mut facts = facts;
+    if facts.kind == iyakki_storage::gpt::Kind::Gpt && facts.bios_boot.is_none() {
+        if let Some(st) = plan.steps.iter().find(|s| s.role == Some(Role::Bios) && s.action == Action::Create) {
+            let k = u64::from(d.sector) / 512;
+            planned_facts = facts.clone();
+            planned_facts.bios_boot = Some((st.first_lba * k, st.sectors * k));
+            planned_facts.bios_boot_content = Vec::new();
+            facts = &planned_facts;
+        }
+    }
+    let c = bs::evaluate(facts, src.core_bytes, req.bios_replace);
+    let Some(m) = c.method.filter(|_| c.refusals.is_empty()) else {
+        return Err(format!("legacy BIOS boot cannot be set up on this disk: {}", c.refusals.join("; ")));
+    };
+    warnings.retain(|w| !w.starts_with("the BIOS (legacy) boot of this shared disk"));
+    warnings.extend(c.warnings);
+    plan.bios = Some(m);
+    Ok(())
+}
+
 /// The plan's own consistency, checked again after building (and by the writer against a fresh read of the disk): the rules
 /// that protect other systems, as code.
 pub fn check_plan(d: &DiskModel, plan: &Plan) -> Result<(), String> {
@@ -1225,6 +1373,8 @@ pub fn check_plan(d: &DiskModel, plan: &Plan) -> Result<(), String> {
     let mut spans: Vec<(u64, u64, String)> = Vec::new();
     for st in &plan.steps {
         let existing = d.parts.iter().find(|p| p.name == st.part);
+        // a logical partition lies inside its extended partition, whose span is checked instead
+        let logical = d.table == Some(TableKind::Mbr) && st.index > 4 && existing.is_some();
         match st.action {
             Action::Create => {
                 if existing.is_some() {
@@ -1249,7 +1399,7 @@ pub fn check_plan(d: &DiskModel, plan: &Plan) -> Result<(), String> {
                 }
             }
         }
-        if st.action != Action::Delete {
+        if st.action != Action::Delete && !logical {
             spans.push((st.first_lba, st.first_lba + st.sectors, st.part.clone()));
         }
     }
@@ -1402,6 +1552,7 @@ impl DiskModel {
             raw_data: b("raw_data"),
             unusual_gpt: b("unusual_gpt"),
             disk_guid: j.get("disk_guid").and_then(Json::as_str).and_then(unhex16),
+            bios: Local(None),
             fingerprint: s("fingerprint"),
         })
     }
@@ -1409,9 +1560,9 @@ impl DiskModel {
 
 impl SourceSpec {
     pub fn to_json(&self) -> Json {
-        Json::obj(vec![("path", Json::str(self.path.display().to_string())), ("boot_bytes", Json::num(self.boot_bytes)), ("payload_bytes", Json::num(self.payload_bytes)), ("secure_boot", Json::Bool(self.secure_boot))])
+        Json::obj(vec![("path", Json::str(self.path.display().to_string())), ("boot_bytes", Json::num(self.boot_bytes)), ("payload_bytes", Json::num(self.payload_bytes)), ("core_bytes", Json::num(self.core_bytes)), ("secure_boot", Json::Bool(self.secure_boot))])
     }
     pub fn from_json(j: &Json) -> Result<SourceSpec, String> {
-        Ok(SourceSpec { path: PathBuf::from(j.get("path").and_then(Json::as_str).ok_or("source: path missing")?), boot_bytes: j.get("boot_bytes").and_then(Json::as_u64).ok_or("source: boot_bytes missing")?, payload_bytes: j.get("payload_bytes").and_then(Json::as_u64).unwrap_or(0), secure_boot: j.get("secure_boot").and_then(Json::as_bool).unwrap_or(false) })
+        Ok(SourceSpec { path: PathBuf::from(j.get("path").and_then(Json::as_str).ok_or("source: path missing")?), boot_bytes: j.get("boot_bytes").and_then(Json::as_u64).ok_or("source: boot_bytes missing")?, payload_bytes: j.get("payload_bytes").and_then(Json::as_u64).unwrap_or(0), core_bytes: j.get("core_bytes").and_then(Json::as_u64).unwrap_or(0), secure_boot: j.get("secure_boot").and_then(Json::as_bool).unwrap_or(false) })
     }
 }

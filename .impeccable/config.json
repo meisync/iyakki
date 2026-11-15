@@ -1,0 +1,62 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "flat-type-hierarchy",
+        "value": "*",
+        "files": [
+          "crates/iyakki-web/src/a11y_fixtures/shop.html"
+        ],
+        "createdAt": "2026-11-14T23:27:11.895Z",
+        "reason": "test fixture, not UI: include_str! into crates/iyakki-web/src/a11y_tests.rs as unstyled input for the accessibility-tree parser; it carries no CSS, so every role measures the 16px browser default by construction"
+      },
+      {
+        "rule": "flat-type-hierarchy",
+        "value": "*",
+        "files": [
+          "crates/iyakki-web/src/a11y_fixtures/article.html"
+        ],
+        "createdAt": "2026-11-14T23:27:11.906Z",
+        "reason": "test fixture, not UI: include_str! into crates/iyakki-web/src/a11y_tests.rs as unstyled input for the accessibility-tree parser; it carries no CSS, so every role measures the 16px browser default by construction"
+      },
+      {
+        "rule": "flat-type-hierarchy",
+        "value": "*",
+        "files": [
+          "crates/iyakki-agent/tests/fixtures/web/news_front.html"
+        ],
+        "createdAt": "2026-11-14T23:43:16.161Z",
+        "reason": "test fixture, not UI: include_str! into crates/iyakki-agent/src/{webresearch,webpage}.rs as unstyled input for the web-research extractor; it ships no CSS, so every role measures the 16px browser default by construction"
+      },
+      {
+        "rule": "overused-font",
+        "value": "inter",
+        "files": [
+          "docs/design/launcher/launcher.html"
+        ],
+        "createdAt": "2026-11-15T01:05:34.984Z",
+        "reason": "design reference, not product code: Inter is a stand-in for a UI sans in the comps. The shipped face is undecided - IYAKKI bundles Noto Sans and DejaVu (OFL) and any new face is weighed against a 60 MB ISO. Scoped to these two files so the rule still fires on product code"
+      },
+      {
+        "rule": "overused-font",
+        "value": "inter",
+        "files": [
+          "docs/design/launcher/index.html"
+        ],
+        "createdAt": "2026-11-15T01:05:34.995Z",
+        "reason": "design reference, not product code: Inter is a stand-in for a UI sans in the comps. The shipped face is undecided - IYAKKI bundles Noto Sans and DejaVu (OFL) and any new face is weighed against a 60 MB ISO. Scoped to these two files so the rule still fires on product code"
+      },
+      {
+        "rule": "cramped-padding",
+        "value": "*",
+        "files": [
+          "docs/design/launcher/launcher.html"
+        ],
+        "createdAt": "2026-11-15T01:05:44.158Z",
+        "reason": "macOS menu bar: a 28px bar with text optically centred and no vertical inset is the platform convention the brief pins ('follow the exact macOS UI standard'); 8-16px of inset would make it 44px+ and stop being a menu bar"
+      }
+    ]
+  }
+}

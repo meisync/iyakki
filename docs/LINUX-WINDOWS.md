@@ -95,8 +95,8 @@ expanded and no shell runs it. The program is started with `DISPLAY=:1` (set by 
 * **No graphics card.** Drawing is by the processor (Mesa llvmpipe for OpenGL, `LIBGL_ALWAYS_SOFTWARE=1`). Video, WebGL and games are slow.
 * **No sound** in the window yet (no PulseAudio or PipeWire socket).
 * The picture travels over RFB with ZRLE or Hextile: fine for tools, editors and terminals; smooth video is not a goal.
-* One window (one program) at a time per tile; the program's own pop-up windows are placed by matchbox as maximised windows.
-* No Alt key, no key release timing (a key is pressed and released at once), no right-to-left or compose input; the keymap is the
+* Up to four windows (programs) per tile, each in its own slot (its own display number, socket and X authority file inside the one sandbox). **New window** puts the one on screen aside (it keeps running) and shows the list; a row of tabs switches; **Stop** closes only the one on screen. The program's own pop-up windows are placed by matchbox as maximised windows. Tested on fakes only, never with several real X servers at once.
+* Alt plus a letter, digit or sign reaches the program as Alt (only while a window runs; Ctrl+Alt and Super+Alt stay the shell's chords). Alt with the arrows or Tab, and Alt alone, are not sent. No key release timing (a key is pressed and released at once), no right-to-left or compose input; the keymap is the
   display server's.
 * The clipboard is text only and only by the buttons (section 4).
 * A browser such as Brave is glibc and Chromium based and cannot run natively on IYAKKI (musl); it could run in this window later.
@@ -116,7 +116,7 @@ reading with links and size limits, install with a fake runner, the golden argum
 runtime folder as host paths, start and stop with a fake spawner, audit, cpu and memory from a fake `/proc`) and
 `crates/iyakki-shell/src/apps/linuxwin_tests.rs` (key mapping, geometry at 360x740, 800x480, 1280x720, 1920x1080 and 2560x1600 and in
 panes, the whole path against a fake sandbox that serves RFB on the real socket path, resize, the explicit clipboard, role gating,
-the memory strip, closing the tile).
+the memory strip, closing the tile, several windows with their own slots, switching, the ended window handing over, the limit of four, and the Alt key).
 
 **Real run (development PC, normal user, network on; the ignored test `crates/iyakki-rfb/tests/real_window.rs`):** a real Debian 12 sandbox
 was downloaded (26 MB, checked) and the display packages installed with `apt` (`tigervnc-standalone-server` 1.12.0, matchbox, xterm,

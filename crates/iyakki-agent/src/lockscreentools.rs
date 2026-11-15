@@ -53,12 +53,18 @@ impl LockTools {
 
     fn status(&self) -> String {
         let c = self.backend.config();
-        let lock = if self.backend.can_lock() { "The screen can be locked (Super+L, the Power menu, or lock_screen)." } else { "This account has no password (a guest), so the screen cannot be locked." };
+        let lock = if self.backend.can_lock() { "The screen can be locked (Super+L, Control+Command+L in the Mac profile, the Power menu, or lock_screen)." } else { "This account has no password (a guest), so the screen cannot be locked." };
         format!("Automatic lock: {}. {lock} The screen always locks when the computer goes to sleep.", c.describe())
     }
 }
 
 impl Tools for LockTools {
+
+    fn inner_tools(&self) -> Option<&dyn Tools> {
+
+        Some(&*self.inner)
+
+    }
     fn defs(&self) -> Vec<ToolDef> {
         let mut v = self.inner.defs();
         v.retain(|d| !is_lock_tool(&d.spec.name));

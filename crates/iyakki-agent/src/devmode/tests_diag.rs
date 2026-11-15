@@ -456,8 +456,12 @@ fn the_shell_makes_sure_dev_null_and_friends_can_be_opened_by_an_ordinary_user()
     let dir = std::env::temp_dir().join(format!("iyakki-nodes-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let notes = ensure_std_nodes(&dir);
-    assert_eq!(notes.len(), STD_NODES.len(), "{notes:?}");
-    assert!(notes.iter().all(|n| n.contains("made again") || n.contains("could not be fixed")));
+    if cfg!(target_os = "linux") {
+        assert_eq!(notes.len(), STD_NODES.len(), "{notes:?}");
+        assert!(notes.iter().all(|n| n.contains("made again") || n.contains("could not be fixed")));
+    } else {
+        assert!(notes.is_empty(), "a Mac's /dev is the system's: nothing to repair, {notes:?}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
     // the environment of a command: clean, with the account's own home and name
     let env = command_env(Path::new("/home/admin"), "admin");
@@ -509,6 +513,50 @@ fn every_new_route_is_in_the_table_with_its_scope() {
     assert_eq!(api::scope_of("GET", "/v1/dev/state"), Some(Some(Scope::Debug)));
     assert_eq!(api::scope_of("GET", "/v1/dev/inbox"), Some(Some(Scope::Debug)));
     assert_eq!(api::scope_of("GET", "/v1/dev/diag"), Some(Some(Scope::Debug)));
+    assert_eq!(api::scope_of("GET", "/v1/dev/flows/assist"), Some(Some(Scope::Debug)));
     assert_eq!(api::scope_of("POST", "/v1/dev/click"), Some(Some(Scope::Input)));
     assert_eq!(Scope::parse("kube"), Some(Scope::Kube));
+}
+
+#[test]
+fn the_flows_assist_readout_lists_switches_waiting_suggestions_and_counters_and_the_command_prints_them() {
+    use iyakki_flow::assist_store::AssistStore;
+    let dir = std::env::temp_dir().join(format!("iyakki-dev-assist-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // no flow yet: the switches only
+    let v = super::api_diag::flows_assist_report(&dir, "", 1_000_000);
+    assert_eq!((v["enabled"].as_bool(), v["flows"].as_array().map(Vec::len)), (Some(true), Some(0)), "{v}");
+    let book = AssistStore::from_fn(&dir, || 1_000_000);
+    book.set_enabled(false).unwrap();
+    let v = super::api_diag::flows_assist_report(&dir, "", 1_000_000);
+    let text = super::cli_diag::assist_text(&v);
+    assert!(text.contains("STOPPED") && text.contains("Matrix notice off"), "{text}");
+    // the route is on the table with the debug scope and is refused without it
+    let r = rig("flowsassist");
+    let a = Role::Admin.template();
+    assert_eq!(call(&r, &key("l", "root", &[Scope::Install]), &a, "GET", "/v1/dev/flows/assist", &[], b"").unwrap().status, 403);
+    let v = call(&r, &key("l", "root", &[Scope::Debug]), &a, "GET", "/v1/dev/flows/assist", &[], b"").unwrap();
+    assert_ne!(v.status, 403, "the debug scope is enough");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn dev_scan_lists_each_announced_device_with_name_address_and_services_and_listens_two_seconds() {
+    use iyakki_netscan::mdns::net::Found;
+    let found = vec![
+        Found { host: "iyakki-0a1b2c.local".into(), addrs: vec!["192.168.50.66".parse().unwrap(), "fe80::1".parse().unwrap()], services: vec![("_iyakki-dev._tcp".into(), 7979), ("_iyakki-web._tcp".into(), 8443)] },
+        Found { host: "iyakki-ffeedd.local".into(), addrs: vec!["192.168.50.70".parse().unwrap()], services: vec![("_iyakki-dev._tcp".into(), 7979)] },
+    ];
+    let lines = super::cli::scan_report(&found);
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].starts_with("iyakki-0a1b2c.local") && lines[0].contains("192.168.50.66,fe80::1") && lines[0].ends_with("_iyakki-dev._tcp:7979 _iyakki-web._tcp:8443"), "{}", lines[0]);
+    assert!(lines[1].contains("192.168.50.70") && lines[1].ends_with("_iyakki-dev._tcp:7979"));
+    // nobody answered: one line that says what to check
+    let none = super::cli::scan_report(&[]);
+    assert_eq!(none.len(), 1);
+    assert!(none[0].contains("No IYAKKI device answered") && none[0].contains("Announce this device"), "{}", none[0]);
+    // the scan and the name lookup both listen two seconds
+    assert_eq!(super::cli::SCAN_WAIT, std::time::Duration::from_secs(2));
+    assert_eq!(super::client::RESOLVE_WAIT, std::time::Duration::from_secs(2));
 }

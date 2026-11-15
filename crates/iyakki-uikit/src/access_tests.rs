@@ -372,3 +372,59 @@ fn announcements_are_capped_and_taken_once() {
     assert_eq!(v.last().unwrap(), "n39");
     assert!(take_announcements().is_empty());
 }
+
+#[test]
+fn typing_echo_says_the_typed_character_a_deletion_and_never_a_secret() {
+    let f = |t: &str| Node::field("Name", t, false);
+    assert_eq!(typing_echo(&f("ab"), &f("abc")).as_deref(), Some("c"));
+    assert_eq!(typing_echo(&f("ab"), &f("ab ")).as_deref(), Some("space"));
+    assert_eq!(typing_echo(&f("abc"), &f("ab")).as_deref(), Some("deleted c"));
+    assert_eq!(typing_echo(&f(""), &f("é")).as_deref(), Some("é"));
+    // unchanged, replaced, a long paste and another field say nothing
+    assert_eq!(typing_echo(&f("ab"), &f("ab")), None);
+    assert_eq!(typing_echo(&f("ab"), &f("xb")), None);
+    assert_eq!(typing_echo(&f("a"), &f("a pasted sentence")), None);
+    assert_eq!(typing_echo(&f("a"), &Node::field("Other", "ab", false)), None);
+    // a field that hides its text is never echoed, whatever changed
+    let s = |t: &str| Node::field("Password", t, true);
+    assert_eq!(typing_echo(&s("ab"), &s("abc")), None);
+    assert_eq!(typing_echo(&s("abc"), &s("ab")), None);
+    // not a field
+    let b = Node::new("Save", Role::Button, State::default());
+    assert_eq!(typing_echo(&b, &b), None);
+}
+
+#[test]
+fn arrows_in_words_a_field_without_a_hint_still_has_a_name_and_an_unlabelled_control_is_found() {
+    assert_eq!(clean_name("‹"), "previous");
+    assert_eq!(clean_name("›"), "next");
+    assert_eq!(Node::field("", "", false).name, "Text field");
+    assert_eq!(Node::field("Name", "", false).name, "Name");
+    let hits = vec![
+        hit(10.0, 10.0, 80.0, 30.0, Event::Tab(3), ""),
+        hit(10.0, 50.0, 80.0, 30.0, Event::Tab(4), "Save"),
+        hit(10.0, 90.0, 80.0, 30.0, Event::Key(Key::Esc), ""),
+        hit(10.0, 130.0, 80.0, 30.0, Event::Key(Key::Char('q')), ""),
+        hit(10.0, 170.0, 2.0, 2.0, Event::Tab(9), ""),
+    ];
+    let found = unnamed(&hits, (800.0, 600.0));
+    assert_eq!(found.iter().map(|(i, _)| *i).collect::<Vec<_>>(), [0, 3], "an unlabelled tab and key are found; Esc is named Close; a speck is no control");
+    describe("", &Event::Tab(3), Meta::new(Role::Button, State::default()).named("Next page"));
+    assert_eq!(unnamed(&hits, (800.0, 600.0)).iter().map(|(i, _)| *i).collect::<Vec<_>>(), [3]);
+    start_frame();
+}
+
+#[test]
+fn a_dialog_without_a_title_hook_is_announced_with_the_tile_and_its_buttons() {
+    let none = vec![hit(10.0, 10.0, 80.0, 30.0, Event::Tab(1), "Save")];
+    assert_eq!(generic_dialog(&none, "Store"), None, "no modal frame, no dialog");
+    let hits = vec![
+        hit(0.0, 0.0, 1000.0, 600.0, Event::Tick, "backdrop"),
+        hit(300.0, 400.0, 100.0, 30.0, Event::Key(Key::Char('y')), "Install"),
+        hit(420.0, 400.0, 100.0, 30.0, Event::Key(Key::Esc), "Cancel"),
+        hit(420.0, 400.0, 100.0, 30.0, Event::Key(Key::Esc), "Cancel"),
+    ];
+    assert_eq!(generic_dialog(&hits, "Store").as_deref(), Some("Store. Install, Cancel"));
+    let bare = vec![hit(0.0, 0.0, 1000.0, 600.0, Event::Tick, "backdrop")];
+    assert_eq!(generic_dialog(&bare, "Data").as_deref(), Some("Data"));
+}

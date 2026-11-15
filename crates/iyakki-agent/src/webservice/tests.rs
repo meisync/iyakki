@@ -31,7 +31,16 @@ impl ChatBackend for Script {
         Err("plain chat is not scripted".into())
     }
     fn complete_tools(&self, _: &[Message], _: &[ToolSpec]) -> Result<ModelTurn, String> {
-        Ok(self.turns.lock().unwrap().pop_front().unwrap_or(ModelTurn { text: "done".into(), calls: vec![] }))
+        let t = self.turns.lock().unwrap().pop_front().unwrap_or(ModelTurn { text: "done".into(), calls: vec![] });
+        // two turns for the real-browser fixture: a failing model and a slow one
+        if t.text == "__ERR__" {
+            return Err("the model is not reachable".into());
+        }
+        if t.text == "__HANG__" {
+            std::thread::sleep(Duration::from_secs(8));
+            return Ok(ModelTurn { text: "done after a wait".into(), calls: vec![] });
+        }
+        Ok(t)
     }
 }
 
@@ -43,6 +52,12 @@ fn final_turn(t: &str) -> ModelTurn {
     ModelTurn { text: t.into(), calls: vec![] }
 }
 
+/// The files of the fake tool set (paths are unique per test).
+static FAKE_FILES: Mutex<std::collections::BTreeMap<String, String>> = Mutex::new(std::collections::BTreeMap::new());
+
+/// (flow notices shown, saver shorter on battery) of the fake tool set.
+static FAKE_SWITCHES: Mutex<(bool, bool, bool, bool)> = Mutex::new((true, false, true, true));
+
 struct FakeTools {
     executed: Arc<Mutex<Vec<String>>>,
 }
@@ -51,13 +66,54 @@ impl Tools for FakeTools {
     fn defs(&self) -> Vec<ToolDef> {
         let t = |n: &str, risk| ToolDef { spec: ToolSpec { name: n.into(), description: n.into(), schema: json!({"type": "object"}) }, risk, untrusted: true };
         // `web_fetch` asks here so approvals can be tested with a tool that is in the profile; `run_command` is not in any profile
-        vec![t("now", Risk::Safe), t("web_fetch", Risk::Ask), t("run_command", Risk::Ask), t("radio_play", Risk::Safe)]
+        // `read_file` and `write_file` are what a person's own tool set has and no service profile lists: only the tiles' `files` domain reaches them
+        vec![t("now", Risk::Safe), t("web_fetch", Risk::Ask), t("run_command", Risk::Ask), t("radio_play", Risk::Safe), t("read_file", Risk::Safe), t("write_file", Risk::Ask), t("notification_filters", Risk::Safe), t("notification_filter_set", Risk::Ask), t("screensaver_status", Risk::Safe), t("screensaver_set", Risk::Ask), t("system_sounds_status", Risk::Safe), t("system_sounds_set", Risk::Ask), t("battery_settings_status", Risk::Safe), t("battery_settings_set", Risk::Ask)]
     }
-    fn call(&self, name: &str, _: &Value) -> Result<String, String> {
+    fn call(&self, name: &str, a: &Value) -> Result<String, String> {
         self.executed.lock().unwrap().push(name.into());
-        Ok(format!("{name} ok"))
+        match name {
+            "read_file" => FAKE_FILES.lock().unwrap().get(a["path"].as_str().unwrap_or("")).cloned().ok_or_else(|| "no such file".to_string()),
+            "write_file" => {
+                let p = a["path"].as_str().unwrap_or("");
+                if p.starts_with("/etc/") {
+                    return Err("you may not write there".into());
+                }
+                FAKE_FILES.lock().unwrap().insert(p.into(), a["content"].as_str().unwrap_or("").into());
+                Ok(format!("wrote {p}"))
+            }
+            "notification_filters" => Ok(format!("scan: show (New devices)\nflows: {} (Flows)\n", if FAKE_SWITCHES.lock().unwrap().0 { "show" } else { "quiet" })),
+            "screensaver_status" => Ok(format!("After 10 minutes idle: saver. Style: logo. Shorter on battery: {}.", if FAKE_SWITCHES.lock().unwrap().1 { "yes" } else { "no" })),
+            "system_sounds_status" => Ok(format!("System sounds are {}. Level: -10 dB below IYAKKI's volume. Start: on", if FAKE_SWITCHES.lock().unwrap().2 { "on" } else { "off" })),
+            "battery_settings_status" => Ok(format!("Percentage in the top bar: {}. Low-battery warnings: on. Shutdown at the critical level: on.", if FAKE_SWITCHES.lock().unwrap().3 { "shown" } else { "hidden" })),
+            "system_sounds_set" => {
+                FAKE_SWITCHES.lock().unwrap().2 = a["enabled"].as_bool().unwrap_or(false);
+                Ok("done".into())
+            }
+            "battery_settings_set" => {
+                FAKE_SWITCHES.lock().unwrap().3 = a["show_percent"].as_bool().unwrap_or(false);
+                Ok("done".into())
+            }
+            "notification_filter_set" => {
+                FAKE_SWITCHES.lock().unwrap().0 = a["level"] == "show";
+                Ok("done".into())
+            }
+            "screensaver_set" => {
+                if a.get("battery_shorter").is_none() {
+                    return Err("nothing to change".into());
+                }
+                FAKE_SWITCHES.lock().unwrap().1 = a["battery_shorter"].as_bool().unwrap_or(false);
+                Ok("done".into())
+            }
+            _ => Ok(format!("{name} ok")),
+        }
     }
-    fn describe(&self, name: &str, _: &Value) -> String {
+    fn describe(&self, name: &str, a: &Value) -> String {
+        if name == "screensaver_set" || name == "notification_filter_set" || name == "system_sounds_set" || name == "battery_settings_set" {
+            return format!("{name} {a}");
+        }
+        if name == "write_file" {
+            return format!("write {} characters to {}", a["content"].as_str().map_or(0, |c| c.chars().count()), a["path"].as_str().unwrap_or(""));
+        }
         format!("call {name}")
     }
     // a desktop grant that must NOT count over the API
@@ -72,7 +128,22 @@ struct FakeSource {
 
 impl ToolSource for FakeSource {
     fn tools_for(&self, _: &Principal) -> Arc<dyn Tools> {
-        Arc::new(FakeTools { executed: self.executed.clone() })
+        // the same wrapper the real source adds (`deploy_team_host`), over a backend that records what it was told to apply
+        Arc::new(crate::hostservicetools::TeamHostTools::new(Arc::new(FakeTools { executed: self.executed.clone() }), Arc::new(FakeHostBackend { executed: self.executed.clone() })))
+    }
+}
+
+struct FakeHostBackend {
+    executed: Arc<Mutex<Vec<String>>>,
+}
+
+impl crate::hostservicetools::Backend for FakeHostBackend {
+    fn preview(&self, team: &str, name: &str) -> Result<String, String> {
+        Ok(format!("kind: Service\nmetadata: {{name: {name}, namespace: {team}}}"))
+    }
+    fn publish(&self, team: &str, name: &str, environment: &str) -> Result<String, String> {
+        self.executed.lock().unwrap().push(format!("apply:{team}/{name}@{environment}"));
+        Ok("service created".into())
     }
 }
 
@@ -82,9 +153,20 @@ struct FakeExtras {
     web: Mutex<(bool, u16)>,
     /// (person, from, to) of every tenant switch the service reported
     switched: Arc<Mutex<Vec<(String, String, String)>>>,
+    /// developer key (hex) -> (computer, account); computer -> its api scopes
+    progs: Mutex<HashMap<String, (String, String)>>,
+    pscopes: Mutex<HashMap<String, Vec<String>>>,
+    /// the one schedule's pause, kept so that a page that pauses it sees it paused
+    paused: AtomicBool,
 }
 
 impl Extras for FakeExtras {
+    fn paired_program(&self, key_hex: &str) -> Option<(String, String)> {
+        self.progs.lock().unwrap().get(key_hex).cloned()
+    }
+    fn program_scopes(&self, computer: &str) -> Vec<String> {
+        self.pscopes.lock().unwrap().get(computer).cloned().unwrap_or_default()
+    }
     fn ready(&self) -> Result<(), String> {
         if self.ready.load(Ordering::SeqCst) {
             Ok(())
@@ -126,8 +208,37 @@ impl Extras for FakeExtras {
         }
         Ok((1..=7).rev().map(|n| json!({"id": format!("r{n}"), "flow": "f1", "status": if n == 7 { "blocked" } else { "succeeded" }, "blocked": if n == 7 { "asks: delete the old files?" } else { "" }})).collect())
     }
+    fn flow_import(&self, _: &Principal, flow: &Value) -> ApiResult<Value> {
+        if flow["id"].as_str().is_none() {
+            return Err(ApiError::InvalidInput("the flow has no id".into()));
+        }
+        Ok(json!({"id": format!("{}-2", flow["id"].as_str().unwrap_or("")), "name": flow["name"]}))
+    }
+    fn flow_validate(&self, _: &Principal, id: Option<&str>, flow: Option<&Value>) -> ApiResult<Vec<Value>> {
+        match (id, flow) {
+            (Some("f1"), _) => Ok(vec![json!({"node": "n1", "level": "warning", "message": "this step has no timeout"})]),
+            (Some(_), _) => Err(ApiError::NotFound("no such flow".into())),
+            (None, Some(f)) if f["broken"] == true => Ok(vec![json!({"node": null, "level": "error", "message": "no start step"})]),
+            (None, Some(_)) => Ok(vec![]),
+            _ => Err(ApiError::InvalidInput("give a flow id or a flow".into())),
+        }
+    }
+    fn flow_run_decide(&self, _: &Principal, id: &str, run: &str, node: &str, approved: bool) -> ApiResult<()> {
+        match (id, run, node) {
+            ("f1", "r1", "ask") if approved => Ok(()),
+            ("f1", "r1", "ask") => Ok(()),
+                        _ => Err(ApiError::NotFound("no such waiting step".into())),
+        }
+    }
+    fn flow_run_stop(&self, _: &Principal, id: &str, run: &str) -> ApiResult<()> {
+        if id == "f1" && run == "r1" {
+            Ok(())
+        } else {
+            Err(ApiError::NotFound("no such run".into()))
+        }
+    }
     fn schedules(&self, _: &Principal) -> ApiResult<Vec<Value>> {
-        Ok(vec![json!({"flow": "f1", "name": "Nightly", "published": 1, "active": true, "trigger": {"id": "t1", "kind": "cron", "expr": "0 9 * * *", "tz": "local", "enabled": true}, "next": [1_800_000_000_000i64], "paused": false})])
+        Ok(vec![json!({"flow": "f1", "name": "Nightly", "published": 1, "active": true, "trigger": {"id": "t1", "kind": "cron", "expr": "0 9 * * *", "tz": "local", "enabled": true}, "next": [1_800_000_000_000i64], "paused": self.paused.load(Ordering::SeqCst)})])
     }
     fn schedule_save(&self, _: &Principal, flow: &str, trigger: &Value) -> ApiResult<Value> {
         if !["f1", "f2", "f3"].contains(&flow) {
@@ -145,6 +256,7 @@ impl Extras for FakeExtras {
         if flow != "f1" {
             return Err(ApiError::NotFound("no such flow".into()));
         }
+        self.paused.store(paused, Ordering::SeqCst);
         Ok(json!({"flow": flow, "paused": paused}))
     }
     fn flow_run_get(&self, _: &Principal, id: &str, run: &str) -> ApiResult<Value> {
@@ -189,6 +301,7 @@ struct H {
     script: Arc<Script>,
     dir: std::path::PathBuf,
     switched: Arc<Mutex<Vec<(String, String, String)>>>,
+    extras: Arc<FakeExtras>,
 }
 
 fn accounts() -> Arc<FakeAccounts> {
@@ -205,18 +318,19 @@ fn harness(profile: &str, tweak: impl FnOnce(&mut ServiceConfig)) -> H {
     let executed = Arc::new(Mutex::new(vec![]));
     let script = Arc::new(Script { turns: Mutex::new(VecDeque::new()) });
     let switched = Arc::new(Mutex::new(Vec::new()));
+    let extras = Arc::new(FakeExtras { ready: AtomicBool::new(true), web: Mutex::new((false, 8443)), switched: switched.clone(), progs: Default::default(), pscopes: Default::default(), paused: Default::default() });
     let deps = Arc::new(Deps {
         auth: accounts.clone(),
         audit: accounts.clone(),
         store: Arc::new(RunStore::new(&dir.join("runs"))),
         chat: script.clone(),
         tools: Arc::new(FakeSource { executed: executed.clone() }),
-        extras: Arc::new(FakeExtras { ready: AtomicBool::new(true), web: Mutex::new((false, 8443)), switched: switched.clone() }),
+        extras: extras.clone(),
         system_prompt: "test".into(),
     });
     let id = tls::self_signed(&dir.join("tls"), &[]).expect("certificate");
     let svc = server::start(&chk, deps, id).expect("start");
-    H { svc, accounts, executed, script, dir, switched }
+    H { svc, accounts, executed, script, dir, switched, extras }
 }
 
 fn req(method: &str, path: &str, token: Option<&str>, body: Option<Value>) -> Request {
@@ -309,6 +423,95 @@ fn the_route_table_is_consistent() {
         assert!(r.in_profile(Profile::Cloud), "{}", r.id);
     }
     assert!(ROUTES.iter().any(|r| r.in_profile(Profile::Cloud) && !r.in_profile(Profile::AgentApi)));
+}
+
+#[test]
+fn a_program_signs_in_with_a_paired_key_and_can_call_only_the_families_granted_to_its_computer() {
+    use crate::devmode::auth::{hex, sign_headers};
+    let h = harness("cloud", |_| {});
+    let key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+    let key_hex = hex(key.verifying_key().as_bytes());
+    let fp = h.svc.fingerprint().to_string();
+    let signed = |key: &ed25519_dalek::SigningKey, fp: &str| -> Request {
+        let mut r = req("POST", "/api/v1/login", None, None);
+        for (k, v) in sign_headers(key, "POST", "/api/v1/login", &[], &[], fp, crate::clock::now_unix()).unwrap() {
+            r.headers.insert(k, v);
+        }
+        r
+    };
+    // a key nobody paired, a wrong certificate and an unsigned try are 401; a paired key without a grant is 403
+    assert_eq!(h.call_req(signed(&key, &fp)).0, 401, "not paired");
+    h.extras.progs.lock().unwrap().insert(key_hex.clone(), ("laptop".into(), "ann".into()));
+    assert_eq!(h.call_req(signed(&key, "AA:BB")).0, 401, "signed for another certificate");
+    let (s, v, _) = h.call_req(signed(&key, &fp));
+    assert_eq!(s, 403, "{v}");
+    assert!(v["error"]["message"].as_str().unwrap_or("").contains("no api scope"), "{v}");
+    // granted: read flows and see who it is
+    h.extras.pscopes.lock().unwrap().insert("laptop".into(), vec!["api:flows:read".into(), "api:status".into()]);
+    let r = signed(&key, &fp);
+    let (s, v, _) = h.call_req(r.clone());
+    assert_eq!(s, 200, "{v}");
+    assert_eq!((v["user"].as_str(), v["computer"].as_str()), (Some("ann"), Some("laptop")));
+    assert_eq!(h.call_req(r).0, 401, "the same signed request is not accepted twice");
+    let tok = v["token"].as_str().unwrap().to_string();
+    assert_eq!(h.call("GET", "/api/v1/whoami", Some(&tok), None).0, 200);
+    assert_eq!(h.call("GET", "/api/v1/flows", Some(&tok), None).0, 200);
+    let (s, v, _) = h.call("POST", "/api/v1/flows/f1/run", Some(&tok), Some(json!({})));
+    assert_eq!(s, 403, "reading only: no run");
+    assert!(v["error"]["message"].as_str().unwrap_or("").contains("laptop"), "{v}");
+    assert_eq!(h.call("GET", "/api/v1/files", Some(&tok), None).0, 403, "another family");
+    assert_eq!(h.call("GET", "/api/v1/chat/runs", Some(&tok), None).0, 403);
+    // the account's own rights still apply, and the administrator routes stay out of reach whatever is granted
+    let admin = harness("cloud", |_| {});
+    let akey = ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]);
+    admin.extras.progs.lock().unwrap().insert(hex(akey.verifying_key().as_bytes()), ("ops".into(), "root".into()));
+    admin.extras.pscopes.lock().unwrap().insert("ops".into(), crate::devmode::apiscopes::FAMILIES.iter().map(|(f, _)| f.to_string()).collect());
+    let mut r = req("POST", "/api/v1/login", None, None);
+    for (k, v) in sign_headers(&akey, "POST", "/api/v1/login", &[], &[], admin.svc.fingerprint(), crate::clock::now_unix()).unwrap() {
+        r.headers.insert(k, v);
+    }
+    let (s, v, _) = admin.call_req(r);
+    assert_eq!(s, 200, "{v}");
+    let atok = v["token"].as_str().unwrap().to_string();
+    assert_eq!(admin.call("GET", "/api/v1/admin/status", Some(&atok), None).0, 403, "the administrator route is not reached by any scope");
+    assert_eq!(admin.call("GET", "/api/v1/flows", Some(&atok), None).0, 200);
+    // taking the grant back applies on the very next request, and logout still works
+    h.extras.pscopes.lock().unwrap().insert("laptop".into(), vec!["api:status".into()]);
+    assert_eq!(h.call("GET", "/api/v1/flows", Some(&tok), None).0, 403, "revoked at once");
+    assert_eq!(h.call("GET", "/api/v1/whoami", Some(&tok), None).0, 200);
+    h.extras.progs.lock().unwrap().clear();
+    h.extras.pscopes.lock().unwrap().clear();
+    assert_eq!(h.call("GET", "/api/v1/whoami", Some(&tok), None).0, 403, "an unpaired computer holds nothing");
+    assert_eq!(h.call("POST", "/api/v1/logout", Some(&tok), None).0, 200, "ending its own token is always allowed");
+    // a person's ordinary token is not limited by any of this
+    let ann = h.ann();
+    assert_eq!(h.call("GET", "/api/v1/flows", Some(&ann), None).0, 200);
+    assert_eq!(h.call("GET", "/api/v1/chat/runs", Some(&ann), None).0, 200);
+}
+
+#[test]
+fn the_client_helper_signs_in_over_real_tls_with_the_paired_key_and_calls_only_what_its_scopes_allow() {
+    use crate::devmode::auth::hex;
+    use crate::devmode::webclient::ApiClient;
+    let h = harness("cloud", |_| {});
+    let key = ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]);
+    h.extras.progs.lock().unwrap().insert(hex(key.verifying_key().as_bytes()), ("ci".into(), "ann".into()));
+    let (port, fp) = (h.svc.local_addr().port(), h.svc.fingerprint().to_string());
+    let api = ApiClient::with_key("127.0.0.1", port, &fp, key.clone());
+    assert!(api.call("GET", "/api/v1/whoami", &[], None).unwrap_err().contains("sign in first"));
+    assert!(api.sign_in().unwrap_err().contains("no api scope"), "a computer without a grant is refused");
+    h.extras.pscopes.lock().unwrap().insert("ci".into(), vec!["api:status".into(), "api:flows:read".into()]);
+    let who = api.sign_in().unwrap();
+    assert_eq!((who["user"].as_str(), who["computer"].as_str()), (Some("ann"), Some("ci")));
+    assert_eq!(api.call("GET", "/api/v1/whoami", &[], None).unwrap().0, 200);
+    assert_eq!(api.call("GET", "/api/v1/flows", &[], None).unwrap().0, 200);
+    let (s, v) = api.call("POST", "/api/v1/flows/f1/run", &[], Some(&json!({}))).unwrap();
+    assert_eq!(s, 403, "{v}");
+    // the wrong certificate is never trusted
+    let wrong = ApiClient::with_key("127.0.0.1", port, "AA:BB:CC", key);
+    assert!(wrong.sign_in().is_err());
+    api.sign_out().unwrap();
+    assert!(api.call("GET", "/api/v1/whoami", &[], None).is_err());
 }
 
 #[test]
@@ -424,7 +627,7 @@ fn a_route_or_tool_outside_the_profile_is_404() {
     }
     assert_eq!(h.call("POST", "/api/v1/data/call", Some(&t), Some(json!({"tool": "data_open", "args": {}}))).0, 404);
     // things that never exist, with or without a token
-    for p in ["/", "/api/v1", "/api/v1/camera", "/api/v1/audio", "/api/v1/usb", "/api/v1/firmware", "/api/v1/firewall", "/api/v1/shell", "/v1/dev/install", "/api/v1/dev/install", "/api/v1/system/power", "/metrics", "/ws", "/api/v1/chat/runs/abc/../../x"] {
+    for p in ["/", "/api/v1", "/api/v1/camera", "/api/v1/audio", "/api/v1/usb", "/api/v1/firmware", "/api/v1/firewall", "/api/v1/shell", "/v1/dev/install", "/api/v1/dev/install", "/api/v1/system/power", "/ws", "/api/v1/chat/runs/abc/../../x"] {
         assert_eq!(h.call("GET", p, Some(&t), None).0, 404, "{p}");
         assert_eq!(h.call("GET", p, None, None).0, 404, "{p} without a token");
     }
@@ -631,6 +834,33 @@ fn a_body_must_be_json() {
 }
 
 #[test]
+fn a_program_token_opens_the_event_stream_and_a_members_address_only_as_far_as_its_scopes_reach() {
+    use crate::cloudmembers::SessionLookup;
+    use crate::devmode::auth::{hex, sign_headers};
+    let h = harness("cloud", |_| {});
+    let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+    let fp = h.svc.fingerprint().to_string();
+    h.extras.progs.lock().unwrap().insert(hex(key.verifying_key().as_bytes()), ("laptop".into(), "ann".into()));
+    h.extras.pscopes.lock().unwrap().insert("laptop".into(), vec!["api:status".into()]);
+    let mut r = req("POST", "/api/v1/login", None, None);
+    for (k, v) in sign_headers(&key, "POST", "/api/v1/login", &[], &[], &fp, crate::clock::now_unix()).unwrap() {
+        r.headers.insert(k, v);
+    }
+    let (s, v, _) = h.call_req(r);
+    assert_eq!(s, 200, "{v}");
+    let prog = v["token"].as_str().unwrap().to_string();
+    let sh = h.svc.shared();
+    assert!(!super::events::token_opens_stream(sh, &prog), "api:status does not reach the event stream (api:tiles)");
+    h.extras.pscopes.lock().unwrap().insert("laptop".into(), vec!["api:tiles:read".into()]);
+    assert!(super::events::token_opens_stream(sh, &prog), "granted at once");
+    assert!(super::events::token_opens_stream(sh, &h.ann()), "a person's own token is not limited");
+    // the domain listener: a program's token is not a person's session
+    let sessions = server::sessions_for_test(sh);
+    assert_eq!(sessions.user_of(&prog), None, "a program token does not open a members address");
+    assert_eq!(sessions.user_of(&h.ann()).as_deref(), Some("ann"));
+}
+
+#[test]
 fn audit_lines_exist_for_every_audited_route_and_hold_no_secrets() {
     // one sign-in per audited route: more routes than the default sign-in limit
     let h = harness("cloud", |c| c.limits.logins_per_minute = 1000);
@@ -725,7 +955,8 @@ fn the_default_tool_set_is_exactly_this_list() {
     // the reviewed list, by name (docs/development/MINIMAL-WEBSERVICE.md, section 9); a change here is a decision
     assert_eq!(Profile::AgentApi.tools(), ["now", "web_search", "web_fetch", "web_research", "web_feed", "web_links", "weather", "stock_quote", "search_documents", "data_open", "data_describe", "data_query"]);
     let extra: Vec<&&str> = Profile::Cloud.tools().iter().filter(|t| !Profile::AgentApi.tools().contains(t)).collect();
-    assert_eq!(extra, [&"flow_list", &"flow_get", &"flow_runs", &"flow_run_status"]);
+    // tiles_list is free; deploy_team_host asks on a card every time (F-WEB-04, F-TCFG-14)
+    assert_eq!(extra, [&"deploy_team_host", &"tiles_list", &"flow_list", &"flow_get", &"flow_runs", &"flow_run_status"]);
     assert!(tools::allowed_set(Profile::AgentApi, &[], &["now".into(), "web_search".into()]).unwrap().len() == 2, "a request may narrow the list");
 }
 
@@ -760,7 +991,8 @@ fn the_default_is_loopback_and_a_lan_needs_the_opt_in_and_a_network() {
     // a host name is not an address; port 0 only on loopback; unknown profile; unknown field; half a certificate; zero limits
     assert!(ServiceConfig { listen: "example.org:8444".into(), ..ServiceConfig::default() }.check().is_err());
     assert!(ServiceConfig { listen: "0.0.0.0:0".into(), lan: true, allow_from: vec!["10.0.0.0/8".into()], ..ServiceConfig::default() }.check().is_err());
-    assert!(ServiceConfig { profile: "flows-runner".into(), ..ServiceConfig::default() }.check().unwrap_err().contains("not built yet"));
+    assert!(ServiceConfig { profile: "nope".into(), ..ServiceConfig::default() }.check().unwrap_err().contains("unknown profile"));
+    assert!(ServiceConfig { profile: "flows-runner".into(), ..ServiceConfig::default() }.check().is_ok(), "the flows runner is a profile now");
     assert!(ServiceConfig::parse(r#"{"listn": "0.0.0.0:1"}"#).is_err(), "a typo is an error, not a default");
     assert!(ServiceConfig { tls: super::config::TlsFiles { cert: "a".into(), key: String::new() }, ..ServiceConfig::default() }.check().is_err());
     let mut z = ServiceConfig::default();
@@ -802,7 +1034,7 @@ fn deps_for(dir: &std::path::Path) -> Arc<Deps> {
         store: Arc::new(RunStore::new(&dir.join("runs"))),
         chat: Arc::new(Script { turns: Mutex::new(VecDeque::new()) }),
         tools: Arc::new(FakeSource { executed: Arc::new(Mutex::new(vec![])) }),
-        extras: Arc::new(FakeExtras { ready: AtomicBool::new(true), web: Mutex::new((false, 8443)), switched: Default::default() }),
+        extras: Arc::new(FakeExtras { ready: AtomicBool::new(true), web: Mutex::new((false, 8443)), switched: Default::default(), progs: Default::default(), pscopes: Default::default(), paused: Default::default() }),
         system_prompt: "t".into(),
     })
 }
@@ -949,7 +1181,7 @@ fn readiness_follows_the_services_and_shutdown_is_graceful() {
     let dir = crate::testdir::unique("webservice", "ready");
     std::fs::create_dir_all(&dir).unwrap();
     let a = accounts();
-    let extras = Arc::new(FakeExtras { ready: AtomicBool::new(false), web: Mutex::new((false, 8443)), switched: Default::default() });
+    let extras = Arc::new(FakeExtras { ready: AtomicBool::new(false), web: Mutex::new((false, 8443)), switched: Default::default(), progs: Default::default(), pscopes: Default::default(), paused: Default::default() });
     let deps = Arc::new(Deps { auth: a.clone(), audit: a, store: Arc::new(RunStore::new(&dir)), chat: Arc::new(Script { turns: Mutex::new(VecDeque::new()) }), tools: Arc::new(FakeSource { executed: Arc::new(Mutex::new(vec![])) }), extras: extras.clone(), system_prompt: "t".into() });
     let chk = ServiceConfig { listen: "127.0.0.1:0".into(), data_dir: dir.to_string_lossy().into(), ..ServiceConfig::default() }.check().unwrap();
     let svc = server::start(&chk, deps, tls::self_signed(&dir.join("tls"), &[]).unwrap()).unwrap();
@@ -1237,6 +1469,9 @@ mod notifyapi_tests;
 #[cfg(test)]
 #[path = "tiles_tests.rs"]
 mod tiles_tests;
+#[cfg(test)]
+#[path = "remote_runner_tests.rs"]
+mod remote_runner_tests;
 
 // ------------------------------------------------------------------------------------------------ tenant configuration
 
@@ -1248,6 +1483,24 @@ fn cfg_cloud() -> (H, String, String, String) {
     assert_eq!(h.call("POST", "/api/v1/tenant/members", Some(&root), Some(json!({"name": "ann", "role": "admin"}))).0, 200);
     assert_eq!(h.call("POST", "/api/v1/tenant/members", Some(&root), Some(json!({"name": "bob", "role": "member"}))).0, 200);
     (h, root, ann, bob)
+}
+
+#[test]
+fn tenantcfg_person_layer_routes_store_only_the_callers_own_narrowing() {
+    let (h, _root, ann, bob) = cfg_cloud();
+    let me = "/api/v1/tenant/config-me/media.policy";
+    // nothing configured by the tenant: nothing to narrow
+    assert_eq!(h.call("PUT", me, Some(&bob), Some(json!({"enabled": true, "values": {"deny_devices": ["mic"]}}))).0, 409);
+    assert_eq!(h.call("PUT", "/api/v1/tenant/config/media.policy", Some(&ann), Some(json!({"enabled": true, "values": {"media": "allow"}, "ack_warnings": crate::tenantconfig::safety::rules_table()}))).0, 200);
+    let (s, v, _) = h.call("PUT", me, Some(&bob), Some(json!({"enabled": true, "values": {"deny_devices": ["mic"]}})));
+    assert_eq!((s, v["effective"]["deny_devices"].clone()), (200, json!(["mic"])), "{v}");
+    let (s, g, _) = h.call("GET", me, Some(&bob), None);
+    assert_eq!((s, g["items"][0]["values"]["deny_devices"].clone()), (200, json!(["mic"])));
+    assert_eq!(h.call("GET", me, Some(&ann), None).1["items"], json!([]), "another person sees none of it");
+    assert_eq!(h.call("PUT", "/api/v1/tenant/config-me/egress.policy", Some(&bob), Some(json!({"enabled": true}))).0, 400);
+    assert_eq!(h.call("DELETE", me, Some(&bob), None).0, 200);
+    assert_eq!(h.call("DELETE", me, Some(&bob), None).0, 404);
+    assert!(h.accounts.lines().iter().any(|l| l.contains("tenant.config.person.put")));
 }
 
 #[test]
@@ -1412,4 +1665,495 @@ fn tenantcfg_api_groups_approver_roles_and_the_approvals_list() {
     assert_eq!(h.call("DELETE", "/api/v1/namespaces/web/approvers/prod", Some(&bob), Some(json!({"groups": ["leads"]}))).0, 200);
     assert_eq!(h.call("GET", "/api/v1/namespaces/web/approvers", Some(&bob), None).1["approvers"], json!({}));
     assert!(h.accounts.lines().iter().any(|l| l.contains("api.tteam_approver_grant")));
+}
+
+// ------------------------------------------------------------------------------------------------ real-browser fixture
+
+/// NOT a test of its own: the server that the real-browser harness (`dist/browsertest/`) drives. Ignored, so a plain test run never
+/// starts it. It starts the same service the tests above use (real TLS socket on 127.0.0.1, fake accounts with throw-away
+/// passwords, a scripted model, a temporary data folder), writes where it listens to `$IYAKKI_BROWSERTEST_INFO`, and serves until
+/// the file `$IYAKKI_BROWSERTEST_INFO.stop` appears (or 20 minutes pass), then removes its data. Profile: `$IYAKKI_BROWSERTEST_PROFILE`
+/// (default `cloud`).
+#[test]
+#[ignore = "serves for dist/browsertest; run by its driver"]
+fn browser_fixture_server() {
+    let Some(info) = std::env::var_os("IYAKKI_BROWSERTEST_INFO") else {
+        eprintln!("SKIP: IYAKKI_BROWSERTEST_INFO is not set (this is started by dist/browsertest/run_pages.py)");
+        return;
+    };
+    let profile = std::env::var("IYAKKI_BROWSERTEST_PROFILE").unwrap_or_else(|_| "cloud".into());
+    let h = harness(&profile, |c| {
+        c.limits.logins_per_minute = 1000;
+        c.limits.requests_per_minute = 100_000; // the run measures how many requests the pages make; the fixture must not refuse them
+    });
+    // IYAKKI_BROWSERTEST_TENANTS=2: the home tenant (root and ann are members) and a second one `gamma` that root owns, so the page has a switch
+    if std::env::var("IYAKKI_BROWSERTEST_TENANTS").as_deref() == Ok("2") && profile == "cloud" {
+        let gamma = h.dir.join("gamma-volume");
+        let mut r = crate::cloudroles::Roles::new("root").unwrap();
+        r.add_tenant_member("root", "bob", crate::cloudroles::TenantRole::Member).unwrap();
+        crate::cloudroles::save(&crate::cloudroles::path(&gamma), &r).unwrap();
+        let file = super::tenants::file(&h.dir);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let text = json!({"home": {"id": "acme", "name": "Acme Ltd"}, "tenants": [{"id": "gamma", "name": "Gamma GmbH", "data_dir": gamma.to_string_lossy()}]});
+        std::fs::write(file, text.to_string()).unwrap();
+    }
+    // a small git repository in root's own space, with one changed and one untracked file, for the Git page
+    if profile == "cloud" {
+        let d = h.dir.join("cloud").join("files").join("personal").join("root").join("repo");
+        std::fs::create_dir_all(&d).unwrap();
+        let git = |args: &[&str]| {
+            let o = std::process::Command::new("git").env_clear().env("PATH", "/usr/local/bin:/usr/bin:/bin").env("HOME", "/nonexistent").env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=T", "-c", "user.email=t@example.org", "-c", "commit.gpgsign=false", "-C"]).arg(&d).args(args).output();
+            o.map(|o| o.status.success()).unwrap_or(false)
+        };
+        if git(&["init", "-q", "-b", "main"]) {
+            for (i, t) in ["one", "two", "three"].iter().enumerate() {
+                std::fs::write(d.join("f.txt"), format!("{t}\n")).unwrap();
+                git(&["add", "."]);
+                git(&["commit", "-q", "-m", &format!("commit {t} {i}")]);
+            }
+            std::fs::write(d.join("f.txt"), "changed\n").unwrap();
+            std::fs::write(d.join("new.txt"), "n\n").unwrap();
+        }
+    }
+    let turns_file = std::path::PathBuf::from(format!("{}.turns", std::path::Path::new(&info).display()));
+    let mut turns_seen = 0usize;
+    let stop = std::path::PathBuf::from(format!("{}.stop", std::path::Path::new(&info).display()));
+    let body = json!({"port": h.svc.local_addr().port(), "fingerprint": h.svc.fingerprint(), "profile": profile, "admin": "root", "admin_password": "root-password-1", "user": "ann", "user_password": "ann-password-1"});
+    let tmp = std::path::PathBuf::from(format!("{}.tmp", std::path::Path::new(&info).display()));
+    std::fs::write(&tmp, body.to_string()).unwrap();
+    std::fs::rename(&tmp, &info).unwrap(); // appears whole
+    let t0 = Instant::now();
+    while !stop.exists() && t0.elapsed() < Duration::from_secs(1200) {
+        // the driver appends one line per model turn to `<info>.turns`: `call` (asks to fetch a page: an approval), `err`, `hang`, or `final:TEXT`
+        if let Ok(text) = std::fs::read_to_string(&turns_file) {
+            let lines: Vec<&str> = text.lines().collect();
+            for l in lines.iter().skip(turns_seen) {
+                let turn = match *l {
+                    "call" => call_turn("web_fetch"),
+                    "err" => final_turn("__ERR__"),
+                    "hang" => final_turn("__HANG__"),
+                    other => final_turn(other.strip_prefix("final:").unwrap_or(other)),
+                };
+                h.script.turns.lock().unwrap().push_back(turn);
+            }
+            turns_seen = lines.len();
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let dir = h.dir.clone();
+    drop(h);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_cloud_profile_offers_tiles_list_and_the_agent_api_profile_does_not() {
+    let cloud = tools::allowed_set(Profile::Cloud, &[], &[]).unwrap();
+    assert!(cloud.contains("tiles_list"), "{cloud:?}");
+    assert!(!tools::allowed_set(Profile::AgentApi, &[], &[]).unwrap().contains("tiles_list"));
+    // the wrapper that adds the tool names the built-in tile catalog
+    let t = crate::tilestools::TilesTools::new(std::sync::Arc::new(NoTools), crate::tilestools::TilesTools::builtin_catalog());
+    let text = Tools::call(&t, "tiles_list", &serde_json::json!({})).unwrap();
+    assert!(text.contains("Tiles that can be opened"), "{text}");
+}
+
+struct NoTools;
+impl Tools for NoTools {
+    fn defs(&self) -> Vec<ToolDef> {
+        vec![]
+    }
+    fn call(&self, name: &str, _: &serde_json::Value) -> Result<String, String> {
+        Err(format!("unknown tool {name}"))
+    }
+    fn describe(&self, name: &str, _: &serde_json::Value) -> String {
+        name.to_string()
+    }
+}
+
+#[test]
+fn a_cloud_run_publishes_a_team_host_only_after_the_person_approves_the_card() {
+    let h = harness("cloud", |_| {});
+    let ann = h.ann();
+    let turn = ModelTurn { text: String::new(), calls: vec![ToolCall { id: "c-host".into(), name: "deploy_team_host".into(), args: json!({"team": "red", "name": "gpu"}) }] };
+    let run = h.start_run(&ann, vec![turn.clone(), final_turn("published")]);
+    let ev = h.wait_event(&ann, &run, |e| e["type"] == "approval");
+    let ask = ev.iter().find(|e| e["type"] == "approval").expect("the run asks first");
+    assert!(ask.to_string().contains("deploy_team_host"), "{ask}");
+    assert!(h.executed.lock().unwrap().is_empty(), "nothing is applied before the answer");
+    let call = ask["id"].as_str().unwrap().to_string();
+    let path = format!("/api/v1/approvals/{run}/{call}");
+    assert_eq!(h.call("POST", &path, Some(&ann), Some(json!({"verdict": "approve"}))).0, 200);
+    let ev = h.wait_event(&ann, &run, |e| e["type"] == "final");
+    assert!(ev.iter().any(|e| e["type"] == "final" && e["text"] == "published"));
+    assert_eq!(*h.executed.lock().unwrap(), ["apply:red/gpu@dev"]);
+    // a denied card applies nothing
+    let run2 = h.start_run(&ann, vec![turn, final_turn("not published")]);
+    let ev = h.wait_event(&ann, &run2, |e| e["type"] == "approval");
+    let c2 = ev.iter().find(|e| e["type"] == "approval").unwrap()["id"].as_str().unwrap().to_string();
+    assert_eq!(h.call("POST", &format!("/api/v1/approvals/{run2}/{c2}"), Some(&ann), Some(json!({"verdict": "deny"}))).0, 200);
+    let ev = h.wait_event(&ann, &run2, |e| e["type"] == "final");
+    assert!(ev.iter().any(|e| e["type"] == "decision" && e["approved"] == false));
+    assert_eq!(h.executed.lock().unwrap().len(), 1);
+    // the agent-API profile never offers it
+    let h2 = harness("agent-api", |_| {});
+    let a2 = h2.ann();
+    let run3 = h2.start_run(&a2, vec![ModelTurn { text: String::new(), calls: vec![ToolCall { id: "c-x".into(), name: "deploy_team_host".into(), args: json!({"team": "red", "name": "gpu"}) }] }, final_turn("no")]);
+    h2.wait_event(&a2, &run3, |e| e["type"] == "final");
+    assert!(h2.executed.lock().unwrap().is_empty());
+}
+
+#[test]
+fn metrics_are_prometheus_text_for_administrators_only_and_count_by_route_and_status_class_without_names() {
+    let h = harness("agent-api", |_| {});
+    let (ann, root) = (h.ann(), h.root());
+    // no sign-in: refused; a person who is not an administrator: refused
+    assert_eq!(h.call("GET", "/metrics", None, None).0, 401);
+    assert_eq!(h.call("GET", "/metrics", Some(&ann), None).0, 403);
+    // some traffic: a good call, a refused one, a missing page, a failed sign-in
+    assert_eq!(h.call("GET", "/api/v1/whoami", Some(&ann), None).0, 200);
+    assert_eq!(h.call("GET", "/api/v1/whoami", Some(&ann), None).0, 200);
+    assert_eq!(h.call("GET", "/api/v1/nonesuch", Some(&ann), None).0, 404);
+    assert_eq!(h.call("POST", "/api/v1/login", None, Some(json!({"name": "ann", "password": "wrong-password-1"}))).0, 401);
+    let (s, _, resp) = h.call("GET", "/metrics", Some(&root), None);
+    assert_eq!(s, 200);
+    let ct = resp.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("content-type")).map(|(_, v)| v.clone()).unwrap_or_default();
+    assert!(ct.starts_with("text/plain; version=0.0.4"), "{ct}");
+    let text = String::from_utf8(resp.body.clone()).unwrap();
+    assert!(text.contains("iyakki_requests_total{route=\"whoami\",status=\"2xx\"} 2\n"), "{text}");
+    assert!(text.contains("iyakki_requests_total{route=\"unknown\",status=\"4xx\"} 1\n"), "a path that is no route is counted under one fixed label: {text}");
+    assert!(text.contains("iyakki_logins_total{outcome=\"failed\"} 1\n") && text.contains("iyakki_logins_total{outcome=\"ok\"} "), "{text}");
+    assert!(text.contains("iyakki_build_info{profile=\"agent-api\",version=\"") && text.contains("iyakki_sessions "), "{text}");
+    // nothing that identifies a person, a token or an address is in it
+    for secret in ["ann", "root", "10.1.1.1", &ann, &root, "password"] {
+        assert!(!text.contains(&format!("\"{secret}")) && !text.contains(&format!("={secret}")) && !text.contains(&format!("{secret}\"")), "{secret} in {text}");
+    }
+    assert!(!text.contains(&ann) && !text.contains(&root));
+    // a second scrape counts the first one
+    let (_, _, again) = h.call("GET", "/metrics", Some(&root), None);
+    assert!(String::from_utf8(again.body).unwrap().contains("iyakki_requests_total{route=\"metrics\",status=\"2xx\"} 1\n"));
+    // POST to it does not exist
+    assert_eq!(h.call("POST", "/metrics", Some(&root), None).0, 405);
+    // it is part of the described API
+    assert!(openapi::document(Profile::AgentApi)["paths"].get("/metrics").is_some());
+}
+
+#[test]
+fn metrics_count_runs_approvals_and_flow_runs_and_say_how_many_runs_are_held_and_how_much_room_is_left() {
+    let h = harness("agent-api", |_| {});
+    let (ann, root) = (h.ann(), h.root());
+    h.script.turns.lock().unwrap().push_back(final_turn("done"));
+    let (s, v, _) = h.call("POST", "/api/v1/chat/runs", Some(&ann), Some(json!({"prompt": "hello"})));
+    assert_eq!(s, 200, "{v}");
+    let id = v["id"].as_str().unwrap().to_string();
+    // a refused start is not counted as a start
+    assert_eq!(h.call("POST", "/api/v1/chat/runs", Some(&ann), Some(json!({}))).0, 400);
+    let end = std::time::Instant::now() + Duration::from_secs(20);
+    let mut text = String::new();
+    while std::time::Instant::now() < end {
+        let (_, _, resp) = h.call("GET", "/metrics", Some(&root), None);
+        text = String::from_utf8(resp.body).unwrap();
+        if text.contains("iyakki_runs_held{status=\"completed\"} 1\n") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(text.contains("iyakki_events_total{event=\"runs_started\"} 1\n"), "{text}");
+    assert!(text.contains("iyakki_runs_held{status=\"completed\"} 1\n") && text.contains("iyakki_runs_held{status=\"running\"} 0\n"), "{text}");
+    assert!(text.contains("iyakki_approvals_pending 0\n") && text.contains("iyakki_tool_results_held{outcome=\"ok\"} 0\n"), "{text}");
+    assert!(text.contains("iyakki_data_free_bytes "), "{text}");
+    #[cfg(target_os = "linux")]
+    assert!(text.contains("iyakki_process_resident_memory_bytes "), "{text}");
+    // a stop of that run is counted when the call succeeded
+    let _ = h.call("POST", &format!("/api/v1/chat/runs/{id}/stop"), Some(&ann), None);
+    assert!(!text.contains(&id), "no run id is ever in the numbers");
+    // every line is still well formed
+    for l in text.lines().filter(|l| !l.starts_with('#')) {
+        assert!(l.rsplit_once(' ').is_some_and(|(_, v)| v.parse::<f64>().is_ok()), "{l}");
+    }
+}
+
+#[test]
+fn metrics_keep_running_totals_of_tool_calls_and_model_tokens_that_agree_with_the_runs_held() {
+    let h = harness("agent-api", |_| {});
+    let (ann, root) = (h.ann(), h.root());
+    let metrics = |h: &H| String::from_utf8(h.call("GET", "/metrics", Some(&root), None).2.body).unwrap();
+    let t0 = metrics(&h);
+    assert!(t0.contains("iyakki_tool_calls_total{outcome=\"ok\"} 0\n") && t0.contains("iyakki_tool_calls_total{outcome=\"failed\"} 0\n") && t0.contains("iyakki_model_tokens_total 0\n"), "{t0}");
+    let run = h.start_run(&ann, vec![call_turn("web_fetch"), final_turn("fetched")]);
+    let ev = h.wait_event(&ann, &run, |e| e["type"] == "approval");
+    let call = ev.iter().find(|e| e["type"] == "approval").unwrap()["id"].as_str().unwrap().to_string();
+    assert_eq!(h.call("POST", &format!("/api/v1/approvals/{run}/{call}"), Some(&ann), Some(json!({"verdict": "approve"}))).0, 200);
+    h.wait_event(&ann, &run, |e| e["type"] == "final");
+    let t1 = metrics(&h);
+    assert!(t1.contains("iyakki_tool_calls_total{outcome=\"ok\"} 1\n"), "{t1}");
+    assert!(t1.contains("iyakki_tool_results_held{outcome=\"ok\"} 1\n"), "the total agrees with what the held run shows: {t1}");
+    assert!(!t1.contains(&run) && !t1.contains("web_fetch"), "no run id and no tool name in the numbers");
+    for l in t1.lines().filter(|l| !l.starts_with('#')) {
+        assert!(l.rsplit_once(' ').is_some_and(|(_, v)| v.parse::<f64>().is_ok()), "{l}");
+    }
+}
+
+#[test]
+fn the_token_total_adds_only_what_a_run_used_since_its_last_report_and_never_goes_down() {
+    use super::runs::{count_event, Totals};
+    use std::sync::atomic::Ordering::Relaxed;
+    let t = Totals::default();
+    let mut last = 0u64;
+    let usage = |tokens| crate::agent::RunEvent::Usage { tokens, cost_cents: 0.0, files: 0, seconds: 1 };
+    for tokens in [100, 250, 250, 240, 400] {
+        count_event(&t, &mut last, &usage(tokens));
+    }
+    assert_eq!(t.tokens.load(Relaxed), 400, "the growth of one run: 100, +150, +0, +0 (a lower report adds nothing), +150");
+    let mut other = 0u64;
+    count_event(&t, &mut other, &usage(30));
+    assert_eq!(t.tokens.load(Relaxed), 430, "a second run adds its own");
+    count_event(&t, &mut other, &crate::agent::RunEvent::ToolResult { id: "1".into(), name: "x".into(), ok: false, text: String::new() });
+    count_event(&t, &mut other, &crate::agent::RunEvent::ToolResult { id: "2".into(), name: "x".into(), ok: true, text: String::new() });
+    assert_eq!((t.tool_ok.load(Relaxed), t.tool_failed.load(Relaxed)), (1, 1));
+}
+
+#[test]
+fn every_route_that_changes_something_is_audited_except_the_ones_listed_here_with_their_reasons() {
+    // A table test: a new route that changes state must say `audit: true` or be added here on purpose, with the reason.
+    let exempt: &[(&str, &str)] = &[
+        ("login", "its outcome is counted by the sign-in rate limiter and the audit line is written by the login handler itself"),
+        ("logout", "ends the caller's own session; nothing of anyone else's changes"),
+        ("metrics", "read only (a text, not JSON)"),
+    ];
+    let mut missing = Vec::new();
+    for r in routes::ROUTES {
+        if r.method != "GET" && r.method != "HEAD" && !r.audit && !exempt.iter().any(|(id, _)| *id == r.id) {
+            missing.push(format!("{} {} ({})", r.method, r.path, r.id));
+        }
+    }
+    assert!(missing.is_empty(), "these routes change state and are not audited (set `audit: true` or list them with a reason): {missing:?}");
+    for (id, why) in exempt {
+        assert!(!why.is_empty() && routes::ROUTES.iter().any(|r| r.id == *id), "{id} is a route of the table");
+    }
+}
+
+#[test]
+fn a_run_made_outside_the_service_is_announced_to_the_persons_event_stream_when_it_appears_and_when_its_status_changes() {
+    let h = harness("agent-api", |_| {});
+    let (_ann, _bob) = (h.ann(), h.login("bob", "bob-password-1"));
+    let bus = crate::notifyhub::events::bus_for(&h.dir);
+    let (mine, theirs) = (bus.subscribe("ann").unwrap(), bus.subscribe("bob").unwrap());
+    // the first look at a person only notes what is there
+    let store = h.svc.shared().deps.store.clone();
+    let log = |id: &str, user: &str, status: &str| crate::runs::RunLog { id: id.into(), user: user.into(), started: 1_700_000_000, prompt: "a secret prompt from the desktop".into(), status: status.into(), events: vec![], session: None, task_id: None, row: None, agent: None };
+    std::thread::sleep(Duration::from_millis(2600));
+    let (id, other) = (crate::runs::new_run_id(), crate::runs::new_run_id());
+    let t0 = std::time::Instant::now();
+    store.save(&log(&id, "ann", "running")).unwrap();
+    store.save(&log(&other, "bob", "running")).unwrap();
+    let mut got: Vec<Value> = Vec::new();
+    let end = std::time::Instant::now() + Duration::from_secs(15);
+    while std::time::Instant::now() < end && !got.iter().any(|k| k["data"]["id"] == id.as_str()) {
+        for e in bus.drain(mine, Duration::from_millis(200)).unwrap_or_default() {
+            got.push(serde_json::from_str::<Value>(&e).unwrap());
+        }
+    }
+    let first = got.iter().find(|k| k["data"]["id"] == id.as_str()).expect("the run made outside the service was announced");
+    // a save wakes the watcher: it does not wait for its two-second turn (a short margin keeps this steady on a busy machine)
+    assert!(t0.elapsed() < Duration::from_millis(1700), "announced after {:?}", t0.elapsed());
+    assert_eq!((first["type"].as_str(), first["data"]["status"].as_str()), (Some("run"), Some("running")), "{first}");
+    // the end is announced too
+    store.save(&log(&id, "ann", "completed")).unwrap();
+    let end = std::time::Instant::now() + Duration::from_secs(15);
+    while std::time::Instant::now() < end && !got.iter().any(|k| k["data"]["id"] == id.as_str() && k["data"]["status"] == "completed") {
+        for e in bus.drain(mine, Duration::from_millis(200)).unwrap_or_default() {
+            got.push(serde_json::from_str::<Value>(&e).unwrap());
+        }
+    }
+    assert!(got.iter().any(|k| k["data"]["id"] == id.as_str() && k["data"]["status"] == "completed"), "{got:?}");
+    // only words and counts travel, and only to the person whose run it is
+    let all = got.iter().map(|k| k.to_string()).collect::<String>();
+    assert!(!all.contains("secret prompt") && !all.contains(&other), "{all}");
+    let bobs = bus.drain(theirs, Duration::from_millis(50)).unwrap_or_default();
+    assert!(bobs.iter().all(|e| !e.contains(&id)), "{bobs:?}");
+}
+
+#[test]
+fn a_run_tells_the_persons_event_stream_when_it_starts_and_ends_and_nobody_elses() {
+    let h = harness("agent-api", |_| {});
+    let (ann, bob) = (h.ann(), h.login("bob", "bob-password-1"));
+    let bus = crate::notifyhub::events::bus_for(&h.dir);
+    let (mine, theirs) = (bus.subscribe("ann").unwrap(), bus.subscribe("bob").unwrap());
+    h.script.turns.lock().unwrap().push_back(final_turn("the answer"));
+    let (s, v, _) = h.call("POST", "/api/v1/chat/runs", Some(&ann), Some(json!({"prompt": "hello"})));
+    assert_eq!(s, 200, "{v}");
+    let id = v["id"].as_str().unwrap().to_string();
+    let mut kinds = Vec::new();
+    let end = std::time::Instant::now() + Duration::from_secs(20);
+    while std::time::Instant::now() < end && !kinds.iter().any(|k: &Value| k["type"] == "run" && k["data"]["status"] == "completed") {
+        for e in bus.drain(mine, Duration::from_millis(200)).unwrap_or_default() {
+            kinds.push(serde_json::from_str::<Value>(&e).unwrap());
+        }
+    }
+    let runs: Vec<&Value> = kinds.iter().filter(|k| k["type"] == "run").collect();
+    assert!(runs.len() >= 2, "{kinds:?}");
+    assert_eq!(runs[0]["data"]["id"], id.as_str());
+    assert_eq!(runs[0]["data"]["status"], "running", "the start is told first");
+    assert_eq!(runs.last().unwrap()["data"]["status"], "completed", "and the end last");
+    // only counts and words travel: no prompt, no answer
+    let all = kinds.iter().map(|k| k.to_string()).collect::<String>();
+    assert!(!all.contains("hello") && !all.contains("the answer"), "{all}");
+    // the other person's stream got no run event of ours
+    let others = bus.drain(theirs, Duration::from_millis(50)).unwrap_or_default();
+    assert!(others.iter().all(|e| !e.contains("\"type\":\"run\"")), "{others:?}");
+    let _ = bob;
+}
+
+#[test]
+fn a_flow_run_the_person_starts_is_followed_and_its_status_is_told_to_their_stream() {
+    let h = harness("cloud", |_| {});
+    let (ann, bob) = (h.ann(), h.login("bob", "bob-password-1"));
+    let bus = crate::notifyhub::events::bus_for(&h.dir);
+    let (mine, theirs) = (bus.subscribe("ann").unwrap(), bus.subscribe("bob").unwrap());
+    let (s, v, _) = h.call("POST", "/api/v1/flows/f1/run", Some(&ann), Some(json!({})));
+    assert_eq!(s, 200, "{v}");
+    let mut seen = Vec::new();
+    let end = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < end && !seen.iter().any(|k: &Value| k["type"] == "flowrun") {
+        for e in bus.drain(mine, Duration::from_millis(200)).unwrap_or_default() {
+            seen.push(serde_json::from_str::<Value>(&e).unwrap());
+        }
+    }
+    let ev = seen.iter().find(|k| k["type"] == "flowrun").unwrap_or_else(|| panic!("{seen:?}"));
+    assert_eq!((ev["data"]["flow"].as_str(), ev["data"]["run"].as_str(), ev["data"]["status"].as_str()), (Some("f1"), Some("r1"), Some("succeeded")));
+    assert_eq!(ev["data"].as_object().unwrap().len(), 3, "the words only: {ev}");
+    // another person's stream hears nothing of it
+    let others = bus.drain(theirs, Duration::from_millis(50)).unwrap_or_default();
+    assert!(others.iter().all(|e| !e.contains("flowrun")), "{others:?}");
+    let _ = bob;
+}
+
+#[test]
+fn the_flows_runner_profile_offers_sign_in_and_the_flows_and_nothing_else() {
+    let h = harness("flows-runner", |_| {});
+    let (ann, gus) = (h.ann(), h.login("gus", "gus-password-1"));
+    // the flows of the person: list, read, start, follow
+    let (s, v, _) = h.call("GET", "/api/v1/flows", Some(&ann), None);
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["flows"][0]["id"], "f1");
+    assert_eq!(h.call("GET", "/api/v1/flows/f1", Some(&ann), None).0, 200);
+    let (s, v, _) = h.call("POST", "/api/v1/flows/f1/run", Some(&ann), Some(json!({"inputs": {}})));
+    assert_eq!((s, v["run"].as_str()), (200, Some("r1")), "{v}");
+    let (s, v, _) = h.call("GET", "/api/v1/flows/f1/runs/r1", Some(&ann), None);
+    assert_eq!((s, v["status"].as_str()), (200, Some("succeeded")), "{v}");
+    assert_eq!(h.call("GET", "/api/v1/flows/nope/runs/r1", Some(&ann), None).0, 404);
+    // health, version, who am I and the API description of this profile
+    for p in ["/healthz", "/readyz", "/api/v1/version"] {
+        assert_eq!(h.call("GET", p, None, None).0, 200, "{p}");
+    }
+    assert_eq!(h.call("GET", "/api/v1/whoami", Some(&ann), None).0, 200);
+    let (s, doc, _) = h.call("GET", "/api/v1/openapi.json", Some(&ann), None);
+    assert_eq!(s, 200);
+    let paths: Vec<&String> = doc["paths"].as_object().unwrap().keys().collect();
+    assert!(paths.iter().any(|p| p.contains("/flows")) && !paths.iter().any(|p| p.contains("/chat/") || p.contains("/models") || p.contains("/tiles") || p.contains("/data/")), "{paths:?}");
+    // everything else is not there: no chat, models, tools, tiles, data, approvals, files
+    for (m, p) in [("GET", "/api/v1/models"), ("GET", "/api/v1/tools"), ("GET", "/api/v1/chat/runs"), ("POST", "/api/v1/chat/runs"), ("GET", "/api/v1/tiles"), ("POST", "/api/v1/data/call"), ("GET", "/api/v1/approvals"), ("GET", "/api/v1/files")] {
+        assert_eq!(h.call(m, p, Some(&ann), if m == "POST" { Some(json!({})) } else { None }).0, 404, "{m} {p}");
+    }
+    // a person without the flows right is refused where the cloud profile would refuse
+    assert_eq!(h.call("GET", "/api/v1/flows", Some(&gus), None).0, 403);
+    // no chat tool at all
+    assert!(Profile::FlowsRunner.tools().is_empty());
+    // import: a safe draft with a free id; a body that is not a flow is refused
+    let (s, v, _) = h.call("POST", "/api/v1/flows/import", Some(&ann), Some(json!({"flow": {"id": "f9", "name": "Nine"}})));
+    assert_eq!((s, v["id"].as_str()), (200, Some("f9-2")), "{v}");
+    assert_eq!(h.call("POST", "/api/v1/flows/import", Some(&ann), Some(json!({"flow": 5}))).0, 400);
+    assert_eq!(h.call("POST", "/api/v1/flows/import", Some(&ann), Some(json!({"flow": {"name": "no id"}}))).0, 400);
+    assert_eq!(h.call("POST", "/api/v1/flows/import", Some(&ann), Some(json!({"flow": {}, "extra": 1}))).0, 400, "an unknown field is refused");
+    // validate: by id or by a whole flow, never both
+    let (s, v, _) = h.call("POST", "/api/v1/flows/validate", Some(&ann), Some(json!({"id": "f1"})));
+    assert_eq!((s, v["ok"].as_bool(), v["issues"][0]["level"].as_str()), (200, Some(true), Some("warning")), "{v}");
+    let (_, v, _) = h.call("POST", "/api/v1/flows/validate", Some(&ann), Some(json!({"flow": {"broken": true}})));
+    assert_eq!((v["ok"].as_bool(), v["issues"][0]["message"].as_str()), (Some(false), Some("no start step")), "{v}");
+    assert_eq!(h.call("POST", "/api/v1/flows/validate", Some(&ann), Some(json!({"id": "f1", "flow": {}}))).0, 400);
+    assert_eq!(h.call("POST", "/api/v1/flows/validate", Some(&ann), Some(json!({}))).0, 400);
+    assert_eq!(h.call("POST", "/api/v1/flows/validate", Some(&ann), Some(json!({"id": "../x"}))).0, 400);
+    assert_eq!(h.call("POST", "/api/v1/flows/validate", Some(&ann), Some(json!({"id": "nope"}))).0, 404);
+    // stop: the run of the person's own flow; another run is not found
+    assert_eq!(h.call("POST", "/api/v1/flows/f1/runs/r1/stop", Some(&ann), None).0, 200);
+    assert_eq!(h.call("POST", "/api/v1/flows/f1/runs/r9/stop", Some(&ann), None).0, 404);
+    // a step that waits for a person is answered by the person's own call: approve or deny, once, only their own run
+    let step = |s: &str, tok: &str, body: Value| h.call("POST", &format!("/api/v1/flows/f1/runs/r1/steps/{s}/decide"), Some(tok), Some(body)).0;
+    assert_eq!(step("ask", &ann, json!({"verdict": "approve"})), 200);
+    assert_eq!(step("ask", &ann, json!({"verdict": "deny"})), 200);
+    assert_eq!(step("done", &ann, json!({"verdict": "approve"})), 404, "a step that was answered is not waiting any more");
+    assert_eq!(step("nope", &ann, json!({"verdict": "approve"})), 404);
+    assert_eq!(step("ask", &ann, json!({"verdict": "maybe"})), 400);
+    assert_eq!(step("ask", &ann, json!({})), 400);
+    assert_eq!(step("ask", &gus, json!({"verdict": "approve"})), 403);
+    assert_eq!(h.call("POST", "/api/v1/flows/f1/runs/r9/steps/ask/decide", Some(&ann), Some(json!({"verdict": "approve"}))).0, 404);
+    // the cloud profile has no such route: its approvals go through the tenant approval router
+    let c = harness("cloud", |_| {});
+    let ct = c.ann();
+    assert_eq!(c.call("POST", "/api/v1/flows/f1/runs/r1/steps/ask/decide", Some(&ct), Some(json!({"verdict": "approve"}))).0, 404);
+    // schedules are on the flows runner too
+    assert_eq!(h.call("GET", "/api/v1/schedules", Some(&ann), None).0, 200);
+    let lines = h.accounts.lines().join("\n");
+    assert!(lines.contains("flows_import") && lines.contains("flows_run_stop"), "{lines}");
+    // nobody else: the guest may do none of it
+    for (m, p) in [("POST", "/api/v1/flows/import"), ("POST", "/api/v1/flows/validate"), ("POST", "/api/v1/flows/f1/runs/r1/stop")] {
+        assert_eq!(h.call(m, p, Some(&gus), Some(json!({}))).0, 403, "{p}");
+    }
+}
+
+#[test]
+fn the_data_api_profile_offers_sign_in_and_the_read_only_data_tools_and_nothing_else() {
+    let h = harness("data-api", |_| {});
+    let (ann, gus) = (h.ann(), h.login("gus", "gus-password-1"));
+    assert!(Profile::DataApi.tools().iter().all(|t| t.starts_with("data_")) && Profile::DataApi.tools().len() == 3);
+    for p in ["/healthz", "/readyz", "/api/v1/version"] {
+        assert_eq!(h.call("GET", p, None, None).0, 200, "{p}");
+    }
+    assert_eq!(h.call("GET", "/api/v1/whoami", Some(&ann), None).0, 200);
+    // the three data tools work; others are not found; a call needs the data right
+    for tool in ["data_open", "data_describe", "data_query"] {
+        let (s, v, _) = h.call("POST", "/api/v1/data/call", Some(&ann), Some(json!({"tool": tool, "args": {}})));
+        assert_eq!(s, 200, "{tool}: {v}");
+    }
+    for tool in ["data_export", "run_command", "web_fetch", "flow_run"] {
+        assert_eq!(h.call("POST", "/api/v1/data/call", Some(&ann), Some(json!({"tool": tool, "args": {}}))).0, 404, "{tool}");
+    }
+    assert_eq!(h.call("POST", "/api/v1/data/call", Some(&gus), Some(json!({"tool": "data_query", "args": {}}))).0, 403);
+    assert_eq!(h.call("POST", "/api/v1/data/call", Some(&ann), Some(json!({"tool": "data_query", "args": 5}))).0, 400);
+    // nothing else is there
+    for (m, p) in [("GET", "/api/v1/models"), ("GET", "/api/v1/tools"), ("GET", "/api/v1/chat/runs"), ("GET", "/api/v1/flows"), ("GET", "/api/v1/tiles"), ("GET", "/api/v1/approvals"), ("GET", "/api/v1/schedules")] {
+        assert_eq!(h.call(m, p, Some(&ann), None).0, 404, "{m} {p}");
+    }
+    let (_, doc, _) = h.call("GET", "/api/v1/openapi.json", Some(&ann), None);
+    let paths: Vec<&String> = doc["paths"].as_object().unwrap().keys().collect();
+    assert!(paths.iter().any(|p| p.contains("/data/call")) && !paths.iter().any(|p| p.contains("/flows") || p.contains("/chat/") || p.contains("/tiles")), "{paths:?}");
+    // the call is audited with the tool's name and no arguments
+    let lines = h.accounts.lines().join("\n");
+    assert!(lines.contains("tool=data_query") && !lines.contains("secret"), "{lines}");
+}
+
+#[test]
+fn the_tile_host_profile_offers_sign_in_and_the_tiles_and_nothing_else() {
+    let h = harness("tile-host", |_| {});
+    let ann = h.ann();
+    assert!(Profile::TileHost.tools().is_empty() && Profile::parse("tile-host") == Ok(Profile::TileHost));
+    for p in ["/healthz", "/readyz", "/api/v1/version"] {
+        assert_eq!(h.call("GET", p, None, None).0, 200, "{p}");
+    }
+    assert_eq!(h.call("GET", "/api/v1/whoami", Some(&ann), None).0, 200);
+    assert_eq!(h.call("GET", "/api/v1/tiles", None, None).0, 401, "the tile list needs a sign-in");
+    // the tiles are listed and one is drawn and answers events
+    let (s, list, _) = h.call("GET", "/api/v1/tiles", Some(&ann), None);
+    assert_eq!(s, 200, "{list}");
+    assert!(list.to_string().contains("settings"), "{list}");
+    let (s, v, _) = h.call("POST", "/api/v1/tiles/settings/events", Some(&ann), Some(json!({"width": 360, "height": 480})));
+    assert_eq!(s, 200, "{v}");
+    assert!(v.to_string().contains("SETTINGS"), "{v}");
+    // nothing else is there
+    for (m, p) in [("GET", "/api/v1/models"), ("GET", "/api/v1/tools"), ("GET", "/api/v1/chat/runs"), ("GET", "/api/v1/flows"), ("GET", "/api/v1/approvals"), ("GET", "/api/v1/schedules"), ("POST", "/api/v1/data/call"), ("GET", "/api/v1/files")] {
+        assert_eq!(h.call(m, p, Some(&ann), None).0, 404, "{m} {p}");
+    }
+    let (_, doc, _) = h.call("GET", "/api/v1/openapi.json", Some(&ann), None);
+    let paths: Vec<&String> = doc["paths"].as_object().unwrap().keys().collect();
+    assert!(paths.iter().any(|p| p.contains("/tiles")) && !paths.iter().any(|p| p.contains("/flows") || p.contains("/chat/") || p.contains("/data/")), "{paths:?}");
 }

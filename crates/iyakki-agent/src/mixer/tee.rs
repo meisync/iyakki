@@ -14,12 +14,15 @@ pub type Tap = Box<dyn Fn(u32, u8, &[i16]) -> bool + Send>;
 pub type Listening = Box<dyn Fn() -> bool + Send>;
 /// Must the machine's own output stay silent right now (the controlling page plays the sound instead)?
 pub type Muted = Box<dyn Fn() -> bool + Send>;
+/// The output stopped (closed or aborted: a pause or a stop): whatever is queued for the listeners must not play on.
+pub type OnStop = Box<dyn Fn() + Send>;
 
 pub struct TeeSink {
     inner: Box<dyn Sink>,
     tap: Tap,
     listening: Listening,
     muted: Muted,
+    on_stop: Option<OnStop>,
     silent: Vec<i16>,
     rate: u32,
     channels: usize,
@@ -32,7 +35,7 @@ pub struct TeeSink {
 
 impl TeeSink {
     pub fn new(inner: Box<dyn Sink>, tap: Tap, listening: Listening) -> TeeSink {
-        TeeSink { inner, tap, listening, muted: Box::new(|| false), silent: Vec::new(), rate: 0, channels: 0, stand_in: false, offered: 0, taken: 0 }
+        TeeSink { inner, tap, listening, muted: Box::new(|| false), on_stop: None, silent: Vec::new(), rate: 0, channels: 0, stand_in: false, offered: 0, taken: 0 }
     }
 
     /// While `muted` says yes the card is still opened and fed (so the mixer keeps its pace and the card does not have to be
@@ -42,10 +45,29 @@ impl TeeSink {
         self
     }
 
-    /// The real wiring: the pages of `browsermedia`, and the controlling page's "This computer (the browser)" choice.
+    /// Called when the output closes or aborts, so a listener's queue is flushed with it.
+    pub fn with_on_stop(mut self, f: OnStop) -> TeeSink {
+        self.on_stop = Some(f);
+        self
+    }
+
+    /// The real wiring: the pages of `browsermedia`, and the controlling page's "This computer (the browser)" choice; also the client
+    /// sessions that asked for the person's sound (`clientmedia`, a connected client's `audio_open`), which can silence the machine too.
     pub fn browser(inner: Box<dyn Sink>) -> TeeSink {
-        TeeSink::new(inner, Box::new(|r, c, p| crate::browsermedia::broadcast_audio(r, c, p)), Box::new(crate::browsermedia::audio_listeners))
-            .with_mute(Box::new(crate::browsermedia::local_muted))
+        let routes = crate::clientmedia::audio_routes();
+        let (r1, r2, r3, r4) = (routes.clone(), routes.clone(), routes.clone(), routes);
+        TeeSink::new(
+            inner,
+            Box::new(move |r, c, p| {
+                // both taps always get the period; `|` would skip the second
+                let a = crate::browsermedia::broadcast_audio(r, c, p);
+                let b = r1.tap(r, c, p);
+                a || b
+            }),
+            Box::new(move || crate::browsermedia::audio_listeners() || r2.listening()),
+        )
+        .with_mute(Box::new(move || crate::browsermedia::local_muted() || r3.machine_muted()))
+        .with_on_stop(Box::new(move || r4.flush_all()))
     }
 }
 
@@ -85,6 +107,9 @@ impl Sink for TeeSink {
     }
 
     fn close(&mut self) {
+        if let Some(f) = &self.on_stop {
+            f();
+        }
         if !self.stand_in {
             self.inner.close();
         }
@@ -109,6 +134,22 @@ impl Sink for TeeSink {
 
     fn detail(&self) -> String {
         self.inner.detail()
+    }
+
+    fn set_low_latency(&mut self, profile: Option<(u32, u32)>) {
+        self.inner.set_low_latency(profile);
+    }
+
+    fn low_latency(&self) -> Option<(u32, u32)> {
+        self.inner.low_latency()
+    }
+
+    fn abort(&mut self) {
+        if let Some(f) = &self.on_stop {
+            f();
+        }
+        self.stand_in = false;
+        self.inner.abort();
     }
 
     fn latency_ms(&self) -> u32 {

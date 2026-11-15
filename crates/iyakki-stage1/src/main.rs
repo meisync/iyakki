@@ -433,6 +433,63 @@ mod linux {
         }
     }
 
+    /// Mount every layer of a plan read-only at `/layers/<name>` (a squashfs on a loop device each). On the first failure the layers
+    /// already mounted are unmounted again, so the next candidate starts clean.
+    fn present_layers(plan: &layers::MountPlan) -> Result<(), String> {
+        let mut done: Vec<&str> = Vec::new();
+        for m in &plan.mounts {
+            mkdirs(&m.mountpoint);
+            let src = PathBuf::from(volume_dir(m.volume)).join(&m.path);
+            let r = loop_attach(&src).and_then(|node| mnt(&node, &m.mountpoint, Some("squashfs"), libc::MS_RDONLY, ""));
+            if let Err(e) = r {
+                for d in done {
+                    let cp = c(&format!("{}/{d}", layers::MOUNT_BASE));
+                    // SAFETY: valid NUL-terminated path.
+                    unsafe { libc::umount2(cp.as_ptr(), libc::MNT_DETACH) };
+                }
+                return Err(format!("layer {}: {e}", m.name));
+            }
+            done.push(&m.name);
+        }
+        Ok(())
+    }
+
+    /// The first layer set that can be used: `iyakki/layers/current.json`, `previous.json`, then the seed `boot/layers.json`. None when there is
+    /// no manifest at all (a single-root install) or no set is usable (the single roots are tried next, then the failure screen).
+    fn choose_layers(only: Volume, boot_ok: bool, data_ok: bool, previous_only: bool) -> Option<(layers::MountPlan, &'static str, String)> {
+        let kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default().trim().to_string();
+        let mut extra = std::collections::BTreeMap::new();
+        if !kernel.is_empty() {
+            extra.insert("kernel".to_string(), kernel.split(|c: char| !(c.is_ascii_digit() || c == '.')).next().unwrap_or("").to_string());
+        }
+        for (vol, path, label) in layers::manifest_sources(previous_only) {
+            if vol != only || (vol == Volume::Data && !data_ok) || (vol == Volume::Boot && !boot_ok) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(PathBuf::from(volume_dir(vol)).join(&path)) else { continue };
+            let set = match layers::LayerSet::parse(&text) {
+                Ok(s) => s,
+                Err(e) => {
+                    say(&format!("skipping {label} ({path}): {e}"));
+                    continue;
+                }
+            };
+            let stat = |v: Volume, p: &str| std::fs::metadata(PathBuf::from(volume_dir(v)).join(p)).ok().filter(|m| m.is_file()).map(|m| m.len());
+            let plan = match layers::plan_set(&set, &extra, &stat) {
+                Ok(p) => p,
+                Err(e) => {
+                    say(&format!("skipping {label} ({path}): {e}"));
+                    continue;
+                }
+            };
+            match present_layers(&plan) {
+                Ok(()) => return Some((plan, label, path)),
+                Err(e) => say(&format!("skipping {label} ({path}): {e}")),
+            }
+        }
+        None
+    }
+
     /// The file on the boot volume that tells GRUB the lean boot did not work (`boot/grub/iyakki-lean-failed`): while it is there the menu's
     /// first entry starts the full boot instead of the lean one, so a broken lean tree never makes the machine restart in a loop. Written by
     /// [`fail`], removed here by the first lean start that gets as far as switching root. The boot volume is remounted read-write only when
@@ -576,7 +633,7 @@ mod linux {
     fn free_old_root() {
         for e in std::fs::read_dir("/").into_iter().flatten().flatten() {
             let n = e.file_name().to_string_lossy().into_owned();
-            if ["newroot", "s", "lower", "upper", "dev", "proc", "sys"].contains(&n.as_str()) {
+            if ["newroot", "s", "lower", "layers", "upper", "dev", "proc", "sys"].contains(&n.as_str()) {
                 continue;
             }
             let p = e.path();
@@ -592,7 +649,7 @@ mod linux {
                 fail(&format!("internal error in the first stage: {info}"));
             }
         }));
-        for d in ["/dev", "/proc", "/sys", "/s/boot", "/s/data", "/lower", "/upper", "/newroot"] {
+        for d in ["/dev", "/proc", "/sys", "/s/boot", "/s/data", "/lower", "/layers", "/upper", "/newroot"] {
             mkdirs(d);
         }
         let _ = mnt("devtmpfs", "/dev", Some("devtmpfs"), 0, "mode=0755");
@@ -701,13 +758,29 @@ mod linux {
         };
         let list = candidates(cur.as_ref(), prev.as_ref(), &kind_of, boot_ok);
         let mut chosen: Option<Candidate> = None;
-        for cand in list {
-            match present(&cand) {
-                Ok(()) => {
-                    chosen = Some(cand);
-                    break;
+        // a layered install (docs/development/LAYERED-ROOT-DESIGN.md): the order is data layers, data single roots, seed layers, seed root
+        let mut layered: Option<(layers::MountPlan, &str, String)> = None;
+        let mut lower = "/lower".to_string();
+        let mut used_vols = [false, false]; // [boot, data]
+        for attempt in layers::attempt_order(list) {
+            match attempt {
+                layers::Attempt::Layers(v) => {
+                    if let Some((plan, label, path)) = choose_layers(v, boot_ok, data_ok, opts.previous) {
+                        lower = plan.lowerdir.clone();
+                        used_vols = [plan.uses(Volume::Boot), plan.uses(Volume::Data)];
+                        let vol = if plan.uses(Volume::Data) { Volume::Data } else { Volume::Boot };
+                        chosen = Some(Candidate { volume: vol, kind: Kind::Image, path: path.clone(), size: None });
+                        say(&format!("root layers mounted: {} ({label})", plan.names().join(" ")));
+                        layered = Some((plan, label, path));
+                    }
                 }
-                Err(e) => say(&format!("skipping {}: {e}", cand.path)),
+                layers::Attempt::Root(cand) => match present(&cand) {
+                    Ok(()) => chosen = Some(cand),
+                    Err(e) => say(&format!("skipping {}: {e}", cand.path)),
+                },
+            }
+            if chosen.is_some() {
+                break;
             }
         }
         let Some(chosen) = chosen else {
@@ -725,7 +798,12 @@ mod linux {
             fail(why);
         };
         let t_root = t0.elapsed().as_millis();
-        say(&format!("root {} mounted at {t_root} ms", chosen.path));
+        if layered.is_none() {
+            used_vols = [chosen.volume == Volume::Boot, chosen.volume == Volume::Data];
+            say(&format!("root {} mounted at {t_root} ms", chosen.path));
+        } else {
+            say(&format!("root layers ready at {t_root} ms"));
+        }
         screen_quiet("starting IYAKKI...");
         // 3. writable overlay: upper layer on tmpfs (swappable)
         if let Err(e) = mnt("tmpfs", "/upper", Some("tmpfs"), 0, "mode=0755") {
@@ -737,7 +815,7 @@ mod linux {
         let patches = if data_ok { patch_layers(chosen.path.as_str()) } else { Vec::new() };
         let mut mounted = false;
         if !patches.is_empty() {
-            match mnt("overlay", "/newroot", Some("overlay"), 0, &overlay_options_patched(&patches, "/lower", "/upper/u", "/upper/w")) {
+            match mnt("overlay", "/newroot", Some("overlay"), 0, &overlay_options_patched(&patches, &lower, "/upper/u", "/upper/w")) {
                 Ok(()) => {
                     mounted = true;
                     say(&format!("{} patch layer(s) over the root", patches.len()));
@@ -749,7 +827,7 @@ mod linux {
             }
         }
         if !mounted {
-            if let Err(e) = mnt("overlay", "/newroot", Some("overlay"), 0, &overlay_options("/lower", "/upper/u", "/upper/w")) {
+            if let Err(e) = mnt("overlay", "/newroot", Some("overlay"), 0, &overlay_options(&lower, "/upper/u", "/upper/w")) {
                 fail(&e);
             }
         }
@@ -768,7 +846,7 @@ mod linux {
         let moves = [(Volume::Boot, "/newroot/.stage1/boot"), (Volume::Data, "/newroot/var/lib/iyakki")];
         for (v, to) in moves {
             let from = volume_dir(v);
-            if v == chosen.volume {
+            if used_vols[(v == Volume::Data) as usize] {
                 mkdirs(to);
                 if let Err(e) = mnt(from, to, None, libc::MS_MOVE, "") {
                     say(&e);

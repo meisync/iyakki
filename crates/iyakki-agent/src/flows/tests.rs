@@ -205,7 +205,7 @@ fn commands_run_by_argument_list_in_the_workspace_with_the_cli_tiles_programs_on
     // a remote runner is a stub that says so
     let mut rr = exec_req(&["tar"], "");
     rr.runner = RunnerKind::Remote;
-    assert!(env.host.exec(&rr, &Cancel::new()).unwrap_err().message.contains("planned"));
+    assert!(env.host.exec(&rr, &Cancel::new()).unwrap_err().message.contains("another machine"));
     assert!(audits.lock().unwrap().iter().any(|l| l.contains("flow.exec") && l.contains("f1/n1 tar")), "{:?}", audits.lock().unwrap());
 }
 
@@ -398,13 +398,14 @@ fn publish_rollback_apply_and_heal_policy_are_hard_ask_and_the_rest_ask_or_read(
     }
     let d = defs(&Role::User.template());
     let risk = |n: &str| d.iter().find(|x| x.spec.name == n).unwrap().risk;
-    for n in ["flow_list", "flow_get", "flow_runs", "flow_run_status", "flow_logs", "flow_explain_failure"] {
+    for n in ["flow_list", "flow_get", "flow_runs", "flow_run_status", "flow_logs", "flow_explain_failure", "flow_assist_activity"] {
         assert_eq!(risk(n), Risk::Safe, "{n}");
     }
-    for n in ["flow_create", "flow_edit", "flow_run", "flow_cancel", "flow_publish", "flow_rollback", "flow_apply_to_runs", "flow_set_heal_policy", "flow_prune_history"] {
+    for n in ["flow_create", "flow_edit", "flow_run", "flow_cancel", "flow_publish", "flow_rollback", "flow_apply_to_runs", "flow_set_heal_policy", "flow_prune_history", "flow_failure_help", "flow_assist_stop_all", "flow_outside_messages_set", "flow_outside_messages_policy", "flow_assist_settings", "flow_trial"] {
         assert_eq!(risk(n), Risk::Ask, "{n}");
     }
-    assert_eq!(d.len(), 23, "16 flow tools, flow_prune_history and the six webhook tools");
+    assert_eq!(risk("flow_outside_messages"), Risk::Safe);
+    assert_eq!(d.len(), 35, "the four remote machine tools, 16 flow tools, flow_trial, flow_assist_activity, flow_prune_history, flow_failure_help, flow_assist_stop_all, flow_assist_settings, the three outside-message tools and the six webhook tools");
     assert!(d.iter().all(|x| is_flow_tool(&x.spec.name)));
     // no tools for an account without the app, and the wrapped chat never offers them without it
     let mut p = Role::User.template();
@@ -454,6 +455,93 @@ fn heal_policy_changes_go_to_the_draft_and_the_audit_log() {
     assert_eq!(env.store.get_draft("check-the-shop").unwrap().node("ping").unwrap().heal.as_ref().unwrap().mode, HealMode::AlwaysAsk);
     assert!(call(&env, "flow_set_heal_policy", json!({"flow": "check-the-shop", "mode": "sometimes"})).is_err());
     assert!(audits.lock().unwrap().iter().any(|l| l.contains("flow.heal_policy") && l.contains("auto-fix simple")), "{:?}", audits.lock().unwrap());
+}
+
+#[test]
+fn outside_messages_are_read_and_switched_per_flow_by_chat_and_audited() {
+    let (env, _d) = env_with("tools-chan", policy(&["*"]));
+    let audits = Arc::new(Mutex::new(Vec::new()));
+    let a2 = audits.clone();
+    *env.host.audit_sink.lock().unwrap() = Some(Arc::new(move |u, a, d| a2.lock().unwrap().push(format!("{u} {a} {d}"))));
+    call(&env, "flow_create", spec()).unwrap();
+    assert!(call(&env, "flow_outside_messages", json!({"flow": "check-the-shop"})).unwrap().contains("ON"), "a new flow may send");
+    env.host.chan.block_new("check-the-shop");
+    assert!(call(&env, "flow_outside_messages", json!({"flow": "check-the-shop"})).unwrap().contains("OFF"));
+    assert!(call(&env, "flow_outside_messages", json!({})).unwrap().contains("check-the-shop: off"));
+    assert!(call(&env, "flow_outside_messages", json!({"flow": "nope"})).unwrap_err().contains("no flow"));
+    let r = call(&env, "flow_outside_messages_set", json!({"flow": "check-the-shop", "on": true})).unwrap();
+    assert!(r.contains("ON"), "{r}");
+    assert!(env.host.chan.allowed("check-the-shop"));
+    call(&env, "flow_outside_messages_set", json!({"flow": "check-the-shop", "on": false})).unwrap();
+    assert!(!env.host.chan.allowed("check-the-shop"));
+    assert!(call(&env, "flow_outside_messages_set", json!({"flow": "check-the-shop"})).is_err(), "on is required");
+    assert!(call(&env, "flow_outside_messages_set", json!({"flow": "nope", "on": true})).unwrap_err().contains("no flow"));
+    assert!(audits.lock().unwrap().iter().filter(|l| l.contains("flow.outside_messages")).count() >= 2);
+}
+
+#[test]
+fn the_failure_help_offer_is_set_per_flow_or_in_general_by_chat_and_is_audited() {
+    use super::failfix::FailBook;
+    let (env, _d) = env_with("tools7", policy(&["*"]));
+    let audits = Arc::new(Mutex::new(Vec::new()));
+    let a2 = audits.clone();
+    *env.host.audit_sink.lock().unwrap() = Some(Arc::new(move |u, a, d| a2.lock().unwrap().push(format!("{u} {a} {d}"))));
+    call(&env, "flow_create", spec()).unwrap();
+    assert!(FailBook::open(&env.data).offer_for("check-the-shop"));
+    let o = call(&env, "flow_failure_help", json!({"flow": "check-the-shop", "on": false})).unwrap();
+    assert!(o.contains("not offered"), "{o}");
+    let b = FailBook::open(&env.data);
+    assert!(!b.offer_for("check-the-shop") && b.offer(), "only this flow");
+    assert!(call(&env, "flow_failure_help", json!({"flow": "no-such-flow", "on": false})).unwrap_err().contains("no flow"));
+    assert!(call(&env, "flow_failure_help", json!({"flow": "check-the-shop"})).is_err(), "on is required");
+    call(&env, "flow_failure_help", json!({"all": true, "on": false})).unwrap();
+    assert!(!FailBook::open(&env.data).offer());
+    let back = call(&env, "flow_failure_help", json!({"flow": "check-the-shop", "on": true})).unwrap();
+    assert!(back.contains("general switch is off"), "{back}");
+    call(&env, "flow_failure_help", json!({"all": true, "on": true})).unwrap();
+    assert!(FailBook::open(&env.data).offer_for("check-the-shop"));
+    assert!(audits.lock().unwrap().iter().filter(|l| l.contains("flow.failure_help")).count() >= 4);
+}
+
+#[test]
+fn stopping_all_assist_by_chat_is_one_way_and_audited() {
+    let (env, _d) = env_with("tools8", policy(&["*"]));
+    let audits = Arc::new(Mutex::new(Vec::new()));
+    let a2 = audits.clone();
+    *env.host.audit_sink.lock().unwrap() = Some(Arc::new(move |u, a, d| a2.lock().unwrap().push(format!("{u} {a} {d}"))));
+    assert!(env.assist_store().global().enabled);
+    let o = call(&env, "flow_assist_stop_all", json!({})).unwrap();
+    assert!(o.contains("Only the person can switch it on again"), "{o}");
+    assert!(!env.assist_store().global().enabled);
+    assert!(call(&env, "flow_assist_stop_all", json!({})).unwrap().contains("already stopped"));
+    // there is no tool argument or second tool that switches it on again
+    assert!(!super::tools::defs(&policy(&["*"])).iter().any(|d| d.spec.name.contains("assist") && d.spec.schema.to_string().contains("enable")));
+    assert_eq!(audits.lock().unwrap().iter().filter(|l| l.contains("flow.assist.stop_all")).count(), 1);
+    env.assist_store().set_enabled(true).unwrap();
+}
+
+#[test]
+fn the_message_policy_and_assist_settings_tools_set_validate_audit_and_show() {
+    let (env, _d) = env_with("tools9", policy(&["*"]));
+    let audits = Arc::new(Mutex::new(Vec::new()));
+    let a2 = audits.clone();
+    *env.host.audit_sink.lock().unwrap() = Some(Arc::new(move |u, a, d| a2.lock().unwrap().push(format!("{u} {a} {d}"))));
+    let shown = call(&env, "flow_outside_messages_policy", json!({})).unwrap();
+    assert!(shown.contains("no quiet hours") && shown.contains("no escalation"), "{shown}");
+    let o = call(&env, "flow_outside_messages_policy", json!({"quiet_start": "22:00", "quiet_end": "07:30", "escalate_minutes": 30, "escalate_room": "ops"})).unwrap();
+    assert!(o.contains("quiet hours 22:00 to 07:30") && o.contains("after 30 min") && o.contains("ops"), "{o}");
+    assert!(call(&env, "flow_outside_messages_policy", json!({"quiet_start": "25:00", "quiet_end": "07:30"})).is_err());
+    assert!(call(&env, "flow_outside_messages_policy", json!({"escalate_minutes": 0})).unwrap().contains("no escalation"));
+    assert!(call(&env, "flow_outside_messages_policy", json!({"quiet_off": true})).unwrap().contains("no quiet hours"));
+    assert!(audits.lock().unwrap().iter().any(|l| l.contains("flow.outside_messages.policy")));
+    // settings of the fixing agent
+    let o = call(&env, "flow_assist_settings", json!({"matrix": true, "matrix_room": "ops", "models": [{"name": "lan/small", "local": true, "timeout_seconds": 30}, {"name": "cloud/big"}], "fallback": true})).unwrap();
+    assert!(o.contains("Matrix notice on") && o.contains("room ops") && o.contains("lan/small (local) 30s") && o.contains("cloud/big"), "{o}");
+    let g = env.assist_store().global();
+    assert!(g.matrix && g.profile.models.len() == 2 && g.profile.fallback);
+    assert!(call(&env, "flow_assist_settings", json!({"models": [{"name": ""}]})).is_err());
+    assert!(call(&env, "flow_assist_settings", json!({})).unwrap().contains("Matrix notice on"), "no arguments only shows");
+    assert!(audits.lock().unwrap().iter().any(|l| l.contains("flow.assist.settings")));
 }
 
 #[test]
@@ -581,7 +669,7 @@ fn the_tools_are_wrapped_for_the_tile_chat_and_the_hard_ask_ones_are_never_appro
     }
     let open: SharedOpen = Arc::new(Mutex::new(Open::default()));
     let t = FlowTools::new(Arc::new(Inner), env.clone(), open.clone());
-    assert_eq!(t.defs().len(), 24, "23 flow tools (with the webhook tools) and ask_form");
+    assert_eq!(t.defs().len(), 36, "35 flow tools (with the webhook tools) and ask_form");
     assert_eq!(t.call("something_else", &json!({})).unwrap(), "inner something_else");
     // with a flow open, `flow` may be left out
     call(&env, "flow_create", json!({"name": "Open one", "nodes": [{"id": "n", "kind": "notify", "config": {"title": "hi"}}]})).unwrap();
@@ -655,7 +743,7 @@ fn the_scheduler_starts_at_sign_in_only_for_accounts_with_flows_and_stops_at_sig
     let p = env.policy.clone();
     // the hub keys on the services folder, so this account is its own
     let user = "rootlogin";
-    let flows = crate::scope::home_root(user, svc.dir()).join("Flows");
+    let flows = crate::scope::home_root_for_writes(user, svc.dir()).join("Flows");
     let _ = std::fs::remove_dir_all(&flows);
     assert!(!FlowEnv::start_for_login(&svc, user, &p), "no flows, nothing started");
     assert!(!FlowEnv::scheduler_running(&svc, user));
@@ -716,6 +804,9 @@ fn the_flows_chat_leads_with_flow_tools_hides_app_creation_and_asks_for_missing_
 #[test]
 fn deleting_a_flow_and_dropping_a_version_are_hard_ask_named_audited_and_refused_when_unsafe() {
     let (env, _d) = env_with("deldrop", policy(&["*"]));
+    let audits = Arc::new(Mutex::new(Vec::new()));
+    let a2 = audits.clone();
+    *env.host.audit_sink.lock().unwrap() = Some(Arc::new(move |_, a, d| a2.lock().unwrap().push(format!("{a} {d}"))));
     call(&env, "flow_create", spec()).unwrap();
     call(&env, "flow_publish", json!({"flow": "check-the-shop", "changelog": "one"})).unwrap();
     call(&env, "flow_edit", json!({"flow": "check-the-shop", "ops": [{"op": "update_node", "id": "ping", "timeout_ms": 9}]})).unwrap();
@@ -733,6 +824,7 @@ fn deleting_a_flow_and_dropping_a_version_are_hard_ask_named_audited_and_refused
     call(&env, "flow_drop_version", json!({"flow": "check-the-shop", "version": 1})).unwrap();
     assert!(env.store.get_version("check-the-shop", 1).is_none() && env.store.get_version("check-the-shop", 2).is_some());
     assert_eq!(env.store.versions("check-the-shop").len(), 1);
+    assert!(audits.lock().unwrap().iter().any(|l| l.starts_with("flow.version.drop check-the-shop v1")), "{:?}", audits.lock().unwrap());
     let e = call(&env, "flow_drop_version", json!({"flow": "check-the-shop", "version": 2})).unwrap_err();
     assert!(e.contains("only version"), "{e}");
     // a flow with an unfinished run is not deleted
@@ -743,8 +835,19 @@ fn deleting_a_flow_and_dropping_a_version_are_hard_ask_named_audited_and_refused
     assert!(env.store.exists("check-the-shop"));
     let rid = env.engine.summaries()[0].id.clone();
     env.engine.cancel(&rid).unwrap();
-    let e = call(&env, "flow_delete", json!({"flow": "check-the-shop"}));
-    assert!(e.is_ok() || e.unwrap_err().contains("not finished"));
+    assert!(!audits.lock().unwrap().iter().any(|l| l.starts_with("flow.delete")), "a refused delete is not audited as done");
+    // the cancel is handled by the engine's own thread: wait until the delete is no longer refused
+    let t0 = std::time::Instant::now();
+    loop {
+        match call(&env, "flow_delete", json!({"flow": "check-the-shop"})) {
+            Ok(_) => break,
+            Err(e) => assert!(e.contains("not finished") && t0.elapsed().as_secs() < 10, "{e}"),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(!env.store.exists("check-the-shop"));
+    let a = audits.lock().unwrap().clone();
+    assert!(a.iter().any(|l| l.starts_with("flow.delete check-the-shop") && l.contains("Check the shop")), "{a:?}");
 }
 
 #[test]
@@ -830,6 +933,26 @@ fn the_last_open_flow_is_kept_per_person_bounded_and_cleared_on_delete_and_sign_
 }
 
 #[test]
+fn the_last_open_flow_ends_after_four_hours_and_not_a_minute_before() {
+    let (env, _d) = env_with("last-flow-ttl", policy(&["*"]));
+    assert_eq!(LAST_FLOW_TTL_SECS, 4 * 3600);
+    call(&env, "flow_create", json!({"name": "Old one", "nodes": [{"id": "n", "kind": "notify", "config": {"title": "hi"}}]})).unwrap();
+    let key = last_key(&env.svc, &env.user);
+    let age = |secs: i64| {
+        set_last_flow(&env.svc, &env.user, "old-one", "Old one");
+        let mut m = last_slot().lock().unwrap_or_else(|e| e.into_inner());
+        m.get_mut(&key).unwrap().2 = crate::clock::now_unix() - secs;
+    };
+    // a minute short of four hours: still attached
+    age(LAST_FLOW_TTL_SECS - 60);
+    assert_eq!(last_flow(&env).map(|(id, _)| id).as_deref(), Some("old-one"));
+    // a minute over: gone, and the record is dropped so the chat shows no chip
+    age(LAST_FLOW_TTL_SECS + 60);
+    assert!(last_flow(&env).is_none());
+    assert!(!last_flow_recorded(&env.svc, &env.user));
+}
+
+#[test]
 fn pruning_the_history_by_the_tool_lists_first_asks_always_and_spares_the_newest_and_the_unfinished() {
     let (env, _d) = env_with("prunehist", policy(&["*"]));
     call(&env, "flow_create", json!({"name": "Only tell", "nodes": [{"id": "tell", "kind": "notify", "config": {"title": "hi"}}]})).unwrap();
@@ -860,4 +983,170 @@ fn pruning_the_history_by_the_tool_lists_first_asks_always_and_spares_the_newest
     assert!(again.starts_with("Removed 1 run(s)"), "{again}");
     assert_eq!(env.engine.summaries().len(), 1);
     assert!(call(&env, "flow_prune_history", json!({"keep": 1, "days": 1})).unwrap().contains("nothing to remove"));
+}
+
+#[test]
+fn saved_machines_are_managed_by_chat_with_a_vault_name_only_and_a_flow_runs_there_through_the_real_transport() {
+    let (env, _d) = env_with("rmach", policy(&["127.0.0.1", "*"]));
+    assert!(call(&env, "remote_machines", json!({})).unwrap().contains("No machines"));
+    // the token has to be in the vault first, and only its name is given
+    let e = call(&env, "remote_machine_add", json!({"name": "lab", "url": "http://127.0.0.1:9", "token_vault": "lab-token"})).unwrap_err();
+    assert!(e.contains("no such entry"), "{e}");
+    let e = call(&env, "remote_machine_add", json!({"name": "lab", "url": "http://127.0.0.1:9", "token_vault": "a pasted token value!"})).unwrap_err();
+    assert!(!e.contains("pasted"), "{e}");
+    env.svc.on_login(&env.user, "a-long-test-passphrase", true);
+    env.svc.user_set(&env.user, "lab-token", "tok-secret-12345").unwrap();
+    // the other machine: a real socket that answers the two calls
+    let (port, seen) = serve(vec![http_resp(200, &[("Content-Type", "application/json")], r#"{"run":"r5","flow":"nightly"}"#), http_resp(200, &[("Content-Type", "application/json")], r#"{"status":"succeeded","nodes":[{"node":"a","state":"succeeded"}]}"#)], 0);
+    let url = format!("http://127.0.0.1:{port}");
+    let ok = call(&env, "remote_machine_add", json!({"name": "lab", "url": url, "token_vault": "uvault:lab-token"})).unwrap();
+    assert!(ok.contains("Saved") && !ok.contains("tok-secret"), "{ok}");
+    assert!(call(&env, "remote_machines", json!({})).unwrap().contains(&format!("lab {url}")));
+    let raw = std::fs::read_to_string(env.data.join("remote-machines.json")).unwrap();
+    assert!(!raw.contains("tok-secret"), "the file holds the vault name only: {raw}");
+    let r = call(&env, "remote_flow_run", json!({"machine": "lab", "flow": "nightly", "inputs": {"x": 1}, "wait_s": 20})).unwrap();
+    assert!(r.contains("Run r5 on lab: succeeded") && r.contains("a: succeeded"), "{r}");
+    let sent = seen.lock().unwrap().clone();
+    assert!(sent[0].starts_with("POST /api/v1/flows/nightly/run ") && sent[0].to_ascii_lowercase().contains("authorization: bearer tok-secret-12345"), "{}", sent[0]);
+    assert!(sent[1].starts_with("GET /api/v1/flows/nightly/runs/r5 "), "{}", sent[1]);
+    assert!(!r.contains("tok-secret"));
+    // an unknown name is refused before anything is sent, and a machine can be forgotten
+    assert!(call(&env, "remote_flow_run", json!({"machine": "nope", "flow": "n"})).unwrap_err().contains("no saved machine"));
+    assert!(call(&env, "remote_machine_remove", json!({"name": "lab"})).unwrap().contains("Forgot"));
+    assert!(call(&env, "remote_machine_remove", json!({"name": "lab"})).unwrap().contains("No machine"));
+    // every one of these asks first except the list
+    let d = defs(&policy(&["*"]));
+    let risk = |n: &str| d.iter().find(|x| x.spec.name == n).unwrap().risk;
+    assert_eq!(risk("remote_machines"), Risk::Safe);
+    for n in ["remote_machine_add", "remote_machine_remove", "remote_flow_run"] {
+        assert_eq!(risk(n), Risk::Ask, "{n}");
+    }
+    // a host the account may not reach is refused
+    let (env2, _d2) = env_with("rmach2", policy(&["example.org"]));
+    env2.svc.on_login(&env2.user, "a-long-test-passphrase", true);
+    env2.svc.user_set(&env2.user, "t", "tok-secret-12345").unwrap();
+    call(&env2, "remote_machine_add", json!({"name": "far", "url": "http://127.0.0.1:9", "token_vault": "t"})).unwrap();
+    assert!(call(&env2, "remote_flow_run", json!({"machine": "far", "flow": "n"})).unwrap_err().contains("may not reach"));
+}
+
+// ---- the flows runner's import, validate and stop over the real flow environment (F-WEBSVC-12)
+
+mod real_runner {
+    use super::*;
+    use crate::webservice::real::assemble;
+    use iyakki_core_api::{ApiError, AuditSink, Authenticator, Principal};
+
+    struct NoAuth;
+    impl Authenticator for NoAuth {
+        fn login(&self, _: &str, _: &str) -> iyakki_core_api::ApiResult<Principal> {
+            Err(ApiError::Denied("no".into()))
+        }
+        fn lookup(&self, _: &str) -> Option<Principal> {
+            None
+        }
+    }
+    struct NoAudit;
+    impl AuditSink for NoAudit {
+        fn record(&self, _: &str, _: &str, _: &str) {}
+    }
+
+    fn principal(user: &str) -> Principal {
+        Principal { user: user.into(), role: "user".into(), admin: false, policy: Role::User.template() }
+    }
+
+    #[test]
+    fn a_flow_is_validated_imported_as_a_safe_draft_run_and_stopped_through_the_real_extras() {
+        let d = tmp("runner-real");
+        let svc = Services::open(&d.join("svc"), Arc::new(Dead), Arc::new(Dead)).unwrap();
+        let deps = assemble(Arc::new(NoAuth), Arc::new(NoAudit), svc, Arc::new(crate::cli::tests::MockHost::default()));
+        let x = &deps.extras;
+        let p = principal("runnerann");
+        // a flow without a start step is an error; one with a start and an end is fine
+        let mut f = Flow::new("imp", "Imported");
+        f.production = true;
+        f.triggers.push(Trigger::new("t", TriggerKind::Interval { every_s: 60, anchor_ms: None }));
+        let broken = serde_json::from_str::<serde_json::Value>(&f.to_json()).unwrap();
+        let issues = x.flow_validate(&p, None, Some(&broken)).unwrap();
+        assert!(issues.iter().any(|i| i["level"] == "error"), "{issues:?}");
+        f.nodes.push(Node::new("s", "start", json!({})));
+        f.nodes.push(Node::new("w", "delay", json!({"seconds": 30})));
+        f.nodes.push(Node::new("e", "end", json!({})));
+        f.edges.push(Edge::new("s", "w"));
+        f.edges.push(Edge::new("w", "e"));
+        let good = serde_json::from_str::<serde_json::Value>(&f.to_json()).unwrap();
+        assert!(!x.flow_validate(&p, None, Some(&good)).unwrap().iter().any(|i| i["level"] == "error"));
+        assert!(x.flow_validate(&p, None, Some(&json!("not a flow"))).is_err());
+        assert!(matches!(x.flow_validate(&p, Some("nope"), None), Err(ApiError::NotFound(_))));
+        // import: a safe draft, a second import gets a free id, and it is the person's own (another person has none)
+        let a = x.flow_import(&p, &good).unwrap();
+        assert_eq!(a["id"], "imp");
+        assert_eq!(x.flow_import(&p, &good).unwrap()["id"], "imp-2");
+        assert!(x.flow_import(&p, &json!({"nodes": 5})).is_err());
+        assert!(x.flows(&p).unwrap().iter().any(|v| v["id"] == "imp"));
+        assert!(x.flows(&principal("runnerbob")).unwrap().is_empty());
+        let back = x.flow_export(&p, "imp").unwrap();
+        assert_eq!(back["production"], false, "an import is never production");
+        assert!(back["triggers"].as_array().unwrap().iter().all(|t| t["enabled"] == false), "its triggers are off");
+        assert!(x.flow_validate(&p, Some("imp"), None).is_ok());
+        // run the draft (a 30 second wait), stop it, and the run ends cancelled; another person cannot stop it
+        let run = x.flow_run(&p, "imp", true, &json!({})).unwrap();
+        assert!(matches!(x.flow_run_stop(&principal("runnerbob"), "imp", &run), Err(ApiError::NotFound(_))));
+        assert!(matches!(x.flow_run_stop(&p, "imp", "no-such-run"), Err(ApiError::NotFound(_))));
+        x.flow_run_stop(&p, "imp", &run).unwrap();
+        let end = std::time::Instant::now() + Duration::from_secs(15);
+        let mut status = String::new();
+        while std::time::Instant::now() < end {
+            status = x.flow_run_get(&p, "imp", &run).unwrap()["status"].as_str().unwrap_or("").to_string();
+            if status == "cancelled" {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(status, "cancelled", "the stopped run ended");
+    }
+
+    fn wait_status(x: &std::sync::Arc<crate::webservice::deps::Deps>, p: &Principal, flow: &str, run: &str, want: &str) -> String {
+        let end = std::time::Instant::now() + Duration::from_secs(20);
+        let mut status = String::new();
+        while std::time::Instant::now() < end {
+            status = x.extras.flow_run_get(p, flow, run).map(|v| v["status"].as_str().unwrap_or("").to_string()).unwrap_or_default();
+            if status == want {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        status
+    }
+
+    #[test]
+    fn a_step_that_waits_for_a_person_is_answered_once_by_that_person_and_nobody_else() {
+        let d = tmp("runner-decide");
+        let svc = Services::open(&d.join("svc"), Arc::new(Dead), Arc::new(Dead)).unwrap();
+        let deps = assemble(Arc::new(NoAuth), Arc::new(NoAudit), svc, Arc::new(crate::cli::tests::MockHost::default()));
+        let (p, other) = (principal("deciderann"), principal("deciderbob"));
+        let mut f = Flow::new("ask", "Ask");
+        f.nodes.push(Node::new("s", "start", json!({})));
+        f.nodes.push(Node::new("a", "approval", json!({"message": "Continue?"})));
+        f.nodes.push(Node::new("e", "end", json!({})));
+        f.edges.push(Edge::new("s", "a"));
+        f.edges.push(Edge::new("a", "e").port("approved"));
+        deps.extras.flow_import(&p, &serde_json::from_str::<serde_json::Value>(&f.to_json()).unwrap()).unwrap();
+        // the run reaches the step and waits ("needs you")
+        let run = deps.extras.flow_run(&p, "ask", true, &json!({})).unwrap();
+        assert_eq!(wait_status(&deps, &p, "ask", &run, "needs you"), "needs you");
+        // not theirs, no such step, not a step that waits: not found
+        assert!(matches!(deps.extras.flow_run_decide(&other, "ask", &run, "a", true), Err(ApiError::NotFound(_))));
+        assert!(matches!(deps.extras.flow_run_decide(&p, "ask", &run, "nope", true), Err(ApiError::NotFound(_))));
+        assert!(matches!(deps.extras.flow_run_decide(&p, "ask", &run, "s", true), Err(ApiError::NotFound(_))), "a step that is not waiting");
+        assert!(matches!(deps.extras.flow_run_decide(&p, "other-flow", &run, "a", true), Err(ApiError::NotFound(_))));
+        // the person approves: the run goes on and ends; a second answer finds nothing waiting
+        deps.extras.flow_run_decide(&p, "ask", &run, "a", true).unwrap();
+        assert_eq!(wait_status(&deps, &p, "ask", &run, "succeeded"), "succeeded");
+        assert!(deps.extras.flow_run_decide(&p, "ask", &run, "a", true).is_err());
+        // a no ends the run without the rest
+        let run2 = deps.extras.flow_run(&p, "ask", true, &json!({})).unwrap();
+        assert_eq!(wait_status(&deps, &p, "ask", &run2, "needs you"), "needs you");
+        deps.extras.flow_run_decide(&p, "ask", &run2, "a", false).unwrap();
+        assert_eq!(wait_status(&deps, &p, "ask", &run2, "failed"), "failed");
+    }
 }

@@ -64,6 +64,8 @@ pub enum Block {
     Code(String),
     Rule,
     Image(PdfImage),
+    /// Start a new page (nothing happens at the top of a page).
+    PageBreak,
 }
 
 pub struct Builder {
@@ -116,6 +118,81 @@ fn encode(s: &str, replaced: &mut usize) -> Vec<u8> {
             b'?'
         }
     }).collect()
+}
+
+/// Does the text hold a character the standard fonts lack but the embedded font draws correctly (F-PDF-11)?
+fn needs_emb(text: &str) -> bool {
+    text.chars().any(|c| winansi(c).is_none() && !c.is_control() && c != '\u{200b}' && c != '\u{feff}' && crate::embed::supports(c))
+}
+
+fn emb_chars(text: &str) -> Vec<char> {
+    text.chars().filter(|c| *c != '\r' && *c != '\u{200b}' && *c != '\u{feff}' && (!c.is_control() || *c == '\n' || *c == '\t')).map(|c| if c == '\t' { ' ' } else { c }).collect()
+}
+
+/// The face to draw `chars` with: the wanted one when it has every character, else Sans.
+fn emb_face(chars: &[char], want: usize) -> usize {
+    let has = |ix: usize| crate::embed::face(ix).is_some_and(|f| chars.iter().all(|c| *c == '\n' || c.is_whitespace() || f.gid(*c) != 0));
+    if has(want) { want } else { 0 }
+}
+
+fn wrap_emb(chars: &[char], size: f64, max: f64, f: &crate::embed::Face, mono: bool) -> Vec<Vec<char>> {
+    let w = |s: &[char]| s.iter().map(|c| f.width(*c)).sum::<f64>() * size / 1000.0;
+    let mut lines: Vec<Vec<char>> = Vec::new();
+    for para in chars.split(|c| *c == '\n') {
+        let mut cur: Vec<char> = Vec::new();
+        for word in para.split(|c| *c == ' ').filter(|x| !x.is_empty() || mono) {
+            let mut wd = word.to_vec();
+            loop {
+                let try_len = if cur.is_empty() { w(&wd) } else { w(&cur) + w(&[' ']) + w(&wd) };
+                if try_len <= max || (cur.is_empty() && wd.len() <= 1) {
+                    if !cur.is_empty() {
+                        cur.push(' ');
+                    }
+                    cur.extend_from_slice(&wd);
+                    break;
+                }
+                if cur.is_empty() {
+                    let mut cut = 1;
+                    while cut < wd.len() && w(&wd[..cut + 1]) <= max {
+                        cut += 1;
+                    }
+                    lines.push(wd[..cut].to_vec());
+                    wd = wd[cut..].to_vec();
+                    if wd.is_empty() {
+                        break;
+                    }
+                } else {
+                    lines.push(std::mem::take(&mut cur));
+                }
+            }
+        }
+        lines.push(cur);
+    }
+    while lines.len() > 1 && lines.last().map(|l| l.is_empty()).unwrap_or(false) {
+        lines.pop();
+    }
+    lines
+}
+
+/// The hex string for `chars` in an embedded face; the glyphs used are recorded for the subset. A character the font lacks is a `?`.
+fn emb_hex(f: &crate::embed::Face, used: &mut std::collections::BTreeMap<u16, char>, chars: &[char], replaced: &mut usize) -> String {
+    let mut hex = String::with_capacity(chars.len() * 4 + 2);
+    hex.push('<');
+    for &c in chars {
+        let (mut g, mut ch) = (f.gid(c), c);
+        if g == 0 {
+            if c.is_whitespace() {
+                (g, ch) = (f.gid(' '), ' ');
+            } else {
+                *replaced += 1;
+                (g, ch) = (f.gid('?'), '?');
+            }
+        }
+        used.insert(g, ch);
+        let _ = write!(hex, "{g:04X}");
+    }
+    hex.push('>');
+    hex
 }
 
 fn escape(b: &[u8]) -> String {
@@ -205,6 +282,7 @@ impl Builder {
         let mut pages: Vec<PageOut> = vec![PageOut { content: String::new(), images: vec![] }];
         let mut images: Vec<&PdfImage> = Vec::new();
         let mut y = top;
+        let mut used: [std::collections::BTreeMap<u16, char>; 3] = Default::default();
         macro_rules! new_page {
             () => {
                 pages.push(PageOut { content: String::new(), images: vec![] });
@@ -217,6 +295,11 @@ impl Builder {
                 break;
             }
             match b {
+                Block::PageBreak => {
+                    if !first_on_page {
+                        new_page!();
+                    }
+                }
                 Block::Rule => {
                     if y - 12.0 < bottom {
                         new_page!();
@@ -256,11 +339,26 @@ impl Builder {
                         Block::Code(t) => (t, 9.0, false, true, 8.0, 2.0, 8.0, false, None),
                         _ => unreachable!(),
                     };
-                    let bytes = encode(text, &mut replaced);
-                    if bytes.iter().all(|b| *b == b' ') {
-                        continue;
+                    enum Ln {
+                        B(Vec<u8>),
+                        E(Vec<char>),
                     }
-                    let lines = wrap(&bytes, size, cw - indent, bold, mono);
+                    let mut efont = 0usize;
+                    let lines: Vec<Ln> = if needs_emb(text) {
+                        let chars = emb_chars(text);
+                        if chars.iter().all(|c| c.is_whitespace()) {
+                            continue;
+                        }
+                        efont = emb_face(&chars, if mono { 2 } else if bold { 1 } else { 0 });
+                        let f = crate::embed::face(efont).expect("font");
+                        wrap_emb(&chars, size, cw - indent, f, efont == 2).into_iter().map(Ln::E).collect()
+                    } else {
+                        let bytes = encode(text, &mut replaced);
+                        if bytes.iter().all(|b| *b == b' ') {
+                            continue;
+                        }
+                        wrap(&bytes, size, cw - indent, bold, mono).into_iter().map(Ln::B).collect()
+                    };
                     let lh = size * if mono { 1.2 } else { 1.3 };
                     // keep a heading with the lines after it
                     let need = if matches!(b, Block::Heading(..)) { before + lh * 3.0 } else { lh };
@@ -284,7 +382,16 @@ impl Builder {
                                 let _ = writeln!(p.content, "BT /F1 {size:.1} Tf {:.2} {:.2} Td ({}) Tj ET", m + indent - 12.0 - width_of(&mb, size, false, false).min(20.0) + 8.0, y, escape(&mb));
                             }
                         }
-                        let _ = writeln!(p.content, "BT /{font} {size:.1} Tf {:.2} {:.2} Td ({}) Tj ET", m + indent, y, escape(line));
+                        match line {
+                            Ln::B(line) => {
+                                let _ = writeln!(p.content, "BT /{font} {size:.1} Tf {:.2} {:.2} Td ({}) Tj ET", m + indent, y, escape(line));
+                            }
+                            Ln::E(chars) => {
+                                let f = crate::embed::face(efont).expect("font");
+                                let hex = emb_hex(f, &mut used[efont], chars, &mut replaced);
+                                let _ = writeln!(p.content, "BT /F{} {size:.1} Tf {:.2} {:.2} Td {hex} Tj ET", 4 + efont, m + indent, y);
+                            }
+                        }
                         if grey {
                             let _ = writeln!(p.content, "0 g");
                             if li == 0 {
@@ -305,8 +412,15 @@ impl Builder {
             }
             for (i, p) in pages.iter_mut().enumerate() {
                 let label = if t.is_empty() { format!("{} / {}", i + 1, total) } else { format!("{}   -   {} / {}", t, i + 1, total) };
-                let lb = encode(&label, &mut replaced);
-                let _ = writeln!(p.content, "0.5 g BT /F1 8 Tf {:.2} {:.2} Td ({}) Tj ET 0 g", m, m - 4.0, escape(&lb));
+                if needs_emb(&label) {
+                    let chars = emb_chars(&label);
+                    let f = crate::embed::face(0).expect("font");
+                    let hex = emb_hex(f, &mut used[0], &chars, &mut replaced);
+                    let _ = writeln!(p.content, "0.5 g BT /F4 8 Tf {:.2} {:.2} Td {hex} Tj ET 0 g", m, m - 4.0);
+                } else {
+                    let lb = encode(&label, &mut replaced);
+                    let _ = writeln!(p.content, "0.5 g BT /F1 8 Tf {:.2} {:.2} Td ({}) Tj ET 0 g", m, m - 4.0, escape(&lb));
+                }
             }
         }
         // objects
@@ -342,20 +456,29 @@ impl Builder {
             if img.alpha.is_some() {
                 let _ = write!(d, " /SMask {} 0 R", smask_no);
             }
-            let _ = write!(d, " /Length {} >>\nstream\n", img.rgb.len());
+            let z = crate::filter::zlib_deflate(&img.rgb);
+            let _ = write!(d, " /Filter /FlateDecode /Length {} >>\nstream\n", z.len());
             let mut o = d.into_bytes();
-            o.extend_from_slice(&img.rgb);
+            o.extend_from_slice(&z);
             o.extend_from_slice(b"\nendstream");
             objs.push(o);
             match &img.alpha {
                 Some(a) => {
-                    let mut o = format!("<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceGray /BitsPerComponent 8 /Length {} >>\nstream\n", img.w, img.h, a.len()).into_bytes();
-                    o.extend_from_slice(a);
+                    let z = crate::filter::zlib_deflate(a);
+                    let mut o = format!("<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode /Length {} >>\nstream\n", img.w, img.h, z.len()).into_bytes();
+                    o.extend_from_slice(&z);
                     o.extend_from_slice(b"\nendstream");
                     objs.push(o);
                 }
                 None => objs.push(b"null".to_vec()),
             }
+        }
+        // embedded fonts come after the pages: five objects each, named /F4 (Sans), /F5 (Bold), /F6 (Mono)
+        let emb_base = page_base + total * 2;
+        let emb_used: Vec<usize> = (0..3).filter(|i| !used[*i].is_empty()).collect();
+        let mut emb_res = String::new();
+        for (k, ix) in emb_used.iter().enumerate() {
+            let _ = write!(emb_res, "/F{} {} 0 R ", 4 + ix, emb_base + 5 * k);
         }
         for (i, p) in pages.iter().enumerate() {
             let content_no = page_base + i * 2 + 1;
@@ -363,11 +486,15 @@ impl Builder {
             for &ix in &p.images {
                 let _ = write!(xo, "/Im{} {} 0 R ", ix, fixed + 1 + ix * 2);
             }
-            objs.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {:.2} {:.2}] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> /XObject << {} >> >> /Contents {} 0 R >>", pw, ph, xo, content_no).into_bytes());
-            let mut c = format!("<< /Length {} >>\nstream\n", p.content.len()).into_bytes();
-            c.extend_from_slice(p.content.as_bytes());
+            objs.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {:.2} {:.2}] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R {} >> /XObject << {} >> >> /Contents {} 0 R >>", pw, ph, emb_res, xo, content_no).into_bytes());
+            let z = crate::filter::zlib_deflate(p.content.as_bytes());
+            let mut c = format!("<< /Filter /FlateDecode /Length {} >>\nstream\n", z.len()).into_bytes();
+            c.extend_from_slice(&z);
             c.extend_from_slice(b"\nendstream");
             objs.push(c);
+        }
+        for (k, ix) in emb_used.iter().enumerate() {
+            objs.extend(crate::embed::objects(*ix, &used[*ix], emb_base + 5 * k));
         }
         let mut out: Vec<u8> = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n".to_vec();
         let mut offsets = Vec::new();

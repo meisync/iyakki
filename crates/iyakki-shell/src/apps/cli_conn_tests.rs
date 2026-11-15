@@ -399,7 +399,7 @@ fn geometry_and_clicks_hold_at_every_screen_size_for_the_list_the_form_and_the_d
         }
         // the buttons are inside the panel, in at most two rows, and do not overlap each other
         let buttons: Vec<_> = g.hits.iter().filter(|x| matches!(x.ev, Event::Key(Key::Char(_))) && x.label.contains('(')).collect();
-        assert_eq!(buttons.len(), 7, "{what}");
+        assert_eq!(buttons.len(), 8, "{what}");
         for (i, a) in buttons.iter().enumerate() {
             for b in buttons.iter().skip(i + 1) {
                 let apart = a.rect.x + a.rect.w <= b.rect.x + 0.5 || b.rect.x + b.rect.w <= a.rect.x + 0.5 || a.rect.y + a.rect.h <= b.rect.y + 0.5 || b.rect.y + b.rect.h <= a.rect.y + 0.5;

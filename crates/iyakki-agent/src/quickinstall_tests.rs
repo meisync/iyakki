@@ -276,11 +276,21 @@ fn fake_program(t: &Tmp) -> PathBuf {
     p
 }
 
+/// Like [`fake_program`], but the first step does not end before the test creates the file `go` next to it (a fixed sleep could run
+/// out while the test thread waited for a CPU on a loaded machine, and the "still running" checks would then see finished jobs).
+fn held_program(t: &Tmp) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let p = t.0.join("fake-iyakki");
+    std::fs::write(&p, "#!/bin/sh\necho \"[1/2] fake $2\"\nwhile [ ! -e \"$(dirname \"$0\")/go\" ]; do sleep 0.02; done\necho \"[2/2] done $2\"\n").unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
 #[test]
 fn starting_runs_one_detached_job_per_step_in_the_install_workspace_and_refuses_a_second_run() {
     let t = Tmp::new("start");
     let jobs = Jobs::new(&t.0.join("jobs"));
-    let l = Launch { exe: fake_program(&t), data: t.0.join("data") };
+    let l = Launch { exe: held_program(&t), data: t.0.join("data") };
     let none = |_: Item| false;
     let started = start(&jobs, "alice", Item::Elasticsearch, &none, &l).unwrap();
     assert_eq!(started.iter().map(|j| j.label.as_str()).collect::<Vec<_>>(), ["Install k3s (1/2)", "Install Elasticsearch (2/2, after k3s)"]);
@@ -291,6 +301,7 @@ fn starting_runs_one_detached_job_per_step_in_the_install_workspace_and_refuses_
     assert!(e.contains("being installed already"), "{e}");
     assert_eq!(install_jobs(&jobs, "alice").len(), 2);
     assert!(jobs.visible("alice", "").is_empty(), "installer jobs are not in the chat's strip");
+    std::fs::write(t.0.join("go"), "go").unwrap();
     let t0 = Instant::now();
     for j in &started {
         let done = jobs.wait("alice", &j.id, Duration::from_secs(20)).unwrap();

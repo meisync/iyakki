@@ -85,6 +85,22 @@ fn each_key_changes_one_choice_keeps_it_for_this_person_and_audits_it() {
 }
 
 #[test]
+fn the_typing_echo_switch_is_on_the_page_saved_and_audited() {
+    let cx = admin("acc-set-echo");
+    let dir = cx.services.dir().to_path_buf();
+    let mut a = SettingsApp::new(&cx).on(Tab::Accessibility);
+    assert!(acc::load(&dir, "root").typing_echo, "on by default");
+    press(&mut a, &cx, 'e');
+    assert!(!acc::load(&dir, "root").typing_echo);
+    let g = draw(&mut a, &cx, 1280, 720);
+    let said: Vec<String> = g.hits.iter().filter_map(access::node_of).map(|n| n.speak()).collect();
+    assert!(said.iter().any(|s| s == "Typing echo, switch, off"), "{said:?}");
+    press(&mut a, &cx, 'e');
+    assert!(acc::load(&dir, "root").typing_echo);
+    assert!(std::fs::read_to_string(cx.audit.path()).unwrap_or_default().contains("typing echo"));
+}
+
+#[test]
 fn the_reader_without_a_voice_is_said_on_the_page_and_in_the_message() {
     let cx = admin("acc-set-novoice");
     let mut a = SettingsApp::new(&cx).on(Tab::Accessibility);

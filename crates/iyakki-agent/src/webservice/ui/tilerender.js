@@ -63,8 +63,38 @@
     img.rgba[i + 3] = 255;
   }
 
+  const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  // base64 text to bytes, with no help from the page or from node (a bad character ends it)
+  function fromBase64(s) {
+    const out = []; let acc = 0, bits = 0;
+    for (const ch of String(s)) {
+      const v = B64.indexOf(ch);
+      if (v < 0) { if (ch === "=") break; return null; }
+      acc = (acc << 6) | v; bits += 6;
+      if (bits >= 8) { bits -= 8; out.push((acc >> bits) & 255); acc &= (1 << bits) - 1; }
+    }
+    return Uint8Array.from(out);
+  }
+
+  // The pictures of a frame ({"7": {w, h, rgba: base64}}) as handle -> {w, h, rgba}. Sizes are checked as on the host (at most 1024 x 1024,
+  // the bytes must match); a picture that does not pass is left out, and its handle draws as a grey box.
+  function decodeImages(images) {
+    const out = {};
+    if (!images || typeof images !== "object") return out;
+    for (const k of Object.keys(images).slice(0, 64)) {
+      const p = images[k] || {};
+      const w = p.w | 0, h = p.h | 0;
+      if (w <= 0 || h <= 0 || w > 1024 || h > 1024) continue;
+      const bytes = typeof p.rgba === "string" ? fromBase64(p.rgba) : p.rgba;
+      if (bytes && bytes.length === w * h * 4) out[k] = { w, h, rgba: bytes };
+    }
+    return out;
+  }
+
   // Draw the list into an RGBA image of w x h on the background colour bg ([r, g, b, a]). A bad op is skipped, never thrown on.
-  function render(ops, w, h, bg) {
+  // `images` is a frame's "images" member (or already decoded): pictures drawn by handle, scaled to their rectangle by nearest neighbour.
+  function render(ops, w, h, bg, images) {
+    const pics = decodeImages(images);
     w = Math.max(0, w | 0); h = Math.max(0, h | 0);
     const img = newImage(w, h, bg || [255, 255, 255, 255]);
     const surface = { x: 0, y: 0, w, h };
@@ -133,7 +163,19 @@
           }
           break;
         }
-        case "image": fill(clip, r, [128, 128, 128, 255]); break;
+        case "image": {
+          const p = pics[String(op.handle >>> 0)];
+          if (!p || r.w <= 0 || r.h <= 0) { fill(clip, r, [128, 128, 128, 255]); break; }
+          const v = intersect(r, clip);
+          for (let y = v.y; y < v.y + v.h; y++) {
+            const sy = Math.floor((y - r.y) * p.h / r.h);
+            for (let x = v.x; x < v.x + v.w; x++) {
+              const sx = Math.floor((x - r.x) * p.w / r.w), i = (sy * p.w + sx) * 4;
+              if (p.rgba[i + 3] > 0) blend(img, x, y, [p.rgba[i], p.rgba[i + 1], p.rgba[i + 2], p.rgba[i + 3]]);
+            }
+          }
+          break;
+        }
         case "push_clip": clips.push(intersect(r, clip)); break;
         case "pop_clip": if (clips.length > 1) clips.pop(); break;
         default: break; // "hit" and anything unknown draw nothing
@@ -175,7 +217,7 @@
   function draw(canvas, frame, scale, bg) {
     const w = Math.max(1, Math.min(4096, frame.width | 0)), h = Math.max(1, Math.min(4096, frame.height | 0));
     const s = Math.max(1, Math.min(4, Math.round(scale || 1)));
-    const img = upscale(render(frame.ops, w, h, bg), s);
+    const img = upscale(render(frame.ops, w, h, bg, frame.images), s);
     canvas.width = img.w;
     canvas.height = img.h;
     canvas.setAttribute("data-logical", w + "x" + h);
@@ -186,7 +228,7 @@
     return { w, h };
   }
 
-  const exported = { FONT, glyph, parseColor, render, upscale, hitAt, draw };
+  const exported = { FONT, glyph, parseColor, render, upscale, hitAt, draw, fromBase64, decodeImages };
   if (typeof module !== "undefined" && module.exports) module.exports = exported;
   else root.IyakkiTileRender = exported;
 })(typeof window !== "undefined" ? window : globalThis);

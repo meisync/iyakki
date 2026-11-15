@@ -185,3 +185,54 @@ fn eighty_megabytes_with_a_small_change_in_seconds() {
     println!("apply_delta {:?}", t.elapsed());
     assert!(d.len() < 20 << 20);
 }
+
+// ------------------------------------------------------------------------------ golden fixture (F-CORE-23, finding F-8)
+
+fn fixture_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/compat/alpha3/binary-delta-v1.hex")
+}
+
+fn old_and_new() -> (Vec<u8>, Vec<u8>) {
+    let old: Vec<u8> = (0..3000u32).map(|i| (i * 31 % 251) as u8).collect();
+    let mut new = old.clone();
+    new[1500..1520].copy_from_slice(b"changed in the delta");
+    new.extend_from_slice(b"and a tail");
+    (old, new)
+}
+
+fn from_hex(t: &str) -> Vec<u8> {
+    let t = t.trim();
+    (0..t.len() / 2).map(|i| u8::from_str_radix(&t[2 * i..2 * i + 2], 16).unwrap()).collect()
+}
+
+/// Writes `tests/compat/alpha3/binary-delta-v1.hex` (once, when the release is cut; never edited after).
+#[test]
+#[ignore]
+fn record_alpha3_binary_delta() {
+    if std::env::var("IYAKKI_COMPAT_RECORD").is_ok() {
+        let (old, new) = old_and_new();
+        let hex: String = make_delta(&old, &new).iter().map(|b| format!("{b:02x}")).collect();
+        std::fs::write(fixture_path(), hex + "\n").unwrap();
+    }
+}
+
+#[test]
+fn the_delta_alpha3_wrote_is_still_read_applies_to_its_old_file_and_a_newer_version_is_named_not_half_read() {
+    let d = from_hex(&std::fs::read_to_string(fixture_path()).unwrap());
+    assert_eq!(&d[..8], MAGIC);
+    let (old, new) = old_and_new();
+    let i = info(&d).unwrap();
+    assert_eq!((i.old_len, i.new_len), (old.len() as u64, new.len() as u64));
+    assert_eq!(apply_delta(&old, &d).unwrap(), new, "what alpha.3 wrote applies to the file it was made against");
+    // a delta of a newer layout (version field and checksum both rewritten) is refused with the sentence that names the version
+    let mut newer = d[..d.len() - 32].to_vec();
+    newer[8..12].copy_from_slice(&(VERSION + 1).to_be_bytes());
+    let sum = sha256(&newer);
+    newer.extend_from_slice(&sum);
+    assert!(info(&newer).unwrap_err().contains("is not understood"), "{:?}", info(&newer));
+    // the wrong old file is refused and a flipped byte fails the checksum
+    assert!(apply_delta(&new, &d).is_err());
+    let mut bad = d.clone();
+    bad[40] ^= 1;
+    assert!(info(&bad).unwrap_err().contains("checksum"));
+}

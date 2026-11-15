@@ -325,3 +325,179 @@ fn a_locked_screen_still_answers_a_computer_that_asks_and_stays_locked() {
     assert!(asker.join().unwrap().is_ok());
     assert!(sh.is_locked());
 }
+
+/// A guest has no password and no lock of their own: a saved choice, even one written under the guest name, never locks them.
+#[test]
+fn a_guest_is_never_locked_by_the_idle_minutes() {
+    let mut sh = signed_in("lk-guest-auto", "gus", "guestpass1");
+    let clock = Arc::new(AtomicU64::new(1_000));
+    sh.saver_clock_for_test(clock.clone());
+    sh.saver_config_for_test(SaverConfig { first: First::Nothing, ..SaverConfig::default() });
+    LockConfig { auto_min: 5 }.save(sh.env.services.dir(), "gus").unwrap();
+    run(&mut sh, &clock, 90 * MIN);
+    assert!(!sh.is_locked() && sh.session.is_some(), "a guest stays as they are, however long it is quiet");
+}
+
+/// The automatic lock keeps its minutes on battery (the screen saver's times are halved, this one is not), and a battery in use holds nothing.
+#[test]
+fn the_automatic_lock_is_not_halved_on_battery() {
+    let (mut sh, clock) = timed("lk-battery", 10);
+    let sys = std::env::temp_dir().join(format!("iyakki-lk-batsys-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&sys);
+    for (k, v) in [("type", "Battery"), ("status", "Discharging"), ("capacity", "64"), ("energy_now", "32000000"), ("energy_full", "50000000"), ("energy_full_design", "60000000"), ("power_now", "8000000")] {
+        let p = sys.join(format!("class/power_supply/BAT0/{k}"));
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, format!("{v}\n")).unwrap();
+    }
+    std::fs::create_dir_all(sys.join("class/power_supply/ADP1")).unwrap();
+    std::fs::write(sys.join("class/power_supply/ADP1/type"), "Mains\n").unwrap();
+    std::fs::write(sys.join("class/power_supply/ADP1/online"), "0\n").unwrap();
+    sh.battery.set_env(iyakki_agent::battery::BatteryEnv::at(&sys));
+    sh.battery_step(0);
+    assert!(sh.saver_keep_on_for_test().is_none(), "a battery in use holds nothing");
+    run(&mut sh, &clock, 6 * MIN);
+    assert!(!sh.is_locked(), "ten minutes are ten minutes on battery too (halved it would have locked at five)");
+    run(&mut sh, &clock, 5 * MIN);
+    assert!(sh.is_locked(), "and the lock comes at ten");
+    let _ = std::fs::remove_dir_all(&sys);
+}
+
+/// A drive that was lost keeps its banner up and with it the automatic lock away; the count starts when the banner goes.
+#[test]
+fn the_drive_banner_holds_the_automatic_lock_off() {
+    let (mut sh, clock) = timed("lk-holds", 5);
+    iyakki_storage::loss::set_thread_override(Some(iyakki_storage::loss::Snapshot { state: iyakki_storage::loss::State::Lost, since: 10, lost_at: Some(10), ..Default::default() }));
+    run(&mut sh, &clock, 20 * MIN);
+    assert!(!sh.is_locked(), "the drive banner holds the lock off");
+    iyakki_storage::loss::set_thread_override(None);
+    run(&mut sh, &clock, 4 * MIN);
+    assert!(!sh.is_locked(), "the count began when the last hold ended");
+    run(&mut sh, &clock, 2 * MIN);
+    assert!(sh.is_locked());
+}
+
+/// A stream of silent MP3 frames that never ends, for a radio that really plays on the made-up network.
+struct QuietStream;
+struct QuietBytes(usize);
+impl std::io::Read for QuietBytes {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let n = out.len().min(417);
+        for b in out[..n].iter_mut() {
+            *b = [0xFF, 0xFB, 0x90, 0x64].get(self.0).copied().unwrap_or(0);
+            self.0 = (self.0 + 1) % 417;
+        }
+        Ok(n)
+    }
+}
+impl iyakki_agent::iyakki_proxy::Streamer for QuietStream {
+    fn open(&self, _url: &str, _h: &[(String, String)]) -> Result<iyakki_agent::iyakki_proxy::StreamHead, String> {
+        Ok(iyakki_agent::iyakki_proxy::StreamHead { status: 200, headers: vec![("content-type".into(), "audio/mpeg".into())], body: Box::new(QuietBytes(0)) })
+    }
+}
+
+/// A radio that plays keeps the automatic lock away for as long as it plays, and the count starts when it stops.
+#[test]
+fn a_playing_radio_holds_the_automatic_lock_off_and_the_count_starts_after_it() {
+    let (mut sh, clock) = timed("lk-radio", 5);
+    let radio = sh.env.services.radio.clone();
+    radio.set_streamer(std::sync::Arc::new(QuietStream));
+    let allow: std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync> = std::sync::Arc::new(|_| true);
+    radio.play(&iyakki_agent::radio::Station::new("Jazz FM", "https://jazz.example.org/live.mp3"), allow, "tee /dev/null");
+    for _ in 0..500 {
+        if radio.is_active() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(radio.is_active());
+    assert_eq!(sh.saver_keep_on_for_test(), Some("the radio"));
+    run(&mut sh, &clock, 30 * MIN);
+    assert!(!sh.is_locked(), "nobody locks the screen over a radio that is playing");
+    radio.stop();
+    run(&mut sh, &clock, 4 * MIN);
+    assert!(!sh.is_locked(), "the count began when the radio stopped");
+    run(&mut sh, &clock, 2 * MIN);
+    assert!(sh.is_locked());
+}
+
+#[test]
+fn with_the_lock_choice_on_the_screen_lock_seals_the_browser_data_and_the_right_password_opens_it_again() {
+    use iyakki_agent::profilepolicy::Policy;
+    use iyakki_agent::profilestore::{ProfileStore, Status};
+    let mut sh = signed_in("lk-seal", "root", "rootpass12");
+    let d = sh.env.services.dir().to_path_buf();
+    // a plain profile, then protection on (the key goes into the person's vault), as Settings -> Browser does
+    let plain = iyakki_agent::webengine::profile_dir(&d, "root");
+    std::fs::create_dir_all(plain.join("data")).unwrap();
+    std::fs::write(plain.join("data/cookies.sqlite"), "FAKE-COOKIE-JAR").unwrap();
+    iyakki_agent::profilestore::protect_for(&sh.env.services, "root").unwrap();
+    let st = ProfileStore::new(&d, "root");
+    assert_eq!(st.status(), Status::Open);
+    // the choice is off by default: locking leaves the data open
+    assert!(sh.lock_screen("test"));
+    assert_eq!(st.status(), Status::Open, "off by default");
+    unlock_with(&mut sh, "rootpass12");
+    assert!(!sh.is_locked());
+    // the choice on: locking seals it, the decrypted copy is gone, no key is in the audit text
+    Policy { lock_seal: true, ..Policy::load(&d, "root") }.save(&d, "root").unwrap();
+    assert!(sh.lock_screen("test"));
+    assert_eq!(st.status(), Status::Sealed);
+    assert!(!plain.join("data/cookies.sqlite").exists(), "the decrypted copy was removed");
+    assert!(audit_text(&sh).contains("browser.data.sealed"));
+    // a wrong password opens nothing
+    unlock_with(&mut sh, "not-the-password");
+    assert!(sh.is_locked());
+    assert_eq!(st.status(), Status::Sealed);
+    // the right one opens the lock and the browser data
+    unlock_with(&mut sh, "rootpass12");
+    assert!(!sh.is_locked());
+    assert_eq!(st.status(), Status::Open);
+    assert_eq!(std::fs::read_to_string(plain.join("data/cookies.sqlite")).unwrap(), "FAKE-COOKIE-JAR");
+    let log = audit_text(&sh);
+    assert!(log.contains("browser.data.opened"));
+    let key = sh.env.services.user_get("root", iyakki_agent::profilestore::VAULT_SECRET).unwrap().to_string();
+    assert!(!log.contains(&key), "the key is not in the audit log");
+}
+
+/// An app that only counts the times the lock told it to let go of what it holds.
+struct LockProbe(Arc<AtomicU64>);
+impl App for LockProbe {
+    fn title(&self) -> &'static str {
+        "PROBE"
+    }
+    fn icon(&self) -> Icon {
+        Icon::Chat
+    }
+    fn accent(&self) -> [u8; 4] {
+        [10, 200, 10, 255]
+    }
+    fn hint(&self) -> String {
+        "probe".into()
+    }
+    fn handle(&mut self, _ev: &Event, _cx: &AppCx) -> Flow {
+        Flow::Stay
+    }
+    fn render(&mut self, _g: &mut Gfx, _area: R, _s: f32, _cx: &AppCx, _tick: u64) {}
+    fn on_lock(&mut self, _cx: &AppCx) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn the_lock_tells_the_open_app_to_let_go_only_when_the_browser_data_is_sealed_with_the_screen() {
+    use iyakki_agent::profilepolicy::Policy;
+    let mut sh = signed_in("lk-letgo", "root", "rootpass12");
+    let d = sh.env.services.dir().to_path_buf();
+    let n = Arc::new(AtomicU64::new(0));
+    sh.screen = Screen::App(Box::new(LockProbe(n.clone())), PApp::Browser);
+    // the choice is off by default: nothing is told
+    assert!(sh.lock_screen("test"));
+    assert_eq!(n.load(Ordering::SeqCst), 0);
+    unlock_with(&mut sh, "rootpass12");
+    sh.screen = Screen::App(Box::new(LockProbe(n.clone())), PApp::Browser);
+    // with the choice on, the app is told before the data is sealed
+    Policy { lock_seal: true, ..Policy::load(&d, "root") }.save(&d, "root").unwrap();
+    assert!(sh.lock_screen("test"));
+    assert_eq!(n.load(Ordering::SeqCst), 1);
+}

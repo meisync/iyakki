@@ -1218,3 +1218,32 @@ fn with_keep_listening_empty_results_listen_again_quietly_and_five_in_a_row_stop
 
 #[path = "voice_mine_tests.rs"]
 mod mine_tests;
+
+#[test]
+fn the_open_a_text_file_box_has_browse_inside_the_window_and_the_picker_fills_it() {
+    let mut b = bench("voice-browse");
+    let home = temp_dir("voice-browse-home");
+    std::fs::write(home.join("note.txt"), "Picked text.").unwrap();
+    b.cx.session.policy.fs_read = vec![home.display().to_string()];
+    let cx = b.cx.clone();
+    let mut a = b.app();
+    click(&mut a, &cx, T_LOAD);
+    for (w, h) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (800, 480)] {
+        let mut g = Gfx::new(w, h);
+        let s = (w as f32 / 1280.0).min(h as f32 / 720.0).clamp(0.6, 3.0);
+        a.draw(&mut g, R::new(0.0, 72.0 * s, w as f32, h as f32 - 72.0 * s), s, &cx, 0);
+        let br: Vec<_> = g.hits.iter().filter(|x| x.ev == Event::Tab(T_BROWSE)).collect();
+        assert_eq!(br.len(), 1, "{w}x{h}: one Browse button");
+        assert!(br[0].rect.x >= 0.0 && br[0].rect.x + br[0].rect.w <= w as f32 + 0.5, "{w}x{h}: inside the width");
+    }
+    click(&mut a, &cx, T_BROWSE);
+    assert!(a.path_pick.is_open());
+    let mut g = Gfx::new(1280, 720);
+    a.draw(&mut g, R::new(0.0, 72.0, 1280.0, 648.0), 1.0, &cx, 0);
+    assert!(!g.hits.is_empty());
+    a.handle(&Event::Key(Key::Esc), &cx);
+    assert!(!a.path_pick.is_open() && a.focus == Focus::Path, "Esc closes the picker only");
+}
+
+// live checks against a real Lemonade server (all ignored; see the file)
+include!("voice_live_tests.rs");

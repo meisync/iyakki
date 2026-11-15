@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use argon2::Argon2;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
@@ -144,6 +145,8 @@ pub enum BackupError {
     /// A name inside the file would leave the person's places, or is not one of ours.
     Unsafe(String),
     NoRoom { need: u64, have: u64 },
+    /// The person stopped the backup; the half file was removed.
+    Cancelled,
     Invalid(String),
     Io(String),
 }
@@ -159,6 +162,7 @@ impl std::fmt::Display for BackupError {
             BackupError::OtherAccount { from } => write!(f, "This backup belongs to the account \u{201C}{from}\u{201D}, not to you. Confirm to restore it into your own folder anyway."),
             BackupError::Unsafe(w) => write!(f, "The backup file names a place it must not touch ({w}). It was refused and nothing was changed."),
             BackupError::NoRoom { need, have } => write!(f, "Not enough room: the backup needs about {} MB and {} MB are free.", need.div_ceil(1 << 20), have / (1 << 20)),
+            BackupError::Cancelled => write!(f, "The backup was stopped. No file was made."),
             BackupError::Invalid(w) | BackupError::Io(w) => write!(f, "{w}"),
         }
     }
@@ -224,20 +228,33 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-fn sha_file(p: &Path) -> io::Result<(u64, String)> {
-    let mut f = File::open(p)?;
+fn sha_file(p: &Path, pr: &Progress) -> Result<(u64, String), BackupError> {
+    let mut f = File::open(p).map_err(|e| io_err(&format!("cannot read {}", p.display()), e))?;
     let mut h = Sha256::new();
     let mut n = 0u64;
     let mut buf = vec![0u8; CHUNK];
     loop {
-        let k = f.read(&mut buf)?;
+        if pr.cancel.load(Ordering::Relaxed) {
+            return Err(BackupError::Cancelled);
+        }
+        let k = f.read(&mut buf).map_err(|e| io_err(&format!("cannot read {}", p.display()), e))?;
         if k == 0 {
             break;
         }
         h.update(&buf[..k]);
         n += k as u64;
+        pr.done.fetch_add(k as u64, Ordering::Relaxed);
     }
     Ok((n, hex(&h.finalize())))
+}
+
+/// How far a backup has come, and a way to stop it. The file is read twice (the manifest at the front of the file holds every file's
+/// hash, so the hashes come first), so `total` is twice the size of the files and `done` counts both passes.
+#[derive(Debug, Default)]
+pub struct Progress {
+    pub total: AtomicU64,
+    pub done: AtomicU64,
+    pub cancel: AtomicBool,
 }
 
 fn plain_sub_ok(s: &str) -> bool {
@@ -554,6 +571,11 @@ fn stamp(now: i64) -> String {
 /// Make the backup file in `dest_dir` (a folder the person picked; it must exist). The file is written under a `.part` name and
 /// renamed when complete, so an interrupted run leaves no half file under the real name.
 pub fn create(l: &Layout, dest_dir: &Path, o: &CreateOptions) -> Result<Created, BackupError> {
+    create_with_progress(l, dest_dir, o, &Progress::default())
+}
+
+/// [`create`] that reports its progress and can be stopped (`Progress::cancel`): the half file is removed and the error is `Cancelled`.
+pub fn create_with_progress(l: &Layout, dest_dir: &Path, o: &CreateOptions, pr: &Progress) -> Result<Created, BackupError> {
     if let Some(p) = &o.passphrase {
         if p.chars().count() < MIN_PASSPHRASE {
             return Err(BackupError::Invalid(format!("The passphrase needs at least {MIN_PASSPHRASE} characters.")));
@@ -575,8 +597,10 @@ pub fn create(l: &Layout, dest_dir: &Path, o: &CreateOptions) -> Result<Created,
             return Err(BackupError::NoRoom { need, have: free });
         }
     }
+    pr.total.store(total.saturating_mul(2), Ordering::Relaxed);
+    pr.done.store(0, Ordering::Relaxed);
     for f in &mut p.found {
-        let (n, h) = sha_file(&f.path).map_err(|e| io_err(&format!("cannot read {}", f.path.display()), e))?;
+        let (n, h) = sha_file(&f.path, pr)?;
         f.entry.len = n;
         f.entry.sha256 = h;
     }
@@ -588,7 +612,7 @@ pub fn create(l: &Layout, dest_dir: &Path, o: &CreateOptions) -> Result<Created,
         return Err(BackupError::Invalid(format!("{name} already exists in that folder; nothing was overwritten.")));
     }
     let part = dest_dir.join(format!("{name}.part"));
-    match write_body(&part, &p, &manifest, &mjson, o.passphrase.as_deref()) {
+    match write_body(&part, &p, &manifest, &mjson, o.passphrase.as_deref(), pr) {
         Ok(bytes) => {
             fs::rename(&part, &final_path).map_err(|e| {
                 let _ = fs::remove_file(&part);
@@ -608,7 +632,7 @@ fn put(s: &mut Sealer, total: &mut Sha256, d: &[u8]) -> Result<(), BackupError> 
     s.write_all(d).map_err(|e| io_err("write failed", e))
 }
 
-fn write_body(part: &Path, p: &Plan, m: &Manifest, mjson: &[u8], pass: Option<&str>) -> Result<u64, BackupError> {
+fn write_body(part: &Path, p: &Plan, m: &Manifest, mjson: &[u8], pass: Option<&str>, pr: &Progress) -> Result<u64, BackupError> {
     use std::os::unix::fs::OpenOptionsExt;
     let mut out = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(part).map_err(|e| io_err(&format!("cannot write {}", part.display()), e))?;
     let mut header = MAGIC.to_vec();
@@ -636,12 +660,16 @@ fn write_body(part: &Path, p: &Plan, m: &Manifest, mjson: &[u8], pass: Option<&s
         let mut h = Sha256::new();
         let mut n = 0u64;
         loop {
+            if pr.cancel.load(Ordering::Relaxed) {
+                return Err(BackupError::Cancelled);
+            }
             let k = inp.read(&mut buf).map_err(|er| io_err("read failed", er))?;
             if k == 0 {
                 break;
             }
             h.update(&buf[..k]);
             n += k as u64;
+            pr.done.fetch_add(k as u64, Ordering::Relaxed);
             put(&mut s, &mut total, &buf[..k])?;
         }
         if n != e.len || hex(&h.finalize()) != e.sha256 {

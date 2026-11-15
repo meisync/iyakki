@@ -15,24 +15,39 @@ use crate::ui::{Event, R, TEXT};
 
 pub mod chat;
 pub mod chat_view;
+pub mod chat_browser_data;
+pub mod chat_camvision;
+pub mod chat_hostname;
+pub mod chat_themes;
+pub mod download_open;
+pub mod chat_settings;
+pub mod chat_settings_assistant;
 pub(crate) mod model_picker;
 pub mod chatpic;
 pub mod browser;
 pub mod browser_assist;
 pub mod browser_av;
+pub mod browser_badsites;
 pub mod browser_block;
+pub mod browser_live;
 pub mod browser_chrome;
 pub mod browser_groups;
 pub mod browser_headers;
 pub mod browser_config;
 pub mod browser_dark;
 pub mod browser_data;
+pub mod browser_forms;
+pub mod browser_stream;
+pub mod browser_thumbs;
+pub mod browser_upload;
 pub mod browser_full;
 pub mod browser_media;
 pub mod web_agent;
 pub mod browser_consent;
 pub mod browser_devpanel;
+pub mod browser_inspect;
 pub mod browser_devtools;
+pub mod browser_report;
 pub mod browser_images;
 pub mod browser_sound;
 pub mod soundask;
@@ -52,6 +67,7 @@ pub mod flows;
 pub mod flows_assist;
 pub mod flows_board;
 pub mod flows_canvas;
+pub mod flows_defaults;
 pub mod flows_fail;
 pub mod flows_hook;
 pub mod flows_icons;
@@ -62,19 +78,24 @@ pub mod flows_props;
 pub mod flows_run;
 pub mod flows_view;
 pub mod data;
+pub mod data_port;
 pub mod dropattach;
 pub mod hostfiles;
 pub mod mcp;
+pub mod mcp_port;
 pub mod media;
+pub mod media_port;
 pub mod mediaplay;
 pub mod multiline;
 pub use iyakki_uikit::neon;
 pub mod mesh;
 pub mod radio;
+pub mod radio_port;
 pub mod rag;
 pub mod runs;
 pub mod scan;
 pub mod skills;
+pub mod skills_port;
 pub mod store;
 pub(crate) mod store_drivers;
 pub mod usage;
@@ -90,8 +111,10 @@ pub mod story;
 pub mod system;
 pub mod calendar;
 pub mod camera;
+pub mod camera_port;
 pub use iyakki_uikit::card;
 pub mod tile;
+pub mod tile_wasm;
 pub mod inbox;
 pub mod jobs_ui;
 pub mod edit;
@@ -122,7 +145,7 @@ mod disks_tile_ui;
 pub mod checkup;
 mod checkup_ui;
 pub mod doctor;
-mod doctor_facts;
+pub(crate) mod doctor_facts;
 mod doctor_ui;
 pub mod cluster_host;
 pub mod cluster_switch;
@@ -137,6 +160,8 @@ pub mod git_wizard;
 pub mod ide_git_connect;
 pub mod ide_notes;
 pub mod ide_tasks;
+pub mod embed;
+pub mod ide_preview;
 pub mod ide_tile;
 pub mod ide_tasks_run;
 pub mod ide_layout;
@@ -147,6 +172,7 @@ pub mod devices;
 pub mod settings;
 pub mod settings_nav;
 pub mod users;
+pub mod users_port;
 pub use iyakki_uikit::widgets;
 
 /// What an app asks the shell to do with files dropped on the window.
@@ -180,6 +206,8 @@ pub struct AppCx {
     pub services: Arc<Services>,
     /// Web access for the browser (checked against the user's host policy by the browser itself).
     pub web: Arc<dyn iyakki_web::Fetch>,
+    /// The machine, for what a tile used to read from `/proc` and `/sys` itself (UI/OS split, F-ARCH-05).
+    pub os: Arc<dyn iyakki_core_api::Os>,
 }
 
 pub trait App {
@@ -187,6 +215,11 @@ pub trait App {
     /// The page or tab that is showing, when the app has them (developer mode's `iyakki dev state` tells it).
     fn page(&self) -> String {
         String::new()
+    }
+    /// The title of a dialog or question drawn over this tile right now (a file picker, a form, a confirmation), or `None`. The screen
+    /// reader says it once when it opens (F-A11Y-02).
+    fn dialog_title(&self) -> Option<String> {
+        None
     }
     fn icon(&self) -> Icon;
     fn accent(&self) -> [u8; 4];
@@ -198,6 +231,14 @@ pub trait App {
         self.hint().split(" · ").map(str::to_string).collect()
     }
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow;
+    /// The screen is about to lock and the person's protected browser data is sealed with it: an app that holds a web engine on that data
+    /// lets it go first (F-VAULT-08, KI-742). The default does nothing.
+    fn on_lock(&mut self, _cx: &AppCx) {}
+    /// Asked when the person clicks Back: false keeps the app open (it may be asking something first, and then returns
+    /// `Flow::Back` itself when the answer is yes).
+    fn leave_guard(&mut self, _cx: &AppCx) -> bool {
+        true
+    }
     /// A smooth scroll step of `px` pixels of a nominal screen (positive = up; [`crate::scrolleng::NOTCH_PX`] is one wheel click) while
     /// nothing is drawn over this app. True when something under the pointer scrolled by it; false (the default) makes the shell send
     /// whole [`Event::Scroll`] notches instead, which every app understands.
@@ -207,6 +248,10 @@ pub trait App {
     /// The app wants F12 for itself (the browser's Developer tools) instead of the shell's screenshot key. The shell checks this
     /// before it starts a screenshot; Print Screen still takes one. The default says no.
     fn claims_f12(&self) -> bool {
+        false
+    }
+    /// The app shows another computer's program and wants Alt+key as a key of its own (`Key::Alt`), not as the plain letter. Default: no.
+    fn wants_alt(&self) -> bool {
         false
     }
     /// The app draws its own smooth pictures and wants the wheel's raw clicks: the shell's wheel steps are not eased for it. No tile does
@@ -313,10 +358,26 @@ pub trait App {
     fn context_pick(&mut self, _id: &str, _cx: &AppCx) -> Flow {
         Flow::Stay
     }
+    /// What the tile holds after being handed an item by another tile: EDIT the open files, MEDIA the queue and its place, DATA the
+    /// table path (tests of the hand-over at shell level; every other app: nothing).
+    #[cfg(test)]
+    fn probe(&self) -> String {
+        String::new()
+    }
+    /// The address of the list link that has the keyboard focus (browser tests).
+    #[cfg(test)]
+    fn probe_link(&self) -> Option<String> {
+        None
+    }
     /// A custom app answers with itself so the shell's tests can look inside (every other app: nothing).
     #[cfg(test)]
     fn as_any_tile(&mut self) -> Option<&mut tile::TileApp> {
         None
+    }
+    /// A `wasm` tile answers with the words it drew, or why it does not run (every other app: nothing).
+    #[cfg(test)]
+    fn wasm_tile_text(&mut self) -> String {
+        String::new()
     }
     /// Draw into `area` (below the header). `tick` advances ~30 times a second.
     fn render(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx, tick: u64);
@@ -415,6 +476,8 @@ impl ScrollLog {
 pub use iyakki_uikit::blink::{blink, caret_allowed, with_caret};
 
 #[cfg(test)]
+mod browser_compat_probe;
+#[cfg(test)]
 mod learn_tests;
 #[cfg(test)]
 mod disks_tile_tests;
@@ -436,6 +499,8 @@ mod dash_tests;
 mod flows_tests;
 #[cfg(test)]
 pub(crate) mod lemonade_fake;
+#[cfg(test)]
+pub(crate) mod pdf_live_check;
 #[cfg(test)]
 pub(crate) mod tile_harness;
 
@@ -491,7 +556,34 @@ pub(crate) mod tests {
     }
 
     pub fn services_in(d: &std::path::Path, up: Arc<dyn iyakki_agent::iyakki_proxy::Upstream>) -> Arc<Services> {
+        no_real_agents_on_path();
         Services::open(&d.join("svc"), up.clone(), up).unwrap()
+    }
+
+    /// Hermetic tests: a developer PC that has the real `claude` or `copilot` on its PATH must not change what a test sees (the
+    /// sign-in refresh would find the real program and its real account). Once per test process, a folder with two stand-ins that
+    /// fail at once ("not installed", as on a clean machine) goes first on the PATH. A test that wants an agent sets its own command
+    /// or puts a fake in the CLI tile's folder; those are used by their full path.
+    fn no_real_agents_on_path() {
+        use std::os::unix::fs::PermissionsExt;
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let d = std::env::temp_dir().join(format!("iyakki-test-no-agents-{}", std::process::id()));
+            if std::fs::create_dir_all(&d).is_err() {
+                return;
+            }
+            for n in ["claude", "copilot"] {
+                let f = d.join(n);
+                if std::fs::write(&f, "#!/bin/sh\nexit 127\n").is_ok() {
+                    let _ = std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755));
+                }
+            }
+            let mut dirs = vec![d];
+            dirs.extend(std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).unwrap_or_default());
+            if let Ok(p) = std::env::join_paths(dirs) {
+                std::env::set_var("PATH", p);
+            }
+        });
     }
 
     pub fn cx_with_admin_store(tag: &str) -> AppCx {
@@ -508,7 +600,15 @@ pub(crate) mod tests {
             mcp_servers: vec![],
             services: services_in(&d, Arc::new(Offline)),
             web: Arc::new(iyakki_web::fetch::NoNetwork),
+            os: Arc::new(iyakki_core_fake::FakeOs::new()),
         }
+    }
+
+    #[test]
+    fn a_tile_reads_the_machine_through_cx_os_and_a_test_gets_the_fake_one() {
+        let cx = cx_with_admin_store("cx-os");
+        assert_eq!(cx.os.sysinfo().product_name().unwrap(), "Test Machine");
+        assert_eq!(cx.os.sysinfo().cpu_count().unwrap(), 4);
     }
 
     /// Point HOME at a fresh temporary folder for the whole test process, so tests that open the FLOWS environment of an account

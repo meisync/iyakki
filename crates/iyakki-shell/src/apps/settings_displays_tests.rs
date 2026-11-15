@@ -218,3 +218,40 @@ fn the_page_lists_the_touch_screens_changes_their_display_and_starts_the_calibra
     assert!(a.displays_buttons().iter().any(|b| b.2 == 't') && a.displays_buttons().iter().any(|b| b.2 == 'c'));
     crate::touchmap::refresh(&[], &outs, &mut Vec::new());
 }
+
+#[test]
+fn look_again_reads_the_displays_again_and_says_what_it_found() {
+    let cx = admin("sd-look");
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx);
+    assert!(a.displays_buttons().iter().any(|b| b.0 == "Look again" && b.2 == 'l'), "the page has the button");
+    // a connected display with an empty EDID and only fallback modes: the state the Mac mini was in
+    let drm = temp_dir("sd-look-drm");
+    let c = drm.join("card0-DP-1");
+    std::fs::create_dir_all(&c).unwrap();
+    std::fs::write(c.join("status"), "connected\n").unwrap();
+    std::fs::write(c.join("edid"), b"").unwrap();
+    std::fs::write(c.join("modes"), "1920x1080\n1280x720\n640x480\n").unwrap();
+    crate::display::set_drm_dir_for_tests(Some(drm.clone()));
+    press(&mut a, &cx, 'l');
+    crate::display::set_drm_dir_for_tests(None);
+    assert!(status(&a).contains("Looking at the displays again") && status(&a).contains("DP-1: no usable EDID"), "{}", status(&a));
+}
+
+#[test]
+fn the_memory_line_of_the_screen_features_is_the_fake_machines_not_this_computers() {
+    use iyakki_core_api::MemInfo;
+    use iyakki_core_fake::{Canned, FakeOs};
+    let mut cx = admin("sd-os");
+    let a = SettingsApp::new(&cx);
+    let line = |kb: u64, cx: &mut AppCx| {
+        cx.os = Arc::new(FakeOs::with(Canned { meminfo: Some(MemInfo { total_kb: kb, free_kb: kb / 2, available_kb: kb / 2, swap_total_kb: 0, swap_free_kb: 0 }), ..Canned::default() }));
+        a.disp_gate(cx).0
+    };
+    let small = line(1_000_000, &mut cx);
+    let big = line(16_000_000, &mut cx);
+    assert!(!small.is_empty() && small != big, "{small:?} / {big:?}");
+    cx.os = Arc::new(FakeOs::with(Canned { meminfo: None, ..Canned::default() }));
+    let unknown = a.disp_gate(&cx).0;
+    assert_ne!(unknown, big);
+}

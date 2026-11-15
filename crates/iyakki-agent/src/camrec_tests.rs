@@ -326,7 +326,10 @@ fn frames_are_stored_exactly_as_received_in_encrypted_files_in_the_day_folders()
     assert!(got > 10);
     // the folder holds only encrypted files, an index, the log
     let names: Vec<String> = std::fs::read_dir(r.rec.cam_dir(&id)).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
-    assert!(names.iter().all(|n| n.len() == 4 || n == "index.txt" || n == "audit.log"), "{names:?}");
+    assert!(names.iter().all(|n| n.len() == 4 || n == "index.txt" || n == "audit.log" || n == "seals.txt"), "{names:?}");
+    // the ledger holds names, counts and MACs: no picture bytes
+    let ledger = std::fs::read_to_string(r.rec.cam_dir(&id).join("seals.txt")).unwrap_or_default();
+    assert!(ledger.lines().all(|l| l.starts_with("sealed ") || l.starts_with("gone ")), "{ledger}");
     r.rec.shutdown();
 }
 
@@ -878,3 +881,50 @@ fn stop_all_for_a_person_is_the_red_signs_one_click() {
     assert_eq!(r.rec.settings_of(&a).mode, Mode::Off);
     r.rec.shutdown();
 }
+
+#[test]
+fn files_cut_at_the_end_or_deleted_are_reported_and_removals_by_the_keeping_rules_are_not() {
+    let r = rig("seal");
+    let id = r.add("Cam", "amy", &[]);
+    r.prep(&id);
+    r.now.store(T0, Ordering::SeqCst);
+    let old = r.fab(&id, T0 - 20 * DAY, 4, 500);
+    let cut = r.fab(&id, T0 - 10 * DAY, 4, 500);
+    let gone = r.fab(&id, T0 - 5 * DAY, 4, 500);
+    let whole = r.fab(&id, T0 - DAY, 4, 500);
+    r.rec.rebuild_index(&id);
+    let spec = r.rec.visible(&r.amy(), &id).unwrap();
+    let key = r.rec.load_key(&spec).unwrap();
+    // what the recorder writes when it closes a file
+    for e in r.rec.entries(&id) {
+        r.rec.append_ledger(&id, &camrec_seal::sealed_line(&key, &e.rel, e.frames, e.end_ms));
+    }
+    let problems = |r: &Rig| {
+        r.rec.st().seal_cache.clear();
+        r.rec.status(&r.amy(), &id).unwrap().file_problems
+    };
+    assert!(problems(&r).is_empty(), "all files whole: nothing to report");
+    // the end of one file is cut off, one file is deleted by hand, and the keeping rules remove the oldest
+    let last = fmt::scan(&cut).unwrap().frames.last().unwrap().offset;
+    std::fs::OpenOptions::new().write(true).open(&cut).unwrap().set_len(last).unwrap();
+    std::fs::remove_file(&gone).unwrap();
+    r.rec.enforce();
+    assert!(!old.exists() && whole.exists());
+    let p = problems(&r);
+    assert_eq!(p.len(), 2, "{p:?}");
+    assert!(p.iter().any(|t| t.contains("was closed with 4 pictures and now has 3")), "{p:?}");
+    assert!(p.iter().any(|t| t.contains("is missing") && t.contains(gone.file_name().unwrap().to_str().unwrap())), "{p:?}");
+    // the owner sees it in the chat's words too, and a viewer who is not the owner does not get the list
+    assert!(r.rec.status(&r.amy(), &id).unwrap().owner);
+    // signing the pending removal notes changes nothing about what is reported
+    r.rec.fold_pending(&id, &key);
+    assert!(!r.rec.cam_dir(&id).join("seals.pending").exists());
+    assert_eq!(problems(&r).len(), 2);
+    // a line nobody with the key wrote is reported and trusted for nothing
+    r.rec.append_ledger(&id, "sealed 2026/01/01/000000.irec 5 1 0000000000000000000000000000000000000000000000000000000000000000\n");
+    let p = problems(&r);
+    assert_eq!(p.len(), 3, "{p:?}");
+    assert!(p.iter().any(|t| t.contains("damaged or was not written by this computer")));
+    r.rec.shutdown();
+}
+

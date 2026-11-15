@@ -313,7 +313,10 @@ fn sorted_entries(dir: &Path) -> Result<Vec<PathBuf>, ProfileError> {
 }
 
 /// Write `data` and `config` of `base` into `w`. Symbolic links and special files are left out. Returns the entry count.
-fn pack<W: Write>(w: &mut W, base: &Path) -> Result<u64, ProfileError> {
+/// A rule that rewrites one file as it is sealed (`rel`, the file's path): `Some(bytes)` are written instead of the file, `None` keeps it.
+pub type Rewrite<'a> = Option<&'a dyn Fn(&str, &Path) -> Option<Vec<u8>>>;
+
+fn pack<W: Write>(w: &mut W, base: &Path, skip: Option<&dyn Fn(&str) -> bool>, rewrite: Rewrite) -> Result<u64, ProfileError> {
     struct St {
         entries: u64,
         bytes: u64,
@@ -329,10 +332,14 @@ fn pack<W: Write>(w: &mut W, base: &Path) -> Result<u64, ProfileError> {
         }
         Ok(())
     }
-    fn walk<W: Write>(w: &mut W, dir: &Path, rel: &str, st: &mut St) -> Result<(), ProfileError> {
+    fn walk<W: Write>(w: &mut W, dir: &Path, rel: &str, st: &mut St, skip: Option<&dyn Fn(&str) -> bool>, rewrite: Rewrite) -> Result<(), ProfileError> {
         for p in sorted_entries(dir)? {
             let name = p.file_name().and_then(|n| n.to_str()).ok_or_else(|| ProfileError::Unstable("a file name is not text".into()))?;
             let r = format!("{rel}/{name}");
+            // what the person chose to keep out of the sealed file (profilepolicy): a folder takes everything in it along
+            if skip.is_some_and(|f| f(&r)) {
+                continue;
+            }
             let md = match std::fs::symlink_metadata(&p) {
                 Ok(m) => m,
                 Err(_) => continue, // vanished while we looked
@@ -343,8 +350,17 @@ fn pack<W: Write>(w: &mut W, base: &Path) -> Result<u64, ProfileError> {
             }
             if md.is_dir() {
                 rec(w, &r, K_DIR, 0)?;
-                walk(w, &p, &r, st)?;
+                walk(w, &p, &r, st, skip, rewrite)?;
             } else if md.is_file() {
+                if let Some(new) = rewrite.and_then(|f| f(&r, &p)) {
+                    st.bytes += new.len() as u64;
+                    if st.bytes > MAX_BYTES {
+                        return Err(ProfileError::TooBig);
+                    }
+                    rec(w, &r, K_FILE, new.len() as u64)?;
+                    w.write_all(&new).map_err(io)?;
+                    continue;
+                }
                 let size = md.len();
                 st.bytes += size;
                 if st.bytes > MAX_BYTES {
@@ -368,7 +384,7 @@ fn pack<W: Write>(w: &mut W, base: &Path) -> Result<u64, ProfileError> {
         if std::fs::symlink_metadata(&d).map(|m| m.is_dir()).unwrap_or(false) {
             st.entries += 1;
             rec(w, top, K_DIR, 0)?;
-            walk(w, &d, top, &mut st)?;
+            walk(w, &d, top, &mut st, skip, rewrite)?;
         }
     }
     w.write_all(&[K_END]).map_err(io)?;
@@ -587,6 +603,9 @@ pub enum Step {
 
 pub struct ProfileStore {
     base: PathBuf,
+    /// The data folder and the user's name, for the person's choices (`profilepolicy`); None for a store made on a bare folder.
+    data: Option<PathBuf>,
+    user: String,
     safe: String,
     live_root: PathBuf,
     fault: Option<Step>,
@@ -604,7 +623,7 @@ impl ProfileStore {
     }
 
     pub fn with_run_root(data: &Path, user: &str, run: &Path) -> ProfileStore {
-        ProfileStore { base: data.join("web-profile"), safe: crate::webengine::safe_name(user), live_root: run.to_path_buf(), fault: None }
+        ProfileStore { base: data.join("web-profile"), data: Some(data.to_path_buf()), user: user.to_string(), safe: crate::webengine::safe_name(user), live_root: run.to_path_buf(), fault: None }
     }
 
     #[cfg(test)]
@@ -680,12 +699,12 @@ impl ProfileStore {
     }
 
     /// Write the archive of `src` as a sealed file at `dest`, verified by reading it back. Returns the entry count.
-    fn write_sealed(&self, src: &Path, dest: &Path, key: &ProfileKey) -> Result<u64, ProfileError> {
+    fn write_sealed(&self, src: &Path, dest: &Path, key: &ProfileKey, skip: Option<&dyn Fn(&str) -> bool>, rewrite: Rewrite) -> Result<u64, ProfileError> {
         use std::os::unix::fs::OpenOptionsExt;
         self.mkdir(&self.base)?;
         let file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(dest).map_err(io)?;
         let mut w = SealWriter::new(std::io::BufWriter::new(file), key)?;
-        let entries = pack(&mut w, src)?;
+        let entries = pack(&mut w, src, skip, rewrite)?;
         let (bw, digest, total) = w.finish()?;
         let file = bw.into_inner().map_err(|e| io(e.into_error()))?;
         file.sync_all().map_err(io)?;
@@ -738,7 +757,7 @@ impl ProfileStore {
             let _ = std::fs::remove_file(&plain);
         }
         let _ = std::fs::create_dir_all(&plain);
-        let entries = self.write_sealed(&plain, &self.newf(), key)?;
+        let entries = self.write_sealed(&plain, &self.newf(), key, None, None)?;
         // the sealed file must match the plain files, not just itself
         {
             let mut r = SealReader::open(std::io::BufReader::new(std::fs::File::open(self.newf()).map_err(io)?), key)?;
@@ -818,15 +837,20 @@ impl ProfileStore {
     /// Write the RAM copy back (atomic, the previous sealed file stays as the backup) and keep it open.
     pub fn checkpoint(&self, key: &ProfileKey) -> Result<(), ProfileError> {
         let _g = lock_ops();
-        self.seal_inner(key)
+        self.seal_inner(key, false)
     }
 
-    fn seal_inner(&self, key: &ProfileKey) -> Result<(), ProfileError> {
+    fn seal_inner(&self, key: &ProfileKey, exit: bool) -> Result<(), ProfileError> {
         if !self.is_open() {
             return Err(ProfileError::NotOpen);
         }
         let new = self.newf();
-        let r = self.write_sealed(&self.live(), &new, key).and_then(|_| {
+        // what the person chose to keep out of the sealed file (see `profilepolicy`); a rule can only leave data out, never add
+        let filter = self.data.as_ref().and_then(|d| crate::profilepolicy::seal_filter(d, &self.user, exit));
+        let skip = filter.as_ref().map(|f| &**f as &dyn Fn(&str) -> bool);
+        let rw = self.data.as_ref().and_then(|d| crate::profilepolicy::seal_rewrite(d, &self.user, exit));
+        let rewrite = rw.as_ref().map(|f| &**f as &dyn Fn(&str, &Path) -> Option<Vec<u8>>);
+        let r = self.write_sealed(&self.live(), &new, key, skip, rewrite).and_then(|_| {
             // the old sealed file becomes the backup through a link, so a sealed file exists at every moment
             if self.sealed().is_file() {
                 let tmp = self.f("sealed.bak.tmp");
@@ -851,7 +875,15 @@ impl ProfileStore {
     /// Seal (write back) and wipe the RAM copy and its link. If sealing fails the RAM copy is kept so nothing is lost.
     pub fn seal(&self, key: &ProfileKey) -> Result<(), ProfileError> {
         let _g = lock_ops();
-        self.seal_inner(key)?;
+        self.seal_inner(key, false)?;
+        self.wipe_live();
+        Ok(())
+    }
+
+    /// [`ProfileStore::seal`] at sign-out: the person's clear-on-exit choices leave their data out of the sealed file too.
+    pub fn seal_for_exit(&self, key: &ProfileKey) -> Result<(), ProfileError> {
+        let _g = lock_ops();
+        self.seal_inner(key, true)?;
         self.wipe_live();
         Ok(())
     }
@@ -876,7 +908,7 @@ impl ProfileStore {
         let tmp = self.live_root.join(format!("{}.rekey", self.safe));
         secure_remove(&tmp);
         self.extract(&self.sealed(), old, &tmp)?;
-        let r = self.write_sealed(&tmp, &self.newf(), new).and_then(|_| {
+        let r = self.write_sealed(&tmp, &self.newf(), new, None, None).and_then(|_| {
             std::fs::rename(self.newf(), self.sealed()).map_err(io)?;
             let _ = std::fs::remove_file(self.backup());
             sync_dir(&self.base);
@@ -1036,9 +1068,37 @@ pub enum SignIn {
     Locked(String),
 }
 
+/// How long a running session's claim on the profile lasts without being renewed (the shell renews it every 40 seconds).
+pub const SESSION_CLAIM_SECS: u64 = 120;
+
+/// Who is asking: the host name of the pod or the computer (pods have their own), else a random name kept once beside the sealed files.
+/// Two machines that share one volume are told apart by it.
+pub fn holder_id(data: &Path) -> String {
+    if let Some(h) = std::env::var("HOSTNAME").ok().map(|h| h.trim().to_string()).filter(|h| !h.is_empty() && h.len() <= 60 && h.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))) {
+        return h;
+    }
+    let p = data.join("web-profile").join(".holder");
+    if let Ok(t) = std::fs::read_to_string(&p) {
+        let t = t.trim();
+        if !t.is_empty() && t.len() <= 40 {
+            return format!("machine-{t}");
+        }
+    }
+    let id = crate::cloudkeys::random::<4>().map(|b| crate::cloudkeys::hex(&b)).unwrap_or_else(|_| "0".into());
+    let _ = std::fs::create_dir_all(p.parent().unwrap_or(data));
+    let _ = std::fs::write(&p, &id);
+    format!("machine-{id}")
+}
+
 /// Called after the person's vault was opened with the password they typed. `key` is the vault's profile key (None when the vault
 /// is locked or has no such key).
 pub fn on_sign_in(data: &Path, user: &str, key: Option<ProfileKey>) -> SignIn {
+    on_sign_in_as(data, user, key, &holder_id(data), iyakki_schema::now_secs())
+}
+
+/// [`on_sign_in`] for a named holder at a given time: the session takes the one-session claim on the profile first, and does not open
+/// it while another holder's unexpired claim stands (F-VAULT-11: two machines on one volume never open the same profile at once).
+pub fn on_sign_in_as(data: &Path, user: &str, key: Option<ProfileKey>, holder: &str, now: u64) -> SignIn {
     let st = ProfileStore::new(data, user);
     if !st.is_protected() {
         return SignIn::Off;
@@ -1046,14 +1106,28 @@ pub fn on_sign_in(data: &Path, user: &str, key: Option<ProfileKey>) -> SignIn {
     let Some(key) = key else {
         return SignIn::Locked("the browser key is not in your vault (forgotten password or reset vault): reset the browser data in Settings -> Browser".into());
     };
+    if let Err(e) = st.take_lease(holder, now, SESSION_CLAIM_SECS) {
+        return SignIn::Locked(e);
+    }
     match st.open(&key) {
         Ok(b) => {
             hold(st.live(), Some(key));
             SignIn::Opened { from_backup: b }
         }
-        Err(ProfileError::WrongKey) => SignIn::Locked("the key does not open the protected data: reset the browser data in Settings -> Browser".into()),
-        Err(e) => SignIn::Locked(e.to_string()),
+        Err(e) => {
+            st.release_lease(holder, now);
+            match e {
+                ProfileError::WrongKey => SignIn::Locked("the key does not open the protected data: reset the browser data in Settings -> Browser".into()),
+                e => SignIn::Locked(e.to_string()),
+            }
+        }
     }
+}
+
+/// While the profile is open the claim is renewed (the shell calls this about every 40 seconds). False when it is not ours any more.
+pub fn renew_claim(data: &Path, user: &str, holder: &str, now: u64) -> bool {
+    let st = ProfileStore::new(data, user);
+    st.is_open() && st.take_lease(holder, now, SESSION_CLAIM_SECS).is_ok()
 }
 
 /// Sign-out: seal and wipe. On failure the RAM copy stays (nothing is lost) and the error is returned. The key is forgotten either way.
@@ -1064,10 +1138,39 @@ pub fn on_sign_out(data: &Path, user: &str) -> Result<bool, ProfileError> {
     if !st.is_open() {
         return Ok(false);
     }
-    match key {
-        Some(k) => st.seal(&k).map(|_| true),
+    let r = match key {
+        Some(k) => st.seal_for_exit(&k).map(|_| true),
         None => Err(ProfileError::NotOpen),
+    };
+    // sealed: the claim is given back (kept when the seal failed, because the RAM copy is still here)
+    if r.is_ok() {
+        st.release_lease(&holder_id(data), iyakki_schema::now_secs());
     }
+    r
+}
+
+/// The screen locks: seal and wipe the RAM copy but keep the key in memory for the unlock (profilepolicy::on_screen_lock).
+pub fn seal_keep_key(data: &Path, user: &str) -> Result<bool, ProfileError> {
+    let st = ProfileStore::new(data, user);
+    let Some(key) = held(&st.live()) else { return Err(ProfileError::NotOpen) };
+    if !st.is_open() {
+        return Ok(false);
+    }
+    let r = st.seal(&key).map(|_| true);
+    if r.is_ok() {
+        st.release_lease(&holder_id(data), iyakki_schema::now_secs());
+    }
+    r
+}
+
+/// The unlock: open the sealed profile again with the key held since sign-in, else the one given (read from the vault).
+pub fn reopen(data: &Path, user: &str, key: Option<ProfileKey>) -> Result<bool, ProfileError> {
+    let st = ProfileStore::new(data, user);
+    let Some(key) = held(&st.live()).or(key) else { return Err(ProfileError::WrongKey) };
+    st.take_lease(&holder_id(data), iyakki_schema::now_secs(), SESSION_CLAIM_SECS).map_err(ProfileError::Storage)?;
+    st.open(&key)?;
+    hold(st.live(), Some(key));
+    Ok(true)
 }
 
 /// Write the open copy back without closing it (an idle moment, or the person leaving the browser tile).
@@ -1150,6 +1253,120 @@ pub fn reset_for(svc: &crate::services::Services, user: &str) -> String {
     st.reset();
     let _ = svc.user_delete(user, VAULT_SECRET);
     "Browser data was deleted: cookies, sign-ins and site storage. Protection is off.".into()
+}
+
+// ------------------------------------------------------------------ moving the sealed file between machines (F-VAULT-11)
+
+/// A claim on one profile: who has it open somewhere, until when (seconds). One session per profile (design section 4.8).
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Lease {
+    pub holder: String,
+    pub until: u64,
+}
+
+impl ProfileStore {
+    fn lease_file(&self) -> PathBuf {
+        self.f("sealed.lease")
+    }
+
+    /// The claim now in force (not expired) on this profile, if any.
+    pub fn lease(&self, now: u64) -> Option<Lease> {
+        std::fs::read_to_string(self.lease_file()).ok().and_then(|t| serde_json::from_str::<Lease>(&t).ok()).filter(|l| l.until > now)
+    }
+
+    /// Claim the profile for `holder` for `ttl` seconds (a holder renews its own claim). Err names who has it.
+    pub fn take_lease(&self, holder: &str, now: u64, ttl: u64) -> Result<(), String> {
+        if holder.is_empty() || holder.len() > 80 || holder.chars().any(|c| c.is_control()) {
+            return Err("the holder needs a short plain name".into());
+        }
+        if let Some(l) = self.lease(now) {
+            if l.holder != holder {
+                return Err(format!("this browser data is in use at {} until it is released (or {} minute(s) pass)", l.holder, (l.until - now).div_ceil(60)));
+            }
+        }
+        let t = serde_json::to_string(&Lease { holder: holder.to_string(), until: now + ttl.clamp(60, 24 * 3600) }).map_err(|e| e.to_string())?;
+        self.mkdir(&self.base).map_err(|e| e.to_string())?;
+        iyakki_schema::write_atomic(&self.lease_file(), t.as_bytes(), 0o600)
+    }
+
+    /// Give the claim back (only the holder's own).
+    pub fn release_lease(&self, holder: &str, now: u64) {
+        if self.lease(now).is_some_and(|l| l.holder == holder) {
+            let _ = std::fs::remove_file(self.lease_file());
+        }
+    }
+
+    /// Copy the sealed file, still sealed, to `to` (a new file, mode 0600). Only while it is sealed and nobody else holds it. Nothing is
+    /// decrypted: the key stays in the person's own vault, and a copy is useless without it.
+    pub fn export_sealed(&self, to: &Path, holder: &str, now: u64) -> Result<u64, ProfileError> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let _g = lock_ops();
+        match self.status() {
+            Status::Off => return Err(ProfileError::NotProtected),
+            Status::Open => return Err(ProfileError::Open),
+            Status::NeedsFinish => return Err(ProfileError::NeedsFinish),
+            Status::Sealed => {}
+        }
+        self.take_lease(holder, now, 300).map_err(ProfileError::Storage)?;
+        let r = (|| {
+            let mut src = std::fs::File::open(self.sealed()).map_err(io)?;
+            let mut dst = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(to).map_err(io)?;
+            let n = std::io::copy(&mut src, &mut dst).map_err(io)?;
+            dst.sync_all().map_err(io)?;
+            Ok(n)
+        })();
+        self.release_lease(holder, now);
+        r
+    }
+
+    /// Read a sealed file from end to end with `key`: it must be a protected profile of this format, made with this key and unchanged.
+    pub fn verify_file(from: &Path, key: &ProfileKey) -> Result<u64, ProfileError> {
+        let md = std::fs::symlink_metadata(from).map_err(io)?;
+        if !md.is_file() {
+            return Err(ProfileError::Damaged("not a plain file".into()));
+        }
+        let mut r = SealReader::open(std::io::BufReader::new(std::fs::File::open(from).map_err(io)?), key)?;
+        let (mut buf, mut total) = (vec![0u8; 64 * 1024], 0u64);
+        loop {
+            let n = r.read(&mut buf).map_err(damaged)?;
+            if n == 0 {
+                return Ok(total);
+            }
+            total += n as u64;
+        }
+    }
+
+    /// Take a sealed file in as this person's protected profile. It is verified with `key` first; the sealed file that was here becomes the
+    /// backup; never while the profile is open, while a plain profile is there, or while somebody else holds it.
+    pub fn import_sealed(&self, from: &Path, key: &ProfileKey, holder: &str, now: u64) -> Result<(), ProfileError> {
+        let _g = lock_ops();
+        if self.plain_present() {
+            return Err(ProfileError::AlreadyProtected);
+        }
+        if self.is_open() {
+            return Err(ProfileError::Open);
+        }
+        Self::verify_file(from, key)?;
+        self.take_lease(holder, now, 300).map_err(ProfileError::Storage)?;
+        let r = (|| {
+            self.mkdir(&self.base)?;
+            let new = self.newf();
+            std::fs::copy(from, &new).map_err(io)?;
+            if self.sealed().is_file() {
+                let tmp = self.f("sealed.bak.tmp");
+                let _ = std::fs::remove_file(&tmp);
+                if std::fs::hard_link(self.sealed(), &tmp).is_err() {
+                    std::fs::copy(self.sealed(), &tmp).map_err(io)?;
+                }
+                std::fs::rename(&tmp, self.backup()).map_err(io)?;
+            }
+            std::fs::rename(&new, self.sealed()).map_err(io)?;
+            sync_dir(&self.base);
+            Ok(())
+        })();
+        self.release_lease(holder, now);
+        r
+    }
 }
 
 #[cfg(test)]

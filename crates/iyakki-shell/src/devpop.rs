@@ -164,6 +164,34 @@ fn read(p: impl AsRef<std::path::Path>) -> Option<String> {
     std::fs::read_to_string(p).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
+/// The size in a mode line such as `2560x1600` (a trailing `i` or `p` is ignored).
+fn mode_size(m: &str) -> Option<(u32, u32)> {
+    let (w, h) = m.trim().split_once('x')?;
+    Some((w.trim().parse().ok()?, h.trim().trim_end_matches(['i', 'p']).parse().ok()?))
+}
+
+/// The refresh rate of the mode `mode` (`2560x1600` from the connector's `modes` file), or `None` when no source knows it.
+/// Sources, in order: the framebuffer's mode line (`U:2560x1600p-165`, used only when its size is this mode's and its number is not
+/// 0: amdgpu prints `-0`, KI-210), then the preferred timing of the connector's EDID (the first mode the kernel lists is that one).
+/// A rate of 0 is never returned.
+fn refresh_hz(mode: &str, fb_modes: Option<&str>, edid: Option<&[u8]>) -> Option<u32> {
+    let want = mode_size(mode)?;
+    let from_fb = fb_modes.and_then(|m| m.lines().next()).and_then(|l| {
+        let (head, hz) = l.rsplit_once('-')?;
+        let size = mode_size(head.rsplit_once(':').map_or(head, |(_, s)| s))?;
+        (size == want).then(|| hz.trim().parse::<u32>().ok()).flatten()
+    });
+    from_fb.filter(|&h| h > 0).or_else(|| {
+        let (w, h, hz) = iyakki_devctl::drmmodes::parse_edid(edid?)?.preferred?;
+        ((w, h) == want && hz > 0).then_some(hz)
+    })
+}
+
+/// ` @ 165 Hz`, or nothing when the rate is not known.
+fn refresh_text(hz: Option<u32>) -> String {
+    hz.filter(|&h| h > 0).map(|h| format!(" @ {h} Hz")).unwrap_or_default()
+}
+
 fn names(p: &std::path::Path) -> Vec<String> {
     let mut v: Vec<String> = std::fs::read_dir(p).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
     v.sort();
@@ -328,14 +356,15 @@ pub fn gather(p: &Probe) -> Snapshot {
 
     // ---- displays
     let scr = iyakki_devctl::screen(r);
-    let refresh = read(r.sys.join("class/graphics/fb0/modes")).and_then(|m| m.lines().next().and_then(|l| l.rsplit_once('-').map(|(_, hz)| hz.trim().to_string()))).and_then(|hz| hz.parse::<u32>().ok());
+    let fb_modes = read(r.sys.join("class/graphics/fb0/modes"));
     let ui_scale = crate::uisize::LEVELS.iter().min_by(|a, b| (a.1 - crate::ui::ui_size()).abs().total_cmp(&(b.1 - crate::ui::ui_size()).abs())).map_or("Normal", |l| l.0);
     let connected: Vec<_> = scr.outputs.iter().filter(|o| o.connected).collect();
     for o in &connected {
         let card_conn = names(&r.sys.join("class/drm")).into_iter().find(|n| n.ends_with(&format!("-{}", o.name)) && n.starts_with("card"));
         let monitor = card_conn.as_ref().and_then(|n| std::fs::read(r.sys.join("class/drm").join(n).join("edid")).ok()).and_then(|b| iyakki_hwinfo::parse_edid(&b)).map(|m| m.name);
         let mode = o.modes.first().cloned().unwrap_or_else(|| "resolution unknown".into());
-        let hz = refresh.map(|h| format!(" @ {h} Hz")).unwrap_or_default();
+        let edid = card_conn.as_ref().and_then(|n| std::fs::read(r.sys.join("class/drm").join(n).join("edid")).ok());
+        let hz = refresh_text(refresh_hz(&mode, fb_modes.as_deref(), edid.as_deref()));
         items.push(Item::new("Display", format!("{} · {}{mode}{hz} · interface size {ui_scale}", o.name, monitor.map(|m| format!("{m} · ")).unwrap_or_default()), Level::Ok, Jump::Settings("display")));
     }
     if connected.is_empty() {
@@ -926,4 +955,4 @@ impl DevPop {
 
 #[cfg(test)]
 #[path = "devpop_tests.rs"]
-mod tests;
+pub(crate) mod tests;

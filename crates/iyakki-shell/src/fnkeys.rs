@@ -410,6 +410,23 @@ pub struct Osd {
 }
 
 impl Osd {
+    /// What the screen reader says for this display: the figure in words, not "65%" (F-A11Y-02).
+    pub fn spoken(&self) -> String {
+        let name = match self.kind {
+            OsdKind::Volume => "Volume",
+            OsdKind::Brightness => "Brightness",
+            OsdKind::KbdLight => "Keyboard light",
+            OsdKind::Notice => return self.text.clone(),
+        };
+        if self.muted {
+            return format!("{name} muted");
+        }
+        match self.fraction {
+            Some(f) if self.text.ends_with('%') => format!("{name} {} percent", (f * 100.0).round() as u32),
+            _ => format!("{name} {}", self.text.to_lowercase()),
+        }
+    }
+
     pub fn volume(s: &SoundSettings, until: u64) -> Osd {
         let text = if s.muted { "Muted".to_string() } else { format!("{}%", s.volume_pct) };
         Osd { kind: OsdKind::Volume, text, fraction: Some(s.volume_pct.min(100) as f32 / 100.0), muted: s.muted, until }

@@ -39,6 +39,21 @@ fn next_in(list: &[u32], cur: u32) -> u32 {
     list.iter().position(|v| *v == cur).map(|i| list[(i + 1) % list.len()]).unwrap_or(list[0])
 }
 
+/// The named speeds `{`/`}` and `<`/`>` jump between; `[` `]` and `,` `.` step by 5 %.
+pub(crate) const POINTER_PRESETS: [u32; 8] = [25, 50, 75, 100, 150, 200, 250, 300];
+
+/// The next pointer speed: `up` or down by one step of 5 %, or to the next preset (wrapping from the end to the other end).
+/// Always inside 25..=300 and a multiple of 5 when it started as one.
+pub(crate) fn pointer_next(now: u32, up: bool, preset: bool) -> u32 {
+    let (lo, hi) = keyboard::POINTER_SPEED_RANGE;
+    let now = now.clamp_safe(lo, hi);
+    if preset {
+        return if up { POINTER_PRESETS.iter().copied().find(|v| *v > now).unwrap_or(POINTER_PRESETS[0]) } else { POINTER_PRESETS.iter().rev().copied().find(|v| *v < now).unwrap_or(POINTER_PRESETS[POINTER_PRESETS.len() - 1]) };
+    }
+    let step = keyboard::POINTER_SPEED_STEP;
+    if up { (now / step * step + step).min(hi) } else { (now.div_ceil(step) * step).saturating_sub(step).max(lo) }
+}
+
 fn mode_label(m: &str) -> &'static str {
     match m {
         "media" => "media keys first (Fn + F-key gives F1 to F12)",
@@ -68,6 +83,22 @@ fn tri(v: Option<bool>) -> &'static str {
     }
 }
 
+/// Put the saved keyboard choices to work now: key repeat, trackpad tap, scrolling, the input profile and the Apple driver. The Keyboard page and the
+/// assistant's keyboard tools both end here, so a change made by chat is applied exactly as one made on the page.
+pub(crate) fn apply_keyboard(k: &KeyboardSettings, sys: &std::path::Path) -> Result<(), String> {
+    if let Some((d, p)) = k.repeat() {
+        crate::input::request_repeat(d, p);
+    }
+    let (tap, _) = k.trackpad();
+    crate::input::request_touchpad(tap);
+    crate::input::request_three_finger_drag(k.three_finger_drag_on());
+    let (mouse, pad) = k.pointer_speeds();
+    crate::input::request_pointer_speed(mouse, pad);
+    crate::scrolleng::request_config(crate::fnkeys::scroll_config(k.scroll()));
+    crate::inputprofile::apply(k);
+    keyboard::apply_apple(sys, k).map(|_| ())
+}
+
 impl SettingsApp {
     /// Use another directory for the kernel's files (tests).
     pub fn with_keyboard_sys(mut self, sys: std::path::PathBuf) -> SettingsApp {
@@ -84,22 +115,15 @@ impl SettingsApp {
         if !self.admin(cx) {
             return None;
         }
-        let r = Self::svc(cx).settings.lock().unwrap().update(|s| f(&mut s.keyboard));
+        let r = Self::svc(cx).settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| f(&mut s.keyboard));
         if let Err(e) = r {
             self.fail(e.to_string());
             return None;
         }
         cx.audit.record(&cx.session.user, "settings.keyboard", what);
         let k = Self::kbd_settings(cx);
-        if let Some((d, p)) = k.repeat() {
-            crate::input::request_repeat(d, p);
-        }
-        let (tap, _) = k.trackpad();
-        crate::input::request_touchpad(tap);
-        crate::scrolleng::request_config(crate::fnkeys::scroll_config(k.scroll()));
-        crate::inputprofile::apply(&k);
-        match keyboard::apply_apple(&self.kbd.sys, &k) {
-            Ok(_) => Some(k),
+        match apply_keyboard(&k, &self.kbd.sys) {
+            Ok(()) => Some(k),
             Err(e) => {
                 self.fail(format!("Saved, but not applied now: {e}"));
                 None
@@ -186,6 +210,12 @@ impl SettingsApp {
                     self.ok(format!("{name}: {}.", if next { "on" } else { "off" }));
                 }
             }
+            Key::Char('j') => {
+                let next = !cur.three_finger_drag_on();
+                if self.kbd_update(cx, &format!("Trackpad three-finger drag={}", if next { "on" } else { "off" }), |s| s.three_finger_drag = Some(next)).is_some() {
+                    self.ok(format!("Trackpad three-finger drag: {}. {}", if next { "on" } else { "off" }, if next { "Three fingers moving hold the button and drag; lift a finger to drop." } else { "Three fingers do nothing." }));
+                }
+            }
             Key::Char('w') | Key::Char('g') => {
                 let wheel = *k == Key::Char('w');
                 let now = cur.wheel_natural.unwrap_or(false);
@@ -215,6 +245,16 @@ impl SettingsApp {
                     if self.kbd_update(cx, &format!("wheel_lines={next}"), |s| s.wheel_lines = next).is_some() {
                         self.ok(format!("A mouse wheel click moves {next} line{}.", if next == 1 { "" } else { "s" }));
                     }
+                }
+            }
+            Key::Char(c @ ('[' | ']' | '{' | '}' | ',' | '.' | '<' | '>')) => {
+                let pad = matches!(c, ',' | '.' | '<' | '>');
+                let (up, preset) = (matches!(c, ']' | '}' | '.' | '>'), matches!(c, '{' | '}' | '<' | '>'));
+                let (mouse, touch) = cur.pointer_speeds();
+                let next = pointer_next(if pad { touch } else { mouse }, up, preset);
+                let (name, key) = if pad { ("Touchpad speed", "touchpad_speed_pct") } else { ("Mouse speed", "pointer_speed_pct") };
+                if self.kbd_update(cx, &format!("{key}={next}"), |s| if pad { s.touchpad_speed_pct = next } else { s.pointer_speed_pct = next }).is_some() {
+                    self.ok(format!("{name}: {next}%."));
                 }
             }
             Key::Char('m') => {
@@ -288,12 +328,13 @@ impl SettingsApp {
     /// One line under a row: what the control does, with an example. None for rows without a control.
     pub(super) fn kbd_help(label: &str) -> Option<&'static str> {
         Some(match label {
-            "Input profile" => "Automatic uses Mac when an Apple keyboard or trackpad is found. Mac: Command is the shortcut key (Command+C copies, Command+Left = Home). PC: Ctrl+C copies.",
+            "Input profile" => "Automatic uses Mac when an Apple keyboard or trackpad is found. Mac: Command is the shortcut key (Command+C copies, Command+Left = Home). PC: Ctrl+C copies. Mac: Ctrl+Cmd+L locks, Ctrl+Cmd+Q signs out.",
             "What you will see: last key" => "The key you pressed and what IYAKKI understood, e.g. Command+C -> Copy.",
             "What you will see: last scroll" => "Which way the content moved on your last scroll, e.g. Scrolled content up (natural, trackpad).",
             "Function keys" => "What the top row sends first. Example: media keys first makes F10 mute; hold Fn for F10.",
             "Trackpad" => "Tap to click: a short tap is a click; two fingers tapped is a right click (Mac profile: Control+click too). Three-finger drag is not available.",
             "Scrolling" => "Natural: the page follows your fingers like a phone. Traditional: it moves the other way. Trackpad and mouse wheel are set apart. Example: the wheel is classic, the trackpad natural.",
+            "Pointer speed" => "How fast the pointer moves on a mouse and on a touchpad, 25 to 300 percent. Example: a 4K screen may want 200 on the mouse. [ ] and , . step by 5; { } and < > jump between named speeds.",
             "Touch Bar" => "What the Touch Bar shows. Example: IYAKKI strip shows system, recent apps and the assistant.",
             "Touch Bar strips" => "Which strips the Touch Bar cycles through, and a picture flip if it looks mirrored.",
             "ISO layout / Option-Command swap" => "ISO fixes a swapped ~ and < key. The swap exchanges Option and Command in the keyboard driver; the Mac profile names keys by their print, so it never swaps twice.",
@@ -324,9 +365,11 @@ impl SettingsApp {
             false,
         ));
         let (tap, natural) = k.trackpad();
-        v.push(("Trackpad".into(), format!("tap to click {}, natural scrolling {} (a touchpad is used when the kernel shows one)", if tap { "on" } else { "off" }, if natural { "on" } else { "off" }), false));
+        v.push(("Trackpad".into(), format!("tap to click {}, natural scrolling {}, three-finger drag {} (a touchpad is used when the kernel shows one)", if tap { "on" } else { "off" }, if natural { "on" } else { "off" }, if k.three_finger_drag_on() { "on" } else { "off" }), false));
         let sc = k.scroll();
         v.push(("Scrolling".into(), format!("speed {}%, mouse wheel {} lines a click and {}, trackpad {}, smooth {}, momentum {}", sc.speed_pct, sc.wheel_lines, if sc.wheel_natural { "natural" } else { "traditional" }, if sc.pad_natural { "natural" } else { "traditional" }, if sc.smooth { "on" } else { "off" }, if sc.momentum { "on" } else { "off" }), false));
+        let (mouse, touch) = k.pointer_speeds();
+        v.push(("Pointer speed".into(), format!("mouse {mouse}%, touchpad {touch}% (default 100; applied as you click; a mouse and a touchpad each have a slower and a faster button)"), false));
         v.push(("Touch Bar keys".into(), if a.touchbar.is_empty() { "not found (its keys need the Mac image's Touch Bar driver)".into() } else { format!("{} device(s), mode {} (0 Esc only, 1 F-keys, 2 media keys, 3 off; the Fn key switches 1 and 2 while held)", a.touchbar.len(), a.touchbar[0].1) }, false));
         v.push(("Touch Bar".into(), touchbar_label(&k.touchbar).into(), false));
         let st = crate::touchbar::status_text();
@@ -383,15 +426,21 @@ impl SettingsApp {
                 break; // a row that would run past the bottom of a short page is left out
             }
             g.text(a.x, y, 14.0 * s, MUTED, &label, Face::Sans);
-            let lines = g.wrap(14.0 * s, &value, Face::Bold, rows_w - label_w);
+            // a label wider than its column (a narrow window, big text) puts the value on the line below it
+            let stacked = g.text_width(14.0 * s, &label, Face::Sans) + 10.0 * s > label_w;
+            let (vx, vw) = if stacked { (a.x, rows_w) } else { (a.x + label_w, rows_w - label_w) };
+            if stacked {
+                y += 18.0 * s;
+            }
+            let lines = g.wrap(14.0 * s, &value, Face::Bold, vw);
             for (i, l) in lines.iter().take(3).enumerate() {
-                g.text(a.x + label_w, y + i as f32 * 18.0 * s, 14.0 * s, if warn { rgb(255, 196, 94) } else { TEXT }, l, Face::Bold);
+                g.text(vx, y + i as f32 * 18.0 * s, 14.0 * s, if warn { rgb(255, 196, 94) } else { TEXT }, l, Face::Bold);
             }
             y += 24.0 * s + if lines.len() > 1 { 18.0 * s * (lines.len().min(3) - 1) as f32 } else { 0.0 };
             if let Some(h) = Self::kbd_help(&label) {
-                let hl = g.wrap(12.0 * s, h, Face::Sans, rows_w - label_w);
+                let hl = g.wrap(12.0 * s, h, Face::Sans, vw);
                 for (i, l) in hl.iter().take(2).enumerate() {
-                    g.text(a.x + label_w, y - 4.0 * s + i as f32 * 15.0 * s, 12.0 * s, DIM, l, Face::Sans);
+                    g.text(vx, y - 4.0 * s + i as f32 * 15.0 * s, 12.0 * s, DIM, l, Face::Sans);
                 }
                 y += 15.0 * s * hl.len().min(2) as f32;
             }
@@ -466,6 +515,6 @@ impl SettingsApp {
 
     pub(super) fn keyboard_buttons(&self) -> Vec<Btn> {
         let (acc, mut_) = (ACCENT, TEXT);
-        vec![("Input profile", acc, 'v'), ("Reset to profile defaults", mut_, 'x'), ("Function keys", acc, 'f'), ("Touch Bar", acc, 'u'), ("Touch Bar strips", mut_, 'e'), ("Touch Bar flip", mut_, 'l'), ("ISO layout", mut_, 'i'), ("Swap Option/Cmd", mut_, 'o'), ("Repeat delay", mut_, 'd'), ("Repeat rate", mut_, 'r'), ("Trackpad tap", mut_, 'p'), ("Trackpad scroll", mut_, 'n'), ("Scroll speed", mut_, 's'), ("Wheel lines", mut_, 'y'), ("Wheel direction", mut_, 'w'), ("Smooth scrolling", mut_, 'g'), ("Momentum", mut_, 'm'), ("Probe touch screen", acc, 'h'), ("Reset touch screen", acc, 'z'), ("Test screen", acc, 'b'), ("Test keyboard light", mut_, 'k'), ("Test sound", mut_, 't')]
+        vec![("Input profile", acc, 'v'), ("Reset to profile defaults", mut_, 'x'), ("Function keys", acc, 'f'), ("Touch Bar", acc, 'u'), ("Touch Bar strips", mut_, 'e'), ("Touch Bar flip", mut_, 'l'), ("ISO layout", mut_, 'i'), ("Swap Option/Cmd", mut_, 'o'), ("Repeat delay", mut_, 'd'), ("Repeat rate", mut_, 'r'), ("Trackpad tap", mut_, 'p'), ("Trackpad scroll", mut_, 'n'), ("Three-finger drag", mut_, 'j'), ("Mouse slower", acc, '['), ("Mouse faster", acc, ']'), ("Mouse speed preset", mut_, '}'), ("Touchpad slower", mut_, ','), ("Touchpad faster", mut_, '.'), ("Touchpad speed preset", mut_, '>'), ("Scroll speed", mut_, 's'), ("Wheel lines", mut_, 'y'), ("Wheel direction", mut_, 'w'), ("Smooth scrolling", mut_, 'g'), ("Momentum", mut_, 'm'), ("Probe touch screen", acc, 'h'), ("Reset touch screen", acc, 'z'), ("Test screen", acc, 'b'), ("Test keyboard light", mut_, 'k'), ("Test sound", mut_, 't')]
     }
 }

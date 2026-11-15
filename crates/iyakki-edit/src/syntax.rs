@@ -1027,6 +1027,35 @@ pub fn highlight_line(lang: Lang, line: &str, state: HlState) -> (Vec<Span>, HlS
     }
 }
 
+/// A highlighted run of a whole document, in BYTE offsets into the text (for a front end that lays out a whole string at once).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ByteSpan {
+    pub start: usize,
+    pub end: usize,
+    pub kind: TokenKind,
+}
+
+/// Highlight a whole text in any supported language: the spans are sorted and do not overlap, and a block comment or string that
+/// goes over several lines keeps its colour on every line.
+pub fn highlight_text(lang: Lang, src: &str) -> Vec<ByteSpan> {
+    let mut out = Vec::new();
+    let mut state = HlState::Normal;
+    let mut offset = 0;
+    for line in src.split_inclusive('\n') {
+        let text = line.trim_end_matches(['\n', '\r']);
+        let (spans, next) = highlight_line(lang, text, state);
+        state = next;
+        let bytes: Vec<usize> = text.char_indices().map(|(i, _)| i).chain(std::iter::once(text.len())).collect();
+        for sp in spans {
+            if let (Some(&a), Some(&b)) = (bytes.get(sp.start), bytes.get(sp.end)) {
+                out.push(ByteSpan { start: offset + a, end: offset + b, kind: sp.kind });
+            }
+        }
+        offset += line.len();
+    }
+    out
+}
+
 /// Incremental per-document cache of the state at the start of each line.
 #[derive(Default)]
 pub struct Highlighter {
@@ -1069,6 +1098,51 @@ impl Highlighter {
             self.starts.push(next);
         }
         highlight_line(lang, lines.get(i).map_or("", String::as_str), self.starts[i]).0
+    }
+}
+
+#[cfg(test)]
+mod text_tests {
+    use super::*;
+
+    fn has(src: &str, spans: &[ByteSpan], k: TokenKind, what: &str) -> bool {
+        spans.iter().any(|s| s.kind == k && &src[s.start..s.end] == what)
+    }
+
+    #[test]
+    fn a_whole_rust_text_is_highlighted_in_byte_offsets_sorted_and_without_overlap() {
+        let src = "// hi\nfn add(a: u32) -> u32 { let s = \"x\"; a + 1 }";
+        let spans = highlight_text(Lang::Rust, src);
+        assert!(has(src, &spans, TokenKind::Comment, "// hi"));
+        assert!(has(src, &spans, TokenKind::Keyword, "fn"));
+        assert!(has(src, &spans, TokenKind::Keyword, "let"));
+        assert!(has(src, &spans, TokenKind::Function, "add"));
+        assert!(has(src, &spans, TokenKind::Type, "u32"));
+        assert!(has(src, &spans, TokenKind::String, "\"x\""));
+        assert!(spans.windows(2).all(|w| w[0].end <= w[1].start), "sorted, non-overlapping");
+    }
+
+    #[test]
+    fn offsets_are_bytes_so_multi_byte_text_before_a_token_does_not_shift_it_and_other_languages_work() {
+        let src = "let \u{e9}t\u{e9} = \"caf\u{e9}\"; // fin";
+        let spans = highlight_text(Lang::Rust, src);
+        assert!(has(src, &spans, TokenKind::String, "\"caf\u{e9}\""));
+        assert!(has(src, &spans, TokenKind::Comment, "// fin"));
+        let py = "def f():\n    return 1  # one\n";
+        let spans = highlight_text(lang_for_path("/x/tool.py"), py);
+        assert!(has(py, &spans, TokenKind::Keyword, "def"));
+        assert!(has(py, &spans, TokenKind::Comment, "# one"));
+        assert!(highlight_text(Lang::Plain, "plain words").is_empty());
+        assert!(highlight_text(Lang::Rust, "").is_empty());
+    }
+
+    #[test]
+    fn a_block_comment_over_several_lines_keeps_its_colour_on_each_line() {
+        let src = "/* one\ntwo\nthree */ fn x() {}\r\nlet y = 2;";
+        let spans = highlight_text(Lang::Rust, src);
+        assert!(has(src, &spans, TokenKind::Comment, "two"));
+        assert!(has(src, &spans, TokenKind::Keyword, "fn"));
+        assert!(has(src, &spans, TokenKind::Keyword, "let"), "after a CRLF the offsets are still right");
     }
 }
 

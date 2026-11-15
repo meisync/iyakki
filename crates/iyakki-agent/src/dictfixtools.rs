@@ -74,6 +74,12 @@ impl DictationWordingTools {
 }
 
 impl Tools for DictationWordingTools {
+
+    fn inner_tools(&self) -> Option<&dyn Tools> {
+
+        Some(&*self.inner)
+
+    }
     fn defs(&self) -> Vec<ToolDef> {
         let mut v = self.inner.defs();
         v.retain(|d| !is_tool(&d.spec.name));

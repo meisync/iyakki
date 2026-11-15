@@ -152,6 +152,20 @@ pub fn set_share_zone(ifaces: Vec<String>) {
     e.network_changed();
 }
 
+/// The networks of the VPN tunnel that is up (empty: none). They count as "the local network" only when the firewall's setting
+/// "VPN is local" is on; entries that are not private ranges are dropped. Called by the VPN manager.
+pub fn set_vpn_networks(nets: Vec<String>) {
+    let parsed: Vec<crate::ruleset::Addr> = nets.iter().filter_map(|n| crate::ruleset::vpn_network(n).ok()).collect();
+    let mut e = engine();
+    if e.ctx().vpn_nets == parsed {
+        return;
+    }
+    let mut c = e.ctx().clone();
+    c.vpn_nets = parsed;
+    e.set_ctx(c);
+    e.network_changed();
+}
+
 /// Where audit entries go (the shell's audit log). Entries made before this is called are delivered at once.
 pub fn set_audit(f: AuditFn) {
     engine().set_audit(f);
@@ -175,7 +189,7 @@ pub fn is_cloud(cmdline: &str, release: &str) -> bool {
 
 /// The facts about this machine for the generator, from the kernel command line and `/proc`.
 pub fn ctx_from(cmdline: &str, release: &str, ipv6: bool) -> Ctx {
-    Ctx { now: 0, ssh_boot: param(cmdline, "iyakki.ssh") == Some("1"), ipv6, cloud: is_cloud(cmdline, release), remote_port: param(cmdline, "iyakki.web").and_then(web_port), direct_ifaces: Vec::new(), direct_allow_more: false, share_ifaces: Vec::new() }
+    Ctx { now: 0, ssh_boot: param(cmdline, "iyakki.ssh") == Some("1"), ipv6, cloud: is_cloud(cmdline, release), remote_port: param(cmdline, "iyakki.web").and_then(web_port), direct_ifaces: Vec::new(), direct_allow_more: false, share_ifaces: Vec::new(), vpn_nets: Vec::new() }
 }
 
 fn ipv6_on() -> bool {

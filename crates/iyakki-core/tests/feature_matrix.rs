@@ -75,9 +75,61 @@ fn test_exists(root: &Path, krate: &str, name: &str) -> bool {
 struct Row {
     id: String,
     status: String,
-    progress: i64,
+    impl_pct: i64,
+    test_pct: i64,
+    manual: String,
     tests: Vec<String>,
     notes: String,
+}
+
+fn manual_ok(m: &str) -> bool {
+    let date_ok = |d: &str| d.len() == 10 && d.char_indices().all(|(i, c)| if i == 4 || i == 7 { c == '-' } else { c.is_ascii_digit() });
+    match m.split_whitespace().collect::<Vec<_>>().as_slice() {
+        ["none"] | ["needed"] => true,
+        ["passed", d, w @ ..] => date_ok(d) && !w.is_empty(),
+        ["failed", ki] => ki.strip_prefix("KI-").is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())),
+        _ => false,
+    }
+}
+
+/// `done N · partial N (impl open N · unproven N) · planned N · blocked N · deprecated N · total N`.
+fn totals_line(rows: &[Row]) -> String {
+    let n = |s: &str| rows.iter().filter(|r| r.status == s).count();
+    let partial = || rows.iter().filter(|r| r.status == "partial");
+    let impl_open = partial().filter(|r| r.impl_pct < 100).count();
+    let unproven = partial().filter(|r| r.impl_pct == 100 && (r.test_pct < 100 || r.manual == "needed" || r.manual.starts_with("failed"))).count();
+    format!("done {} · partial {} (impl open {impl_open} · unproven {unproven}) · planned {} · blocked {} · deprecated {} · total {}", n("done"), n("partial"), n("planned"), n("blocked"), n("deprecated"), rows.len())
+}
+
+/// The ids listed in `partial-ceiling-raises.txt` (one `F-ID reason` per line; `#` lines are comments).
+fn raise_ids(text: &str) -> Vec<String> {
+    text.lines().filter(|l| !l.trim().is_empty() && !l.starts_with('#')).filter_map(|l| l.split_whitespace().next()).map(str::to_string).collect()
+}
+
+/// The number of `partial` rows may not go above the ceiling file. The file may be lowered freely. It may be raised only by the number of
+/// ids newly listed (with a reason) in `docs/development/partial-ceiling-raises.txt`, compared with git HEAD: a new feature row that starts
+/// out partial, or a `done` row honestly demoted because a change needs a new manual test. Nothing else may raise it.
+fn ceiling_problems(partial: usize, root: &Path) -> Vec<String> {
+    let read = |t: &str| t.trim().parse::<usize>().ok();
+    let Some(ceiling) = std::fs::read_to_string(root.join("docs/development/partial-ceiling.txt")).ok().and_then(|t| read(&t)) else {
+        return vec!["docs/development/partial-ceiling.txt is missing or not a number".into()];
+    };
+    let mut p = Vec::new();
+    if partial > ceiling {
+        p.push(format!("{partial} partial rows is above the ceiling {ceiling} in docs/development/partial-ceiling.txt (finish rows, or list a new or demoted row with its reason in partial-ceiling-raises.txt)"));
+    }
+    let git_head = |path: &str| std::process::Command::new("git").args(["show", &format!("HEAD:{path}")]).current_dir(root).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).to_string());
+    if let Some(old) = git_head("docs/development/partial-ceiling.txt").and_then(|t| read(&t)) {
+        if ceiling > old {
+            let now = std::fs::read_to_string(root.join("docs/development/partial-ceiling-raises.txt")).map(|t| raise_ids(&t)).unwrap_or_default();
+            let before = git_head("docs/development/partial-ceiling-raises.txt").map(|t| raise_ids(&t)).unwrap_or_default();
+            let added = now.iter().filter(|i| !before.contains(i)).count();
+            if ceiling - old > added {
+                p.push(format!("the ceiling was raised from {old} to {ceiling} ({} more) but only {added} new id(s) are listed in docs/development/partial-ceiling-raises.txt", ceiling - old));
+            }
+        }
+    }
+    p
 }
 
 /// Returns the problems found (empty = consistent).
@@ -91,11 +143,11 @@ fn check_matrix(text: &str, root: &Path) -> Vec<String> {
         }
         let cells: Vec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
         let at = format!("line {}", n + 1);
-        if cells.len() != 8 {
-            problems.push(format!("{at}: expected 8 columns, found {}", cells.len()));
+        if cells.len() != 9 {
+            problems.push(format!("{at}: expected 9 columns, found {}", cells.len()));
             continue;
         }
-        let (id, name, phase, status, pri, prog, tests, notes) = (cells[0], cells[1], cells[2], cells[3], cells[4], cells[5], cells[6], cells[7]);
+        let (id, name, phase, status, pri, prog, manual, tests, notes) = (cells[0], cells[1], cells[2], cells[3], cells[4], cells[5], cells[6], cells[7], cells[8]);
         let id_ok = id.strip_prefix("F-").and_then(|r| r.rsplit_once('-')).is_some_and(|(area, num)| !area.is_empty() && area.starts_with(|c: char| c.is_ascii_uppercase()) && area.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()) && num.len() == 2 && num.chars().all(|c| c.is_ascii_digit()));
         if !id_ok {
             problems.push(format!("{at}: bad ID `{id}` (want F-AREA-nn)"));
@@ -115,24 +167,32 @@ fn check_matrix(text: &str, root: &Path) -> Vec<String> {
         if !PRIORITIES.contains(&pri) {
             problems.push(format!("{id}: unknown priority `{pri}`"));
         }
-        let progress = prog.strip_suffix('%').and_then(|p| p.parse::<i64>().ok());
-        let Some(progress) = progress.filter(|p| (0..=100).contains(p)) else {
-            problems.push(format!("{id}: progress `{prog}` must be 0%..100%"));
+        let pair = prog.split_once('/').and_then(|(a, b)| Some((a.parse::<i64>().ok()?, b.parse::<i64>().ok()?)));
+        let Some((impl_pct, test_pct)) = pair.filter(|(a, b)| (0..=100).contains(a) && (0..=100).contains(b)) else {
+            problems.push(format!("{id}: Impl/Test `{prog}` must be `<0..100>/<0..100>`"));
             continue;
         };
+        if ![0, 30, 50, 70, 100].contains(&test_pct) {
+            problems.push(format!("{id}: Test {test_pct} must be one of 0, 30, 50, 70, 100"));
+        }
+        if !manual_ok(manual) {
+            problems.push(format!("{id}: Manual `{manual}` must be none, needed, `passed YYYY-MM-DD where` or `failed KI-nnn`"));
+        }
         let tests: Vec<String> = if tests == "—" { vec![] } else { tests.split("<br>").map(|t| t.trim().trim_matches('`').to_string()).collect() };
-        rows.push(Row { id: id.to_string(), status: status.to_string(), progress, tests, notes: notes.to_string() });
+        rows.push(Row { id: id.to_string(), status: status.to_string(), impl_pct, test_pct, manual: manual.to_string(), tests, notes: notes.to_string() });
     }
     if rows.is_empty() {
         problems.push("no feature rows found".into());
     }
     let ids: BTreeSet<&str> = rows.iter().map(|r| r.id.as_str()).collect();
     for r in &rows {
+        let open_manual = r.manual == "needed" || r.manual.starts_with("failed");
+        let (i, t) = (r.impl_pct, r.test_pct);
         match r.status.as_str() {
-            "done" if r.progress != 100 => problems.push(format!("{}: `done` must be 100% (is {}%)", r.id, r.progress)),
-            "planned" if r.progress != 0 => problems.push(format!("{}: `planned` must be 0% (is {}%)", r.id, r.progress)),
-            "partial" if !(1..=99).contains(&r.progress) => problems.push(format!("{}: `partial` must be 1%..99% (is {}%)", r.id, r.progress)),
-            "blocked" if r.progress == 100 => problems.push(format!("{}: `blocked` cannot be 100%", r.id)),
+            "done" if i != 100 || t != 100 || open_manual => problems.push(format!("{}: `done` needs Impl 100, Test 100 and Manual none or passed (is {i}/{t}, Manual {})", r.id, r.manual)),
+            "planned" if i != 0 || t != 0 => problems.push(format!("{}: `planned` must be 0/0 (is {i}/{t})", r.id)),
+            "partial" if i == 100 && t == 100 && !open_manual => problems.push(format!("{}: `partial` with 100/100 and no open manual test is `done`", r.id)),
+            "blocked" if i == 100 && t == 100 => problems.push(format!("{}: `blocked` cannot be 100/100", r.id)),
             _ => {}
         }
         if matches!(r.status.as_str(), "done" | "partial" | "deprecated") && r.tests.is_empty() {
@@ -165,15 +225,12 @@ fn check_matrix(text: &str, root: &Path) -> Vec<String> {
         }
     }
     // the totals line
-    let mut count: BTreeMap<&str, usize> = BTreeMap::new();
-    for r in &rows {
-        *count.entry(r.status.as_str()).or_default() += 1;
-    }
-    let expected = STATUSES.iter().map(|s| format!("{s} {}", count.get(s).copied().unwrap_or(0))).collect::<Vec<_>>().join(" · ") + &format!(" · total {}", rows.len());
+    let expected = totals_line(&rows);
     let found = text.split("<!-- summary:start -->").nth(1).and_then(|r| r.split("<!-- summary:end -->").next()).unwrap_or("").to_string();
     if found != expected {
         problems.push(format!("the totals line is stale: it says `{found}`, the rows say `{expected}`"));
     }
+    problems.extend(ceiling_problems(rows.iter().filter(|r| r.status == "partial").count(), root));
     problems
 }
 
@@ -203,21 +260,30 @@ fn the_checker_catches_the_mistakes_it_exists_for() {
     // duplicate IDs
     assert!(has(&broken("| F-CORE-02 |", "| F-CORE-01 |"), "duplicate ID"));
     assert!(has(&broken("| F-CORE-02 |", "| F-core-2 |"), "bad ID"));
-    // status and progress must agree
-    assert!(has(&broken("| F-CORE-01 | Supervisor: run sandboxed tasks, revoke tokens afterwards | P1 | done | P0 | 100% |", "| F-CORE-01 | Supervisor: run sandboxed tasks, revoke tokens afterwards | P1 | done | P0 | 60% |"), "`done` must be 100%"));
-    assert!(has(&broken("| planned | P3 | 0% |", "| planned | P3 | 30% |"), "`planned` must be 0%"));
-    assert!(has(&broken("| partial | P2 | 50% |", "| partial | P2 | 100% |"), "`partial` must be 1%..99%"));
-    assert!(has(&broken("| done | P0 | 100% |", "| shipped | P0 | 100% |"), "unknown status"));
+    // status, Impl/Test and Manual must agree
+    assert!(has(&broken("| F-CORE-01 | Supervisor: run sandboxed tasks, revoke tokens afterwards | P1 | done | P0 | 100/100 |", "| F-CORE-01 | Supervisor: run sandboxed tasks, revoke tokens afterwards | P1 | done | P0 | 100/70 |"), "`done` needs Impl 100"));
+    assert!(has(&broken("| F-CORE-01 | Supervisor: run sandboxed tasks, revoke tokens afterwards | P1 | done | P0 | 100/100 | none |", "| F-CORE-01 | Supervisor: run sandboxed tasks, revoke tokens afterwards | P1 | done | P0 | 100/100 | needed |"), "`done` needs Impl 100"));
+    assert!(has(&broken("| F-CORE-01 | Supervisor: run sandboxed tasks, revoke tokens afterwards | P1 | done | P0 | 100/100 | none |", "| F-CORE-01 | Supervisor: run sandboxed tasks, revoke tokens afterwards | P1 | partial | P0 | 100/100 | none |"), "is `done`"));
+    assert!(has(&broken("| planned | P3 | 0/0 |", "| planned | P3 | 30/0 |"), "`planned` must be 0/0"));
+    assert!(has(&broken("100/100 | none |", "100/100 | maybe |"), "Manual `maybe`"));
+    assert!(has(&broken("100/100 | none |", "100/55 | none |"), "Test 55"));
+    assert!(has(&broken("100/100 | none |", "100% | none |"), "Impl/Test `100%`"));
+    assert!(has(&broken("| done | P0 | 100/100 |", "| shipped | P0 | 100/100 |"), "unknown status"));
     assert!(has(&broken("| P1 | done | P0 |", "| P11 | done | P0 |"), "unknown phase"));
+    // the partial ceiling
+    assert!(ceiling_problems(usize::MAX, &root).iter().any(|x| x.contains("above the ceiling")));
+    assert!(ceiling_problems(0, &root).iter().all(|x| !x.contains("above")));
+    assert_eq!(raise_ids("# comment\nF-CHAT-02 new feature row\n\nF-NET-06 demoted: new Wi-Fi message needs a manual re-check\n"), vec!["F-CHAT-02", "F-NET-06"]);
+    assert!(manual_ok("passed 2026-11-08 macmini") && manual_ok("failed KI-077") && !manual_ok("passed macmini") && !manual_ok("failed 77"));
     // done without evidence
-    let p = check_matrix(&good.replacen("| F-CORE-04 | Shutdown signals (own `sigaction`, no crate) | P0 | done | P1 | 100% | `iyakki-core::tests::sigterm_sets_the_shutdown_flag_and_the_flag_is_shared` |", "| F-CORE-04 | Shutdown signals (own `sigaction`, no crate) | P0 | done | P1 | 100% | — |", 1), &root);
+    let p = check_matrix(&good.replacen("| F-CORE-04 | Shutdown signals (own `sigaction`, no crate) | P0 | done | P1 | 100/100 | none | `iyakki-core::tests::sigterm_sets_the_shutdown_flag_and_the_flag_is_shared` |", "| F-CORE-04 | Shutdown signals (own `sigaction`, no crate) | P0 | done | P1 | 100/100 | none | — |", 1), &root);
     assert!(has(&p, "F-CORE-04: `done` needs at least one test"), "{p:?}");
     // deprecation must say what replaces it
-    assert!(has(&broken("Replaced by F-EDIT-05 and F-EDIT-06;", "Old."), "must name its replacement"));
-    assert!(has(&broken("Replaced by F-EDIT-05 and F-EDIT-06;", "Replaced by F-NOPE-99;"), "must name its replacement"));
+    assert!(has(&broken("Replaced by F-WEB-03 (pixel-streamed desktop)", "Old."), "must name its replacement"));
+    assert!(has(&broken("Replaced by F-WEB-03 (pixel-streamed desktop)", "Replaced by F-NOPE-99"), "must name its replacement"));
     // stale totals and malformed rows
     assert!(has(&broken("total ", "total 1"), "totals line is stale") || has(&broken("done ", "done 9"), "totals line is stale"));
-    assert!(has(&check_matrix(&format!("{good}\n| F-X-01 | too | few |"), &root), "expected 8 columns"));
+    assert!(has(&check_matrix(&format!("{good}\n| F-X-01 | too | few |"), &root), "expected 9 columns"));
     assert!(check_matrix("no table here", &root).iter().any(|x| x.contains("no feature rows")));
 }
 

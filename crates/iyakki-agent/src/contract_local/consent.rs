@@ -58,7 +58,7 @@ impl CoreConsents {
     /// Tests only: make a question look as old as its time allows.
     #[cfg(test)]
     pub(crate) fn age_for_test(&self, id: &str) {
-        if let Some(r) = self.open.lock().unwrap().iter_mut().find(|r| r.id == id) {
+        if let Some(r) = self.open.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter_mut().find(|r| r.id == id) {
             r.expires_ms = 1;
         }
     }

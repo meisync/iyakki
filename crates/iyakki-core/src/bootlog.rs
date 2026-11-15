@@ -4,6 +4,7 @@
 //! The file is rewritten every few seconds for the first two minutes (the whole log so far, at most 256 KB, newest kept), so it shows how far
 //! IYAKKI got even when it never reaches the sign-in screen. Failures are silent: a log must never stop the boot.
 
+#[cfg(target_os = "linux")]
 use std::io::Read;
 use std::path::PathBuf;
 

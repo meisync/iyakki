@@ -362,7 +362,7 @@ mod tests {
 
     fn fake_helper() -> PathBuf {
         let exe = std::env::current_exe().unwrap();
-        let dir = exe.parent().unwrap().parent().unwrap().to_path_buf();
+        let dir = exe.ancestors().find(|d| d.file_name().is_some_and(|n| n == "debug" || n == "release")).expect("the profile folder (target/debug) above the test program").to_path_buf();
         let p = dir.join("iyakki-fake-webview");
         if !p.is_file() {
             let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());

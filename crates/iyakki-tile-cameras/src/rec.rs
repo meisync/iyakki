@@ -30,6 +30,7 @@ const T_EXPORT: usize = 206;
 const T_LOG: usize = 207;
 const T_SETTINGS: usize = 208;
 const T_BACK: usize = 209;
+const T_LIMITS: usize = 210;
 const T_SLOT0: usize = 300;
 /// Milliseconds of recording that pass per heartbeat while playing (the shell beats about 30 times a second).
 const PLAY_STEP_MS: u64 = 33;
@@ -68,6 +69,8 @@ pub struct RecView {
     clip_mins: u32,
     /// The camera's motion events (F-CAM-04), shown as marks on the timeline.
     motion: Vec<iyakki_tile_api::cameras::MotionRow>,
+    /// The open settings form is the one for the limits of all cameras together (`g`), not the camera's own (`c`).
+    limits_form: bool,
 }
 
 fn mb_text(mb: u64) -> String {
@@ -80,7 +83,7 @@ fn days_text(d: u32) -> String {
 
 impl RecView {
     pub fn new(cx: &TileCx, id: &str, name: &str) -> RecView {
-        let mut v = RecView { id: id.into(), name: name.into(), info: None, days: vec![], day: 0, frame: None, pix: None, pos_ms: 0, playing: false, note: None, view: View::Main, tick: 0, last_info: 0, clip_mins: 1, motion: vec![] };
+        let mut v = RecView { id: id.into(), name: name.into(), info: None, days: vec![], day: 0, frame: None, pix: None, pos_ms: 0, playing: false, note: None, view: View::Main, tick: 0, last_info: 0, clip_mins: 1, motion: vec![], limits_form: false };
         v.reload(cx);
         if let Some(d) = v.days.first() {
             let at = d.spans.first().map_or(d.day_start_ms, |s| s.0);
@@ -119,7 +122,7 @@ impl RecView {
     }
     pub fn hint(&self) -> String {
         match self.view {
-            View::Main => "Space play/pause · ← → step · [ ] day · r record on/off · c settings · e export · l log · Esc back".into(),
+            View::Main => "Space play/pause · ← → step · [ ] day · r record on/off · c settings · g limits for all cameras · e export · l log · Esc back".into(),
             View::Settings(_) => "Tab next field · Enter save · Esc cancel".into(),
             View::Confirm(_) => "y yes · Esc cancel".into(),
             View::Log(_) => "Esc back".into(),
@@ -242,7 +245,60 @@ impl RecView {
         f
     }
 
+    /// The limits that hold for every camera's recordings together: the most they may use and the free space that is always kept.
+    fn limits_form(l: &iyakki_tile_api::cameras::RecLimits) -> Form {
+        let gb = |mb: u64| format!("{}", mb as f64 / 1024.0);
+        let mut f = Form::new("Limits for all cameras")
+            .with_note("These hold for the recordings of every camera together. The oldest recordings are deleted first when the total is over its limit; recording stops with a message when the free space falls below the floor, so the disk never fills up.")
+            .text("Most GB for all cameras", &gb(l.total_mb), "0 for no limit")
+            .text("Keep this many GB free", &gb(l.min_free_mb), &format!("at least {} GB", gb(l.min_floor_mb)));
+        f.focus = 0;
+        f
+    }
+
+    fn submit_limits(&mut self, cx: &TileCx, mut f: Box<Form>) {
+        let (total, free) = (f.value(0).trim().parse::<f64>(), f.value(1).trim().parse::<f64>());
+        let (Ok(total), Ok(free)) = (total, free) else {
+            f.error = Some("Both are numbers of GB (0 means no limit for the total).".into());
+            self.view = View::Settings(f);
+            return;
+        };
+        if !(0.0..1.0e7).contains(&total) || !(0.0..1.0e7).contains(&free) {
+            f.error = Some("Both are numbers of GB (0 means no limit for the total).".into());
+            self.view = View::Settings(f);
+            return;
+        }
+        match cx.cameras.rec_limits_set(Some((total * 1024.0).round() as u64), Some((free * 1024.0).round() as u64)) {
+            Ok(()) => {
+                self.limits_form = false;
+                self.say("Limits for all cameras saved.", true);
+            }
+            Err(e) => {
+                f.error = Some(e);
+                self.view = View::Settings(f);
+            }
+        }
+    }
+
+    fn open_limits(&mut self, cx: &TileCx) {
+        match cx.cameras.rec_limits() {
+            None => self.say("Recording is not available here.", false),
+            Some(l) if !l.can_change => {
+                let gb = |mb: u64| format!("{}", mb as f64 / 1024.0);
+                let total = if l.total_mb == 0 { "no limit".to_string() } else { format!("{} GB", gb(l.total_mb)) };
+                self.say(format!("All cameras together: at most {total}, {} GB always kept free. Only an administrator can change these.", gb(l.min_free_mb)), true);
+            }
+            Some(l) => {
+                self.limits_form = true;
+                self.view = View::Settings(Box::new(Self::limits_form(&l)));
+            }
+        }
+    }
+
     fn submit_settings(&mut self, cx: &TileCx, mut f: Box<Form>) {
+        if self.limits_form {
+            return self.submit_limits(cx, f);
+        }
         let mode = match f.value(0).trim().to_lowercase().as_str() {
             "off" => RecMode::Off,
             "continuous" => RecMode::Continuous,
@@ -310,7 +366,7 @@ impl RecView {
         match std::mem::replace(&mut self.view, View::Main) {
             View::Settings(mut f) => {
                 match f.handle_event(ev) {
-                    FormEvent::Cancel => {}
+                    FormEvent::Cancel => self.limits_form = false,
                     FormEvent::Submit => self.submit_settings(cx, f),
                     _ => self.view = View::Settings(f),
                 }
@@ -381,11 +437,13 @@ impl RecView {
             Event::Key(Key::Char('r')) | Event::Tab(T_RECORD) => self.toggle_record(cx),
             Event::Key(Key::Char('c')) | Event::Tab(T_SETTINGS) => {
                 if owner {
+                    self.limits_form = false;
                     self.view = View::Settings(Box::new(self.settings_form()));
                 } else {
                     self.say("Only the person who added the camera can change its recording.", false);
                 }
             }
+            Event::Key(Key::Char('g')) | Event::Tab(T_LIMITS) => self.open_limits(cx),
             Event::Key(Key::Char('e')) | Event::Tab(T_EXPORT) => match (owner, self.frame.as_ref()) {
                 (true, Some(f)) => self.view = View::Confirm(Ask::Export { from: f.ts_ms }),
                 (true, None) => self.say("Pick a recorded picture first; the clip starts there.", false),
@@ -448,6 +506,7 @@ impl RecView {
         let on = info.as_ref().is_some_and(|i| i.mode != RecMode::Off);
         bx += g.button(bx, y, 13.0 * s, if on { "Stop recording (r)" } else { "Start recording (r)" }, if on { RED } else { ACCENT }, Event::Tab(T_RECORD)) + 8.0 * s;
         bx += g.button(bx, y, 13.0 * s, "Settings (c)", MUTED, Event::Tab(T_SETTINGS)) + 8.0 * s;
+        bx += g.button(bx, y, 13.0 * s, "Limits (g)", MUTED, Event::Tab(T_LIMITS)) + 8.0 * s;
         bx += g.button(bx, y, 13.0 * s, "Export (e)", MUTED, Event::Tab(T_EXPORT)) + 8.0 * s;
         bx += g.button(bx, y, 13.0 * s, "Log (l)", MUTED, Event::Tab(T_LOG)) + 12.0 * s;
         if info.as_ref().is_some_and(|i| i.recording) {

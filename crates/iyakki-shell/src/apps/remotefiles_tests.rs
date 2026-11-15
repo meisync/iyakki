@@ -60,7 +60,7 @@ fn server(home: PathBuf) -> (u16, String, Arc<AtomicBool>) {
             let _ = s.set_read_timeout(Some(Duration::from_millis(100)));
             let (h, g, st) = (host.clone(), g.clone(), s2.clone());
             std::thread::spawn(move || {
-                let srv = Server { host_key: &h, gate: &*g, peer: "127.0.0.1".parse().unwrap() };
+                let srv = Server { host_key: &h, gate: &*g, ec_host: None, peer: "127.0.0.1".parse().unwrap() };
                 serve(s, &srv, st);
             });
         }

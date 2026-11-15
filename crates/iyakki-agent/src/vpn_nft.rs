@@ -5,8 +5,29 @@
 //! [`KillSwitchSpec::evaluate`], so the typed rules mean what the plan says; real kernels are covered by the ignored tests in
 //! `iyakki-fw/tests/tablegen_kernel.rs`.
 
+use std::net::IpAddr;
 use iyakki_fw::nl::tablegen::{ChainKind, ChainSpec, Expr, Hook, IfName, SetSpec, TableSpec};
 use iyakki_vpn::plan::{DnsCaptureSpec, IfMatch, KillSwitchSpec, Proto, Verdict, DNS_CHAIN, DNS_PRIORITY, DNS_TABLE, KS_CHAIN, KS_PRIORITY, KS_TABLE};
+
+/// First and last address of a prefix, as numbers (host bits of the stored address are ignored).
+fn cidr_span(c: &iyakki_vpn::net::Cidr) -> (u128, u128) {
+    let (bits, all): (u32, u128) = if c.is_v4() { (32, u128::from(u32::MAX)) } else { (128, u128::MAX) };
+    let n = match c.addr {
+        IpAddr::V4(a) => u128::from(u32::from(a)),
+        IpAddr::V6(a) => u128::from(a),
+    };
+    let host = if u32::from(c.prefix) >= bits { 0 } else { all >> c.prefix };
+    let lo = n & !host & all;
+    (lo, lo | host)
+}
+
+fn num_ip(v4: bool, n: u128) -> IpAddr {
+    if v4 {
+        IpAddr::V4(std::net::Ipv4Addr::from(n as u32))
+    } else {
+        IpAddr::V6(std::net::Ipv6Addr::from(n))
+    }
+}
 
 fn ifname(m: &IfMatch) -> IfName {
     match m {
@@ -20,13 +41,25 @@ pub fn guard_table(spec: &KillSwitchSpec) -> Result<TableSpec, String> {
     let mut sets = Vec::new();
     for s in &spec.sets {
         let mut members = Vec::new();
+        let mut spans: Vec<(u128, u128)> = Vec::new();
         for c in &s.members {
-            if c.prefix != if c.is_v4() { 32 } else { 128 } {
-                return Err(format!("the set {} takes single addresses only", s.name));
+            if c.is_v4() != s.v4 {
+                return Err(format!("the set {} holds one address family", s.name));
             }
-            members.push(c.addr);
+            let (lo, hi) = cidr_span(c);
+            spans.push((lo, hi));
+            if lo == hi {
+                members.push(c.addr);
+            }
         }
-        sets.push(SetSpec { name: s.name.clone(), v4: s.v4, timeout: true, members });
+        // A network prefix needs an interval set. Then every member goes in as a span, merged so none overlap (the kernel refuses overlaps).
+        let ranges: Vec<(IpAddr, IpAddr)> = if spans.iter().any(|(lo, hi)| lo != hi) {
+            members.clear();
+            iyakki_fw::ruleset::merge_spans(spans).into_iter().map(|(lo, hi)| (num_ip(s.v4, lo), num_ip(s.v4, hi))).collect()
+        } else {
+            Vec::new()
+        };
+        sets.push(SetSpec { name: s.name.clone(), v4: s.v4, timeout: true, members, ranges, concat: Vec::new() });
     }
     let mut rules = Vec::new();
     for r in &spec.rules {
@@ -94,7 +127,6 @@ mod tests {
     use super::*;
     use iyakki_vpn::net::Cidr;
     use iyakki_vpn::plan::{self, FailClosedInput, GuardBase, KillSwitchInput, Packet};
-    use std::net::IpAddr;
 
     /// A packet as the evaluator sees it.
     struct Pkt<'a> {
@@ -115,7 +147,7 @@ mod tests {
                     Expr::Daddr(ip, pre) => Cidr::new(*ip, *pre).unwrap().contains_ip(p.p.daddr) && ip.is_ipv4() == p.p.daddr.is_ipv4(),
                     Expr::DaddrSet(n) => {
                         let s = t.sets.iter().find(|s| &s.name == n).unwrap();
-                        s.v4 == p.p.daddr.is_ipv4() && p.members.iter().any(|(m, v)| m == n && v.contains(&p.p.daddr))
+                        s.v4 == p.p.daddr.is_ipv4() && (p.members.iter().any(|(m, v)| m == n && v.contains(&p.p.daddr)) || s.ranges.iter().any(|(lo, hi)| *lo <= p.p.daddr && p.p.daddr <= *hi))
                     }
                     Expr::L4(x) => {
                         l4 = Some(*x);
@@ -203,7 +235,15 @@ mod tests {
         let mut s2 = spec.clone();
         s2.sets[0].members = vec![Cidr::parse("8.8.4.4/32").unwrap()];
         assert_eq!(guard_table(&s2).unwrap().sets[0].members.len(), 1);
-        s2.sets[0].members = vec![Cidr::parse("8.8.4.0/24").unwrap()];
+        // a network prefix makes an interval set: the single address and the prefix are merged into spans
+        s2.sets[0].members = vec![Cidr::parse("8.8.4.0/24").unwrap(), Cidr::parse("8.8.4.7/32").unwrap(), Cidr::parse("8.8.5.0/24").unwrap()];
+        let t2 = guard_table(&s2).unwrap();
+        assert!(t2.sets[0].members.is_empty());
+        assert_eq!(t2.sets[0].ranges, vec![("8.8.4.0".parse().unwrap(), "8.8.5.255".parse().unwrap())]);
+        let (bytes, _) = iyakki_fw::nl::tablegen::encode_apply(&t2, 1).unwrap();
+        assert!(bytes.windows(8).any(|w| w == [8, 0, 3, 0, 0, 0, 0, 0x14]), "timeout flag 0x10 and interval flag 0x4 on the set");
+        // the set holds one family only
+        s2.sets[0].members = vec![Cidr::parse("2001:db8::/32").unwrap()];
         assert!(guard_table(&s2).is_err());
     }
 

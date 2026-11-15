@@ -183,3 +183,15 @@ fn the_shell_side_of_the_profile_passes_its_own_test() {
     assert!(out.status.success(), "{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(String::from_utf8_lossy(&out.stdout).contains("all checks passed"));
 }
+
+#[test]
+fn the_repack_cache_and_optional_linker_checks_pass() {
+    let have = |t: &str| std::process::Command::new("sh").arg("-c").arg(format!("command -v {t}")).output().map(|o| o.status.success()).unwrap_or(false);
+    if !have("bash") || !have("zstd") {
+        eprintln!("no bash or zstd: skipped");
+        return;
+    }
+    let out = std::process::Command::new("bash").arg(root().join("dist/buildroot/test-repack-cache.sh")).output().expect("run the script");
+    assert!(out.status.success(), "{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains(" 0 failed"));
+}

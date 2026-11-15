@@ -90,6 +90,7 @@ impl VoiceApp {
             Area::Mine => self.draw_mine(g, body, s, cx, tick),
         }
         self.draw_modal(g, area, s, tick);
+        self.path_pick.render(g, area, s, ACCENT, super::blink(tick));
     }
 
     // ------------------------------------------------------------------------------------------------ read aloud
@@ -180,7 +181,7 @@ impl VoiceApp {
         let rows = (((text_h - 18.0 * s) / lh) as usize).clamp(2, 40);
         self.text.min_rows = rows;
         self.text.max_rows = rows;
-        self.text.render(g, x, y, w, s, 15.0 * s, 9.0 * s, 40.0 * s, self.focus == Focus::Text, tick, "Paste or type the text to read aloud (Ctrl+V pastes)", ACCENT, TEXT_AREA, "text", false, true);
+        self.text.render(g, x, y, w, s, 15.0 * s, 9.0 * s, 40.0 * s, self.focus == Focus::Text, tick, &iyakki_uikit::platform::keys("Paste or type the text to read aloud (Ctrl+V pastes)"), ACCENT, TEXT_AREA, "text", false, true);
         self.read_bottom(g, x, by, w, s, &notes, true);
     }
 
@@ -213,7 +214,9 @@ impl VoiceApp {
                 let lab = "Open a text file:";
                 let lw = g.text_width(size, lab, Face::Sans) + 10.0 * s;
                 g.text(x, y + (fh - g.line_height(size, Face::Sans)) / 2.0, size, MUTED, lab, Face::Sans);
-                self.path.render(g, R::new(x + lw, y, w - lw, fh), true, s, super::blink(0), Face::Sans, PATH_FIELD);
+                let bw = g.text_width(12.0 * s, "Browse\u{2026}", Face::Bold) + 12.0 * s * 1.7 + 8.0 * s;
+                self.path.render(g, R::new(x + lw, y, (w - lw - bw).max(40.0 * s), fh), true, s, super::blink(0), Face::Sans, PATH_FIELD);
+                crate::pathpick::PathPick::button(g, x + w - bw + 8.0 * s, y + 2.0 * s, s, T_BROWSE, ACCENT);
             }
             y += fh + 4.0 * s;
             y += para(g, x, y, w, size, DIM, "Enter opens it. Esc cancels. Only files your account may read open.", 2, draw) + 2.0 * s;

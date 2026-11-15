@@ -708,10 +708,108 @@ impl Site {
                     _ => simple(404, "Not found."),
                 };
             }
+            if req.query == "zip" && !self.website() {
+                return self.zip_folder(g, &path);
+            }
             return self.listing(g, &path);
         }
         let name = g.rel.last().map(String::as_str).unwrap_or("");
         self.send_file(req, &path, &md, name)
+    }
+
+    /// The whole folder as one zip (`?zip` on a folder address): stored without compression, built in a temporary file that is already
+    /// removed while it is sent. Hidden files, links out of the folder and the deny list are left out exactly as in the listing;
+    /// at most 5000 entries and 1 GiB; a file that grows while it is read makes the archive fail rather than come out damaged.
+    fn zip_folder(&self, g: &Gate, dir: &Path) -> Reply {
+        use iyakki_archive::zipw::ZipWriter;
+        const MAX_ZIP_BYTES: u64 = 1 << 30;
+        let top = g.rel.last().cloned().unwrap_or_else(|| self.cfg.name.clone());
+        let top: String = top.chars().map(|c| if c.is_control() || matches!(c, '/' | '\\' | '"') { '_' } else { c }).collect::<String>().trim().to_string();
+        let top = if top.is_empty() || top == "." || top == ".." { "folder".to_string() } else { top };
+        let tmp_dir = std::env::temp_dir();
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let tmp = tmp_dir.join(format!("iyakki-share-zip-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+        let file = match std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&tmp) {
+            Ok(f) => f,
+            Err(_) => return simple(503, "Could not prepare the zip."),
+        };
+        let _ = std::fs::remove_file(&tmp); // the open handle keeps it; nothing is left behind whatever happens
+        let mut z = ZipWriter::new(file);
+        let mut total: u64 = 0;
+        let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        let mut todo: Vec<(PathBuf, String)> = vec![(dir.to_path_buf(), top.clone())];
+        let fail = |why: String| simple(413, &format!("This folder cannot be sent as one zip: {why}"));
+        if let Err(e) = z.add_dir(&top, self.now()) {
+            return fail(e);
+        }
+        while let Some((d, prefix)) = todo.pop() {
+            if !seen.insert(d.clone()) {
+                continue;
+            }
+            let mut names: Vec<(String, PathBuf)> = Vec::new();
+            if let Ok(rd) = std::fs::read_dir(&d) {
+                for ent in rd.flatten() {
+                    let name = ent.file_name().to_string_lossy().into_owned();
+                    if self.hidden(&name) {
+                        continue;
+                    }
+                    let Ok(real) = std::fs::canonicalize(ent.path()) else { continue };
+                    if !real.starts_with(&self.root) || self.env.deny.iter().any(|x| real.starts_with(x)) {
+                        continue;
+                    }
+                    // a link into a hidden folder of the share stays hidden, as it does for a download
+                    if real.strip_prefix(&self.root).map_or(true, |r| r.components().any(|c| self.hidden(&c.as_os_str().to_string_lossy()))) {
+                        continue;
+                    }
+                    names.push((name, real));
+                }
+            }
+            names.sort();
+            for (name, real) in names {
+                let Ok(md) = std::fs::metadata(&real) else { continue };
+                let entry = format!("{prefix}/{name}");
+                if iyakki_archive::zipw::valid_name(&entry).is_err() {
+                    continue; // a name that cannot be written safely is left out
+                }
+                if z.entries() >= MAX_LIST {
+                    return fail(format!("more than {MAX_LIST} files and folders"));
+                }
+                if md.is_dir() {
+                    if let Err(e) = z.add_dir(&entry, md.mtime()) {
+                        return fail(e);
+                    }
+                    todo.push((real, entry));
+                } else if md.is_file() {
+                    total += md.len();
+                    if total > MAX_ZIP_BYTES {
+                        return fail(format!("more than {} in all", human_size(MAX_ZIP_BYTES)));
+                    }
+                    let Ok(mut f) = File::open(&real) else { continue };
+                    if let Err(e) = z.add_file(&entry, md.mtime(), 0o644, &mut f, md.len()) {
+                        return fail(e);
+                    }
+                }
+            }
+        }
+        if let Some(free) = (self.env.free_space)(&tmp_dir) {
+            if total.saturating_add(16 << 20) > free {
+                return simple(507, "There is not enough room on this computer to prepare the zip.");
+            }
+        }
+        let mut file = match z.finish() {
+            Ok(f) => f,
+            Err(e) => return fail(e),
+        };
+        let len = match file.metadata() {
+            Ok(m) => m.len(),
+            Err(_) => return simple(503, "Could not prepare the zip."),
+        };
+        let _ = std::io::Seek::rewind(&mut file);
+        let mut r = Reply { status: 200, headers: vec![("Content-Type".into(), "application/zip".into())], body: Body::File { file, start: 0, len } };
+        r.headers.push(("Content-Disposition".into(), disposition(&format!("{top}.zip"))));
+        r.headers.push(("Cache-Control".into(), "no-store".into()));
+        r.headers.push(("Content-Security-Policy".into(), "default-src 'none'; sandbox".into()));
+        r
     }
 
     fn send_file(&self, req: &Req, path: &Path, md: &std::fs::Metadata, name: &str) -> Reply {
@@ -798,6 +896,9 @@ impl Site {
             let mut up = g.rel.clone();
             up.pop();
             h.push_str(&format!("<p><a class=d href=\"{}\">&larr; parent folder</a></p>", esc(&self.href(g, &up, true))));
+        }
+        if !self.website() && !es.is_empty() {
+            h.push_str("<p><a class=d href=\"?zip\">Download this folder as a zip</a></p>");
         }
         // the upload and new-folder forms come BEFORE the list: with hundreds of files the person must not scroll to the bottom to find them
         let here = esc(&self.href(g, &g.rel, true));
@@ -1041,6 +1142,8 @@ pub struct Running {
     pub site: Arc<Site>,
     pub addr: SocketAddr,
     join: Option<std::thread::JoinHandle<()>>,
+    /// The second listener of a "this machine only" share: `[::1]` on the same port (absent where the machine has no IPv6 loopback).
+    join6: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Running {
@@ -1052,9 +1155,14 @@ impl Running {
     /// Stop accepting, and let running transfers end. The port is free again when this returns.
     pub fn stop(&mut self) {
         self.site.stop.store(true, Ordering::Relaxed);
-        if let Some(j) = self.join.take() {
+        for j in [self.join.take(), self.join6.take()].into_iter().flatten() {
             let _ = j.join();
         }
+    }
+
+    /// Does this share also answer on `[::1]`?
+    pub fn listens_on_ipv6_loopback(&self) -> bool {
+        self.join6.is_some()
     }
 }
 
@@ -1075,7 +1183,7 @@ pub fn bind_addr(cfg: &ShareCfg) -> Result<SocketAddr, String> {
     };
     if let IpAddr::V6(a) = ip {
         if a == Ipv6Addr::UNSPECIFIED {
-            return Err("IPv6 is not supported".into());
+            return Err("to listen on every address use \"all\" (IPv4); for IPv6 name one address of this machine, or ::1 for this machine only".into());
         }
     }
     Ok(SocketAddr::new(ip, cfg.port))
@@ -1089,7 +1197,17 @@ pub fn start(cfg: ShareCfg, env: Env) -> Result<Running, String> {
     let site = Arc::new(Site::new(cfg, env)?);
     let s2 = site.clone();
     let join = std::thread::Builder::new().name("share".into()).spawn(move || accept_loop(listener, s2)).map_err(|e| e.to_string())?;
-    Ok(Running { site, addr: local, join: Some(join) })
+    // a share for this machine only also answers on the IPv6 loopback, so http://[::1]:port works too; no IPv6 here is not an error
+    let join6 = if addr.ip().is_loopback() && addr.is_ipv4() {
+        bind_retry(SocketAddr::new(Ipv6Addr::LOCALHOST.into(), local.port())).ok().and_then(|l6| {
+            l6.set_nonblocking(true).ok()?;
+            let s3 = site.clone();
+            std::thread::Builder::new().name("share6".into()).spawn(move || accept_loop(l6, s3)).ok()
+        })
+    } else {
+        None
+    };
+    Ok(Running { site, addr: local, join: Some(join), join6 })
 }
 
 fn accept_loop(l: TcpListener, site: Arc<Site>) {

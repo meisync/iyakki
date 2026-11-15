@@ -270,6 +270,8 @@ impl GitWorkTools {
         let state = Arc::new(Mutex::new(RunState::Running("starting".into())));
         runs().lock().unwrap_or_else(|p| p.into_inner()).push(CloneRun { user: e.user.clone(), root: e.repos_root.clone(), label: label.clone(), state: state.clone() });
         let (tick, dir, submodules, watch) = (e.tick.clone(), plan.dir(), plan.spec.submodules, state.clone());
+        // a clone outlives the chat run that started it: it is waiting work until it ends (F-AI-16)
+        let guard = crate::pendingplus::WorkGuard::start(&crate::pending::Ledger::open(&e.dir.join("pending"), &e.user), crate::pending::Source::Git, &format!("clone:{}", plan.folder), &format!("clone of {label}"), "");
         std::thread::spawn(move || {
             let mut b = batch;
             loop {
@@ -291,6 +293,11 @@ impl GitWorkTools {
                 Some(ItemState::Failed(m)) => RunState::Failed(m),
                 _ => RunState::Failed("the clone did not run".into()),
             };
+            match &end {
+                RunState::Done(m) => guard.finish(true, m),
+                RunState::Failed(m) => guard.finish(false, m),
+                RunState::Running(_) => guard.finish(false, "the clone did not finish"),
+            }
             *state.lock().unwrap_or_else(|p| p.into_inner()) = end;
         });
         let t = Instant::now();
@@ -381,6 +388,12 @@ fn reject_secrets(args: &Value) -> Result<(), String> {
 }
 
 impl Tools for GitWorkTools {
+
+    fn inner_tools(&self) -> Option<&dyn Tools> {
+
+        Some(&*self.inner)
+
+    }
     fn defs(&self) -> Vec<ToolDef> {
         let mut v = self.inner.defs();
         v.retain(|d| !is_gitwork_tool(&d.spec.name));

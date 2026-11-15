@@ -35,6 +35,65 @@ pub fn set_output_factory(f: impl Fn() -> Box<dyn OutputFactory> + Send + Sync +
     *FACTORY.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(f));
 }
 
+type RemoteHandler = Arc<dyn Fn(crate::avrcp::Act) + Send + Sync>;
+static REMOTE: Mutex<Option<RemoteHandler>> = Mutex::new(None);
+
+/// The agent registers what a volume key or a volume setting from the phone does (once, at start). Without it the phone's remote
+/// control channel is still answered, but nothing is changed here.
+pub fn set_remote_handler(f: impl Fn(crate::avrcp::Act) + Send + Sync + 'static) {
+    *REMOTE.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(f));
+}
+
+/// Test door: what a key from a phone would do (the same call the packet reader makes).
+pub fn run_remote_for_test(a: crate::avrcp::Act) {
+    do_remote(a);
+}
+
+/// Take the handler away (sign-out).
+pub fn clear_remote_handler() {
+    *REMOTE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+fn do_remote(a: crate::avrcp::Act) {
+    let h = REMOTE.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some(h) = h {
+        h(a);
+    }
+}
+
+/// Answers the remote-control packets of one phone (AVCTP on PSM 0x17) until the channel closes or goes quiet for a minute.
+fn serve_avrcp(mut sock: L2Sock) {
+    let mut target = crate::avrcp::Target::default();
+    let mut idle = 0;
+    loop {
+        match sock.recv(Duration::from_secs(2)) {
+            Ok(Recv::Data(d)) => {
+                idle = 0;
+                // a bad packet is ignored, the channel stays
+                if let Ok((reply, events)) = target.handle(&d) {
+                    if let Some(r) = reply {
+                        if sock.send(&r).is_err() {
+                            return;
+                        }
+                    }
+                    for e in &events {
+                        if let Some(a) = crate::avrcp::act_for(e) {
+                            do_remote(a);
+                        }
+                    }
+                }
+            }
+            Ok(Recv::Timeout) => {
+                idle += 1;
+                if idle >= 30 {
+                    return;
+                }
+            }
+            _ => return,
+        }
+    }
+}
+
 struct NoOutput;
 impl OutputFactory for NoOutput {
     fn open(&mut self, _: u32, _: usize, _: &str) -> Result<Box<dyn Output>, String> {
@@ -103,6 +162,8 @@ impl AudioHub {
         // the signalling channel needs a paired device; the service discovery channel is open to everyone
         let avdtp = Listener::open_with(PSM_AVDTP, 2, Some(1024));
         let sdp = Listener::open_with(PSM_SDP, 0, None);
+        // the remote-control channel is optional: without it the sound still plays
+        let avctp = Listener::open_with(crate::avrcp::PSM_AVCTP, 2, Some(512)).ok();
         match (avdtp, sdp) {
             (Ok(a), Ok(s)) => {
                 let mut g = self.lock();
@@ -110,7 +171,7 @@ impl AudioHub {
                 g.why_not.clear();
                 drop(g);
                 let h = self.clone();
-                std::thread::spawn(move || h.accept_loop(a, s));
+                std::thread::spawn(move || h.accept_loop(a, s, avctp));
             }
             (a, s) => {
                 let e = a.err().or(s.err()).map(|e| e.to_string()).unwrap_or_default();
@@ -119,11 +180,14 @@ impl AudioHub {
         }
     }
 
-    fn accept_loop(self: Arc<Self>, avdtp: Listener, sdp: Listener) {
+    fn accept_loop(self: Arc<Self>, avdtp: Listener, sdp: Listener, avctp: Option<Listener>) {
         loop {
-            let mut fds = [libc::pollfd { fd: avdtp.raw(), events: libc::POLLIN, revents: 0 }, libc::pollfd { fd: sdp.raw(), events: libc::POLLIN, revents: 0 }];
-            // SAFETY: two valid pollfds
-            unsafe { libc::poll(fds.as_mut_ptr(), 2, 1000) };
+            let mut fds = vec![libc::pollfd { fd: avdtp.raw(), events: libc::POLLIN, revents: 0 }, libc::pollfd { fd: sdp.raw(), events: libc::POLLIN, revents: 0 }];
+            if let Some(l) = avctp.as_ref() {
+                fds.push(libc::pollfd { fd: l.raw(), events: libc::POLLIN, revents: 0 });
+            }
+            // SAFETY: valid pollfds
+            unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, 1000) };
             while let Some((addr, sock)) = sdp.accept() {
                 let open = self.lock().sdp_open.clone();
                 if open.load(Ordering::SeqCst) >= MAX_SDP_CONNECTIONS {
@@ -138,6 +202,14 @@ impl AudioHub {
             }
             while let Some((addr, sock)) = avdtp.accept() {
                 self.on_avdtp(&addr, sock);
+            }
+            if let Some(l) = avctp.as_ref() {
+                while let Some((addr, sock)) = l.accept() {
+                    // only devices the person paired
+                    if hub().known(&addr).is_some() {
+                        std::thread::spawn(move || serve_avrcp(sock));
+                    }
+                }
             }
         }
     }

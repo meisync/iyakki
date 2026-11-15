@@ -15,6 +15,7 @@
 pub mod accounts;
 pub mod e2ee;
 pub mod matrix;
+pub mod mirror;
 pub mod service;
 pub mod tools;
 
@@ -23,6 +24,9 @@ pub(crate) mod fake_hs;
 #[cfg(test)]
 #[path = "matrix_tests.rs"]
 mod matrix_tests;
+#[cfg(test)]
+#[path = "mirror_tests.rs"]
+mod mirror_tests;
 #[cfg(test)]
 #[path = "service_tests.rs"]
 mod service_tests;

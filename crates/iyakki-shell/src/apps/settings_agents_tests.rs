@@ -215,6 +215,27 @@ fn model_key_auto_default_and_hiding_are_set_with_keys_and_clicks() {
 }
 
 #[test]
+fn key_v_on_the_copilot_row_switches_it_between_working_through_the_tools_and_a_read_only_advisor_and_only_there() {
+    let cx = admin("ag-advisor");
+    let mut a = SettingsApp::new(&cx);
+    goto_agents(&mut a, &cx);
+    assert!(!cfg(&cx).copilot.advisor_only, "through IYAKKI's tools and approvals by default");
+    // on the first row (Claude Code) the key does nothing to Copilot
+    press(&mut a, &cx, 'v');
+    assert!(!cfg(&cx).copilot.advisor_only);
+    key(&mut a, &cx, Key::Down);
+    press(&mut a, &cx, 'v');
+    assert!(cfg(&cx).copilot.advisor_only);
+    assert!(status(&a).contains("is an advisor now: read-only, no IYAKKI tools; you apply its edits."), "{}", status(&a));
+    // the agent's own configuration follows: the advisor has no write or shell tool offered
+    let entries = iyakki_agent::extagent::entries(&cfg(&cx), &cx.services.ext_status);
+    assert!(entries.iter().any(|e| e.id == "copilot"));
+    press(&mut a, &cx, 'v');
+    assert!(!cfg(&cx).copilot.advisor_only);
+    assert!(status(&a).contains("works through IYAKKI's tools and approvals again"), "{}", status(&a));
+}
+
+#[test]
 fn install_shows_the_exact_command_and_asks_and_login_names_the_vendors_command() {
     let cx = admin("agp4");
     cx.services.settings.lock().unwrap().update(|s| s.agents.claude.command = "/nonexistent/claude-xyz".into()).unwrap();
@@ -355,7 +376,15 @@ fn login_and_logout_ask_the_shell_for_an_installed_agent_and_the_page_shows_who_
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     // Claude Code (selected) is installed and signed in: Login and Logout are drawn and the keys ask the shell
-    let g = draw(&mut a, &cx, 1280, 720);
+    // the status is looked up on a thread of its own and a busy machine can answer late: draw again until Logout shows (up to 20 s)
+    let mut g = draw(&mut a, &cx, 1280, 720);
+    for _ in 0..2000 {
+        if g.hits.iter().any(|h| h.ev == Event::Tab(crate::agent_login::LOGOUT_TAB)) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        g = draw(&mut a, &cx, 1280, 720);
+    }
     assert!(g.hits.iter().any(|h| h.ev == Event::Tab(crate::agent_login::LOGIN_TAB)) && g.hits.iter().any(|h| h.ev == Event::Tab(crate::agent_login::LOGOUT_TAB)));
     press(&mut a, &cx, 'l');
     assert_eq!(crate::agent_login::take_request(), Some(("claude-code", false)));
@@ -368,4 +397,98 @@ fn login_and_logout_ask_the_shell_for_an_installed_agent_and_the_page_shows_who_
     press(&mut a, &cx, 'l');
     assert_eq!(crate::agent_login::take_request(), None);
     assert!(status(&a).contains("not installed"), "{}", status(&a));
+}
+
+// ---------------------------------------------------------------------------------------------------- native_pdf_output (F-PDF-14)
+
+struct NoTools;
+impl iyakki_agent::agent::Tools for NoTools {
+    fn defs(&self) -> Vec<iyakki_agent::agent::ToolDef> {
+        vec![]
+    }
+    fn call(&self, name: &str, _: &serde_json::Value) -> Result<String, String> {
+        Err(format!("unknown {name}"))
+    }
+    fn describe(&self, name: &str, _: &serde_json::Value) -> String {
+        name.into()
+    }
+}
+
+#[test]
+fn the_pdf_output_switch_is_a_key_on_the_agents_and_models_pages_and_the_chat_tool_flips_the_same_setting() {
+    use iyakki_agent::agent::Tools;
+    use iyakki_agent::pdfnativetools::{is_native, PdfOutputTools, RealBackend};
+    let cx = admin("pdfout");
+    let mut a = SettingsApp::new(&cx);
+    let tool = PdfOutputTools::new(Arc::new(NoTools), Arc::new(RealBackend { svc: cx.services.clone() }));
+    let texts = |a: &mut SettingsApp| draw(a, &cx, 1280, 720).text_log.iter().map(|t| t.2.clone()).collect::<Vec<_>>().join("\n");
+    // Agents: key p on the chosen agent (Claude Code is the first row)
+    goto_agents(&mut a, &cx);
+    assert!(!cfg(&cx).claude.native_pdf_output && !texts(&mut a).contains("writes PDFs"));
+    press(&mut a, &cx, 'p');
+    assert!(cfg(&cx).claude.native_pdf_output && status(&a).contains("pdf_create is not offered"), "{}", status(&a));
+    assert!(texts(&mut a).contains("writes PDFs"), "the row says so");
+    let agents = cx.services.agents_cfg();
+    assert!(is_native(SettingsApp::svc(&cx).settings.lock().unwrap().get(), &agents, Some(iyakki_agent::extagent::CLAUDE_CODE)), "and the chat reads the same switch");
+    press(&mut a, &cx, 'p');
+    assert!(!cfg(&cx).claude.native_pdf_output && status(&a).contains("offered the assistant's pdf_create again"));
+    // the chat tool: status is free, the change asks, and it lands in the same setting the page shows
+    assert!(tool.call("pdf_output_status", &serde_json::json!({})).unwrap().contains("agent:claude (Claude Code): pdf_create offered"));
+    tool.call("pdf_output_set", &serde_json::json!({"target": "agent:claude", "native": true})).unwrap();
+    assert!(cfg(&cx).claude.native_pdf_output && texts(&mut a).contains("writes PDFs"));
+    tool.call("pdf_output_set", &serde_json::json!({"target": "agent:claude", "native": false})).unwrap();
+    assert!(!cfg(&cx).claude.native_pdf_output);
+    // Models: key P on the chosen provider
+    SettingsApp::svc(&cx).settings.lock().unwrap().update(|s| {
+        let mut p = ProviderCfg::new("local", Kind::Ollama);
+        p.models = vec!["m".into()];
+        s.providers.push(p);
+        s.chat = Some(ModelChoice { provider: "local".into(), model: "m".into() });
+    }).unwrap();
+    a.go_to(Tab::Models);
+    let native = || SettingsApp::svc(&cx).settings.lock().unwrap().get().providers[0].native_pdf_output;
+    let rule = || {
+        let agents = cx.services.agents_cfg();
+        let st = SettingsApp::svc(&cx).settings.lock().unwrap();
+        is_native(st.get(), &agents, None)
+    };
+    assert!(!native() && !rule());
+    press(&mut a, &cx, 'P');
+    assert!(native() && rule() && status(&a).contains("local is marked as writing PDF files itself"), "{}", status(&a));
+    assert!(texts(&mut a).contains("writes PDFs"));
+    press(&mut a, &cx, 'P');
+    assert!(!native() && !rule());
+    tool.call("pdf_output_set", &serde_json::json!({"target": "local", "native": true})).unwrap();
+    assert!(native() && rule());
+    assert!(tool.call("pdf_output_status", &serde_json::json!({})).unwrap().contains("local (Ollama): writes PDF files itself"));
+    // a person who may not change settings cannot flip it from the page
+    let mut ucx = cx_with_admin_store("pdfout-user");
+    ucx.session.policy.manage_settings = false;
+    ucx.services = cx.services.clone();
+    let mut u = SettingsApp::new(&ucx);
+    u.go_to(Tab::Models);
+    press(&mut u, &ucx, 'P');
+    assert!(native(), "the page ignores P for a non-administrator");
+}
+
+#[test]
+fn key_v_on_the_copilot_row_switches_it_between_the_iyakkis_tools_and_a_read_only_advisor_and_does_nothing_on_the_others() {
+    let cx = admin("agp-v");
+    let mut a = SettingsApp::new(&cx);
+    goto_agents(&mut a, &cx);
+    // the first row (Claude Code): v is not for it
+    press(&mut a, &cx, 'v');
+    assert!(!cfg(&cx).copilot.advisor_only && !status(&a).contains("advisor"), "{}", status(&a));
+    // the Copilot row: v makes it an advisor, and again takes it back to IYAKKI's tools
+    key(&mut a, &cx, Key::Down);
+    assert!(!cfg(&cx).copilot.advisor_only);
+    press(&mut a, &cx, 'v');
+    assert!(cfg(&cx).copilot.advisor_only, "{}", status(&a));
+    assert!(status(&a).starts_with("GitHub Copilot is an advisor now: read-only, no IYAKKI tools"), "{}", status(&a));
+    // the row says which mode it is in and offers the other
+    press(&mut a, &cx, 'v');
+    assert!(!cfg(&cx).copilot.advisor_only);
+    assert!(status(&a).starts_with("GitHub Copilot works through IYAKKI's tools and approvals again"), "{}", status(&a));
+    // the choice is audited like every setting of this page
+    assert!(cx.audit.recent(20).iter().any(|l| l.contains("agents")), "{:?}", cx.audit.recent(20));
 }

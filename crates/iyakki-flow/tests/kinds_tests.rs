@@ -298,17 +298,53 @@ fn grpc_asks_for_grpcurl_when_it_is_missing() {
 }
 
 #[test]
-fn thrift_is_planned_and_says_so() {
+fn thrift_calls_a_service_over_http_json_and_reads_the_answer_and_the_exceptions() {
     let reg = Registry::builtin();
-    let k = reg.get("thrift").unwrap();
-    assert!(matches!(k.status(), kinds::KindStatus::Planned(_)));
-    let f = one("thrift", json!({"endpoint": "h:9090", "service": "S", "method": "m"}));
-    let issues = validate::validate_flow(&f, &reg);
-    assert!(issues.iter().any(|i| i.level == kinds::Level::Error && i.msg.contains("planned")));
+    assert!(matches!(reg.get("thrift").unwrap().status(), kinds::KindStatus::Ready));
+    let cfg = json!({"endpoint": "https://svc.example.com/thrift", "service": "Calc", "method": "add", "args": [{"id": 1, "type": "i32", "value": 2}, {"id": 2, "type": "i32", "value": 3}], "headers": {"X-Tenant": "t1"}});
+    let f = one("thrift", cfg.clone());
+    assert!(!validate::validate_flow(&f, &reg).iter().any(|i| i.level == kinds::Level::Error), "{:?}", validate::validate_flow(&f, &reg));
     let e = env("k-thrift");
+    e.host.on_http(|req| {
+        assert_eq!((req.method.as_str(), req.url.as_str()), ("POST", "https://svc.example.com/thrift"));
+        assert_eq!(String::from_utf8_lossy(&req.body), r#"[1,"Calc:add",1,1,{"1":{"i32":2},"2":{"i32":3}}]"#);
+        assert!(req.headers.iter().any(|(k, v)| k == "Content-Type" && v == "application/x-thrift") && req.headers.iter().any(|(k, v)| k == "X-Tenant" && v == "t1"));
+        assert!(!req.follow_redirects, "a redirect is not followed with a call body");
+        Ok(HttpResponse { status: 200, headers: vec![], body: r#"[1,"Calc:add",2,1,{"0":{"i32":5}}]"#.into(), elapsed_ms: 3 })
+    });
     let t = test_node(&e, &f);
-    assert!(!t.ok && t.error.contains("planned"));
-    assert!(e.engine.start_run(StartRequest::new("t").with_flow(f)).is_err(), "a flow with a thrift node cannot run");
+    assert!(t.ok, "{}", t.error);
+    assert_eq!(t.output["result"], 5);
+    assert_eq!(t.output["fields"]["0"], 5);
+    // a declared exception, a server failure, a wrong answer and an HTTP error are different errors
+    let say = |body: &str, status: u16| {
+        let e = env("k-thrift2");
+        let body = body.to_string();
+        e.host.on_http(move |_| Ok(HttpResponse { status, headers: vec![], body: body.clone(), elapsed_ms: 1 }));
+        test_node(&e, &one("thrift", cfg.clone()))
+    };
+    let t = say(r#"[1,"Calc:add",2,1,{"1":{"rec":{"1":{"str":"overflow"}}}}]"#, 200);
+    assert!(!t.ok && t.error.contains("exception number 1") && t.error.contains("overflow"), "{}", t.error);
+    let t = say(r#"[1,"add",3,1,{"1":{"str":"no such method"},"2":{"i32":1}}]"#, 200);
+    assert!(!t.ok && t.error.contains("unknown method") && t.error.contains("no such method"), "{}", t.error);
+    let t = say("<html>Bad gateway</html>", 502);
+    assert!(!t.ok && t.error.contains("HTTP 502"), "{}", t.error);
+    let t = say("hello", 200);
+    assert!(!t.ok && t.error.contains("not Thrift JSON"), "{}", t.error);
+    // retry rules: a 503 is worth another try, a refused argument or an exception is not
+    let n = node("thrift", cfg.clone());
+    assert_eq!(class_of("thrift", &n, NodeError { http_status: Some(503), ..Default::default() }), ErrClass::Retryable);
+    assert_eq!(class_of("thrift", &n, NodeError { http_status: Some(404), ..Default::default() }), ErrClass::Permanent);
+    assert_eq!(class_of("thrift", &n, NodeError::config("x")), ErrClass::Permanent);
+    // bad configuration is found before the run
+    for bad in [json!({"endpoint": "svc:9090", "method": "m"}), json!({"endpoint": "https://x", "method": "bad name"}), json!({"endpoint": "https://x", "method": "m", "args": [{"id": 1, "type": "float"}]}), json!({"endpoint": "https://x", "method": "m", "protocol": "binary"}), json!({"endpoint": "https://x", "method": "m", "headers": {"Authorization": "Bearer abc"}})] {
+        assert!(validate::has_errors(&validate::validate_flow(&one("thrift", bad), &reg)));
+    }
+    // a value that does not fit its type stops the call before anything is sent
+    let e = env("k-thrift3");
+    let t = test_node(&e, &one("thrift", json!({"endpoint": "https://x", "method": "m", "args": [{"id": 1, "type": "i8", "value": 999}]})));
+    assert!(!t.ok && t.error.contains("does not fit"));
+    assert!(e.host.http_calls.lock().unwrap().is_empty());
 }
 
 #[test]

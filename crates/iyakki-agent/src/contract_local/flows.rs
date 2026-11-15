@@ -220,7 +220,20 @@ impl Flows for CoreFlows {
             self.audit.line(ctx, "flows.approve", Risk::AskPerson, "refused: local_only");
             return Err(CallError::new(ErrorCode::NeedsConsent, "flows.approval_local_only", "Only a person at the machine can answer this question.").hint("Ask the person at the machine."));
         }
-        self.env.engine.decide(&run.0, &a.id, allow, &who(ctx), "").map_err(|m| CallError::new(ErrorCode::NotFound, "flows.no_such_approval", &m))?;
+        // a tenant keeps a waiting flow question in its approval router: the answer goes through the same exactly-once claim as the API's
+        // and only an approver may give it
+        if let Some(r) = self.tenant_answer(&run.0, &a.id, allow, &who(ctx)) {
+            match r {
+                Ok(crate::cloudflows::approval::Resolution::Applied) => {}
+                Ok(crate::cloudflows::approval::Resolution::AlreadyResolved) => return Err(CallError::new(ErrorCode::NotFound, "flows.no_such_approval", "That question was already answered.")),
+                Err(m) => {
+                    self.audit.line(ctx, "flows.approve", Risk::AskPerson, "refused: not an approver");
+                    return Err(CallError::new(ErrorCode::Denied, "flows.not_an_approver", &m));
+                }
+            }
+        } else {
+            self.env.engine.decide(&run.0, &a.id, allow, &who(ctx), "").map_err(|m| CallError::new(ErrorCode::NotFound, "flows.no_such_approval", &m))?;
+        }
         let node = a.id.clone();
         // the node leaves Waiting first and the run's own status follows a moment later (the engine thread sets it): answer only when the run no longer
         // reports the question as blocking it, or when it already waits for another one, so the status given back is never the old WaitingApproval
@@ -230,6 +243,30 @@ impl Flows for CoreFlows {
         self.catch_up(&mut self.inner.lock().unwrap_or_else(|e| e.into_inner()));
         self.audit.line(ctx, "flows.approve", Risk::AskPerson, if allow { "allowed" } else { "denied" });
         self.status_of(run)
+    }
+}
+
+/// The engine as the approval bridge's resolver.
+struct EngineResolver<'a>(&'a iyakki_flow::engine::Engine);
+
+impl crate::cloudflows::approval::Resolver for EngineResolver<'_> {
+    fn decide(&self, _user: &str, run: &str, node: &str, approved: bool, by: &str, note: &str) -> Result<(), String> {
+        self.0.decide(run, node, approved, by, note)
+    }
+    fn fail(&self, _user: &str, run: &str, node: &str, reason: &str) -> Result<(), String> {
+        self.0.decide(run, node, false, "timeout", reason)
+    }
+}
+
+impl CoreFlows {
+    /// The tenant's answer path for a waiting flow question; `None` when this machine has no such request (every desktop run).
+    fn tenant_answer(&self, run: &str, node: &str, allow: bool, by: &str) -> Option<Result<crate::cloudflows::approval::Resolution, String>> {
+        use crate::cloudflows::approval::Waits;
+        let data = self.env.svc.dir();
+        let waits = Waits::new(&crate::cloudflows::dir(data));
+        let roles = crate::cloudroles::load(&crate::cloudroles::path(data)).ok().flatten()?;
+        let env = crate::tenantconfig::api::Env { dir: data, vault: crate::tenantconfig::vault::for_user(data, "_flows"), audit: &crate::tenantconfig::api::NoAudit };
+        waits.resolve_from_desktop(&env, &roles, run, node, allow, by, "", &EngineResolver(&self.env.engine), iyakki_schema::now_secs())
     }
 }
 

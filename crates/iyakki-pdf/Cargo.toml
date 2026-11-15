@@ -7,3 +7,6 @@ description = "An in-house PDF reader and writer for untrusted files: structure 
 
 [dependencies]
 iyakki-web.workspace = true
+
+[dev-dependencies]
+fontdue = "0.9"

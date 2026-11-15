@@ -174,6 +174,14 @@ impl FlowsApp {
             id::R_BACK => self.leave_run(),
             id::R_AGAIN => self.run_again(),
             id::OFFER => self.toggle_offer(),
+            id::ASSIST_KILL => self.assist_toggle_kill(),
+            id::DEFAULTS => self.open_defaults(super::flows_defaults::DefTab::Assist),
+            id::OFFER_FLOW => {
+                let flow = if self.cur.is_some() { self.cur.clone() } else { self.flows.get(self.list_sel).map(|f| f.id.clone()) };
+                if let Some(flow) = flow {
+                    self.toggle_offer_flow(&flow);
+                }
+            }
             id::SUG_OPEN => self.open_suggestions(),
             id::ASSIST_ROLLBACK => self.assist_rollback(),
             id::ASSIST_PAUSE => self.assist_toggle_pause(),
@@ -402,6 +410,13 @@ impl FlowsApp {
             Key::Char('t') => self.template_picker(),
             Key::Char('i') => self.import_form(),
             Key::Char('o') => self.toggle_offer(),
+            Key::Char('K') => self.assist_toggle_kill(),
+            Key::Char('G') => self.open_defaults(super::flows_defaults::DefTab::Assist),
+            Key::Char('O') => {
+                if let Some(flow) = self.flows.get(self.list_sel).map(|f| f.id.clone()) {
+                    self.toggle_offer_flow(&flow);
+                }
+            }
             Key::Delete | Key::Char('d') => {
                 if let Some(f) = self.flows.get(self.list_sel) {
                     let n = self.env.store.versions(&f.id).len();
@@ -729,6 +744,7 @@ impl FlowsApp {
                 self.modal = Some(Modal::Publish(f));
             }
             Some(Modal::Suggestions(v)) => self.suggestions_event(v, ev),
+            Some(Modal::Defaults(v)) => self.defaults_event(v, ev),
             Some(Modal::Webhook(mut p)) => {
                 if self.hook_event(&mut p, ev) {
                     self.modal = Some(Modal::Webhook(p));

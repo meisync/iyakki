@@ -21,7 +21,7 @@ impl SettingsApp {
     }
 
     fn set_agents(&mut self, cx: &AppCx, f: impl FnOnce(&mut extagent::AgentsCfg), done: String) {
-        let r = Self::svc(cx).settings.lock().unwrap().update(|s| f(&mut s.agents));
+        let r = Self::svc(cx).settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| f(&mut s.agents));
         match r {
             Ok(()) => {
                 cx.audit.record(&cx.session.user, "settings.agents", &done);
@@ -125,6 +125,22 @@ impl SettingsApp {
                     self.modal = Some(Modal::Confirm(ConfirmKind::AgentAuto(id.clone()), format!("Allow the approval mode Auto for {label}? Its edits in the workspace and ordinary commands then run without asking. Deleting things, secrets, anything outside the workspace and cluster teardown still ask.")));
                 }
             }
+            Key::Char('p') => {
+                let to = !cfg.native_pdf_output(&id);
+                self.set_agents(
+                    cx,
+                    |a| match id.as_str() {
+                        extagent::CLAUDE_CODE => a.claude.native_pdf_output = to,
+                        extagent::COPILOT => a.copilot.native_pdf_output = to,
+                        other => {
+                            if let Some(c) = other.strip_prefix("custom:").and_then(|c| a.custom.iter_mut().find(|x| x.id == c)) {
+                                c.native_pdf_output = to;
+                            }
+                        }
+                    },
+                    if to { format!("{label} is marked as writing PDF files itself: the assistant's pdf_create is not offered to it.") } else { format!("{label} is offered the assistant's pdf_create again.") },
+                );
+            }
             Key::Char('v') if id == extagent::COPILOT => {
                 let to = !cfg.copilot.advisor_only;
                 self.set_agents(
@@ -184,8 +200,7 @@ impl SettingsApp {
         let m = model.to_string();
         Self::svc(cx)
             .settings
-            .lock()
-            .unwrap()
+            .lock().unwrap_or_else(std::sync::PoisonError::into_inner)
             .update(|s| {
                 let (cur, list) = match id {
                     extagent::CLAUDE_CODE => (&mut s.agents.claude.model, Some(&mut s.agents.claude.custom_models)),
@@ -243,10 +258,10 @@ impl SettingsApp {
             }
             FormKind::AgentCustom(editing) => {
                 let c = CustomCfg { id: form.value(0).trim().to_string(), name: form.value(1).trim().to_string(), command: form.value(2).trim().to_string(), key_env: form.value(3).trim().to_string(), models_command: form.value(4).trim().to_string(), ..Default::default() };
-                let r = Self::svc(cx).settings.lock().unwrap().update(|s| {
+                let r = Self::svc(cx).settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| {
                     if let Some(old) = s.agents.custom.iter_mut().find(|x| Some(&x.id) == editing.as_ref()) {
                         let keep = old.clone();
-                        *old = CustomCfg { model: keep.model, custom_models: keep.custom_models, key_ref: keep.key_ref, allow_auto: keep.allow_auto, ..c.clone() };
+                        *old = CustomCfg { model: keep.model, custom_models: keep.custom_models, key_ref: keep.key_ref, allow_auto: keep.allow_auto, native_pdf_output: keep.native_pdf_output, ..c.clone() };
                     } else {
                         s.agents.custom.push(c.clone());
                     }
@@ -364,6 +379,9 @@ impl SettingsApp {
             };
             if !enabled {
                 chips.push(("hidden", DIM));
+            }
+            if cfg.native_pdf_output(&id) {
+                chips.push(("writes PDFs", DIM));
             }
             let sub_fit = g.fit(13.0 * s, &sub, Face::Sans, a.w - 200.0 * s);
             row(g, &mut self.tip, i, a.x, y, a.w, 58.0 * s, s, i == sel, &ag.label(), &sub_fit, &chips);

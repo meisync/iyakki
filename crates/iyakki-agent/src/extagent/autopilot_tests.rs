@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::fake::{claude_mcp, tmp};
+use super::fake::{claude_mcp, copilot_mcp, tmp};
 use super::run::{start, RunRequest};
 use super::*;
 use crate::agent::{Risk, RunEvent, RunHandle, RunLimits, ToolDef, Tools, Verdict};
@@ -63,13 +63,17 @@ fn world(tag: &str, plans: Value) -> World {
     let root = root.canonicalize().unwrap();
     std::fs::write(dir.join("plan.json"), plans.to_string()).unwrap();
     claude_mcp(&dir);
+    copilot_mcp(&dir);
     let tools = Arc::new(crate::boardtools::ProjectTools::new(Arc::new(Inner { root: root.clone() }), &root, "Web", &root.join("FEATURES.md")));
     World { root, dir, tools, session: Default::default(), usage: Default::default() }
 }
 
 impl World {
     fn executor(&self, allow_auto: bool) -> Executor {
-        let agent: Arc<dyn ExternalAgent> = Arc::new(claude_code::ClaudeCode::new(AgentCfg { command: self.dir.join("claude").display().to_string(), ..Default::default() }));
+        self.executor_for(Arc::new(claude_code::ClaudeCode::new(AgentCfg { command: self.dir.join("claude").display().to_string(), ..Default::default() })), allow_auto)
+    }
+
+    fn executor_for(&self, agent: Arc<dyn ExternalAgent>, allow_auto: bool) -> Executor {
         let (root, tools, session, usage) = (self.root.clone(), self.tools.clone(), self.session.clone(), self.usage.clone());
         Arc::new(move |call: StepCall| -> RunHandle {
             let resume = session.lock().unwrap().clone();
@@ -100,8 +104,16 @@ impl World {
     }
 
     fn run(&self, allow_auto: bool, limits: RunLimits, goal: &str, verdict: impl FnMut(&str) -> Verdict) -> Vec<RunEvent> {
+        self.run_with(None, allow_auto, limits, goal, verdict)
+    }
+
+    /// The same with another agent than Claude Code driving the steps.
+    fn run_with(&self, agent: Option<Arc<dyn ExternalAgent>>, allow_auto: bool, limits: RunLimits, goal: &str, verdict: impl FnMut(&str) -> Verdict) -> Vec<RunEvent> {
         let mut ctx = autopilot::Context::new(&self.root, &self.root.join("FEATURES.md"), goal);
-        ctx.executor = Some(self.executor(allow_auto));
+        ctx.executor = Some(match agent {
+            Some(a) => self.executor_for(a, allow_auto),
+            None => self.executor(allow_auto),
+        });
         ctx.state = Some(Arc::new(|| "PROJECT STATE\nstack: node".to_string()));
         let h = autopilot::start(Arc::new(crate::chat::Unconfigured), self.tools.clone(), vec![Message::system("SYS"), Message::user(goal)], limits, crate::assistrun::Assist::off(), ctx);
         drive(&h, verdict)
@@ -303,4 +315,186 @@ fn the_summary_lists_what_ran_and_shows_advice_as_suggested_not_run() {
     assert!(text.contains("Files changed: Dockerfile"), "{text}");
     assert!(!text.contains("rm -rf"), "a command that was refused is not listed as run: {text}");
     assert!(text.contains("Suggested, not run: kubectl delete ns demo"), "{text}");
+}
+
+fn upd(id: &str, status: &str, comment: &str) -> Value {
+    json!({"name": "board_update", "args": {"id": id, "status": status, "comment": comment}})
+}
+
+fn tool_texts(ev: &[RunEvent]) -> Vec<String> {
+    ev.iter().filter_map(|e| if let RunEvent::ToolResult { text, .. } = e { Some(text.clone()) } else { None }).collect()
+}
+
+#[test]
+fn a_row_of_a_kind_is_verified_by_the_tool_of_that_kind_and_a_claim_without_it_is_sent_back() {
+    if !have_python() {
+        return;
+    }
+    let w = world(
+        "ap-kind",
+        json!([
+            {"calls": [add("Build the web image")], "text": "Planned."},
+            {"calls": [upd("F-APP-01", "done", "the image is built")], "text": "Claimed it done without building anything."},
+            {"calls": [{"name": "deploy_build", "args": {"name": "web"}}, upd("F-APP-01", "done", "built it")], "text": "Built the image."},
+            {"calls": [], "text": "Summary: done."}
+        ]),
+    );
+    let ev = w.run(true, lim(), "build the web image", |_| Verdict::Approve);
+    let p3 = w.prompt(3);
+    assert!(p3.contains("The check for F-APP-01 FAILED. Diagnosis:"), "a claim with no build is refused and the reason goes to the next step: {p3}");
+    let tr = crate::boardtrack::Tracker::new(&w.root, &w.root.join("FEATURES.md"));
+    assert!(tr.is_verified("F-APP-01"), "verified once deploy_build ran, by the harness, not by the comment: {}", final_text(&ev));
+    assert!(final_text(&ev).contains("1 of 1 rows done"), "{}", final_text(&ev));
+}
+
+#[test]
+fn the_fourth_board_update_of_a_step_is_not_run_the_row_is_parked_and_the_step_ends() {
+    if !have_python() {
+        return;
+    }
+    let w = world(
+        "ap-park",
+        json!([
+            {"calls": [add("Create the player page")], "text": "Planned."},
+            {"calls": [upd("F-APP-01", "partial", "one"), upd("F-APP-01", "partial", "two"), upd("F-APP-01", "partial", "three"), upd("F-APP-01", "done", "four"), upd("F-APP-01", "done", "five")], "text": "Tried to finish."},
+            {"calls": [], "text": "Summary."}
+        ]),
+    );
+    let ev = w.run(true, lim(), "make a player page", |_| Verdict::Approve);
+    let texts = tool_texts(&ev);
+    assert!(texts.iter().any(|t| t.contains("F-APP-01 is parked as review") && t.contains("updated too often in one step")), "{texts:?}");
+    let board = std::fs::read_to_string(w.root.join("FEATURES.md")).unwrap();
+    assert!(board.contains("review"), "the row is parked for the person's OK: {board}");
+    assert!(final_text(&ev).contains("review") || notes(&ev).iter().any(|n| n.contains("review")), "{}", final_text(&ev));
+}
+
+#[test]
+fn steps_that_change_nothing_on_the_board_end_the_run_after_the_no_progress_limit() {
+    if !have_python() {
+        return;
+    }
+    let w = world(
+        "ap-stuck",
+        json!([
+            {"calls": [add("Create the player page")], "text": "Planned."},
+            {"calls": [], "text": "I will think about it."},
+            {"calls": [], "text": "Still thinking."},
+            {"calls": [], "text": "More thinking."},
+            {"calls": [], "text": "Never ends."}
+        ]),
+    );
+    let ev = w.run(true, lim(), "make a player page", |_| Verdict::Approve);
+    let end = ev.last().unwrap();
+    let said = match end {
+        RunEvent::Stopped { reason } => reason.clone(),
+        RunEvent::Final { text } => text.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(said, "autopilot stopped at step 4: no progress in 3 steps in a row. Resume continues from here.");
+    assert_eq!(w.runs(), 4, "the fifth step was never started");
+    let board = std::fs::read_to_string(w.root.join("FEATURES.md")).unwrap();
+    assert!(!board.contains("done 1"), "nothing was claimed or verified: {board}");
+}
+
+#[test]
+fn a_row_that_is_still_open_after_a_try_is_retried_with_the_attempt_number_and_a_different_approach() {
+    if !have_python() {
+        return;
+    }
+    let w = world(
+        "ap-retry",
+        json!([
+            {"calls": [add("Apply the manifest to the cluster")], "text": "Planned."},
+            {"calls": [write("manifest.yaml")], "text": "Wrote a manifest, did not apply it."},
+            {"calls": [write("manifest2.yaml")], "text": "Wrote another."},
+            {"calls": [write("manifest3.yaml")], "text": "And another."},
+            {"calls": [], "text": "Summary."}
+        ]),
+    );
+    let ev = w.run(true, lim(), "apply the manifest", |_| Verdict::Approve);
+    let p3 = w.prompt(3);
+    assert!(p3.contains("Attempt 2 of 3: the last try did not finish, use a different approach."), "{p3}");
+    assert!(!w.prompt(2).contains("Attempt"), "the first try has no attempt line: {}", w.prompt(2));
+    let tr = crate::boardtrack::Tracker::new(&w.root, &w.root.join("FEATURES.md"));
+    assert!(!tr.is_verified("F-APP-01"), "files are no apply: the row stays open");
+    let said = match ev.last().unwrap() {
+        RunEvent::Stopped { reason } => reason.clone(),
+        RunEvent::Final { text } => text.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert!(said.contains("no progress in 3 steps in a row") || said.contains("blocked") || said.contains("not finished after 3 attempts"), "{said}");
+}
+
+fn copilot_of(w: &World) -> Arc<dyn ExternalAgent> {
+    Arc::new(super::copilot::Copilot::new(AgentCfg { command: w.dir.join("copilot").display().to_string(), ..Default::default() }))
+}
+
+fn iyakki_write(path: &str) -> Value {
+    json!({"name": "write_file", "args": {"path": path}})
+}
+
+#[test]
+fn autopilot_driven_by_copilot_plans_works_row_by_row_resumes_the_session_and_never_gives_it_a_write_or_shell_tool_of_its_own() {
+    if !have_python() {
+        return;
+    }
+    let plans = json!([
+        {"calls": [add("Write server.js with an HTTP server"), add("Add a Dockerfile")], "text": "Planned two steps."},
+        {"calls": [iyakki_write("server.js")], "text": "Wrote server.js."},
+        {"calls": [iyakki_write("Dockerfile")], "text": "Wrote the Dockerfile."},
+        {"calls": [], "text": "Summary: done."}
+    ]);
+    // Auto allowed: the harness runs the whole goal through the agent
+    let w = world("ap-cop", plans.clone());
+    let asked = Mutex::new(vec![]);
+    let ev = w.run_with(Some(copilot_of(&w)), true, lim(), "create a simple nodejs webserver", |n| {
+        asked.lock().unwrap().push(n.to_string());
+        Verdict::Approve
+    });
+    let text = final_text(&ev);
+    assert!(text.contains("2 of 2 rows done"), "{text}\n{:?}", notes(&ev));
+    assert!(text.contains("Files changed: server.js, Dockerfile"), "the writes went through IYAKKI's own tool and reached the tracker: {text}");
+    assert!(w.root.join("server.js").exists() && w.root.join("Dockerfile").exists());
+    assert!(asked.lock().unwrap().is_empty(), "with Auto allowed nothing in this plan asks: {:?}", asked.lock().unwrap());
+    // one Copilot session: the first step starts it, every later step resumes it by the id it reported
+    assert_eq!(w.runs(), 4);
+    assert!(!w.args(1).iter().any(|a| a.starts_with("--resume")), "{:?}", w.args(1));
+    for n in 2..=4 {
+        let a = w.args(n);
+        assert!(a.iter().any(|x| x == "--resume=cop-ap"), "step {n} does not resume: {a:?}");
+        // Copilot's own write and shell tools stay denied and only the bridge server is allowed, in every step
+        for f in ["--deny-tool=write", "--deny-tool=shell", "--allow-tool=iyakki", "--no-ask-user"] {
+            assert!(a.iter().any(|x| x == f), "step {n}: {f} in {a:?}");
+        }
+        assert!(a.iter().all(|x| !x.contains("allow-all") && !x.contains("yolo")), "{a:?}");
+    }
+    assert!(w.args(2).join("\n").contains("AUTOPILOT step 2: 0/2 rows done. Work on F-APP-01"), "the step message is the prompt");
+    // Auto not allowed for this agent: the same write asks first, and the run waits on the person
+    let w = world("ap-cop2", plans);
+    let asked = Mutex::new(vec![]);
+    let ev = w.run_with(Some(copilot_of(&w)), false, lim(), "create a simple nodejs webserver", |n| {
+        asked.lock().unwrap().push(n.to_string());
+        Verdict::Approve
+    });
+    assert!(asked.lock().unwrap().iter().any(|n| n == "write_file"), "{:?}", asked.lock().unwrap());
+    assert!(final_text(&ev).contains("2 of 2 rows done"), "{}", final_text(&ev));
+}
+
+#[test]
+fn a_refused_action_blocks_the_row_when_copilot_drives_too() {
+    if !have_python() {
+        return;
+    }
+    let w = world(
+        "ap-cop3",
+        json!([
+            {"calls": [add("Add a Dockerfile")], "text": "Planned."},
+            {"calls": [{"name": "k8s_delete", "args": {"path": "old"}}], "text": "Tried to clean up."},
+            {"calls": [], "text": "Summary."}
+        ]),
+    );
+    let ev = w.run_with(Some(copilot_of(&w)), true, lim(), "add a dockerfile", |n| if n == "k8s_delete" { Verdict::Deny } else { Verdict::Approve });
+    let board = std::fs::read_to_string(w.root.join("FEATURES.md")).unwrap();
+    assert!(board.contains("blocked"), "{board}");
+    assert!(final_text(&ev).contains("1 blocked"), "{}", final_text(&ev));
 }

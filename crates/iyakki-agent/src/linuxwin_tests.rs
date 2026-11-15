@@ -80,13 +80,13 @@ fn the_session_script_is_fixed_text_with_validated_sizes_and_no_eval() {
     let s = session_script();
     assert!(s.starts_with("#!/bin/sh\n"));
     assert!(s.contains("case \"$W$H\" in \"\"|*[!0-9]*) exit 2;; esac"), "sizes must be digits");
-    assert!(s.contains("Xvnc :73 -geometry \"${W}x${H}\" -depth 24 -rfbunixpath \"$SOCK\" -rfbport -1 -SecurityTypes None -nolisten tcp -nolisten local -auth \"$XAUTHORITY\""), "{s}");
-    assert!(s.contains("SOCK=/mnt/iyakki-display/display.sock"));
+    assert!(s.contains("Xvnc \":$DN\" -geometry \"${W}x${H}\" -depth 24 -rfbunixpath \"$SOCK\" -rfbport -1 -SecurityTypes None -nolisten tcp -nolisten local -auth \"$XAUTHORITY\""), "{s}");
+    assert!(s.contains("SOCK=\"/mnt/iyakki-display/display$SUF.sock\""));
     assert!(s.contains("\"$@\" &"), "the program's words are passed on as they are");
     assert!(!s.contains("eval") && !s.contains("sh -c") && !s.contains("$*"));
     assert!(s.contains("matchbox-window-manager -use_titlebar no"));
-    assert!(s.contains("DISPLAY=:73") && !s.contains(":1 ") && !s.contains("DISPLAY=:1"), "not a display number a desktop uses");
-    assert!(s.contains("xauth -q -f \"$XAUTHORITY\" add :73 ."), "the display needs a secret key");
+    assert!(s.contains("DISPLAY=\":$DN\"") && s.contains("DN=$((SLOT + 73))") && !s.contains(":1 ") && !s.contains("DISPLAY=:1"), "not a display number a desktop uses");
+    assert!(s.contains("xauth -q -f \"$XAUTHORITY\" add \":$DN\" ."), "the display needs a secret key");
     assert!(s.contains("/dev/urandom") && !s.contains("-AcceptSetDesktopSize=0"));
 }
 
@@ -370,4 +370,65 @@ fn a_sandbox_that_cannot_start_is_named_first_and_whole() {
     assert!(!m.contains("..."), "{m}");
     let plain = apt_failure("curl", "Reading package lists...\nE: Unable to locate package curl\n");
     assert!(plain.starts_with("apt could not install curl: ") && plain.contains("Unable to locate"), "{plain}");
+}
+
+#[test]
+fn a_second_window_of_one_sandbox_gets_its_own_slot_display_and_socket() {
+    let d = tmp("slot");
+    let la = sandbox(&d, Arc::new(FakeRunner::new(&[])), false, true);
+    let sp = FakeSpawn::default();
+    let w0 = Window::start(&la, &sp, &xterm(), 800, 600).unwrap();
+    let w2 = Window::start_slot(&la, &sp, &xterm(), 640, 480, 2).unwrap();
+    let calls = sp.calls.lock().unwrap().clone();
+    let tail = |a: &Vec<String>| a[a.iter().position(|x| x == "--").unwrap() + 1..].to_vec();
+    assert_eq!(tail(&calls[0]), ["/usr/local/bin/iyakki-window-session", "800", "600", "xterm"], "slot 0 is the form it always was");
+    assert_eq!(tail(&calls[1]), ["/usr/local/bin/iyakki-window-session", "--slot", "2", "640", "480", "xterm"]);
+    let run = la.dir_of(SANDBOX).join("run");
+    assert_eq!((w0.socket(), w2.socket()), (run.join("display.sock"), run.join("display-2.sock")));
+    assert_eq!((w0.slot(), w2.slot()), (0, 2));
+    // one folder is shared, nothing else
+    assert_eq!(calls[1].iter().filter(|a| a.as_str() == "--bind-rw" || a.as_str() == "--bind-ro").count(), 1);
+    // more slots than allowed are refused before anything starts
+    assert!(Window::start_slot(&la, &sp, &xterm(), 640, 480, MAX_SLOTS).unwrap_err().contains("at most"));
+    assert_eq!(sp.calls.lock().unwrap().len(), 2);
+    let log = std::fs::read_to_string(la.audit_path()).unwrap();
+    assert_eq!(log.matches("window.start").count(), 2, "{log}");
+}
+
+#[test]
+fn a_sandbox_with_the_older_script_gets_the_new_one_before_a_second_window_starts() {
+    let d = tmp("oldscript");
+    let la = sandbox(&d, Arc::new(FakeRunner::new(&[])), false, true);
+    let path = la.rootfs_of(SANDBOX).join(SCRIPT_REL);
+    std::fs::write(&path, "#!/bin/sh\n# the script before slots\n").unwrap();
+    let sp = FakeSpawn::default();
+    let _w0 = Window::start(&la, &sp, &xterm(), 800, 600).unwrap();
+    assert!(std::fs::read_to_string(&path).unwrap().contains("before slots"), "slot 0 works with either script and leaves it alone");
+    let _w1 = Window::start_slot(&la, &sp, &xterm(), 800, 600, 1).unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), session_script());
+}
+
+#[test]
+fn the_script_reads_the_slot_and_picks_a_distinct_display_socket_and_authority_file() {
+    // run the first part of the script itself in sh (up to the exports) and print what it decided
+    let script = session_script();
+    let head = script.split("export HOME").next().unwrap().to_string();
+    let probe = format!("{head}echo \"$DN|$SUF|$W|$H|$*\"\n");
+    let dir = tmp("probe");
+    let f = dir.join("probe.sh");
+    std::fs::write(&f, probe).unwrap();
+    let run = |args: &[&str]| {
+        let o = std::process::Command::new("sh").arg(&f).args(args).output().unwrap();
+        (o.status.code(), String::from_utf8_lossy(&o.stdout).trim().to_string())
+    };
+    assert_eq!(run(&["800", "600", "xterm", "-e", "top"]), (Some(0), "73||800|600|xterm -e top".into()));
+    assert_eq!(run(&["--slot", "0", "800", "600", "xterm"]), (Some(0), "73||800|600|xterm".into()));
+    assert_eq!(run(&["--slot", "2", "640", "480", "xclock"]), (Some(0), "75|-2|640|480|xclock".into()));
+    assert_eq!(run(&["--slot", "3", "1", "2", "x"]).1, "76|-3|1|2|x");
+    for bad in [vec!["--slot", "4", "8", "8", "x"], vec!["--slot", "x", "8", "8", "x"], vec!["--slot", "", "8", "8", "x"], vec!["--slot", "-1", "8", "8", "x"], vec!["--slot", "1"], vec!["8", "8"]] {
+        assert_eq!(run(&bad).0, Some(2), "{bad:?}");
+    }
+    // the rest of the script uses those names
+    assert!(script.contains("SOCK=\"/mnt/iyakki-display/display$SUF.sock\"") && script.contains("XAUTHORITY=\"$XDG_RUNTIME_DIR/Xauthority$SUF\"") && script.contains("Xvnc \":$DN\""), "{script}");
+    assert!(!script.contains(":73 "), "no fixed display number left");
 }

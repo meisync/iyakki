@@ -81,3 +81,69 @@ fn click_label_info(sh: &mut Shell, g: &mut Gfx) {
     sh.handle(&Event::MouseDown((r.x + r.w / 2.0) as i32, (r.y + r.h / 2.0) as i32));
     sh.render(g);
 }
+
+// ------------------------------------------------------------------------------------------------ SDK 1.2 cards
+
+const MONEY_PAGE: &str = r#"<!doctype html><html><body><p id="out">waiting</p><script>
+iyakki.money.requestLimit({perDayMinor: 500, why: 'to buy credits for the report'}).then(
+  (r) => { document.getElementById('out').textContent = 'limit ' + r.perDayMinor; },
+  (e) => { document.getElementById('out').textContent = 'error ' + e.code; });
+</script></body></html>"#;
+
+/// Install a dev app with `caps`, sign in as root and open it; returns the shell, the screen, the services and the folder to clean up.
+fn open_dev_app(tag: &str, id: &str, title: &str, caps: &str, page: &str) -> (Shell, Gfx, std::sync::Arc<iyakki_agent::services::Services>, std::path::PathBuf) {
+    let (mut sh, _) = shell_with_users(tag);
+    let mut g = Gfx::new(1280, 720);
+    let ws = std::env::temp_dir().join(format!("iyakki-sdktile-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&ws);
+    let dir = ws.join(id);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("app.json"), format!(r#"{{"id":"{id}","name":"{title}","icon":"🧩","capabilities":{caps}}}"#)).unwrap();
+    std::fs::write(dir.join("index.html"), page).unwrap();
+    login(&mut sh, "root", "rootpass12");
+    let svc = sh.services_for_demo().clone();
+    iyakki_agent::store::tilehub::add_dev(&svc, &iyakki_sec::policy::Role::Admin.template(), "root", &dir).unwrap();
+    sh.refresh_custom();
+    sh.set_group(Group::Apps);
+    sh.render(&mut g);
+    let items = sh.group_items();
+    let i = items.iter().position(|it| matches!(it, LItem::App(e) if e.title == title)).expect("the app's tile");
+    sh.sel = i;
+    sh.render(&mut g);
+    let (w, h) = sh.size;
+    let s = scale_for(w, h);
+    let cap = launcher::per_page(w, h, s);
+    let r = launcher::page_rects(w, h, s, items.len(), i / cap)[i % cap];
+    sh.handle(&Event::MouseDown((r.x + r.w / 2.0) as i32, (r.y + r.h / 2.0) as i32));
+    for _ in 0..8 {
+        sh.handle(&Event::Tick);
+    }
+    sh.render(&mut g);
+    (sh, g, svc, ws)
+}
+
+#[test]
+fn an_app_that_asks_to_spend_more_gets_a_card_every_time_and_only_the_persons_key_raises_the_limit() {
+    let (mut sh, mut g, svc, ws) = open_dev_app("tiles-money-yes", "moneyapp", "Moneyapp", r#"{"money":"USD"}"#, MONEY_PAGE);
+    let card = sh.tile_card_text_for_test();
+    assert!(card.contains("asks to spend more money") && card.contains("0.00 USD to 5.00 USD") && card.contains("buy credits for the report") && card.contains("You are asked every time"), "{card}");
+    assert!(sh.tile_text_for_test().contains("waiting"), "the app waits for the person");
+    let file = svc.dir().join("appdata").join("tile-sdk").join("root").join("moneyapp.sdk2.json");
+    assert!(!file.exists() || !std::fs::read_to_string(&file).unwrap().contains("per_day_minor\": 500"), "nothing is raised while the card waits");
+    sh.handle(&Event::Key(Key::Char('y')));
+    assert!(sh.tile_card_text_for_test().is_empty(), "the card closes");
+    tick_until(&mut sh, &mut g, "limit 500");
+    assert!(std::fs::read_to_string(&file).unwrap().contains("\"per_day_minor\": 500"));
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn saying_no_to_the_money_card_leaves_the_limit_at_nothing_and_the_app_hears_denied() {
+    let (mut sh, mut g, svc, ws) = open_dev_app("tiles-money-no", "moneyno", "Moneyno", r#"{"money":"USD"}"#, MONEY_PAGE);
+    assert!(sh.tile_card_text_for_test().contains("asks to spend more money"));
+    sh.handle(&Event::Key(Key::Esc));
+    tick_until(&mut sh, &mut g, "error Denied");
+    let file = svc.dir().join("appdata").join("tile-sdk").join("root").join("moneyno.sdk2.json");
+    assert!(!file.exists() || !std::fs::read_to_string(&file).unwrap().contains("\"per_day_minor\": 500"));
+    let _ = std::fs::remove_dir_all(&ws);
+}

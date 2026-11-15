@@ -32,7 +32,22 @@ pub struct ScrollList {
     grab: Option<f32>,
     /// The last pointer position seen.
     pub pointer: Option<(i32, i32)>,
+    /// A press on the list's body (a finger or a held mouse button on a row): the drag that may follow scrolls the list.
+    body: Option<Body>,
+    /// How far the pointer must move before a press on the body becomes a drag (a tap stays a tap), in pixels.
+    slop: f32,
 }
+
+/// A press on the body of the list and what the pointer did since.
+#[derive(Clone, Copy, Debug)]
+struct Body {
+    start_y: i32,
+    last_y: i32,
+    moved: bool,
+}
+
+/// How far (nominal pixels) a press on a row may wander before it is a drag of the list and not a tap.
+pub const DRAG_SLOP: f32 = 10.0;
 
 /// The hit id the bar registers is the caller's; the width of the clickable strip (wider than the drawn bar, for fingers).
 const STRIP: f32 = 16.0;
@@ -44,6 +59,7 @@ impl ScrollList {
         self.row = row.max(1.0);
         self.max = (content_h - view.h).max(0.0);
         self.offset = self.offset.clamp_safe(0.0, self.max);
+        self.slop = DRAG_SLOP * s;
         self.track = if self.max > 0.0 { R::new(view.x + view.w - STRIP * s, view.y, STRIP * s, view.h) } else { R::new(view.x + view.w, view.y, 0.0, 0.0) };
     }
 
@@ -167,6 +183,49 @@ impl ScrollList {
 
     pub fn release(&mut self) {
         self.grab = None;
+        self.body = None;
+    }
+
+    /// A press landed on a row of the list (call it when the row's click event arrives; the pointer position is the last one seen).
+    /// A drag that follows, once it has moved past the slop, scrolls the list with the finger and is taken by [`ScrollList::event`],
+    /// so a tap still clicks the row and a drag never lands on a row by accident. False when there is nothing to scroll or the press
+    /// was not over the body (the bar has its own handling).
+    pub fn body_press(&mut self) -> bool {
+        self.body = None;
+        if self.max <= 0.0 {
+            return false;
+        }
+        let Some((x, y)) = self.pointer else { return false };
+        if !self.view.contains(x, y) || self.track.contains(x, y) {
+            return false;
+        }
+        self.body = Some(Body { start_y: y, last_y: y, moved: false });
+        true
+    }
+
+    /// True while a drag that began on the body has moved far enough to count as a drag.
+    pub fn body_dragging(&self) -> bool {
+        self.body.is_some_and(|b| b.moved)
+    }
+
+    /// The pointer moved to `y` while a press on the body is held.
+    fn body_drag_to(&mut self, y: i32) -> bool {
+        let Some(mut b) = self.body else { return false };
+        if !b.moved {
+            if ((y - b.start_y) as f32).abs() <= self.slop {
+                return false;
+            }
+            // the list takes the finger from here on, without a jump of the distance already travelled
+            b.moved = true;
+            b.last_y = y;
+            self.body = Some(b);
+            return true;
+        }
+        // a finger moving down pulls the content down: the offset (distance from the top) gets smaller
+        self.by(-((y - b.last_y) as f32));
+        b.last_y = y;
+        self.body = Some(b);
+        true
     }
 
     pub fn dragging(&self) -> bool {
@@ -182,9 +241,12 @@ impl ScrollList {
                     self.drag_to(*y);
                     return true;
                 }
-                false
+                self.body_drag_to(*y)
             }
-            Event::MouseUp(..) => std::mem::take(&mut self.grab).is_some(),
+            Event::MouseUp(..) => {
+                let dragged = self.body.take().is_some_and(|b| b.moved);
+                std::mem::take(&mut self.grab).is_some() || dragged
+            }
             Event::AreaAt(id, _, y) if *id == bar_id => {
                 self.bar_down(*y);
                 true
@@ -264,6 +326,51 @@ mod tests {
         l.release();
         assert!(l.offset > l.max * 0.3 && l.offset < l.max * 0.7, "{}", l.offset);
         assert!(!l.event(&Event::AreaAt(8, 5.0, 5.0), 9), "another area is not ours");
+    }
+
+    #[test]
+    fn a_drag_that_starts_on_a_row_scrolls_the_list_with_the_finger_and_a_tap_does_not() {
+        let mut l = list();
+        l.pointer = Some((50, 200));
+        // a tap: pressed, moved a little, released: nothing scrolled, nothing taken
+        assert!(l.body_press());
+        assert!(!l.event(&Event::MouseMove(50, 205), 9) && !l.body_dragging());
+        assert!(!l.event(&Event::MouseUp(50, 205), 9) && l.offset == 0.0);
+        // a drag upwards (the finger moves up 100 px): the content follows, the list scrolls down by 100 less the slop it waited
+        l.pointer = Some((50, 300));
+        assert!(l.body_press());
+        assert!(l.event(&Event::MouseMove(50, 280), 9) && l.body_dragging(), "past the slop the drag starts");
+        assert!(l.offset == 0.0, "and starts without a jump");
+        assert!(l.event(&Event::MouseMove(50, 230), 9));
+        assert!((l.offset - 50.0).abs() < 0.01, "{}", l.offset);
+        assert!(l.event(&Event::MouseMove(50, 260), 9) && (l.offset - 20.0).abs() < 0.01, "and back down pulls the content down: {}", l.offset);
+        assert!(l.event(&Event::MouseUp(50, 260), 9), "the release of a drag is taken, so it is not a click");
+        assert!(!l.body_dragging());
+        assert!(!l.event(&Event::MouseMove(50, 100), 9), "no press, no drag");
+        // never past either end
+        l.pointer = Some((50, 200));
+        assert!(l.body_press());
+        l.event(&Event::MouseMove(50, 150), 9);
+        l.event(&Event::MouseMove(50, -5000), 9);
+        assert!((l.offset - l.max).abs() < 0.01);
+        l.event(&Event::MouseMove(50, 90000), 9);
+        assert_eq!(l.offset, 0.0);
+        l.event(&Event::MouseUp(0, 0), 9);
+    }
+
+    #[test]
+    fn a_press_outside_the_body_or_on_a_list_that_fits_never_becomes_a_drag() {
+        let mut l = list();
+        l.pointer = Some((50, 20));
+        assert!(!l.body_press(), "above the list");
+        l.pointer = Some((l.track.x as i32 + 4, 200));
+        assert!(!l.body_press(), "on the bar: the bar has its own handling");
+        l.pointer = None;
+        assert!(!l.body_press(), "no known pointer");
+        let mut f = ScrollList::default();
+        f.layout(R::new(0.0, 0.0, 100.0, 300.0), 200.0, 30.0, 1.0);
+        f.pointer = Some((10, 10));
+        assert!(!f.body_press() && !f.event(&Event::MouseMove(10, 200), 9));
     }
 
     #[test]

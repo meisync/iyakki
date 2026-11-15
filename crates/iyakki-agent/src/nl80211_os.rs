@@ -145,6 +145,13 @@ pub struct Nl80211Socket {
 
 impl Nl80211Socket {
     /// Open and bind a `NETLINK_GENERIC` socket (needs the right to control the Wi-Fi card, normally root).
+    #[cfg(not(target_os = "linux"))]
+    pub fn open(_timeout: Duration) -> Result<Nl80211Socket, NlError> {
+        Err(NlError::Io(format!("Wi-Fi control (nl80211) is {}", crate::oscompat::UNAVAILABLE)))
+    }
+
+    /// Open and bind a `NETLINK_GENERIC` socket (needs the right to control the Wi-Fi card, normally root).
+    #[cfg(target_os = "linux")]
     pub fn open(timeout: Duration) -> Result<Nl80211Socket, NlError> {
         // SAFETY: plain system call with constant arguments.
         let raw = unsafe { libc::socket(libc::AF_NETLINK, libc::SOCK_RAW | libc::SOCK_CLOEXEC, NETLINK_GENERIC) };
@@ -322,6 +329,12 @@ pub struct PacketEapol {
 const ETH_P_PAE_BE: u16 = nl80211::ETH_P_PAE.to_be();
 
 impl PacketEapol {
+    #[cfg(not(target_os = "linux"))]
+    pub fn open(_ifindex: u32) -> Result<PacketEapol, String> {
+        Err(format!("EAPOL packet sockets are {}", crate::oscompat::UNAVAILABLE))
+    }
+
+    #[cfg(target_os = "linux")]
     pub fn open(ifindex: u32) -> Result<PacketEapol, String> {
         // SAFETY: plain system call with constant arguments.
         let raw = unsafe { libc::socket(libc::AF_PACKET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, ETH_P_PAE_BE as i32) };
@@ -344,6 +357,21 @@ impl PacketEapol {
     }
 }
 
+/// Never reached outside Linux (`open` fails there); present so the hotspot code compiles.
+#[cfg(not(target_os = "linux"))]
+impl EapolChannel for PacketEapol {
+    fn send(&mut self, _sta: Mac, _eapol: &[u8]) -> Result<(), String> {
+        Err(crate::oscompat::UNAVAILABLE.into())
+    }
+    fn recv(&mut self, _wait_ms: i32) -> Result<Option<(Mac, Vec<u8>)>, String> {
+        Err(crate::oscompat::UNAVAILABLE.into())
+    }
+    fn raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
+    }
+}
+
+#[cfg(target_os = "linux")]
 impl EapolChannel for PacketEapol {
     fn send(&mut self, sta: Mac, eapol: &[u8]) -> Result<(), String> {
         // SAFETY: an all-zero sockaddr_ll is valid.
@@ -391,6 +419,13 @@ impl EapolChannel for PacketEapol {
 }
 
 /// A UDP socket bound to one interface (the DHCP server must hear only the hotspot's clients) that may broadcast.
+#[cfg(not(target_os = "linux"))]
+pub fn udp_on_interface(_ifname: &str, _port: u16) -> Result<UdpSocket, String> {
+    Err(format!("binding a socket to one interface is {}", crate::oscompat::UNAVAILABLE))
+}
+
+/// (the Linux version of the above: `SO_BINDTODEVICE`)
+#[cfg(target_os = "linux")]
 pub fn udp_on_interface(ifname: &str, port: u16) -> Result<UdpSocket, String> {
     let s = UdpSocket::bind(("0.0.0.0", port)).map_err(|e| format!("binding UDP {port}: {e}"))?;
     s.set_broadcast(true).map_err(|e| format!("allowing broadcast: {e}"))?;

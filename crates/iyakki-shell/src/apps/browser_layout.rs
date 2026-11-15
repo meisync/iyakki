@@ -40,6 +40,9 @@ struct Env<'a> {
     /// How deep inline boxes are being measured or laid out (they are measured, then laid out, so nesting costs).
     depth: std::cell::Cell<u8>,
     s: f32,
+    /// Text-only zoom: how much bigger the letters are drawn than the rest of the page (1.0: not used). Pictures, boxes, form
+    /// controls and spacing keep the page's scale; line breaks and heights follow the bigger text.
+    ts: f32,
 }
 
 pub struct Prim {
@@ -205,7 +208,7 @@ struct Anc {
 pub fn control_size(g: &mut Gfx, c: &Control, size: f32, s: f32, max_w: f32) -> (f32, f32) {
     let field_h = size * 1.95;
     let (w, h) = match c.kind {
-        ControlKind::Text | ControlKind::Password => ((c.size as f32 * size * 0.52).clamp_safe(130.0 * s, 900.0 * s), field_h),
+        ControlKind::Text | ControlKind::Password | ControlKind::File => ((c.size as f32 * size * 0.52).clamp_safe(130.0 * s, 900.0 * s), field_h),
         ControlKind::Textarea => ((c.size as f32 * size * 0.52).clamp_safe(220.0 * s, 700.0 * s), c.rows as f32 * size * 1.45 + 14.0 * s),
         ControlKind::Checkbox | ControlKind::Radio => (size * 1.25, size * 1.25),
         ControlKind::Submit | ControlKind::Button => (g.text_width(size, &c.label, Face::Bold) + size * 2.0, field_h),
@@ -283,7 +286,7 @@ fn tokens(g: &mut Gfx, spans: &[Span], size: f32, bold: bool, ctx: &Ctx, env: &E
             continue;
         }
         if sp.style.gap > 0 && sp.text.is_empty() {
-            let size = if sp.style.size_pct > 0 { 16.0 * env.s * sp.style.size_pct as f32 / 100.0 } else { size };
+            let size = if sp.style.size_pct > 0 { 16.0 * env.s * env.ts * sp.style.size_pct as f32 / 100.0 } else { size };
             out.push(Tok::Gap { w: sp.style.gap as f32 * env.s, bg: sp.style.bg.map(|b| over(b, ctx.bg)), size });
             continue;
         }
@@ -301,7 +304,7 @@ fn tokens(g: &mut Gfx, spans: &[Span], size: f32, bold: bool, ctx: &Ctx, env: &E
             continue;
         }
         let face = if sp.style.code { Face::Mono } else if sp.style.bold || bold { Face::Bold } else { Face::Sans };
-        let base = if sp.style.size_pct > 0 { 16.0 * env.s * sp.style.size_pct as f32 / 100.0 } else { size };
+        let base = if sp.style.size_pct > 0 { 16.0 * env.s * env.ts * sp.style.size_pct as f32 / 100.0 } else { size };
         let sz = if sp.style.code { base * 0.92 } else { base };
         // the page's colour when it gave one; otherwise the reader's own colours for links, notes and italics
         let wanted = match sp.style.color {
@@ -703,7 +706,13 @@ fn heading_size(level: u8, s: f32) -> f32 {
 }
 
 pub fn layout(g: &mut Gfx, doc: &Doc, width: f32, s: f32, infos: &[ImgInfo], rev: u32) -> Layout {
-    let env = Env { controls: &doc.controls, images: &doc.images, infos, inlines: &doc.inlines, depth: std::cell::Cell::new(0), s };
+    layout_text(g, doc, width, s, 1.0, infos, rev)
+}
+
+/// [`layout`] with the text drawn `ts` times bigger than the page (text-only zoom, F-BROW-97).
+pub fn layout_text(g: &mut Gfx, doc: &Doc, width: f32, s: f32, ts: f32, infos: &[ImgInfo], rev: u32) -> Layout {
+    let ts = if ts.is_finite() { ts.clamp(0.25, 5.0) } else { 1.0 };
+    let env = Env { controls: &doc.controls, images: &doc.images, infos, inlines: &doc.inlines, depth: std::cell::Cell::new(0), s, ts };
     let mut prims: Vec<Prim> = Vec::new();
     let mut links: Vec<Option<R>> = vec![None; doc.links.len()];
     let mut controls: Vec<Option<R>> = vec![None; doc.controls.len()];
@@ -750,7 +759,7 @@ fn blocks(g: &mut Gfx, list: &[Block], env: &Env, ox: f32, width: f32, y: f32, c
                 *prev_margin = 0.0;
             }
             Block::Pre(text) => {
-                let size = 14.0 * s;
+                let size = 14.0 * s * env.ts;
                 let lh = size * 1.4;
                 let pad = 10.0 * s;
                 let (pre_bg, pre_fg) = if ctx.light { (rgb(240, 241, 245), rgb(30, 34, 48)) } else { (rgb(12, 16, 30), rgb(200, 215, 240)) };
@@ -1264,7 +1273,7 @@ fn intrinsic(g: &mut Gfx, list: &[Block], env: &Env, ctx: &Ctx, cap: f32) -> f32
     for b in list {
         let w = match b {
             Block::Text(t) => {
-                let (size, bold) = if t.level > 0 { (heading_size(t.level, s), true) } else { (base, false) };
+                let (size, bold) = if t.level > 0 { (heading_size(t.level, s) * env.ts, true) } else { (base * env.ts, false) };
                 let toks = tokens(g, &t.spans, size, bold, ctx, env, cap);
                 let space = g.text_width(size, " ", Face::Sans);
                 let mut w = 0.0;
@@ -1316,7 +1325,7 @@ fn min_content(g: &mut Gfx, list: &[Block], env: &Env, ctx: &Ctx) -> f32 {
     for b in list {
         let w = match b {
             Block::Text(t) => {
-                let (size, bold) = if t.level > 0 { (heading_size(t.level, s), true) } else { (16.0 * s, false) };
+                let (size, bold) = if t.level > 0 { (heading_size(t.level, s) * env.ts, true) } else { (16.0 * s * env.ts, false) };
                 let toks = tokens(g, &t.spans, size, bold, ctx, env, 1e6);
                 // a line can break between boxes, words and pictures: the widest one alone is the least it needs
                 let mut best = 0.0f32;
@@ -1514,10 +1523,17 @@ pub fn key_of(width: f32, s: f32) -> (i32, i32) {
     (width.round() as i32, (s * 100.0).round() as i32)
 }
 
+/// The layout key when the text has its own zoom (see [`layout_text`]): a different text zoom is a different layout.
+pub fn key_of_text(width: f32, s: f32, ts: f32) -> (i32, i32) {
+    let (w, k) = key_of(width, s);
+    (w, k.saturating_add(((ts.clamp(0.25, 5.0) - 1.0) * 100.0).round() as i32 * 100_000))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn text_block(g: &mut Gfx, t: &TextBlock, env: &Env, width: f32, y: f32, base: f32, ctx: &Ctx, sink: &mut Sink) -> f32 {
     let s = env.s;
-    let (size, bold) = if t.level > 0 { (heading_size(t.level, s), true) } else { (base, false) };
+    let (size, bold) = if t.level > 0 { (heading_size(t.level, s) * env.ts, true) } else { (base * env.ts, false) };
+    let base = base * env.ts;
     let indent = t.indent as f32 * 24.0 * s + if t.quote { 18.0 * s } else { 0.0 };
     let marker_w = if t.marker.is_empty() { 0.0 } else { 30.0 * s };
     let mut y = y;

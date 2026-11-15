@@ -14,6 +14,10 @@ testing = []
 iyakki-sec.workspace = true
 # the same permissive crates the agent already uses for SSH keys, the SSH transport and FTPS (no new external dependency)
 aes = "0.8"
+# the two AEAD ciphers of the SSH server (F-FILE-12): permissive crates that are already in the lock file; the framing around them is ours
+aes-gcm = "0.10"
+chacha20 = "0.9"
+poly1305 = "0.8"
 ctr = "0.9"
 ed25519-dalek = "3"
 sha2 = "0.10"
@@ -22,6 +26,8 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # member key exchange (curve25519-sha256) in the SSH client and server: X25519 only, the bytes come from iyakki-sec
 x25519-dalek = { version = "3", default-features = false, features = ["zeroize"] }
 libc = "0.2"
+# RSA and ECDSA P-256 signature checks and the ECDSA host key (F-FILE-13); already in the lock file through rustls
+ring = "0.17"
 
 [dev-dependencies]
 # the FTPS test makes a self-signed certificate (same crate and features as the agent's cloudroute.rs)

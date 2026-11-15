@@ -60,6 +60,8 @@ pub struct Shared {
     pub runs: RunManager,
     /// WASM tiles run for browsers (`tiles.rs`).
     pub tiles: super::tiles::TileHost,
+    /// Counters for `GET /metrics` (`metrics.rs`).
+    pub metrics: super::metrics::Metrics,
     pub allowed_tools: BTreeSet<String>,
     pub fingerprint: String,
     pub(super) addr_limit: Limiter,
@@ -67,6 +69,8 @@ pub struct Shared {
     pub(super) user_limit: Limiter,
     /// Tenant switches per person (a switch locks and clears things, so it is limited more tightly than other calls).
     pub(super) switch_limit: Limiter,
+    /// Nonces of signed sign-ins of programs (a replayed request is refused).
+    pub(super) nonces: crate::devmode::auth::Nonces,
     /// `None` for the embedded service (`embed.rs`): it has no listener of its own.
     tls: Option<Arc<rustls::ServerConfig>>,
     open: AtomicUsize,
@@ -119,18 +123,23 @@ pub fn start(chk: &Checked, deps: Arc<Deps>, tls: Identity) -> Result<Service, S
         tokens: Tokens::new(store, Duration::from_secs(l.token_idle_secs), l.token_lifetime_secs),
         runs: RunManager::new(deps, Duration::from_secs(l.approval_timeout_secs)),
         tiles: super::tiles::TileHost::new(super::tiles::builtin()),
+        metrics: Default::default(),
         allowed_tools,
         fingerprint: tls.fingerprint.clone(),
         addr_limit: Limiter::new(600),
         login_limit: Limiter::new(l.logins_per_minute),
         user_limit: Limiter::new(l.requests_per_minute),
         switch_limit: Limiter::new(10),
+        nonces: Default::default(),
         tls: Some(tls.config),
         open: AtomicUsize::new(0),
         stop: AtomicBool::new(false),
         cfg,
     });
+    crate::cloudmembers::register(Arc::new(SharedSessions(Arc::downgrade(&shared))));
     let s = shared.clone();
+    let w = shared.clone();
+    let _ = std::thread::Builder::new().name("iyakki-svc-runwatch".into()).spawn(move || watch_saved_runs(w));
     let h = std::thread::Builder::new().name("iyakki-svc-accept".into()).spawn(move || accept_loop(listener, s)).map_err(|e| e.to_string())?;
     log::info!("service: profile {} on https://{addr} (certificate SHA-256 {})", chk.profile.name(), shared.fingerprint);
     Ok(Service { shared, addr, accept: Mutex::new(Some(h)) })
@@ -148,12 +157,14 @@ impl Shared {
             tokens: Tokens::new(None, Duration::from_secs(l.token_idle_secs), l.token_lifetime_secs),
             runs: RunManager::new(deps, Duration::from_secs(l.approval_timeout_secs)),
             tiles: super::tiles::TileHost::new(super::tiles::builtin()),
+            metrics: Default::default(),
             allowed_tools,
             fingerprint: String::new(),
             addr_limit: Limiter::new(600),
             login_limit: Limiter::new(l.logins_per_minute),
             user_limit: Limiter::new(l.requests_per_minute),
             switch_limit: Limiter::new(10),
+            nonces: Default::default(),
             tls: None,
             open: AtomicUsize::new(0),
             stop: AtomicBool::new(false),
@@ -191,6 +202,45 @@ impl Service {
 impl Drop for Service {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Runs the service did not start (a chat on the desktop, a scheduled flow's agent, a run of the board) are announced to the person's
+/// event stream too, so the Runs page refreshes at once for them as it does for its own. Only people with an open event connection are
+/// looked at, every two seconds, and only the words travel (`{id, status, events}`, never the prompt or an answer): the saved list of
+/// the person's runs is compared with what was seen before, and a run that is new or whose status changed is announced.
+fn watch_saved_runs(shared: Arc<Shared>) {
+    let bus = crate::notifyhub::events::bus_for(std::path::Path::new(&shared.cfg.data_dir));
+    let mut seen: std::collections::HashMap<String, std::collections::HashMap<String, String>> = Default::default();
+    // a run saved anywhere (the desktop, the schedule) wakes this loop at once: the two seconds are only the fallback
+    let wake = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let w = wake.clone();
+        shared.deps.store.add_on_save(move || w.store(true, Ordering::SeqCst));
+    }
+    while !shared.stop.load(Ordering::SeqCst) {
+        for _ in 0..20 {
+            if shared.stop.load(Ordering::SeqCst) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            if wake.swap(false, Ordering::SeqCst) {
+                break;
+            }
+        }
+        let users = bus.users();
+        seen.retain(|u, _| users.contains(u));
+        for user in users {
+            let now: std::collections::HashMap<String, (String, usize)> = shared.deps.store.list(&user).into_iter().map(|m| (m.id, (m.status, m.tool_calls))).collect();
+            if let Some(before) = seen.get(&user) {
+                for (id, (status, calls)) in &now {
+                    if before.get(id) != Some(status) && !shared.runs.holds(id) {
+                        bus.publish(&user, &crate::notifyhub::events::event("run", serde_json::json!({"id": id, "status": status, "events": calls})));
+                    }
+                }
+            }
+            seen.insert(user, now.into_iter().map(|(id, (s, _))| (id, s)).collect());
+        }
     }
 }
 
@@ -264,6 +314,8 @@ fn read_request(conn: &mut Conn, max_body: usize, mut buf: Vec<u8>) -> Result<Re
 }
 
 fn connection(stream: TcpStream, peer: SocketAddr, shared: &Shared) {
+    // a socket accepted from a non-blocking listener is non-blocking too on macOS and the BSDs (not on Linux): the TLS code below expects to block
+    let _ = stream.set_nonblocking(false);
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(FIRST_BYTES_TIMEOUT));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
@@ -326,6 +378,9 @@ pub(super) fn authenticate_user(sh: &Shared, req: &Request, peer: IpAddr, route:
     if !need_ok(&p, route.needs) {
         return Err(decorate(error_response(403, "denied", "your role does not allow this"), &allow_origin));
     }
+    if let Some(why) = program_refusal(sh, tok, route) {
+        return Err(decorate(error_response(403, "denied", &why), &allow_origin));
+    }
     let (ok, wait) = sh.user_limit.allow(&p.user);
     if !ok {
         return Err(decorate(error_response(429, "rate_limited", "too many requests").header("Retry-After", &wait.to_string()), &allow_origin));
@@ -340,6 +395,18 @@ pub(super) fn with_origin(r: Response, origin: &Option<String>) -> Response {
 
 pub(super) fn error_answer(status: u16, code: &str, message: &str) -> Response {
     error_response(status, code, message)
+}
+
+/// A token that a program got by signing in with the developer key of a paired computer may call only the route families the
+/// administrator granted that computer (`api:*`, read afresh now, so a revoke or an unpairing applies at once). Ordinary tokens are
+/// not touched.
+pub(super) fn program_refusal(sh: &Shared, token: &str, route: &Route) -> Option<String> {
+    let computer = sh.tokens.program_of(token)?;
+    let held = sh.deps.extras.program_scopes(&computer);
+    if crate::devmode::apiscopes::family_of(route).is_some() && !crate::devmode::apiscopes::allows(&held, route) {
+        return Some(format!("the api scopes of {computer} do not allow {} (an administrator grants them on the device)", route.id));
+    }
+    None
 }
 
 pub(super) fn bearer(req: &Request) -> Option<&str> {
@@ -374,8 +441,24 @@ fn audit_clean(s: &str) -> String {
     s.chars().filter(|c| c.is_ascii_graphic() || *c == ' ').take(120).collect()
 }
 
-/// The whole pipeline for one request.
+/// The whole pipeline for one request, counted for `/metrics` (the route's table id and the status class only).
 pub fn handle(sh: &Shared, req: &Request, peer: IpAddr) -> Response {
+    let t0 = Instant::now();
+    let resp = handle_inner(sh, req, peer);
+    let id = match routes::find(sh.profile, &req.method, &req.path) {
+        Found::Route(r, _) => r.id,
+        _ if super::ui::is_ui_path(&req.path) => "ui",
+        _ => "unknown",
+    };
+    sh.metrics.request(id, resp.status, t0.elapsed().as_micros() as u64);
+    sh.metrics.event(id, resp.status);
+    if id == "login" {
+        sh.metrics.login(resp.status == 200);
+    }
+    resp
+}
+
+fn handle_inner(sh: &Shared, req: &Request, peer: IpAddr) -> Response {
     let t0 = Instant::now();
     let ip = peer.to_string();
     let allow_origin = match origin_ok(sh, req) {
@@ -426,6 +509,9 @@ pub fn handle(sh: &Shared, req: &Request, peer: IpAddr) -> Response {
         if !need_ok(&p, route.needs) {
             return decorate(error_response(403, "denied", "your role does not allow this"), &allow_origin);
         }
+        if let Some(why) = program_refusal(sh, tok, route) {
+            return decorate(error_response(403, "denied", &why), &allow_origin);
+        }
         // the tile events route has its own, higher limit (tiles.rs): a pointer-driven page sends many small requests
         let (ok, wait) = if route.id == "tile_events" { (true, 0) } else { sh.user_limit.allow(&p.user) };
         if !ok {
@@ -442,6 +528,15 @@ pub fn handle(sh: &Shared, req: &Request, peer: IpAddr) -> Response {
     if !req.body.is_empty() && route.id != "files_upload" && req.header("content-type").is_none_or(|c| !c.to_ascii_lowercase().starts_with("application/json")) {
         return decorate(error_response(400, "invalid_input", "send application/json"), &allow_origin);
     }
+    if route.id == "metrics" {
+        // Prometheus text, not JSON; administrators only (the route table says so)
+        let text = sh.metrics.render(sh.profile.name(), env!("CARGO_PKG_VERSION"), {
+            let (runs_by_status, tool_results_ok, tool_results_failed) = sh.runs.census();
+            let (tool_calls_ok_total, tool_calls_failed_total, model_tokens_total) = sh.runs.totals();
+            super::metrics::Gauges { sessions: sh.tokens.count(), connections: sh.open.load(Ordering::SeqCst), runs: sh.runs.count(), runs_by_status, tool_results_ok, tool_results_failed, approvals_pending: sh.deps.store.pending_approvals(None).len(), memory_bytes: super::metrics::resident_memory(), data_free_bytes: crate::sharedsite::statvfs_free(std::path::Path::new(&sh.cfg.data_dir)), tool_calls_ok_total, tool_calls_failed_total, model_tokens_total }
+        });
+        return decorate(Response::new(200, "text/plain; version=0.0.4; charset=utf-8", text.into_bytes()), &allow_origin);
+    }
     let ctx = handlers::Ctx { sh, req, params: &params, principal: principal.as_ref(), token: token.as_deref(), ip: &ip };
     let (resp, detail) = match handlers::dispatch(route.id, &ctx) {
         Ok((status, v, detail)) => (Response::json(status, &v), detail),
@@ -452,8 +547,27 @@ pub fn handle(sh: &Shared, req: &Request, peer: IpAddr) -> Response {
         let user = principal.as_ref().map(|p| p.user.as_str()).unwrap_or("-");
         sh.deps.audit.record(user, &format!("api.{}", route.id), &audit_clean(&format!("{detail} status={status} addr={ip}")));
     }
+    announce_change(sh, req, route, status, principal.as_ref(), token.as_deref());
     log::info!("service: {} {} {} {}ms user={}", req.method, route.id, status, t0.elapsed().as_millis(), principal.as_ref().map(|p| p.user.as_str()).unwrap_or("-"));
     decorate(resp, &allow_origin)
+}
+
+/// After a request that changed something (not a GET, answered 2xx), tell the open event streams of the volume that data of this
+/// area changed, so a page refreshes at once instead of waiting for its timer. The message holds only the area (the first words of
+/// the address after `/api/v1/`), never data: what changed is read through the API, which checks who may see it. Notification routes
+/// have their own, exact events and are left out.
+fn announce_change(sh: &Shared, req: &Request, route: &Route, status: u16, principal: Option<&Principal>, token: Option<&str>) {
+    if req.method == "GET" || !(200..300).contains(&status) || route.id == "events" || route.id == "login" || route.id == "logout" {
+        return;
+    }
+    let Some(p) = principal else { return };
+    let Some(rest) = req.path.strip_prefix("/api/v1/") else { return };
+    let area: String = rest.split(['/', '?']).next().unwrap_or("").chars().filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-' || *c == '_').take(24).collect();
+    if area.is_empty() || area == "notifications" {
+        return;
+    }
+    let dir = super::tenants::data_dir_for(sh, token, &p.user);
+    crate::notifyhub::events::bus_for(&dir).publish_all(&crate::notifyhub::events::event("changed", serde_json::json!({"area": area})));
 }
 
 fn unauthorized(origin: &Option<String>) -> Response {
@@ -469,4 +583,33 @@ fn decorate(r: Response, origin: &Option<String>) -> Response {
 
 pub(super) fn json_body(req: &Request) -> Result<Value, Fail> {
     serde_json::from_slice(&req.body).map_err(|_| Fail::new(400, "invalid_input", "the body is not valid JSON"))
+}
+
+/// Lets the domain listener ask this service who a session token belongs to (`cloudmembers`). Holds the service weakly: once it is
+/// dropped the listener stops accepting its tokens.
+struct SharedSessions(std::sync::Weak<Shared>);
+
+#[cfg(test)]
+pub(super) fn sessions_for_test(sh: &Arc<Shared>) -> impl crate::cloudmembers::SessionLookup {
+    SharedSessions(Arc::downgrade(sh))
+}
+
+impl crate::cloudmembers::SessionLookup for SharedSessions {
+    fn user_of(&self, token: &str) -> Option<String> {
+        let sh = self.0.upgrade()?;
+        // a program's token is limited to the `api:*` scopes of its computer; it must not open a `members` address as the whole person
+        if sh.tokens.program_of(token).is_some() {
+            return None;
+        }
+        let user = sh.tokens.find(token)?;
+        // an account that is gone ends its sessions here too
+        sh.deps.auth.lookup(&user)?;
+        Some(user)
+    }
+    fn tenant_of(&self, token: &str) -> Option<String> {
+        self.0.upgrade()?.tokens.tenant_of(token)
+    }
+    fn alive(&self) -> bool {
+        self.0.upgrade().is_some_and(|s| !s.stop.load(Ordering::SeqCst))
+    }
 }

@@ -10,6 +10,8 @@
 //! This is a tool for the user's own computer, not part of the IYAKKI image (see BOUNDARY.md).
 
 pub mod apply;
+pub mod biosgpt;
+pub mod biosshared;
 pub mod bootpack;
 pub mod cli;
 pub mod drives;
@@ -26,6 +28,7 @@ pub mod leanstrip;
 pub mod plan_cli;
 pub mod planner;
 pub mod screen;
+pub mod stickupdate;
 pub mod macos;
 pub mod term;
 pub mod tui;
@@ -34,6 +37,15 @@ pub mod wizard;
 pub mod writer;
 
 #[cfg(test)]
+mod biosgpt_tests;
+#[cfg(test)]
 mod gpt_install_tests;
 #[cfg(test)]
 mod planner_tests;
+#[cfg(test)]
+mod real_mkfs_tests;
+
+#[cfg(test)]
+mod fuzzkit;
+#[cfg(test)]
+mod bios_fuzz_tests;

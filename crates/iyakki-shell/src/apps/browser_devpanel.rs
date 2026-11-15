@@ -8,8 +8,11 @@
 //!   `DevTools::seq` moved. Nothing is parsed or scrubbed here: the lines were scrubbed when they were stored (no query strings,
 //!   tokens, bodies, headers or cookies). The built-in reader has no page scripts; its Network tab lists the requests the reader
 //!   made itself (addresses scrubbed the same way).
-//! * **No script evaluation.** The web view protocol has no safe way to run a script and bring a result back, so there is no
-//!   JavaScript console input and no Elements tab. That is deliberate.
+//! * **The inspector (F-BROW-41).** For pages the built-in reader shows, the Console tab has a prompt (Enter or `e`) that evaluates an
+//!   expression in the reader's own script engine, and the Elements tab (`4`) shows the page's tree with the chosen node's attributes
+//!   and text (`browser_inspect.rs`, the engine is `browser_inspecthost.rs`). The full web engine's protocol has no safe way to run a
+//!   script and bring a result back, so for pages it shows there is no prompt (the panel says so) and the Elements tab explains it.
+//!   What an expression returns stays on this screen: it is never stored in the buffers and never copied by "Copy as text".
 //! * **Layout.** The panel takes about 35 % of the page area, at the bottom or (wide windows) at the right, with a divider the mouse
 //!   can drag (`+` and `-` do the same from the keyboard); the page is resized to what is left, so nothing is drawn over anything.
 
@@ -17,13 +20,17 @@ use iyakki_agent::clock::{self, Zone};
 use iyakki_agent::devtools::{DevEvent, DevTools, Level, Snapshot, Tagged};
 
 use super::browser_devtools::NetLine;
+use super::browser_inspect::{Inspector, Kind as InKind};
 use crate::safeclamp::SafeClamp;
 use crate::gfx::{rgb, Face, Gfx};
 use crate::ui::{Event, Key, DIM, ERR, MUTED, OK, R, TEXT};
 
 const ACCENT: [u8; 4] = rgb(88, 190, 235);
 const WARN: [u8; 4] = rgb(255, 190, 90);
-const PANEL_BG: [u8; 4] = [8, 11, 24, 250];
+/// The developer panel's ground, themed (see `fx::panel_alpha`): a const cannot read the live theme.
+fn panel_bg() -> [u8; 4] {
+    crate::fx::panel_alpha(250)
+}
 
 /// Buttons (`Event::Tab`). The browser routes this whole range here before its own numbers.
 pub const TAB_TOGGLE: usize = 7000;
@@ -38,12 +45,18 @@ pub const TAB_FAILED: usize = 7008;
 pub const TAB_SORT: usize = 7009;
 pub const TAB_FILTER: usize = 7010;
 pub const TAB_DOCK: usize = 7011;
+pub const TAB_ELEMENTS: usize = 7012;
+pub const TAB_PROMPT: usize = 7013;
+/// The Report site button: the same as the `!` key (a local report about the page, nothing sent).
+pub const TAB_REPORT: usize = 7014;
+/// Rows of the Elements page: `TAB_ROW + n` is the nth visible row.
+pub const TAB_ROW: usize = 7100;
 /// Areas (`Event::AreaAt`): the list, and the divider the mouse drags.
 pub const AREA_BODY: usize = 905;
 pub const AREA_SPLIT: usize = 906;
 
 pub fn is_tab(n: usize) -> bool {
-    (TAB_TOGGLE..=TAB_DOCK).contains(&n)
+    (TAB_TOGGLE..=TAB_REPORT).contains(&n) || (TAB_ROW..TAB_ROW + 400).contains(&n)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,6 +64,8 @@ pub enum Tab {
     Console,
     Network,
     Timings,
+    /// The page's tree and the chosen node (the reader's pages).
+    Elements,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,12 +88,18 @@ pub enum Sort {
 }
 
 /// What the browser has to do after a key or click that the panel took.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Act {
     /// Nothing for the browser: the panel changed (or did not take the key).
     Done,
     Close,
     Copy,
+    /// The Report site button.
+    Report,
+    /// The prompt sent this expression to the reader's engine.
+    Eval(String),
+    /// The Elements page was opened or asked to refresh: the browser fills in the tree.
+    Inspect,
 }
 
 /// What the page area shows, as far as the panel cares.
@@ -157,7 +178,9 @@ pub struct Panel {
     pub frac: f32,
     pub dock: Option<Dock>,
     /// Rows scrolled off the top, per tab.
-    scroll: [usize; 3],
+    scroll: [usize; 4],
+    /// The console prompt and the Elements page (`browser_inspect.rs`).
+    pub insp: Inspector,
     /// Entries up to this `seq` were cleared by the person (Console, Network): they are hidden here, not removed from the buffers.
     floor: [u64; 2],
     snap: Snapshot,
@@ -185,7 +208,8 @@ impl Default for Panel {
             sort: Sort::Time,
             frac: DEFAULT_FRAC,
             dock: None,
-            scroll: [0; 3],
+            scroll: [0; 4],
+            insp: Inspector::default(),
             floor: [0; 2],
             snap: Snapshot::default(),
             seen: 0,
@@ -204,6 +228,7 @@ fn idx(t: Tab) -> usize {
         Tab::Console => 0,
         Tab::Network => 1,
         Tab::Timings => 2,
+        Tab::Elements => 3,
     }
 }
 
@@ -246,7 +271,8 @@ impl Panel {
         self.snap = Snapshot::default();
         self.seen = 0;
         self.reader_seen = 0;
-        self.scroll = [0; 3];
+        self.scroll = [0; 4];
+        self.insp = Inspector::default();
         self.floor = [0; 2];
         self.grab = None;
     }
@@ -366,6 +392,7 @@ impl Panel {
             Tab::Console => "Console",
             Tab::Network => "Network",
             Tab::Timings => "Timings",
+            Tab::Elements => "Elements",
         };
         o.push_str(&format!("IYAKKI browser developer tools - {tab}\nPage: {page}\n"));
         let mut filters = Vec::new();
@@ -403,6 +430,12 @@ impl Panel {
                     o.push('\n');
                 }
             }
+            Tab::Elements => {
+                // the tree as the panel shows it; what expressions returned is not copied
+                let t = self.insp.tree_text();
+                o.push_str(if t.is_empty() { "No page tree is shown.\n" } else { &t });
+                o.push('\n');
+            }
             Tab::Timings => {
                 match self.newest_page() {
                     Some((r, d, l, u)) => o.push_str(&format!("{u}\nfirst response {r} ms, DOMContentLoaded {d} ms, load {l} ms (from navigation start)\n")),
@@ -426,6 +459,24 @@ impl Panel {
 
     /// A key while the panel has the keyboard. `Act::Done` for keys it used or ignored; the browser asks `Act::Close` and `Act::Copy`.
     pub fn key(&mut self, k: &Key) -> Act {
+        if self.insp.editing {
+            return match self.insp.prompt_key(k) {
+                Some(e) => {
+                    self.scroll[idx(Tab::Console)] = usize::MAX / 2;
+                    self.insp.push(InKind::In, format!("> {e}"));
+                    Act::Eval(e)
+                }
+                None => Act::Done,
+            };
+        }
+        if self.tab == Tab::Elements && matches!(k, Key::Up | Key::Down | Key::PageUp | Key::PageDown | Key::Home | Key::End | Key::Left | Key::Right | Key::Enter) {
+            self.insp.tree_key(k);
+            return Act::Done;
+        }
+        if self.tab == Tab::Console && !self.editing && matches!(k, Key::Enter | Key::Char('e')) {
+            self.insp.editing = true;
+            return Act::Done;
+        }
         if self.editing {
             match k {
                 Key::Esc | Key::Enter => self.editing = false,
@@ -444,11 +495,16 @@ impl Panel {
         let t = idx(self.tab);
         match k {
             Key::Esc => return Act::Close,
-            Key::Tab | Key::Right => self.set_tab(next(self.tab, true)),
-            Key::BackTab | Key::Left => self.set_tab(next(self.tab, false)),
+            Key::Tab | Key::Right => return self.tab_to(next(self.tab, true)),
+            Key::BackTab | Key::Left => return self.tab_to(next(self.tab, false)),
             Key::Char('1') => self.set_tab(Tab::Console),
             Key::Char('2') => self.set_tab(Tab::Network),
             Key::Char('3') => self.set_tab(Tab::Timings),
+            Key::Char('4') => {
+                self.set_tab(Tab::Elements);
+                return Act::Inspect;
+            }
+            Key::Char('r') if self.tab == Tab::Elements => return Act::Inspect,
             Key::Char('/') => self.editing = true,
             Key::Char('l') => self.cycle_level(),
             Key::Char('f') => self.toggle_failed(),
@@ -470,6 +526,10 @@ impl Panel {
     }
 
     pub fn paste(&mut self, t: &str) -> bool {
+        if self.insp.editing {
+            self.insp.paste(t);
+            return true;
+        }
         if !self.editing {
             return false;
         }
@@ -489,8 +549,18 @@ impl Panel {
             TAB_CONSOLE => self.set_tab(Tab::Console),
             TAB_NETWORK => self.set_tab(Tab::Network),
             TAB_TIMINGS => self.set_tab(Tab::Timings),
+            TAB_ELEMENTS => {
+                self.set_tab(Tab::Elements);
+                return Act::Inspect;
+            }
+            TAB_PROMPT => {
+                self.set_tab(Tab::Console);
+                self.insp.editing = true;
+            }
+            n if (TAB_ROW..TAB_ROW + 400).contains(&n) => self.insp.pick(self.insp.scroll + (n - TAB_ROW)),
             TAB_CLEAR => self.clear_tab(),
             TAB_COPY => return Act::Copy,
+            TAB_REPORT => return Act::Report,
             TAB_CLOSE => return Act::Close,
             TAB_LEVEL => self.cycle_level(),
             TAB_FAILED => self.toggle_failed(),
@@ -510,6 +580,13 @@ impl Panel {
     fn set_tab(&mut self, t: Tab) {
         self.tab = t;
         self.editing = false;
+        self.insp.editing = false;
+    }
+
+    /// Tab and Shift+Tab: the next tab; the Elements page also asks the browser for its tree.
+    fn tab_to(&mut self, t: Tab) -> Act {
+        self.set_tab(t);
+        if t == Tab::Elements { Act::Inspect } else { Act::Done }
     }
 
     fn reset_scroll(&mut self) {
@@ -555,7 +632,10 @@ impl Panel {
                 let n = newest(&self.snap.failed).max(newest(&self.snap.slow));
                 self.floor[1] = self.floor[1].max(n);
             }
-            Tab::Timings => {}
+            Tab::Timings | Tab::Elements => {}
+        }
+        if self.tab == Tab::Console {
+            self.insp.lines.clear();
         }
         self.reset_scroll();
     }
@@ -586,7 +666,7 @@ impl Panel {
         self.rect = rect;
         self.total = total;
         self.dock_now = dock;
-        g.rect(rect.x, rect.y, rect.w, rect.h, PANEL_BG);
+        g.rect(rect.x, rect.y, rect.w, rect.h, panel_bg());
         // the divider: a strip at the edge next to the page
         let div = match dock {
             Dock::Bottom => R::new(rect.x, rect.y, rect.w, 5.0 * s),
@@ -607,10 +687,11 @@ impl Panel {
         let r1 = R::new(inner.x, inner.y + 2.0 * s, inner.w, 28.0 * s);
         let close_w = chip_width(g, fs, "Close Esc");
         let mut x = inner.x + pad;
-        let tabs: [(Tab, usize, String, [u8; 4]); 3] = [
+        let tabs: [(Tab, usize, String, [u8; 4]); 4] = [
             (Tab::Console, TAB_CONSOLE, if console_n > 0 { format!("Console {console_n}") } else { "Console".into() }, if errors > 0 { ERR } else { ACCENT }),
             (Tab::Network, TAB_NETWORK, if net_n > 0 { format!("Network {net_n}") } else { "Network".into() }, ACCENT),
             (Tab::Timings, TAB_TIMINGS, "Timings".into(), ACCENT),
+            (Tab::Elements, TAB_ELEMENTS, "Elements".into(), ACCENT),
         ];
         for (t, id, label, col) in tabs {
             let w = chip_width(g, fs, &label);
@@ -621,6 +702,7 @@ impl Panel {
                 Tab::Console => "Console",
                 Tab::Network => "Network",
                 Tab::Timings => "Timings",
+                Tab::Elements => "Elements",
             });
             x += w + 6.0 * s;
         }
@@ -654,13 +736,15 @@ impl Panel {
                 place(g, &mut x, if self.sort == Sort::Time { "Sort: newest" } else { "Sort: slowest" }, ACCENT, self.sort == Sort::Duration, TAB_SORT, "Sort");
             }
             Tab::Timings => {}
+            Tab::Elements => place(g, &mut x, "Refresh (r)", ACCENT, false, TAB_ELEMENTS, "Refresh"),
         }
         place(g, &mut x, "Copy as text", OK, false, TAB_COPY, "Copy as text");
-        if self.tab != Tab::Timings {
+        place(g, &mut x, "Report site (!)", OK, false, TAB_REPORT, "Report site");
+        if !matches!(self.tab, Tab::Timings | Tab::Elements) {
             place(g, &mut x, "Clear", MUTED, false, TAB_CLEAR, "Clear");
         }
         place(g, &mut x, if dock == Dock::Bottom { "Dock right" } else { "Dock bottom" }, MUTED, false, TAB_DOCK, "Dock");
-        if right - x >= min_filter {
+        if right - x >= min_filter && self.tab != Tab::Elements {
             let fr = R::new(x, r2.y, right - x, r2.h - 4.0 * s);
             g.rrect(fr.x, fr.y, fr.w, fr.h, 6.0 * s, rgb(16, 20, 36));
             g.rrect_outline(fr.x, fr.y, fr.w, fr.h, 6.0 * s, 1.0 * s, if self.editing { ACCENT } else { rgb(60, 70, 110) });
@@ -684,10 +768,15 @@ impl Panel {
         g.hit(body, Event::Area(AREA_BODY), "dev panel");
         g.clipped(body, |g| match self.tab {
             Tab::Console => {
-                let l = self.console_lines();
+                let mut l = self.console_lines();
+                l.extend(self.transcript_lines());
+                let prompt_h = g.line_height(fs, Face::Mono) + 12.0 * s;
+                let list = R::new(body.x, body.y, body.w, (body.h - prompt_h).max(0.0));
                 let empty = self.empty_text(ctx, Tab::Console, l.is_empty());
-                self.draw_list(g, body, s, &l, &empty, false);
+                self.draw_list(g, list, s, &l, &empty, false);
+                self.draw_prompt(g, R::new(body.x, body.y + list.h, body.w, body.h - list.h), s, ctx);
             }
+            Tab::Elements => self.draw_elements(g, body, s, ctx),
             Tab::Network => {
                 let l = self.net_lines(ctx, reader);
                 let empty = self.empty_text(ctx, Tab::Network, l.is_empty());
@@ -704,8 +793,10 @@ impl Panel {
         if !ctx.full {
             return match tab {
                 Tab::Network => "No requests yet. This is the built-in reader's own network list.".to_string(),
-                _ if ctx.offered => "The built-in reader runs no page scripts that report here. Press F to show this page in the full web engine; then console messages, failed requests and timings appear here.".to_string(),
-                _ => "Console messages and timings need the full web engine, which this build does not have. Use the full web build (docs/FULL-BROWSER.md).".to_string(),
+                Tab::Console if self.insp.lines.is_empty() => "No script errors or warnings on this page. Press e (or Enter) to type an expression for the built-in reader's script engine. Timings and messages of the page's own network need the full web engine (F).".to_string(),
+                Tab::Console => String::new(),
+                _ if ctx.offered => "The built-in reader reports no load timings. Press F to show this page in the full web engine; then timings appear here.".to_string(),
+                _ => "Load timings need the full web engine, which this build does not have. Use the full web build (docs/FULL-BROWSER.md).".to_string(),
             };
         }
         if !self.snap.probe_seen {
@@ -719,6 +810,110 @@ impl Panel {
                 Tab::Console => "No console errors or warnings on this page since the panel was opened.".to_string(),
                 _ => "No failed or slow requests on this page since the panel was opened.".to_string(),
             }
+        }
+    }
+
+    /// The transcript of the prompt as list lines.
+    fn transcript_lines(&self) -> Vec<Line> {
+        self.insp
+            .lines
+            .iter()
+            .enumerate()
+            .map(|(i, o)| {
+                let (tag, color) = match o.kind {
+                    InKind::In => ("in", ACCENT),
+                    InKind::Out => ("=", OK),
+                    InKind::Err => ("err", ERR),
+                    InKind::Log => ("log", MUTED),
+                    InKind::Note => ("--", DIM),
+                };
+                Line { time: String::new(), tag: tag.into(), color, text: o.text.clone(), ms: 0, seq: u64::MAX / 2 + i as u64 }
+            })
+            .collect()
+    }
+
+    /// The input line under the console list.
+    fn draw_prompt(&mut self, g: &mut Gfx, r: R, s: f32, ctx: Ctx) {
+        let fs = 12.0 * s;
+        let fr = R::new(r.x + 8.0 * s, r.y + 2.0 * s, (r.w - 16.0 * s).max(10.0), (r.h - 4.0 * s).max(8.0));
+        let on = self.insp.editing;
+        g.rrect(fr.x, fr.y, fr.w, fr.h, 6.0 * s, rgb(16, 20, 36));
+        g.rrect_outline(fr.x, fr.y, fr.w, fr.h, 6.0 * s, 1.0 * s, if on { ACCENT } else { rgb(60, 70, 110) });
+        let (text, col) = if ctx.full {
+            ("Not for pages the full web engine shows: it has no safe way to run a script and bring a result back.".to_string(), DIM)
+        } else if self.insp.waiting {
+            ("Starting the page's script engine...".to_string(), MUTED)
+        } else if on {
+            (format!("> {}|", self.insp.input), TEXT)
+        } else {
+            ("> press Enter or e to evaluate an expression in this page".to_string(), DIM)
+        };
+        let shown = g.fit(fs, &text, Face::Mono, fr.w - 12.0 * s);
+        g.text(fr.x + 6.0 * s, fr.y + (fr.h - g.line_height(fs, Face::Mono)) / 2.0, fs, col, &shown, Face::Mono);
+        g.hit(fr, Event::Tab(TAB_PROMPT), "Expression");
+    }
+
+    /// The Elements page: the tree on top, the chosen node under it.
+    fn draw_elements(&mut self, g: &mut Gfx, body: R, s: f32, ctx: Ctx) {
+        let fs = 12.0 * s;
+        let lh = g.line_height(fs, Face::Mono) + 3.0 * s;
+        let pad = 8.0 * s;
+        if ctx.full || !self.insp.has_tree() {
+            let msg = if ctx.full {
+                "The Elements page shows pages the built-in reader shows. The full web engine keeps its own page tree and offers no safe way to read it here. Press Esc in the page for the built-in reader.".to_string()
+            } else {
+                "Press r (or Refresh) to read this page's tree.".to_string()
+            };
+            let mut y = body.y + 4.0 * s;
+            for w in wrap(g, fs, &msg, body.w - 2.0 * pad) {
+                if y + lh > body.y + body.h {
+                    break;
+                }
+                g.text(body.x + pad, y, fs, MUTED, &w, Face::Sans);
+                y += lh;
+            }
+            return;
+        }
+        let detail = self.insp.detail();
+        let want = (detail.len() as f32 + 1.0) * lh;
+        let dh = want.min(body.h * 0.45).max(lh * 2.0).min(body.h);
+        let list = R::new(body.x, body.y, body.w, body.h - dh);
+        let rows = self.insp.rows();
+        let visible = ((list.h - lh) / lh).max(1.0) as usize;
+        // keep the chosen row in view
+        let sel = self.insp.sel.min(rows.len().saturating_sub(1));
+        if sel < self.insp.scroll {
+            self.insp.scroll = sel;
+        }
+        if sel >= self.insp.scroll + visible {
+            self.insp.scroll = sel + 1 - visible;
+        }
+        self.insp.scroll = self.insp.scroll.min(rows.len().saturating_sub(visible));
+        let head = if self.insp.live { "The page as its scripts left it" } else { "The page as the server sent it (evaluate an expression to start its scripts)" };
+        let head = g.fit(fs, head, Face::Sans, body.w - 2.0 * pad);
+        g.text(body.x + pad, list.y + 1.0 * s, fs, DIM, &head, Face::Sans);
+        for (i, r) in rows.iter().skip(self.insp.scroll).take(visible).enumerate() {
+            let y = list.y + lh + i as f32 * lh;
+            let rr = R::new(body.x + 2.0 * s, y, body.w - 4.0 * s, lh);
+            if self.insp.scroll + i == sel {
+                g.rect(rr.x, rr.y, rr.w, rr.h, [ACCENT[0], ACCENT[1], ACCENT[2], 60]);
+            }
+            let mark = if !r.has_kids { "  " } else if r.open { "v " } else { "> " };
+            let text = g.fit(fs, &format!("{}{}{}", "  ".repeat(r.depth.min(30)), mark, r.label), Face::Mono, body.w - 2.0 * pad);
+            g.text(body.x + pad, y, fs, if self.insp.scroll + i == sel { TEXT } else { MUTED }, &text, Face::Mono);
+            g.hit(rr, Event::Tab(TAB_ROW + i), "element row");
+        }
+        // the chosen node
+        let dr = R::new(body.x, list.y + list.h, body.w, dh);
+        g.rect(dr.x, dr.y, dr.w, dr.h, rgb(14, 18, 34));
+        let mut y = dr.y + 2.0 * s;
+        for l in detail.iter() {
+            if y + lh > dr.y + dr.h {
+                break;
+            }
+            let t = g.fit(fs, l, Face::Mono, dr.w - 2.0 * pad);
+            g.text(dr.x + pad, y, fs, if l.starts_with('<') { ACCENT } else { TEXT }, &t, Face::Mono);
+            y += lh;
         }
     }
 
@@ -871,9 +1066,9 @@ fn net_line(z: &Zone, t: &Tagged) -> Line {
 }
 
 fn next(t: Tab, fwd: bool) -> Tab {
-    let all = [Tab::Console, Tab::Network, Tab::Timings];
+    let all = [Tab::Console, Tab::Network, Tab::Timings, Tab::Elements];
     let i = idx(t);
-    all[if fwd { (i + 1) % 3 } else { (i + 2) % 3 }]
+    all[if fwd { (i + 1) % 4 } else { (i + 3) % 4 }]
 }
 
 fn chip_width(g: &mut Gfx, fs: f32, label: &str) -> f32 {

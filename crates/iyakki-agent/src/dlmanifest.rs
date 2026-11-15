@@ -24,8 +24,11 @@ pub const PUBKEY_FILE: &str = include_str!("../../../legal/downloads-manifest.pu
 /// The largest manifest read from anywhere.
 pub const MAX_BYTES: usize = 1 << 20;
 const SCHEMA: u32 = 1;
-/// Items whose lookup already goes through the manifest (the others still use their constants in the code; see the migration backlog).
-pub const WIRED: &[&str] = &["cli:kubectl", "cli:helm"];
+/// Items whose version lookup goes through the manifest: every float+sum item of the CLI tile that has a vendor lookup (the ones that
+/// follow "latest" by a plain download address, `ffmpeg` for one, have nothing to look up; the ones pinned in the code read their pin from
+/// the manifest through `pins`). A fetched manifest that names a version replaces the lookup; with none the old lookup runs.
+/// `nodejs` keeps its choice of the long-term-support build when the manifest names nothing.
+pub const WIRED: &[&str] = &["cli:kubectl", "cli:helm", "cli:k3s", "cli:terraform", "cli:opentofu", "cli:gh", "cli:arduino-cli", "cli:nodejs", "cli:uv", "cli:claude-code", "cli:github-copilot", "cli:ollama", "cli:grpcurl"];
 /// Items that are proprietary vendor software: the flag is part of the bundled data and a fetched manifest cannot change it.
 pub const PROPRIETARY: &[&str] = &["cli:claude-code", "cli:github-copilot", "mac-firmware", "mac-camera"];
 
@@ -419,7 +422,14 @@ pub fn version_override_with(s: &Store, id: &str) -> Option<String> {
         return None;
     }
     let it = s.active().items.into_iter().find(|i| i.id == key)?;
-    (!it.version.is_empty() && version_ok(&it.version)).then_some(it.version)
+    (!it.version.is_empty() && version_ok(&it.version) && version_shape_ok(&it.version)).then_some(it.version)
+}
+
+/// A version a vendor lookup could have returned: starts with a digit, or with `v` and a digit (`v1.31.0`, `0.5.1`, `v1.30.4+k3s1`).
+/// Anything else (`latest`, `-x`, `v`) is not used even if the manifest is signed: the lookup runs instead.
+pub fn version_shape_ok(v: &str) -> bool {
+    let b = v.as_bytes();
+    matches!(b, [d, ..] if d.is_ascii_digit()) || matches!(b, [b'v', d, ..] if d.is_ascii_digit())
 }
 
 // ---- the bundled data, made from the code (for `iyakki dlmanifest gen` and the drift test)

@@ -39,6 +39,8 @@ IYAKKI launcher
   ./run.sh dlmanifest keygen|sign|verify|check|gen  the signed downloads manifest (versions and checksums of the download items; docs/development/DOWNLOADS-MANIFEST.md)
   ./run.sh image-programs  fails when production code starts a program the images do not ship (list: dist/buildroot/image-programs.txt)
   ./run.sh alpha-check  the gate before an alpha: build, tests, licences, docs links, versions, secrets, QEMU smoke tests (--dry: fast checks only)
+  ./run.sh compat-check  the compatibility gates (docs/development/CORE-COMPATIBILITY-DESIGN.md): every versioned surface is listed, the core API surface only grows
+                      (docs/development/core-surface.txt), golden fixtures under tests/compat/ are read by the current code and unknown parts survive
   ./run.sh check-macos  cargo check of the window crates for the macOS targets (compiles only; skips when the Rust target is not installed)
   ./run.sh release [version]  collect the images, sign them, write release.json and the download page (docs/RELEASING.md)
   ./run.sh cli ARGS   run the iyakki command line, e.g.  ./run.sh cli run tests/fixtures/hello.wat
@@ -140,7 +142,7 @@ case "${1:-help}" in
     dist/release/warnings-gate.sh
     # KI-060: the run gets its own temp folder, removed at the end; growth of iyakki-* in the system /tmp fails the step
     iyakki_run_tmp_begin; rc=0
-    cargo test --workspace || rc=$?
+    IYAKKI_NO_HOST_HOME=1 cargo test --workspace || rc=$?
     iyakki_run_tmp_end || rc=1
     [ "$rc" -eq 0 ] || exit "$rc"
     (cd crates/iyakki-gui && cargo build -q --bin iyakki-desktop && echo "iyakki-gui: builds") ;;
@@ -182,6 +184,8 @@ case "${1:-help}" in
   image-programs)
     # the guard against a missing program on the image (the curl bug): scans production code for spawned programs; narrow test, no image needed
     exec cargo test -q -p iyakki-agent --test image_programs ;;
+  compat-check)
+    shift; exec dist/release/compat-check.sh "$@" ;;
   alpha-check)
     # the gate before an alpha: build, test, licences, docs links, versions, secrets, QEMU smoke tests -> PASS/FAIL table
     shift; exec dist/release/alpha-check.sh "$@" ;;

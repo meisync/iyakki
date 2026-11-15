@@ -287,7 +287,15 @@ pub struct Output {
     pub dummy_volume: bool,
 }
 
+/// The card id of the one output a computer without ALSA (the macOS window) has: whatever the system plays on.
+pub const SYSTEM_DEFAULT_ID: &str = "system-default";
+
 impl Output {
+    /// "System default output": the sound goes where the operating system sends it (macOS), so there is no list to choose from.
+    pub fn system_default() -> Output {
+        Output { card: 0, device: 0, card_id: SYSTEM_DEFAULT_ID.into(), card_name: "the system's own output".into(), pcm_name: String::new(), kind: Kind::Analog, connected: Some(true), monitor: None, speakers: None, hdmi_no: 0, digital_off: false, builtin_speaker: true, hw_volume: None, dummy_volume: false }
+    }
+
     /// Does the output's volume come from the card's hardware control? (Else: IYAKKI's software volume.)
     pub fn uses_hw_volume(&self, mode: VolumeMode) -> bool {
         self.hw_volume.is_some()
@@ -310,6 +318,9 @@ impl Output {
 
     /// "HDMI: PDM-15T", "HDMI 2 (no monitor)", "USB Audio: …", "Speakers/headphones (HDA Intel PCH)".
     pub fn label(&self) -> String {
+        if self.card_id == SYSTEM_DEFAULT_ID {
+            return "System default output".to_string();
+        }
         match self.kind {
             Kind::Hdmi => match (&self.monitor, self.connected) {
                 (Some(m), _) => format!("HDMI: {m}"),
@@ -511,6 +522,11 @@ fn is_output_jack(name: &str) -> bool {
     !n.contains("hdmi") && !n.contains("mic") && (n.contains("headphone") || n.contains("line out") || n.contains("speaker") || n.contains("headset"))
 }
 
+/// The kernel's list of sound cards (`asound/cards` under `proc_root`), empty when it cannot be read: the one reader of that file.
+pub fn cards_text(proc_root: &Path) -> String {
+    std::fs::read_to_string(proc_root.join("asound").join("cards")).unwrap_or_default()
+}
+
 /// Every playback device of the machine. `mixer(card)` gives `amixer -c card contents` (None when there is no `amixer`).
 pub fn scan(proc_root: &Path, mixer: &dyn Fn(u32) -> Option<String>) -> Vec<Output> {
     let asound = proc_root.join("asound");
@@ -600,7 +616,19 @@ fn fill_from_proc_eld(outs: &mut [Output], elds: &[ProcEld]) {
     }
     let dynamic = elds.len() != hdmi.len();
     let present: Vec<&ProcEld> = elds.iter().filter(|e| e.present).collect();
-    let jacks_known = hdmi.iter().any(|&i| outs[i].connected.is_some());
+    // the kernel says no pin has a monitor: a jack or ELD control that still says "on" is stale (a monitor that was just
+    // unplugged), and sound written to that pin goes nowhere
+    if present.is_empty() {
+        for &i in &hdmi {
+            let o = &mut outs[i];
+            o.connected = Some(false);
+            o.monitor = None;
+            o.speakers = None;
+        }
+        return;
+    }
+    // a monitor is reported but no jack control says so: trust the pins (as when the mixer could not be asked)
+    let jacks_known = hdmi.iter().any(|&i| outs[i].connected == Some(true));
     let mut next = 0;
     for (n, &i) in hdmi.iter().enumerate() {
         let o = &mut outs[i];
@@ -641,30 +669,50 @@ pub struct Choice {
     pub reason: String,
 }
 
+/// An HDMI/DP output whose pin reports no monitor (ELD not valid, jack off).
+fn pin_is_dead(o: &Output) -> bool {
+    o.kind == Kind::Hdmi && o.connected == Some(false)
+}
+
+/// Where an output stands in the automatic order (lower is better) and the reason, None when it is not usable automatically.
+fn automatic_rank(o: &Output) -> Option<(u8, String)> {
+    match (o.kind, o.connected) {
+        // a speaker that is always there says nothing about the person's wish: a monitor, USB or Bluetooth device comes first
+        (Kind::Analog, Some(true)) if o.builtin_speaker => Some((4, "automatic: the built-in speaker (no headphones, monitor with speakers or USB audio device is connected)".into())),
+        (Kind::Analog, Some(true)) => Some((0, "automatic: speakers or headphones are connected".into())),
+        (Kind::Hdmi, Some(true)) if o.speakers != Some(false) => Some((1, format!("automatic: {} is connected over HDMI/DP", o.monitor.as_deref().map_or("a monitor".to_string(), |m| format!("monitor {m}"))))),
+        (Kind::Usb, _) => Some((2, "automatic: a USB audio device is plugged in".into())),
+        (Kind::Bluetooth, _) => Some((3, "automatic: a Bluetooth audio device".into())),
+        (Kind::Hdmi, Some(true)) => Some((5, format!("automatic: {} is connected over HDMI/DP but reports no speakers", o.monitor.as_deref().map_or("a monitor".to_string(), |m| format!("monitor {m}"))))),
+        (Kind::Analog, None) => Some((6, "automatic: the card's analog output (it does not report its jacks)".into())),
+        // some codecs report no speaker jack at all: their analog output is still better than silence
+        (Kind::Analog, Some(false)) => Some((7, "automatic: the card's analog output (nothing is reported plugged in)".into())),
+        _ => None,
+    }
+}
+
 /// Pick the output: the chosen one (`chosen` = its [`Output::key`]) when it is there, else the best one connected.
 pub fn choose(outs: &[Output], chosen: &str) -> Choice {
+    let mut dead_pin = false;
     if !chosen.is_empty() {
         if let Some(o) = outs.iter().find(|o| o.key() == chosen) {
-            return Choice { output: Some(o.clone()), chosen: true, reason: "chosen in Settings → Sound".into() };
+            // an HDMI/DP pin whose monitor is gone plays into nothing: the next automatic choice takes over until it is back
+            // (when nothing else could play, the chosen one stays: there is nothing better to hear)
+            if pin_is_dead(o) && outs.iter().any(|x| x.key() != chosen && automatic_rank(x).is_some()) {
+                dead_pin = true;
+            } else {
+                return Choice { output: Some(o.clone()), chosen: true, reason: "chosen in Settings → Sound".into() };
+            }
         }
     }
-    let rank = |o: &Output| -> Option<(u8, String)> {
-        match (o.kind, o.connected) {
-            // a speaker that is always there says nothing about the person's wish: a monitor, USB or Bluetooth device comes first
-            (Kind::Analog, Some(true)) if o.builtin_speaker => Some((4, "automatic: the built-in speaker (no headphones, monitor with speakers or USB audio device is connected)".into())),
-            (Kind::Analog, Some(true)) => Some((0, "automatic: speakers or headphones are connected".into())),
-            (Kind::Hdmi, Some(true)) if o.speakers != Some(false) => Some((1, format!("automatic: {} is connected over HDMI/DP", o.monitor.as_deref().map_or("a monitor".to_string(), |m| format!("monitor {m}"))))),
-            (Kind::Usb, _) => Some((2, "automatic: a USB audio device is plugged in".into())),
-            (Kind::Bluetooth, _) => Some((3, "automatic: a Bluetooth audio device".into())),
-            (Kind::Hdmi, Some(true)) => Some((5, format!("automatic: {} is connected over HDMI/DP but reports no speakers", o.monitor.as_deref().map_or("a monitor".to_string(), |m| format!("monitor {m}"))))),
-            (Kind::Analog, None) => Some((6, "automatic: the card's analog output (it does not report its jacks)".into())),
-            // some codecs report no speaker jack at all: their analog output is still better than silence
-            (Kind::Analog, Some(false)) => Some((7, "automatic: the card's analog output (nothing is reported plugged in)".into())),
-            _ => None,
-        }
+    let best = outs.iter().filter_map(|o| automatic_rank(o).map(|(r, why)| (r, why, o))).min_by_key(|(r, _, _)| *r);
+    let missing = if chosen.is_empty() {
+        String::new()
+    } else if dead_pin {
+        format!("the chosen output ({chosen}) has no monitor connected now, it comes back when one is; ")
+    } else {
+        format!("the chosen output ({chosen}) is not connected now; ")
     };
-    let best = outs.iter().filter_map(|o| rank(o).map(|(r, why)| (r, why, o))).min_by_key(|(r, _, _)| *r);
-    let missing = if chosen.is_empty() { String::new() } else { format!("the chosen output ({chosen}) is not connected now; ") };
     match best {
         Some((_, why, o)) => Choice { output: Some(o.clone()), chosen: false, reason: format!("{missing}{why}") },
         None if outs.is_empty() => Choice { output: None, chosen: false, reason: format!("{missing}{NO_OUTPUT} (no sound card was found)") },
@@ -1036,9 +1084,20 @@ pub fn hw_volume_is_dummy(proc_root: &Path, card: u32) -> bool {
     is_cs8409_card(proc_root, card)
 }
 
-/// What changes when a card or a PCM appears or goes: `/proc/asound/cards` and `/proc/asound/pcm`.
+/// What changes when a card or a PCM appears or goes: `/proc/asound/cards` and `/proc/asound/pcm`, and per card which `eld#*`
+/// pins report a monitor (the kernel changes them when an HDMI/DP monitor comes or goes).
 pub fn sound_signature(proc_root: &Path) -> String {
-    format!("{}\n--\n{}", read(proc_root.join("asound/cards")), read(proc_root.join("asound/pcm")))
+    let asound = proc_root.join("asound");
+    let mut s = format!("{}\n--\n{}", read(asound.join("cards")), read(asound.join("pcm")));
+    let mut cards: Vec<PathBuf> = std::fs::read_dir(&asound).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("card"))).collect();
+    cards.sort();
+    for dir in cards {
+        let name = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        for e in proc_elds(&dir) {
+            s += &format!("\n{name}:{}.{}={}:{}", e.order.0, e.order.1, e.present, e.name.as_deref().unwrap_or(""));
+        }
+    }
+    s
 }
 
 /// Is a full look due: the cards or PCMs changed, or [`WATCH_EVERY`] has gone by.
@@ -1587,6 +1646,11 @@ impl Selector {
 /// else a fresh look (with `amixer` only for the real `/proc`, so a test's made-up tree never meets the real mixer).
 pub fn outputs_at(proc_root: &Path) -> Vec<Output> {
     let real = proc_root == Path::new("/proc");
+    // no ALSA outside Linux: the one output is the system's default (the mixer's AudioQueue plays on it)
+    #[cfg(not(target_os = "linux"))]
+    if real {
+        return vec![Output::system_default()];
+    }
     if real && global().is_active() {
         return global().status().outputs;
     }
@@ -1710,29 +1774,57 @@ pub fn install_when_card_appears(prefs: impl Fn() -> SoundSettings + Send + 'sta
     when_card_appears(PathBuf::from("/proc"), || watch_wait(uptime()), move || install(prefs()));
 }
 
-/// One round of the watcher: look at the cards and PCMs, and take a full look when they changed or it is due.
+/// How often the watcher reads the card, PCM and ELD files (cheap: a few small files). A full look follows at once when they
+/// changed, and every [`WATCH_EVERY`] regardless.
+pub const WATCH_POLL: Duration = Duration::from_millis(500);
+/// After a change the watcher looks again once these long after it: the ELD turns valid a moment after a monitor is plugged in,
+/// and the jack controls can lag. A look that finds nothing new changes nothing (no rewrite of `/etc/asound.conf`).
+pub const SETTLE_LOOKS: [Duration; 2] = [Duration::from_millis(1200), Duration::from_millis(3000)];
+
+/// One round of the watcher: look at the cards, PCMs and ELD pins, and take a full look when they changed, shortly after a
+/// change (settle looks), or when it is due.
 pub struct Watch {
     last_sig: Option<String>,
     last_look: Option<Instant>,
+    /// When the signature last changed, and how many settle looks since.
+    changed_at: Option<Instant>,
+    settled: usize,
 }
 
 impl Watch {
     pub fn new() -> Watch {
-        Watch { last_sig: None, last_look: None }
+        Watch { last_sig: None, last_look: None, changed_at: None, settled: SETTLE_LOOKS.len() }
     }
 
     /// Returns the status when a look was taken.
     pub fn step(&mut self, sel: &Selector, proc_root: &Path) -> Option<Status> {
+        self.step_at(sel, proc_root, Instant::now())
+    }
+
+    /// [`step`](Self::step) with the time given (tests).
+    pub fn step_at(&mut self, sel: &Selector, proc_root: &Path, now: Instant) -> Option<Status> {
         let sig = sound_signature(proc_root);
         let changed = self.last_sig.as_deref() != Some(sig.as_str());
+        if changed && self.last_sig.is_some() {
+            self.changed_at = Some(now);
+            self.settled = 0;
+        }
         self.last_sig = Some(sig);
-        if self.last_look.is_none_or(|t| look_due(changed, t.elapsed())) {
+        let settle_due = match (self.changed_at, SETTLE_LOOKS.get(self.settled)) {
+            (Some(t), Some(after)) => now.saturating_duration_since(t) >= *after,
+            _ => false,
+        };
+        if settle_due {
+            self.settled += 1;
+        }
+        let since = self.last_look.map_or(WATCH_EVERY, |t| now.saturating_duration_since(t));
+        if self.last_look.is_none() || settle_due || look_due(changed, since) {
             let before = sel.generation();
             let st = sel.refresh();
             if sel.generation() != before {
                 log::info!("sound output: {}", st.summary());
             }
-            self.last_look = Some(Instant::now());
+            self.last_look = Some(now);
             return Some(st);
         }
         None
@@ -1745,7 +1837,7 @@ impl Default for Watch {
     }
 }
 
-/// Re-read the sound hardware every [`WATCH_EVERY`] in the background (once per process).
+/// Read the sound hardware files every [`WATCH_POLL`] and take a full look on a change or every [`WATCH_EVERY`], in the background (once per process).
 pub fn start_watch() {
     if WATCHING.swap(true, Ordering::SeqCst) {
         return;
@@ -1753,10 +1845,12 @@ pub fn start_watch() {
     let started = std::thread::Builder::new().name("iyakki-audioout".into()).spawn(|| {
         let mut w = Watch::new();
         loop {
-            // a microphone that records something from the first start: capture controls get their default once per card
-            crate::micdefaults::run();
-            w.step(global(), Path::new("/proc"));
-            std::thread::sleep(watch_wait(uptime()));
+            // the files are read often so a monitor plugged in or out is noticed within a second; a full look is taken then
+            if w.step(global(), Path::new("/proc")).is_some() {
+                // a microphone that records something from the first start: capture controls get their default once per card
+                crate::micdefaults::run();
+            }
+            std::thread::sleep(WATCH_POLL.min(watch_wait(uptime())));
         }
     });
     if started.is_err() {
@@ -2057,6 +2151,8 @@ mod tests {
         }, || false);
         assert_eq!(sel.refresh().device, None);
         let g0 = sel.generation();
+        // the kernel's pin and the mixer's jack agree: the monitor is on the first connected pin
+        put(&t.0, "asound/card0/eld#2.6", &eld_file(true, "PDM-15T"));
         *jack.lock().unwrap() = Some(3);
         assert_eq!(sel.refresh().device.as_deref(), Some("plughw:0,3"));
         let g1 = sel.generation();
@@ -2070,6 +2166,158 @@ mod tests {
         // the next sound is routed there
         let args = route_args(vec!["aplay".into(), "-q".into()], sel.device().as_deref());
         assert_eq!(args, ["aplay", "-D", "plughw:0,7", "-q"]);
+    }
+
+    // ---- monitor hotplug (KI-180): the pins' ELD files, the watcher and /etc/asound.conf
+
+    /// A Mac mini whose three HDMI devices (3, 7, 8) have one pin each (`eld#2.0`..`eld#2.2`, pin n is device n-th), plus a USB card.
+    fn hotplug_tree(tag: &str, usb: bool) -> Tree {
+        let t = tree(tag);
+        let r = &t.0;
+        let mut cards = " 0 [PCH            ]: HDA-Intel - HDA Intel PCH\n".to_string();
+        if usb {
+            cards += " 1 [Device         ]: USB-Audio - USB Audio Device\n";
+            put(r, "asound/card1/usbid", "0d8c:0014\n");
+            pcm(r, 1, 0, "USB Audio");
+        }
+        put(r, "asound/cards", &cards);
+        for (d, id) in [(3, "HDMI 0"), (7, "HDMI 1"), (8, "HDMI 2")] {
+            pcm(r, 0, d, id);
+        }
+        pins(&t, None);
+        t
+    }
+
+    /// Only the pin `on` (0..3) reports a monitor.
+    fn pins(t: &Tree, on: Option<usize>) {
+        for p in 0..3 {
+            put(&t.0, &format!("asound/card0/eld#2.{p}"), &eld_file(on == Some(p), "NEW-MON"));
+        }
+    }
+
+    fn conf(t: &Tree) -> String {
+        std::fs::read_to_string(t.0.join("asound.conf")).unwrap_or_default()
+    }
+
+    fn hotplug_selector(t: &Tree) -> Selector {
+        Selector::new(t.0.clone(), |_| None, || false).with_softvol(crate::softvol::Softvol::new(t.0.join("asound.conf"), crate::softvol::fake::Fake::default()))
+    }
+
+    /// Run the watcher over a made-up clock: 500 ms per poll.
+    fn poll(w: &mut Watch, sel: &Selector, t: &Tree, clock: &mut Instant, ms: u64) -> usize {
+        let mut looks = 0;
+        for _ in 0..(ms / 500).max(1) {
+            *clock += WATCH_POLL;
+            looks += w.step_at(sel, &t.0, *clock).is_some() as usize;
+        }
+        looks
+    }
+
+    #[test]
+    fn the_signature_changes_when_a_pin_gets_or_loses_its_monitor() {
+        let t = hotplug_tree("sig", false);
+        let a = sound_signature(&t.0);
+        assert_eq!(a, sound_signature(&t.0), "nothing changed, same signature");
+        pins(&t, Some(0));
+        let b = sound_signature(&t.0);
+        assert_ne!(a, b);
+        pins(&t, Some(1));
+        assert_ne!(b, sound_signature(&t.0));
+        pins(&t, None);
+        assert_eq!(a, sound_signature(&t.0));
+    }
+
+    #[test]
+    fn automatic_output_follows_a_monitor_unplugged_and_another_plugged_in_with_few_rewrites() {
+        let t = hotplug_tree("auto-seq", false);
+        pins(&t, Some(1)); // the monitor on the second pin: device 7
+        let sel = hotplug_selector(&t);
+        let mut w = Watch::new();
+        let mut clock = Instant::now();
+        assert!(w.step_at(&sel, &t.0, clock).is_some(), "the first step looks");
+        let c1 = conf(&t);
+        assert!(c1.contains("hw:0,7"), "{c1}");
+        let g1 = sel.generation();
+        // quiet seconds: only the regular look every 3 s, nothing rewritten
+        let m1 = std::fs::metadata(t.0.join("asound.conf")).unwrap().modified().unwrap();
+        poll(&mut w, &sel, &t, &mut clock, 9000);
+        assert_eq!(sel.generation(), g1, "an unchanged state is not a change");
+        assert_eq!(std::fs::metadata(t.0.join("asound.conf")).unwrap().modified().unwrap(), m1, "an unchanged state does not rewrite asound.conf");
+        // the monitor is unplugged: within two seconds the dead pin is not used any more
+        pins(&t, None);
+        let looks = poll(&mut w, &sel, &t, &mut clock, 1000);
+        assert!(looks >= 1, "a change is looked at at once");
+        let st = sel.status();
+        assert!(st.device.is_none() && st.choice.output.is_none(), "no monitor, no other card: no output, not the dead pin; {:?}", st.choice);
+        assert!(sel.generation() > g1, "the mixer's sink sees a new generation and closes (stale)");
+        let g2 = sel.generation();
+        // the same monitor comes back on another connector: the ELD turns valid, the next automatic choice is its pin
+        pins(&t, Some(0));
+        poll(&mut w, &sel, &t, &mut clock, 1000);
+        let c3 = conf(&t);
+        assert!(c3.contains("hw:0,3") && c3 != c1, "{c3}");
+        assert!(sel.status().device.is_some());
+        let g3 = sel.generation();
+        assert!(g3 > g2);
+        // settle looks and quiet seconds after the change rewrite nothing
+        let m3 = std::fs::metadata(t.0.join("asound.conf")).unwrap().modified().unwrap();
+        poll(&mut w, &sel, &t, &mut clock, 9000);
+        assert_eq!(sel.generation(), g3, "no flapping");
+        assert_eq!(std::fs::metadata(t.0.join("asound.conf")).unwrap().modified().unwrap(), m3);
+    }
+
+    #[test]
+    fn a_settle_look_catches_an_eld_that_turns_valid_after_the_pin_changed() {
+        let t = hotplug_tree("settle", false);
+        let sel = hotplug_selector(&t);
+        let mut w = Watch::new();
+        let mut clock = Instant::now();
+        w.step_at(&sel, &t.0, clock);
+        // the pin says "present" with no name yet, then the name and formats arrive without any other change of the pin
+        put(&t.0, "asound/card0/eld#2.0", "monitor_present\t\t1\neld_valid\t\t1\n");
+        poll(&mut w, &sel, &t, &mut clock, 500);
+        let looks_settle = poll(&mut w, &sel, &t, &mut clock, 3500);
+        assert!(looks_settle >= 2, "two settle looks follow a change, got {looks_settle}");
+    }
+
+    #[test]
+    fn an_explicit_choice_falls_back_when_its_pin_loses_the_monitor_and_returns_when_it_is_back() {
+        let t = hotplug_tree("explicit", true);
+        pins(&t, Some(1));
+        let sel = hotplug_selector(&t);
+        sel.set_prefs(SoundSettings { output: "PCH:7".into(), ..Default::default() });
+        let mut w = Watch::new();
+        let mut clock = Instant::now();
+        w.step_at(&sel, &t.0, clock);
+        let st = sel.status();
+        assert!(st.choice.chosen && st.choice.output.as_ref().map(Output::key).as_deref() == Some("PCH:7"));
+        assert!(conf(&t).contains("hw:0,7"));
+        // the monitor is unplugged: the chosen pin is dead, the USB device plays, the file follows
+        pins(&t, None);
+        poll(&mut w, &sel, &t, &mut clock, 1000);
+        let st = sel.status();
+        assert!(!st.choice.chosen && st.choice.reason.contains("PCH:7") && st.choice.reason.contains("no monitor"), "{}", st.choice.reason);
+        assert_eq!(st.choice.output.as_ref().map(Output::key).as_deref(), Some("Device:0"));
+        assert!(conf(&t).contains("hw:1,0"), "{}", conf(&t));
+        assert_eq!(sel.prefs().output, "PCH:7", "the choice itself is kept");
+        // a monitor on a different pin does not take the chosen device: its pin is another one
+        pins(&t, Some(0));
+        poll(&mut w, &sel, &t, &mut clock, 1000);
+        // the monitor is on the chosen device's pin again
+        pins(&t, Some(1));
+        poll(&mut w, &sel, &t, &mut clock, 1000);
+        assert!(sel.status().choice.chosen);
+        assert!(conf(&t).contains("hw:0,7"), "{}", conf(&t));
+    }
+
+    #[test]
+    fn automatic_follows_the_next_choice_when_the_current_pin_is_dead_and_a_stale_jack_does_not_keep_it() {
+        // the mixer still says the old jack is on after the kernel says no pin has a monitor
+        let t = hotplug_tree("stale-jack", true);
+        pins(&t, None);
+        let sel = Selector::new(t.0.clone(), |c| (c == 0).then(|| "numid=1,iface=CARD,name='HDMI/DP,pcm=3 Jack'\n  : values=on\n".to_string()), || false);
+        let st = sel.refresh();
+        assert_eq!(st.device.as_deref(), Some("plughw:1,0"), "{:?}", st.choice);
     }
 
     #[test]
@@ -2091,9 +2339,12 @@ mod tests {
         let st = sel.refresh();
         assert_eq!(st.device.as_deref(), Some("plughw:0,3"));
         assert!(!st.choice.chosen && st.choice.reason.contains("Device:0") && st.choice.reason.contains("not connected"), "{}", st.choice.reason);
-        // a chosen output that has no monitor is still used: the person asked for it
+        // a chosen HDMI output that has no monitor is not used while another output can play; it is the person's choice again
+        // once a monitor is there (see the hotplug tests)
         sel.set_prefs(SoundSettings { output: "PCH:8".into(), ..Default::default() });
-        assert_eq!(sel.status().device.as_deref(), Some("plughw:0,8"));
+        let st = sel.status();
+        assert_eq!(st.device.as_deref(), Some("plughw:0,3"));
+        assert!(!st.choice.chosen && st.choice.reason.contains("PCH:8") && st.choice.reason.contains("no monitor"), "{}", st.choice.reason);
     }
 
     #[test]
@@ -2369,3 +2620,17 @@ mod tests {
 #[cfg(test)]
 #[path = "audioout_macbook_tests.rs"]
 mod macbook_tests;
+
+#[cfg(test)]
+mod system_default_tests {
+    use super::*;
+
+    #[test]
+    fn the_system_default_output_is_one_honest_row_that_is_chosen_automatically() {
+        let o = Output::system_default();
+        assert_eq!(o.label(), "System default output");
+        let c = choose(&[o.clone()], "");
+        assert_eq!(c.output.as_ref().map(|x| x.label()), Some("System default output".to_string()));
+        assert!(!o.uses_hw_volume(VolumeMode::Automatic), "the volume is IYAKKI's own");
+    }
+}

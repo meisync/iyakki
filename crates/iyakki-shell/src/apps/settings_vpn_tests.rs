@@ -257,3 +257,17 @@ fn the_page_draws_inside_the_window_at_the_four_sizes() {
         }
     }
 }
+
+#[test]
+fn the_firewall_page_shows_the_vpn_guard_line_and_reads_it_at_most_every_two_seconds() {
+    use iyakki_vpn::profile::Settings;
+    let mut r = rig("fw-line");
+    assert_eq!(r.a.fw_vpn_line(&r.cx), None);
+    let id = r.mgr.import("Office", conf().as_bytes()).unwrap().profile.id;
+    r.mgr.set_settings(&id, Settings { kill_switch: true, ..Settings::full() }, 1_000_000).unwrap();
+    r.mgr.set_enabled(&id, true, 1_000_000).unwrap();
+    assert_eq!(r.a.fw_vpn_line(&r.cx), None, "the answer of the last second is kept");
+    r.a.fw.vpn_line = r.a.fw.vpn_line.take().map(|(t, l)| (t - std::time::Duration::from_secs(3), l));
+    let l = r.a.fw_vpn_line(&r.cx).expect("read again");
+    assert!(l.contains("VPN kill switch is active (Office)"), "{l}");
+}

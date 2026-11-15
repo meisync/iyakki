@@ -27,10 +27,17 @@ pub const L_NEWRW: usize = BASE + 333;
 pub const L_RUN: usize = BASE + 334;
 pub const L_STOP: usize = BASE + 335;
 pub const L_REFRESH: usize = BASE + 336;
+pub const L_IMGMAKE: usize = BASE + 337;
+pub const L_IMGYES: usize = BASE + 338;
+pub const L_IMGNO: usize = BASE + 339;
 pub const L_PKGS: usize = BASE + 340;
 pub const L_FOLDER: usize = BASE + 341;
 pub const L_NAME: usize = BASE + 342;
 pub const L_CONFIRM: usize = BASE + 343;
+pub const L_ARCHIVE: usize = BASE + 344;
+pub const L_PORT: usize = BASE + 345;
+pub const L_LICENCE: usize = BASE + 346;
+pub const L_CMD: usize = BASE + 347;
 const MAX_ROWS: usize = 40;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +45,8 @@ pub enum LView {
     Sandboxes,
     New,
     Images,
+    /// Make an image app from the archived root of a sandbox (the chat tool `linuxapp_image`, with its card).
+    Archive,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,9 +56,15 @@ enum Focus {
     Folder,
     Name,
     Confirm,
+    Archive,
+    Port,
+    Licence,
+    Cmd,
 }
 
 /// What a button of the page asks for; `shell_linux.rs` does it.
+use iyakki_agent::linuxapps_net::Mode as NetMode;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LinuxAction {
     /// Read the facts again.
@@ -60,6 +75,8 @@ pub enum LinuxAction {
     Remove { name: String, packages: Vec<String> },
     Upgrade { name: String },
     SetNetwork { name: String, on: bool },
+    /// The network switch of the page: off, outbound only (own namespace, the computer unreachable) or shared with the computer.
+    SetNetMode { name: String, mode: NetMode },
     Mount { name: String, folder: String, rw: bool },
     Unmount { name: String, folder: String },
     /// Open the CLI tile inside the sandbox.
@@ -68,6 +85,8 @@ pub enum LinuxAction {
     Delete { name: String, typed: String },
     RunImage { id: String },
     StopImage { id: String },
+    /// Make an image app from a sandbox's archived root. `confirmed` false: show the card (what goes in, what runs); true: the person said yes.
+    ImageFromRoot { archive: String, name: String, port: u16, licence: String, command: Vec<String>, confirmed: bool },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,6 +94,8 @@ pub struct BoxRow {
     pub name: String,
     pub title: String,
     pub network: bool,
+    /// Off, outbound only or shared with the computer (`network` is true for the last two).
+    pub mode: NetMode,
     /// `(folder on the machine, mount point inside, read-write)`
     pub mounts: Vec<(String, String, bool)>,
     pub mb: u64,
@@ -120,12 +141,21 @@ pub struct LinuxPage {
     pub folder: TextField,
     pub name: TextField,
     pub confirm: TextField,
+    pub archive: TextField,
+    pub port: TextField,
+    pub licence: TextField,
+    pub command: TextField,
+    /// The card of an image made from an archive that waits for Yes or No: its text and the action to run on Yes.
+    pub card: Option<(String, LinuxAction)>,
     focus: Focus,
     rel: usize,
     new_net: bool,
     new_rw: bool,
     confirm_for: Option<String>,
-    first: usize,
+    /// The sandbox and image lists' scrolling (one helper, `scrolllist.rs`), and the row that was chosen at the last drawing: a change
+    /// of the choice by a key scrolls it into view, the wheel and a drag do not move the choice.
+    pub(super) list: ScrollList,
+    seen_sel: Option<usize>,
 }
 
 impl LinuxPage {
@@ -137,12 +167,18 @@ impl LinuxPage {
             folder: TextField::new("/home/you/project", false),
             name: TextField::new("name, e.g. dev", false),
             confirm: TextField::new("type the name to delete", false),
+            archive: TextField::new("archive in your home, e.g. Downloads/root.tar.gz", false),
+            port: TextField::new("port the app listens on, e.g. 8080", false),
+            licence: TextField::new("licence, e.g. MIT", false),
+            command: TextField::new("command that starts it, e.g. /usr/bin/myapp --serve", false),
+            card: None,
             focus: Focus::None,
             rel: 0,
             new_net: true,
             new_rw: false,
             confirm_for: None,
-            first: 0,
+            list: ScrollList::default(),
+            seen_sel: None,
         }
     }
 
@@ -150,7 +186,17 @@ impl LinuxPage {
         self.view = LView::Sandboxes;
         self.focus = Focus::None;
         self.confirm_for = None;
-        self.first = 0;
+        self.list.to_top();
+        self.seen_sel = None;
+    }
+
+    /// Place the list for this drawing; a choice that changed since the last drawing (a key) is brought into view.
+    fn layout_list(&mut self, view: R, n: usize, rh: f32, s: f32, sel: usize) {
+        self.list.layout(view, n as f32 * rh, rh, s);
+        if self.seen_sel != Some(sel) {
+            self.list.show(sel as f32 * rh, (sel + 1) as f32 * rh);
+            self.seen_sel = Some(sel);
+        }
     }
 
     fn list_len(&self) -> usize {
@@ -168,6 +214,10 @@ impl LinuxPage {
             Focus::Folder => Some(&mut self.folder),
             Focus::Name => Some(&mut self.name),
             Focus::Confirm => Some(&mut self.confirm),
+            Focus::Archive => Some(&mut self.archive),
+            Focus::Port => Some(&mut self.port),
+            Focus::Licence => Some(&mut self.licence),
+            Focus::Cmd => Some(&mut self.command),
         }
     }
 }
@@ -192,7 +242,7 @@ impl BrandMenu {
         let n = match self.linux.view {
             LView::Sandboxes => f.boxes.len(),
             LView::Images => f.images.len(),
-            LView::New => 0,
+            LView::New | LView::Archive => 0,
         };
         if n > 0 && self.sel >= n {
             self.sel = n - 1;
@@ -216,7 +266,8 @@ impl BrandMenu {
         self.linux.view = v;
         self.linux.focus = Focus::None;
         self.linux.confirm_for = None;
-        self.linux.first = 0;
+        self.linux.list.to_top();
+        self.linux.seen_sel = None;
         self.sel = 0;
         self.note = None;
     }
@@ -265,7 +316,12 @@ impl BrandMenu {
         if !b.network && !self.linux.facts.as_ref().is_some_and(|f| f.any_host) {
             return self.lnote("A sandbox with its network on can reach any server; only an account allowed every host may turn it on.");
         }
-        Some(Outcome::Linux(LinuxAction::SetNetwork { name: b.name, on: !b.network }))
+        let mode = match b.mode {
+            NetMode::Off => NetMode::OutboundOnly,
+            NetMode::OutboundOnly => NetMode::HostShared,
+            NetMode::HostShared => NetMode::Off,
+        };
+        Some(Outcome::Linux(LinuxAction::SetNetMode { name: b.name, mode }))
     }
 
     fn act_mount(&mut self, rw: bool) -> Option<Outcome> {
@@ -327,6 +383,49 @@ impl BrandMenu {
         Some(Outcome::Linux(LinuxAction::Create { name, release: RELEASES[self.linux.rel].id.to_string(), network: self.linux.new_net, folder }))
     }
 
+    /// The archive form: check the fields here, then ask the shell for the card (the same one the chat tool shows).
+    fn act_image_card(&mut self) -> Option<Outcome> {
+        if let Some(o) = self.linux_need_allowed() {
+            return Some(o);
+        }
+        let archive = self.linux.archive.value.trim().to_string();
+        let name = self.linux.name.value.trim().to_string();
+        if archive.is_empty() {
+            self.linux.focus = Focus::Archive;
+            return self.lnote("Give the archive: the .tar.gz you made inside the sandbox, in your home folder.");
+        }
+        if name.is_empty() {
+            self.linux.focus = Focus::Name;
+            return self.lnote("Give the app a name.");
+        }
+        let Some(port) = self.linux.port.value.trim().parse::<u16>().ok().filter(|p| *p >= 1024) else {
+            self.linux.focus = Focus::Port;
+            return self.lnote("Give the port the app listens on: a number from 1024 to 65535.");
+        };
+        let licence = self.linux.licence.value.trim().to_string();
+        if licence.is_empty() {
+            self.linux.focus = Focus::Licence;
+            return self.lnote("An image app needs its licence (for example MIT).");
+        }
+        let command = words(&self.linux.command.value);
+        if command.first().is_none_or(|c| !c.starts_with('/')) {
+            self.linux.focus = Focus::Cmd;
+            return self.lnote("Give the command that starts the app, beginning with a full path such as /usr/bin/myapp.");
+        }
+        self.linux.card = None;
+        Some(Outcome::Linux(LinuxAction::ImageFromRoot { archive, name, port, licence, command, confirmed: false }))
+    }
+
+    /// The shell made the card: show it with Yes and No.
+    pub fn set_image_card(&mut self, text: String, yes: LinuxAction) {
+        self.linux.card = Some((text, yes));
+    }
+
+    fn act_image_yes(&mut self) -> Option<Outcome> {
+        let (_, a) = self.linux.card.take()?;
+        Some(Outcome::Linux(a))
+    }
+
     fn act_run_image(&mut self, stop: bool) -> Option<Outcome> {
         if let Some(o) = self.linux_need_allowed() {
             return Some(o);
@@ -344,18 +443,18 @@ impl BrandMenu {
             LView::Sandboxes => self.act_terminal(),
             LView::New => self.act_create(),
             LView::Images => self.act_run_image(false),
+            LView::Archive => if self.linux.card.is_some() { self.act_image_yes() } else { self.act_image_card() },
         }
     }
 
     /// Keys of the page. `None`: the menu's usual keys apply (Up/Down, Esc, ...).
-    /// The wheel or the trackpad over the list: a notch moves the selection (and so the list) by a row; not while a field is being typed in.
+    /// The wheel or the trackpad over the list: a notch scrolls three rows (the choice stays where it is); not while a field is being
+    /// typed in.
     pub(super) fn linux_wheel(&mut self, d: i32) {
         if self.linux.focus != Focus::None {
             return;
         }
-        for _ in 0..d.unsigned_abs().min(6) {
-            let _ = self.handle_key(&if d > 0 { Key::Up } else { Key::Down });
-        }
+        self.linux.list.wheel(d);
     }
 
     pub(super) fn linux_key(&mut self, k: &Key) -> Option<Outcome> {
@@ -372,10 +471,16 @@ impl BrandMenu {
                     Focus::Folder => self.act_mount(false),
                     Focus::Name => self.act_create(),
                     Focus::Confirm => self.act_delete_do(),
+                    Focus::Archive | Focus::Port | Focus::Licence | Focus::Cmd => self.act_image_card(),
                     Focus::None => None,
                 },
                 Key::Tab => {
                     self.linux.focus = match (self.linux.view, focus) {
+                        (LView::Archive, Focus::Archive) => Focus::Name,
+                        (LView::Archive, Focus::Name) => Focus::Port,
+                        (LView::Archive, Focus::Port) => Focus::Licence,
+                        (LView::Archive, Focus::Licence) => Focus::Cmd,
+                        (LView::Archive, _) => Focus::Archive,
                         (LView::New, Focus::Name) => Focus::Folder,
                         (LView::New, _) => Focus::Name,
                         (_, Focus::Pkgs) => Focus::Folder,
@@ -406,6 +511,16 @@ impl BrandMenu {
                     self.set_view(LView::Images);
                     Some(Outcome::Nothing)
                 }
+                '4' => {
+                    self.set_view(LView::Archive);
+                    Some(Outcome::Nothing)
+                }
+                'm' if self.linux.view == LView::Archive && self.linux.card.is_none() => self.act_image_card(),
+                'y' if self.linux.view == LView::Archive && self.linux.card.is_some() => self.act_image_yes(),
+                'n' if self.linux.view == LView::Archive && self.linux.card.is_some() => {
+                    self.linux.card = None;
+                    Some(Outcome::Nothing)
+                }
                 'r' => Some(Outcome::Linux(LinuxAction::Refresh)),
                 't' if self.linux.view == LView::Sandboxes => self.act_terminal(),
                 'i' if self.linux.view == LView::Sandboxes => {
@@ -432,11 +547,13 @@ impl BrandMenu {
     /// Clicks and typing by mouse on the page's own regions. `None`: not ours.
     pub(super) fn linux_hit(&mut self, ev: &Event) -> Option<Outcome> {
         match ev {
-            Event::Tab(n) if (L_TAB..L_TAB + 3).contains(n) => {
-                self.set_view([LView::Sandboxes, LView::New, LView::Images][n - L_TAB]);
+            Event::Tab(n) if (L_TAB..L_TAB + 4).contains(n) => {
+                self.set_view([LView::Sandboxes, LView::New, LView::Images, LView::Archive][n - L_TAB]);
                 Some(Outcome::Nothing)
             }
             Event::Tab(n) if (L_ROW..L_ROW + MAX_ROWS).contains(n) || (L_IMG..L_IMG + MAX_ROWS).contains(n) => {
+                // a drag that follows the press scrolls the list with the finger
+                self.linux.list.body_press();
                 self.sel = if *n >= L_IMG { n - L_IMG } else { n - L_ROW };
                 self.linux.confirm_for = None;
                 self.note = None;
@@ -474,11 +591,21 @@ impl BrandMenu {
             Event::Tab(L_RUN) => self.act_run_image(false),
             Event::Tab(L_STOP) => self.act_run_image(true),
             Event::Tab(L_REFRESH) => Some(Outcome::Linux(LinuxAction::Refresh)),
-            Event::FocusAt(id, x) if [L_PKGS, L_FOLDER, L_NAME, L_CONFIRM].contains(id) => {
+            Event::Tab(L_IMGMAKE) => self.act_image_card(),
+            Event::Tab(L_IMGYES) => self.act_image_yes(),
+            Event::Tab(L_IMGNO) => {
+                self.linux.card = None;
+                Some(Outcome::Nothing)
+            }
+            Event::FocusAt(id, x) if [L_PKGS, L_FOLDER, L_NAME, L_CONFIRM, L_ARCHIVE, L_PORT, L_LICENCE, L_CMD].contains(id) => {
                 self.linux.focus = match *id {
                     L_PKGS => Focus::Pkgs,
                     L_FOLDER => Focus::Folder,
                     L_NAME => Focus::Name,
+                    L_ARCHIVE => Focus::Archive,
+                    L_PORT => Focus::Port,
+                    L_LICENCE => Focus::Licence,
+                    L_CMD => Focus::Cmd,
                     _ => Focus::Confirm,
                 };
                 if let Some(f) = self.linux.field() {
@@ -502,7 +629,8 @@ impl BrandMenu {
         match self.linux.view {
             LView::Sandboxes => "1 2 3 views · Up/Down choose · t terminal · i install · n network · d delete · r refresh · Esc back",
             LView::New => "1 2 3 views · c create · Tab next field · Esc back",
-            LView::Images => "1 2 3 views · Up/Down choose · a run · x stop · r refresh · Esc back",
+            LView::Images => "1 2 3 4 views · Up/Down choose · a run · x stop · r refresh · Esc back",
+            LView::Archive => "1 2 3 4 views · m make (shows the card) · y yes · n no · Tab next field · Esc back",
         }
     }
 
@@ -526,7 +654,7 @@ impl BrandMenu {
         }
         y += 4.0 * s;
         let mut x = body.x;
-        for (i, (label, v)) in [("Sandboxes", LView::Sandboxes), ("New", LView::New), ("Image apps", LView::Images)].iter().enumerate() {
+        for (i, (label, v)) in [("Sandboxes", LView::Sandboxes), ("New", LView::New), ("Image apps", LView::Images), ("From archive", LView::Archive)].iter().enumerate() {
             x += g.button(x, y, size, label, if self.linux.view == *v { ACCENT } else { MUTED }, Event::Tab(L_TAB + i)) + gap;
         }
         g.button(x, y, size, "Refresh", DIM, Event::Tab(L_REFRESH));
@@ -543,6 +671,7 @@ impl BrandMenu {
             LView::Sandboxes => self.draw_boxes(g, area, s, blink),
             LView::New => self.draw_new(g, area, s, blink),
             LView::Images => self.draw_images(g, area, s),
+            LView::Archive => self.draw_archive(g, area, s, blink),
         }
     }
 
@@ -574,7 +703,7 @@ impl BrandMenu {
         let chosen = f.boxes.get(sel).cloned();
         // ---- the foot: detail, fields, buttons
         let confirming = self.linux.confirm_for.is_some() && chosen.as_ref().map(|b| &b.name) == self.linux.confirm_for.as_ref();
-        let net_label = chosen.as_ref().map_or("Network".to_string(), |b| format!("Network: {} (switch)", if b.network { "on" } else { "off" }));
+        let net_label = chosen.as_ref().map_or("Network".to_string(), |b| format!("Network: {} (switch)", b.mode.short()));
         let labels: Vec<String> = if confirming {
             vec!["Delete for good".into(), "Cancel".into()]
         } else {
@@ -585,7 +714,7 @@ impl BrandMenu {
         let detail: Vec<String> = match &chosen {
             None => vec![],
             Some(b) => {
-                let mut d = vec![format!("{} \u{b7} {} \u{b7} network {} \u{b7} {} MB on disk", b.name, b.title, if b.network { "on (can reach any server)" } else { "off" }, b.mb)];
+                let mut d = vec![format!("{} \u{b7} {} \u{b7} network {} \u{b7} {} MB on disk", b.name, b.title, b.mode.label(), b.mb)];
                 for (src, dst, rw) in b.mounts.iter().take(3) {
                     d.push(format!("{dst}  \u{2190}  {src}  ({})", if *rw { "read-write" } else { "read-only" }));
                 }
@@ -607,22 +736,23 @@ impl BrandMenu {
                 y += 18.0 * s;
             }
         } else {
-            let fit = (((top_end - area.y) / rh).floor() as usize).max(1);
-            if sel < self.linux.first {
-                self.linux.first = sel;
-            }
-            if sel >= self.linux.first + fit {
-                self.linux.first = sel + 1 - fit;
-            }
-            for (i, b) in f.boxes.iter().enumerate().skip(self.linux.first).take(fit).take(MAX_ROWS) {
-                let r = R::new(area.x - 4.0 * s, area.y + (i - self.linux.first) as f32 * rh, area.w + 8.0 * s, rh - 4.0 * s);
+            let n = f.boxes.len().min(MAX_ROWS);
+            let view = R::new(area.x - 4.0 * s, area.y, area.w + 8.0 * s, (top_end - area.y).max(rh));
+            self.linux.layout_list(view, n, rh, s, sel);
+            let offset = self.linux.list.offset;
+            for (i, b) in f.boxes.iter().enumerate().take(MAX_ROWS) {
+                let r = R::new(area.x - 4.0 * s, area.y + i as f32 * rh - offset, area.w + 8.0 * s, rh - 4.0 * s);
+                if r.y + r.h < view.y || r.y > view.y + view.h {
+                    continue;
+                }
                 let hot = g.hovered(r);
                 crate::fx::row_at(g, r.x, r.y, r.w, r.h, 10.0 * s, i == sel, hot, ACCENT);
                 g.text(r.x + 12.0 * s, r.y + 3.0 * s, 14.0 * s, TEXT, &b.name, Face::Bold);
-                let sub = g.fit(11.5 * s, &format!("{} \u{b7} network {} \u{b7} {} folder(s) \u{b7} {} MB", b.title, if b.network { "on" } else { "off" }, b.mounts.len(), b.mb), Face::Sans, r.w - 24.0 * s);
+                let sub = g.fit(11.5 * s, &format!("{} \u{b7} network {} \u{b7} {} folder(s) \u{b7} {} MB", b.title, b.mode.short(), b.mounts.len(), b.mb), Face::Sans, r.w - 24.0 * s);
                 g.text(r.x + 12.0 * s, r.y + 3.0 * s + g.line_height(14.0 * s, Face::Bold), 11.5 * s, MUTED, &sub, Face::Sans);
                 g.hit(r, Event::Tab(L_ROW + i), &b.name);
             }
+            self.linux.list.draw_bar(g, s, LINUX_BAR, ACCENT);
         }
         // ---- the foot
         let mut y = top_end;
@@ -638,7 +768,9 @@ impl BrandMenu {
         } else {
             self.linux.pkgs.render(g, R::new(area.x, y, area.w, field_h), self.linux.focus == Focus::Pkgs, s, blink, Face::Mono, L_PKGS);
             y += field_h + 6.0 * s;
-            self.linux.folder.render(g, R::new(area.x, y, area.w, field_h), self.linux.focus == Focus::Folder, s, blink, Face::Mono, L_FOLDER);
+            let bw = g.text_width(12.0 * s, "Browse\u{2026}", Face::Bold) + 12.0 * s * 1.7 + 8.0 * s;
+            self.linux.folder.render(g, R::new(area.x, y, (area.w - bw).max(60.0 * s), field_h), self.linux.focus == Focus::Folder, s, blink, Face::Mono, L_FOLDER);
+            crate::pathpick::PathPick::button(g, area.x + (area.w - bw).max(60.0 * s) + 8.0 * s, y + (field_h - 12.0 * s * 2.1).max(0.0) / 2.0, s, BROWSE_FOLDER, ACCENT);
             y += field_h + 6.0 * s;
         }
         if chosen.is_some() {
@@ -669,7 +801,9 @@ impl BrandMenu {
         y += lines * bh + 4.0 * s;
         self.linux.name.render(g, R::new(area.x, y, area.w, field_h), self.linux.focus == Focus::Name, s, blink, Face::Mono, L_NAME);
         y += field_h + 6.0 * s;
-        self.linux.folder.render(g, R::new(area.x, y, area.w, field_h), self.linux.focus == Focus::Folder, s, blink, Face::Mono, L_FOLDER);
+        let bw = g.text_width(12.0 * s, "Browse\u{2026}", Face::Bold) + 12.0 * s * 1.7 + 8.0 * s;
+        self.linux.folder.render(g, R::new(area.x, y, (area.w - bw).max(60.0 * s), field_h), self.linux.focus == Focus::Folder, s, blink, Face::Mono, L_FOLDER);
+        crate::pathpick::PathPick::button(g, area.x + (area.w - bw).max(60.0 * s) + 8.0 * s, y + (field_h - 12.0 * s * 2.1).max(0.0) / 2.0, s, BROWSE_FOLDER, ACCENT);
         y += field_h + 8.0 * s;
         let toggles = vec![format!("Network: {}", if self.linux.new_net { "on" } else { "off" }), format!("Folder: {}", if self.linux.new_rw { "read-write" } else { "read-only" }), "Create sandbox".to_string()];
         let (tpos, tlines) = Self::flow(g, area.w, size, &toggles);
@@ -678,7 +812,7 @@ impl BrandMenu {
             g.button(area.x + p.0, y + p.1 * bh, size, l, if id == L_CREATE { ACCENT } else { MUTED }, Event::Tab(id));
         }
         y += tlines * bh + 2.0 * s;
-        let note = format!("{} Network on means the sandbox can reach any server (the machine's network, outbound). A mounted folder is the only part of your files it can see.", iyakki_agent::linuxapps_dist::LICENCE_NOTE);
+        let note = format!("{} Network: outbound only reaches the internet but never this computer or your own network; shared uses the computer's own network and can reach its services too. A mounted folder is the only part of your files it can see.", iyakki_agent::linuxapps_dist::LICENCE_NOTE);
         for l in g.wrap(11.0 * s, &note, Face::Sans, area.w) {
             if y + 14.0 * s > area.y + area.h {
                 break;
@@ -686,6 +820,41 @@ impl BrandMenu {
             g.text(area.x, y, 11.0 * s, DIM, &l, Face::Sans);
             y += 14.0 * s;
         }
+    }
+
+    fn draw_archive(&mut self, g: &mut Gfx, area: R, s: f32, blink: bool) {
+        let size = 14.0 * s;
+        let field_h = 34.0 * s;
+        let mut y = area.y;
+        for l in g.wrap(12.0 * s, "Make an image app from the archived root of a sandbox: inside it run `tar -C / -czf root.tar.gz ...`, then give the archive's place in your home. The assistant can do the same with the tool linuxapp_image. Nothing is made until you say Yes on the card.", Face::Sans, area.w) {
+            g.text(area.x, y, 12.0 * s, MUTED, &l, Face::Sans);
+            y += 16.0 * s;
+        }
+        y += 4.0 * s;
+        if let Some((text, _)) = &self.linux.card {
+            for l in text.lines() {
+                for w in g.wrap(12.5 * s, l, Face::Sans, area.w) {
+                    g.text(area.x, y, 12.5 * s, TEXT, &w, Face::Sans);
+                    y += 16.0 * s;
+                }
+            }
+            y += 6.0 * s;
+            let x = area.x + g.button(area.x, y, size, "Yes, make it", ACCENT, Event::Tab(L_IMGYES)) + 10.0 * s;
+            g.button(x, y, size, "No", MUTED, Event::Tab(L_IMGNO));
+            return;
+        }
+        for (f, id, focus) in [(0, L_ARCHIVE, Focus::Archive), (1, L_NAME, Focus::Name), (2, L_PORT, Focus::Port), (3, L_LICENCE, Focus::Licence), (4, L_CMD, Focus::Cmd)] {
+            let field = match f {
+                0 => &mut self.linux.archive,
+                1 => &mut self.linux.name,
+                2 => &mut self.linux.port,
+                3 => &mut self.linux.licence,
+                _ => &mut self.linux.command,
+            };
+            field.render(g, R::new(area.x, y, area.w, field_h), self.linux.focus == focus, s, blink, Face::Mono, id);
+            y += field_h + 6.0 * s;
+        }
+        g.button(area.x, y, size, "Make image app", ACCENT, Event::Tab(L_IMGMAKE));
     }
 
     fn draw_images(&mut self, g: &mut Gfx, area: R, s: f32) {
@@ -713,15 +882,15 @@ impl BrandMenu {
         let fixed = lines * bh + desc.len() as f32 * 16.0 * s + note_lines.len().min(2) as f32 * 14.0 * s + prob_lines as f32 * 14.0 * s + 8.0 * s;
         let top_end = (area.y + area.h - fixed).max(area.y);
         let rh = 40.0 * s;
-        let fit = (((top_end - area.y) / rh).floor() as usize).max(1);
-        if sel < self.linux.first {
-            self.linux.first = sel;
-        }
-        if sel >= self.linux.first + fit {
-            self.linux.first = sel + 1 - fit;
-        }
-        for (i, a) in f.images.iter().enumerate().skip(self.linux.first).take(fit).take(MAX_ROWS) {
-            let r = R::new(area.x - 4.0 * s, area.y + (i - self.linux.first) as f32 * rh, area.w + 8.0 * s, rh - 4.0 * s);
+        let n = f.images.len().min(MAX_ROWS);
+        let view = R::new(area.x - 4.0 * s, area.y, area.w + 8.0 * s, (top_end - area.y).max(rh));
+        self.linux.layout_list(view, n, rh, s, sel);
+        let offset = self.linux.list.offset;
+        for (i, a) in f.images.iter().enumerate().take(MAX_ROWS) {
+            let r = R::new(area.x - 4.0 * s, area.y + i as f32 * rh - offset, area.w + 8.0 * s, rh - 4.0 * s);
+            if r.y + r.h < view.y || r.y > view.y + view.h {
+                continue;
+            }
             let hot = g.hovered(r);
             crate::fx::row_at(g, r.x, r.y, r.w, r.h, 10.0 * s, i == sel, hot, ACCENT);
             let title = g.fit(14.0 * s, &a.name, Face::Bold, r.w - 24.0 * s);
@@ -730,6 +899,7 @@ impl BrandMenu {
             g.text(r.x + 12.0 * s, r.y + 3.0 * s + g.line_height(14.0 * s, Face::Bold), 11.5 * s, MUTED, &sub, Face::Sans);
             g.hit(r, Event::Tab(L_IMG + i), &a.id);
         }
+        self.linux.list.draw_bar(g, s, LINUX_BAR, ACCENT);
         let mut y = top_end;
         for (i, l) in desc.iter().enumerate() {
             let t = g.fit(12.0 * s, l, Face::Sans, area.w);

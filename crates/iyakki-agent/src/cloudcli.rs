@@ -79,6 +79,7 @@ pub fn run(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
         }
         Some("cert") => cert(&a[1..], out),
         Some("listen") => listen(&a[1..], out),
+        Some("pod-tls") => crate::cloudlisten::podtls::cli(&a[1..], out),
         Some("roles") => roles(&a[1..], out),
         Some("tenants") => crate::cloudtenantdir::cli(&a[1..], out),
         Some("snapshot") => crate::cloudsnapshot::cli(&a[1..], out),
@@ -105,7 +106,7 @@ pub fn run(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
             out(&reach_text(&c));
             Ok(())
         }
-        _ => Err("usage: iyakki cloud <example TENANT | manifests | image | bundle | common | deploy | reconcile | routes | cert | listen | roles | tenants | snapshot> (docs/development/CLOUD-MULTITENANT-PLAN.md)\n  listen --routes FILE [--bind ADDR] [--cert-source file|vault ...] [--client-ca HOST=NAME] [--service-dialer ...] [--reach ...] [--no-firewall] [--route-tenant HOST=TENANT] (iyakki cloud listen --help)\n  \
+        _ => Err("usage: iyakki cloud <example TENANT | manifests | image | bundle | common | deploy | reconcile | routes | cert | listen | pod-tls | roles | tenants | snapshot> (docs/development/CLOUD-MULTITENANT-PLAN.md)\n  listen --routes FILE [--bind ADDR] [--cert-source file|vault ...] [--client-ca HOST=NAME] [--service-dialer ...] [--reach ...] [--no-firewall] [--route-tenant HOST=TENANT] (iyakki cloud listen --help)\n  \
                   manifests --config FILE [-o OUT]\n  image [--out FILE] [--name REF] [--binary PATH] [--arch amd64|arm64] [--push HOST:PORT/REPO:TAG]\n  \
                   bundle --config FILE --out DIR\n  deploy --config FILE [--kubeconfig FILE] [--context NAME] [--apply]\n  \
                   reconcile --dir DIR [--kubeconfig FILE] [--context NAME] [--apply] [--prune]"
@@ -144,6 +145,13 @@ fn reconcile(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
     }
 }
 
+/// Set by SIGINT or SIGTERM while `iyakki cloud listen` runs: the listener stops and closes its firewall ports.
+static STOP_LISTEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn on_stop_signal(_: libc::c_int) {
+    STOP_LISTEN.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// `iyakki cloud listen --routes FILE ...` (full flags: `cloudlisten_setup::USAGE`): the local domain listener (`cloudlisten.rs`). Runs
 /// until interrupted; follows changes of the routes file and re-reads the certificates once a minute. Certificates from files or the vault,
 /// mutual TLS per route, pods through kubectl or cluster DNS, the firewall gate (the listener does not open without it) and tenants are
@@ -162,6 +170,14 @@ fn listen(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
     for n in &s.notes {
         out(n);
     }
+    // SIGINT and SIGTERM end the listener the proper way (its ports are closed in the firewall); a run that was killed outright left its
+    // rules behind, so they are dropped before the first port is opened.
+    s.gate.clear_stale();
+    // SAFETY: the handlers only store to an atomic.
+    unsafe {
+        libc::signal(libc::SIGINT, on_stop_signal as extern "C" fn(libc::c_int) as usize);
+        libc::signal(libc::SIGTERM, on_stop_signal as extern "C" fn(libc::c_int) as usize);
+    }
     let l = Listener::start(table, s.source, s.gate, s.options)?;
     out(&format!("listening on port(s) {:?}; Ctrl-C stops it. Routes marked access members are NOT enforced by this listener.", l.ports()));
     for (h, why) in l.refused() {
@@ -171,7 +187,15 @@ fn listen(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
     let mut seen = stamp();
     let mut ticks = 0u32;
     loop {
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        // a second is ten looks at the stop flag
+        for _ in 0..10 {
+            if STOP_LISTEN.load(std::sync::atomic::Ordering::Relaxed) {
+                out("stopping: closing the ports");
+                l.stop();
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
         ticks += 1;
         if stamp() != seen {
             seen = stamp();
@@ -179,7 +203,7 @@ fn listen(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
                 Ok(()) => out(&format!("routes reloaded; ports {:?}", l.ports())),
                 Err(e) => out(&format!("routes file not applied: {e}")),
             }
-        } else if ticks % 30 == 0 {
+        } else if ticks % 60 == 0 {
             for line in l.reload_certs() {
                 out(&line);
             }
@@ -423,6 +447,10 @@ fn write(p: &Path, b: &[u8]) -> Result<(), String> {
         std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
     }
     std::fs::write(p, b).map_err(|e| format!("{}: {e}", p.display()))
+}
+
+pub(crate) fn kubectl_apply(args: &[String], stdin: &[u8]) -> Result<String, String> {
+    kubectl(args, stdin)
 }
 
 fn kubectl(args: &[String], stdin: &[u8]) -> Result<String, String> {

@@ -170,6 +170,15 @@ pub struct Global {
     /// Publish times (ms) of the last day, across flows.
     #[serde(default)]
     pub publishes: Vec<i64>,
+    /// Also tell the person by Matrix when autopilot publishes, rolls back or asks.
+    #[serde(default)]
+    pub matrix: bool,
+    /// The saved room for those messages (empty: the main room).
+    #[serde(default)]
+    pub matrix_room: String,
+    /// The named agent profile: models, order, fallback and time limits.
+    #[serde(default)]
+    pub profile: crate::assist_profile::AgentProfile,
 }
 
 fn yes() -> bool {
@@ -181,7 +190,7 @@ fn three() -> u32 {
 
 impl Default for Global {
     fn default() -> Global {
-        Global { schema: 0, extra: Default::default(), enabled: true, max_publish_per_day: 3, publishes: vec![] }
+        Global { schema: 0, extra: Default::default(), enabled: true, max_publish_per_day: 3, publishes: vec![], matrix: false, matrix_room: String::new(), profile: Default::default() }
     }
 }
 
@@ -243,6 +252,25 @@ impl AssistStore {
         let mut g = self.global();
         g.max_publish_per_day = per_day.min(50);
         self.save_global(&g)
+    }
+
+    /// Also tell the person by Matrix (a saved room name; empty: the main room).
+    pub fn set_matrix(&self, on: bool, room: &str) -> Result<(), String> {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut g = self.global();
+        g.matrix = on;
+        g.matrix_room = room.trim().chars().filter(|c| !c.is_control()).take(80).collect();
+        self.save_global(&g)
+    }
+
+    /// Replace the agent profile (cleaned: bounded names and time limits).
+    pub fn set_profile(&self, p: crate::assist_profile::AgentProfile) -> Result<crate::assist_profile::AgentProfile, String> {
+        let p = p.cleaned()?;
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut g = self.global();
+        g.profile = p.clone();
+        self.save_global(&g)?;
+        Ok(p)
     }
 
     pub fn publishes_today_all(&self) -> u32 {

@@ -47,10 +47,14 @@ pub enum Style {
     Small,
     /// The logo breathing, with only a very small drift.
     Breathing,
+    /// Stars flying slowly outwards from the middle of the screen.
+    Starfield,
+    /// The pictures of the person's Pictures folder, one after the other with a slow zoom (the logo when there are none).
+    Slideshow,
 }
 
 impl Style {
-    pub const ALL: [Style; 4] = [Style::Logo, Style::LogoClock, Style::Small, Style::Breathing];
+    pub const ALL: [Style; 6] = [Style::Logo, Style::LogoClock, Style::Small, Style::Breathing, Style::Starfield, Style::Slideshow];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -58,6 +62,8 @@ impl Style {
             Style::LogoClock => "Logo and clock",
             Style::Small => "Small logo (OLED friendly)",
             Style::Breathing => "Breathing logo",
+            Style::Starfield => "Starfield",
+            Style::Slideshow => "Photo slideshow (from Pictures)",
         }
     }
 
@@ -68,6 +74,8 @@ impl Style {
             Style::LogoClock => "Logo + clock",
             Style::Small => "Small logo",
             Style::Breathing => "Breathing",
+            Style::Starfield => "Stars",
+            Style::Slideshow => "Photos",
         }
     }
 }

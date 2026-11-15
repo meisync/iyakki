@@ -10,7 +10,7 @@ Environment: URLS (space separated; default: the local test page, google.com, yo
 SSH_KEY (a public key file: adds it to the initrd as /etc/iyakki/authorized_keys and forwards host port 2222 to the guest's SSH,
 which is how the helper's log and `ps` can be looked at: `ssh -p 2222 root@127.0.0.1`).
 The local test page (canvas animation, CSS grid, fonts) is served from this machine, reached from the guest as http://10.0.2.2:PORT/ .
-The tile choice assumes the launcher's current layout: Tab moves to the Web & Media section, whose first tile is BROWSER.
+The tile choice assumes the launcher's current layout: Tab twice reaches the Media group, whose first tile is BROWSER (2026-11-13; it was one Tab when the group was Web & Media).
 """
 import os, shlex, shutil, socket, struct, subprocess, sys, tempfile, time, zlib
 
@@ -104,7 +104,7 @@ try:
     time.sleep(3)
     typ("admin"); keys("tab"); typ("adminpass1"); keys("tab"); typ("adminpass1"); keys("ret")
     time.sleep(8)
-    keys("tab", "ret")                  # Tab: the Web & Media section, Enter: its first tile, BROWSER
+    keys("tab", "tab", "ret")           # Tab twice: the Media group (Ask & Create, Build, Media), Enter: its first tile, BROWSER
     time.sleep(3)
     ok = True
     for n, url in enumerate(urls, 1):

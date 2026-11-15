@@ -45,3 +45,13 @@ Unit tests (`pathcheck_tests.rs`) run the same checks against the same listener 
 Written and unit-tested 2026-10-28. The existing images were built before the step existed, so **the image must be repacked** (`repack.sh`)
 before `qemu-test.sh` can show the new lines; the first QEMU run of these checks has not happened. `qemu-test-aarch64.sh` does not require
 them yet.
+
+## Upgrade and rollback across two builds (F-CORE-21)
+
+`dist/buildroot/qemu-rollback-test.sh OLD-build-dir NEW-build-dir` boots one synthetic data disk (the alpha.1 fixture plus a marker) with the
+OLD build, then the NEW build, then the OLD build again (the previous version the boot menu keeps), then the NEW build once more. After each
+boot the data must be read (marker, settings, sources, inbox), `e2fsck` must be clean and no `.corrupt-*` file may appear; a file the NEW build
+stamped must be read by the OLD build without being rewritten. It exits 0 (PASS), 1 (FAIL), 2 (a build has no `upgrade` stage) or 3 (not
+runnable here: no QEMU, missing image files). It needs `qemu-system-x86_64`, `mke2fs`, `debugfs` and `e2fsck`, so it runs on the Linux PC or the
+x86 mini, not on an Apple Silicon Mac. `crates/iyakki-core-api/tests/compat_step6.rs` (part of `compat-check.sh`) checks the script parses, refuses
+to run without two builds and still greps for the lines the core prints. **Status: written 2026-11-13; never run against two real builds.**

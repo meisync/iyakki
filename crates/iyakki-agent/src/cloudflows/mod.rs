@@ -19,6 +19,9 @@
 //! Everything takes the time as a number, so tests use a fake clock. Nothing here starts a cluster.
 
 pub mod approval;
+
+/// The pod's own service identity in the tenant vault: scheduled flows read the secrets a team admin marked as this member.
+pub const SERVICE_USER: &str = "_flows";
 pub mod executor;
 pub mod identity;
 pub mod job;
@@ -28,7 +31,9 @@ pub mod quota;
 pub mod real;
 pub mod sandboxed;
 pub mod service;
+pub mod slots;
 pub mod tz;
+pub mod tzrules;
 
 #[cfg(test)]
 mod tests;

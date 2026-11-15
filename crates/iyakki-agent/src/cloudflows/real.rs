@@ -15,6 +15,25 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const STEP_SECS: u64 = 5;
+/// How long a run token is good: the longest a run may take, and never more than a day.
+pub const RUN_TOKEN_SECS: u64 = 6 * 3600;
+
+/// The two hooks of the engine's secret gate: the token issued for each run when it is created, and the rule that a run nobody started by
+/// hand must present its own token before it may read any secret a team admin marked for scheduled runs.
+pub fn secret_hooks(data: &std::path::Path, flows_dir: &std::path::Path) -> (crate::flows::CloudSecret, crate::flows::CloudRunToken, crate::flows::CloudRunEnd) {
+    let tokens = Arc::new(super::identity::RunTokens::default());
+    let (data2, flows2, tokens2) = (data.to_path_buf(), flows_dir.to_path_buf(), tokens.clone());
+    let secret: crate::flows::CloudSecret = Arc::new(move |user: &str, run: &iyakki_flow::host::RunSecretCx, name: &str| {
+        let vault = crate::tenantconfig::vault::for_dir(&data2);
+        let token = Some(run.token.as_str()).filter(|t| !t.is_empty());
+        super::identity::unattended_secret_presented(&tokens2, token, iyakki_schema::now_secs(), &data2, vault.as_ref(), &super::identity::Registry::new(&flows2), user, run, name)
+    });
+    let tokens3 = tokens.clone();
+    let issue: crate::flows::CloudRunToken = Arc::new(move |run_id: &str| tokens.issue(run_id, iyakki_schema::now_secs(), RUN_TOKEN_SECS).ok());
+    // a run that ended presents nothing more: its token is revoked then, not left to expire
+    let end: crate::flows::CloudRunEnd = Arc::new(move |run_id: &str| tokens3.revoke_run(run_id));
+    (secret, issue, end)
+}
 
 static STATUS: std::sync::OnceLock<Mutex<Option<serde_json::Value>>> = std::sync::OnceLock::new();
 
@@ -125,6 +144,18 @@ pub fn install_hook(data: &Path, leading: Arc<AtomicBool>, counters: Arc<Counter
         }
     };
     let last_refusal = Arc::new(AtomicU64::new(0));
+    // the cap counts the runs of the other processes of this tenant too (they share the data folder): each says how many it has going
+    let board = Arc::new(super::slots::SlotBoard::new(&data.join("flows-slots"), &super::slots::SlotBoard::unique_id()));
+    {
+        let weak = Arc::downgrade(&board);
+        let _ = std::thread::Builder::new().name("cloud-flow-slots".into()).spawn(move || {
+            while let Some(b) = weak.upgrade() {
+                b.publish(crate::flows::running_all().unwrap_or(0), iyakki_schema::now_secs());
+                drop(b);
+                std::thread::sleep(Duration::from_secs(5));
+            }
+        });
+    }
     let hook: crate::flows::CloudHook = Arc::new(move |_user: &str, cfg: &mut iyakki_flow::engine::EngineCfg| {
         let q = quota();
         cfg.max_runs = q.max_runs_person;
@@ -137,15 +168,16 @@ pub fn install_hook(data: &Path, leading: Arc<AtomicBool>, counters: Arc<Counter
                 iyakki_flow::runstore::Retention { keep: q.history_keep, days: q.history_days }
             })
         }));
-        let (lead, counters, last, q2) = (leading.clone(), counters.clone(), last_refusal.clone(), quota.clone());
+        let (lead, counters, last, q2, board) = (leading.clone(), counters.clone(), last_refusal.clone(), quota.clone(), board.clone());
         cfg.gate = Some(iyakki_flow::engine::Gate {
             lead: Arc::new(move || lead.load(Ordering::Relaxed)),
             admit: Arc::new(move |_flow: &str, started: usize| {
                 let q = q2();
-                let running = crate::flows::running_all().unwrap_or(0) + started;
-                let ok = running < q.max_runs_tenant;
+                let now = iyakki_schema::now_secs();
+                let mine = crate::flows::running_all().unwrap_or(0);
+                board.publish(mine, now);
+                let ok = super::slots::within_cap(q.max_runs_tenant, mine, started, board.others(now));
                 if !ok {
-                    let now = iyakki_schema::now_secs();
                     if now > last.swap(now, Ordering::Relaxed) + 10 {
                         counters.quota_refused.fetch_add(1, Ordering::Relaxed);
                     }
@@ -200,12 +232,10 @@ pub fn start(svc: Arc<Services>, auth: Arc<dyn Authenticator>, audit: Arc<dyn iy
     install_hook(&data, leading.clone(), sched.counters.clone());
     {
         // a run that nobody started by hand reads only the secrets a team admin marked for scheduled runs
-        let (data2, flows2) = (data.clone(), flows_dir.clone());
-        let hook: crate::flows::CloudSecret = Arc::new(move |user: &str, run: &iyakki_flow::host::RunSecretCx, name: &str| {
-            let vault = crate::tenantconfig::vault::for_dir(&data2);
-            super::identity::unattended_secret(&data2, vault.as_ref(), &super::identity::Registry::new(&flows2), user, run, name)
-        });
+        let (hook, issue, end) = secret_hooks(&data, &flows_dir);
         let _ = crate::flows::CLOUD_SECRET.set(hook);
+        let _ = crate::flows::CLOUD_RUN_TOKEN.set(issue);
+        let _ = crate::flows::CLOUD_RUN_END.set(end);
     }
     // the sandbox: without it a tenant pod refuses commands (fail closed); with it `run_command` and a flow's `cli` and `browser` steps
     // go to a hardened Job on the team's cluster binding
@@ -237,10 +267,10 @@ pub fn start(svc: Arc<Services>, auth: Arc<dyn Authenticator>, audit: Arc<dyn iy
                 *STATUS.get_or_init(|| Mutex::new(None)).lock().unwrap_or_else(|e| e.into_inner()) = Some(sched.status(now));
                 if sched.is_leader() {
                     let shim = AuditShim(audit.clone());
-                    let env = crate::tenantconfig::api::Env { dir: &data, vault: crate::tenantconfig::vault::for_user(&data, "_flows"), audit: &shim };
+                    let env = crate::tenantconfig::api::Env { dir: &data, vault: crate::tenantconfig::vault::for_user(&data, super::SERVICE_USER), audit: &shim };
                     scan_new_waits(&waits, &env, &roles, &tenant, backend.as_ref(), &sched, now);
                     for l in waits.poll(&env, &roles, sink.as_ref(), backend.as_ref(), now) {
-                        audit.record("_flows", "flow.approval.resolved", &l);
+                        audit.record(super::SERVICE_USER, "flow.approval.resolved", &l);
                     }
                 }
                 ticks += 1;
@@ -248,7 +278,7 @@ pub fn start(svc: Arc<Services>, auth: Arc<dyn Authenticator>, audit: Arc<dyn iy
                     hub.tick(now, &net);
                 }
                 for p in rep.paused {
-                    audit.record("_flows", "flow.schedule.paused", &format!("{p} owner lost access"));
+                    audit.record(super::SERVICE_USER, "flow.schedule.paused", &format!("{p} owner lost access"));
                 }
                 for _ in 0..STEP_SECS * 10 {
                     if stop.load(Ordering::Relaxed) {

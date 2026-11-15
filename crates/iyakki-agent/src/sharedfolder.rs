@@ -311,7 +311,7 @@ impl Shares {
         c.owner = self.owner.clone();
         c.bind = if d.access == Access::Local { "127.0.0.1".into() } else if d.bind.trim().is_empty() { "all".into() } else { d.bind.trim().to_string() };
         if c.bind != "all" {
-            let ok = c.bind.parse::<std::net::Ipv4Addr>().is_ok_and(|a| a.is_loopback() || (self.lan)().iter().any(|l| *l == c.bind));
+            let ok = c.bind.parse::<std::net::IpAddr>().is_ok_and(|a| a.is_loopback() || (self.lan)().iter().any(|l| *l == c.bind));
             if !ok {
                 return Err("That address is not one of this machine's addresses.".into());
             }
@@ -578,7 +578,7 @@ impl Shares {
         } else {
             vec![c.bind.clone()]
         };
-        hosts.into_iter().map(|h| format!("http://{h}:{port}{path}")).collect()
+        hosts.into_iter().map(|h| if h.contains(':') { format!("http://[{h}]:{port}{path}") } else { format!("http://{h}:{port}{path}") }).collect()
     }
 
     pub fn list(&self) -> Vec<ShareInfo> {
@@ -668,6 +668,8 @@ pub fn lan_addresses() -> Vec<String> {
 
 /// Sign-out: this person's shares stop.
 pub fn on_logout(user: &str) {
+    // the media server (UPnP/DLNA) serves these shares: it goes off with them
+    crate::upnp_serve::stop_user(user);
     let all: Vec<Arc<Shares>> = registry().lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|((_, u), _)| u == user).map(|(_, m)| m.clone()).collect();
     for m in all {
         m.stop_all();

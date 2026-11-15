@@ -464,3 +464,63 @@ fn the_owners_files_are_migrated_the_shared_sources_are_seen_and_the_plans_are_r
     assert_eq!(admin.get("prometheus-cluster").unwrap().name, "Mine");
     assert_eq!(admin.list().len(), 6);
 }
+
+#[test]
+fn a_slow_cluster_does_not_hold_the_form_and_a_fast_one_answers_as_before() {
+    struct Slow(u64);
+    impl ClusterApi for Slow {
+        fn service(&self, _: &str, _: &str) -> Result<SvcInfo, DashError> {
+            Err(no_cluster("fake"))
+        }
+        fn services(&self) -> Result<Vec<SvcInfo>, DashError> {
+            std::thread::sleep(std::time::Duration::from_millis(self.0));
+            Ok(vec![svc("iyakki-data", "elasticsearch", 9200, Some(true))])
+        }
+        fn host_listens(&self, _: u16) -> bool {
+            false
+        }
+    }
+    let wait = std::time::Duration::from_millis(200);
+    let slow: Arc<dyn ClusterApi> = Arc::new(Slow(1500));
+    let t = std::time::Instant::now();
+    let s = suggest_within(&slow, "elasticsearch", wait).unwrap();
+    assert!(t.elapsed() < std::time::Duration::from_millis(900), "the caller waited {:?}", t.elapsed());
+    assert_eq!(s.url, "");
+    assert!(s.note.contains("still looking") && s.note.contains("cluster://<namespace>/<service>:9200"), "{}", s.note);
+    let fast: Arc<dyn ClusterApi> = Arc::new(Slow(0));
+    assert_eq!(suggest_within(&fast, "elasticsearch", std::time::Duration::from_secs(5)).unwrap().url, "cluster://iyakki-data/elasticsearch:9200");
+    // a kind without a default port has no suggestion, as before
+    assert!(suggest_within(&fast, "duckdb", wait).is_none());
+}
+
+#[test]
+fn a_late_lookup_is_polled_until_it_answers_and_answers_once() {
+    struct Slow;
+    impl ClusterApi for Slow {
+        fn service(&self, _: &str, _: &str) -> Result<SvcInfo, DashError> {
+            Err(no_cluster("fake"))
+        }
+        fn services(&self) -> Result<Vec<SvcInfo>, DashError> {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            Ok(vec![svc("iyakki-data", "elasticsearch", 9200, Some(true))])
+        }
+        fn host_listens(&self, _: u16) -> bool {
+            false
+        }
+    }
+    let api: Arc<dyn ClusterApi> = Arc::new(Slow);
+    assert!(Lookup::start(&api, "duckdb").is_none(), "a kind without a default port has nothing to look for");
+    let mut l = Lookup::start(&api, "elasticsearch").unwrap();
+    assert!(l.poll().is_none(), "not there yet, and asking did not block");
+    assert!(l.late_note().note.contains("fills in here"));
+    let mut got = None;
+    for _ in 0..200 {
+        if let Some(a) = l.poll() {
+            got = Some(a);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(got.unwrap().unwrap().url, "cluster://iyakki-data/elasticsearch:9200");
+    assert!(l.poll().is_none(), "the answer is handed over once");
+}

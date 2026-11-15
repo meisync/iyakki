@@ -10,6 +10,7 @@
 //! * A detection opens the Voice tile on the Assistant tab and taps Talk, so the existing session runs with its follow-up window
 //!   rules unchanged. The audit log gets one line for the detection (no sound, no text).
 
+use crate::stale_stats::mark_stale;
 use super::*;
 use iyakki_agent::wakelisten as wl;
 
@@ -42,7 +43,7 @@ impl Shell {
             if self.wake.handle.take().is_some() || self.wake.sign {
                 self.wake.sign = false;
                 self.wake.note.clear();
-                self.stale = true;
+                mark_stale!(self);
             }
             return;
         }
@@ -67,7 +68,7 @@ impl Shell {
         let on = h.indicator();
         if on != self.wake.sign {
             self.wake.sign = on;
-            self.stale = true;
+            mark_stale!(self);
         }
         let note = h.note();
         if note != self.wake.note {
@@ -85,7 +86,7 @@ impl Shell {
                     let _ = wl::take_session_request(); // the tile could not open (role, cloud mode, memory): no stale tap later
                 }
             }
-            self.stale = true;
+            mark_stale!(self);
         }
     }
 
@@ -97,7 +98,7 @@ impl Shell {
         }
         self.wake.handle = None;
         self.wake.sign = false;
-        self.stale = true;
+        mark_stale!(self);
     }
 }
 

@@ -5,7 +5,7 @@
 //! Nothing here edits or runs a flow. The assistant works through its ordinary flow tools, every change of which asks the person
 //! first (`flow_edit`, `flow_run`, `flow_publish`: see `tools.rs`). The book only bounds how often the person's click starts a fix.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use iyakki_flow::*;
@@ -164,6 +164,9 @@ struct Data {
     /// "Offer the agent when a flow fails": on unless the person turned it off.
     #[serde(default)]
     offer_off: bool,
+    /// Flows the person turned the offer off for (the card, the thread note and the INBOX note), whatever the general switch says.
+    #[serde(default)]
+    flows_off: BTreeSet<String>,
     #[serde(default)]
     runs: BTreeMap<String, Mark>,
     /// Fix attempts spent per flow since its last successful run.
@@ -208,6 +211,24 @@ impl FailBook {
     pub fn set_offer(&mut self, on: bool) {
         self.d.offer_off = !on;
         self.save();
+    }
+
+    /// Is the assistant offered for this flow's failures: the general switch is on and the person did not turn it off for the flow.
+    pub fn offer_for(&self, flow: &str) -> bool {
+        self.offer() && !self.d.flows_off.contains(flow)
+    }
+
+    /// Turn the offer off or on for one flow (the general switch is not changed).
+    pub fn set_offer_for(&mut self, flow: &str, on: bool) {
+        let changed = if on { self.d.flows_off.remove(flow) } else { self.d.flows_off.insert(flow.to_string()) };
+        if changed {
+            self.save();
+        }
+    }
+
+    /// Does this flow have its own "off"?
+    pub fn flow_is_off(&self, flow: &str) -> bool {
+        self.d.flows_off.contains(flow)
     }
 
     pub fn dismissed(&self, run: &str) -> bool {
@@ -337,6 +358,13 @@ mod tests {
         let mut b2 = FailBook::open(&d);
         assert!(b2.dismissed("r1") && b2.announced("r1") && !b2.dismissed("r2") && !b2.offer());
         assert!(b2.try_attempt("r3", "check").is_err());
+        b2.set_offer(true);
+        assert!(b2.offer_for("check"));
+        b2.set_offer_for("check", false);
+        assert!(!b2.offer_for("check") && b2.offer_for("other") && b2.flow_is_off("check"));
+        assert!(FailBook::open(&d).flow_is_off("check"), "per-flow off survives a restart");
+        b2.set_offer_for("check", true);
+        assert!(b2.offer_for("check"));
         b2.reset("check");
         assert_eq!(b2.try_attempt("r3", "check"), Ok(1));
         // the file holds ids and counts only

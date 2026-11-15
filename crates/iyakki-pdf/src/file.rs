@@ -17,6 +17,12 @@ const TOTAL_BUDGET: usize = 384 * 1024 * 1024;
 pub enum PdfError {
     NotPdf,
     Encrypted,
+    /// The file is protected and opens only with a password (none, or none that fits, was given).
+    PasswordNeeded,
+    /// A password was given and it opens nothing.
+    WrongPassword,
+    /// The protection is of a kind this crate does not read (the words say which).
+    Unsupported(String),
     Damaged(String),
     TooLarge,
     NoPages,
@@ -27,7 +33,10 @@ impl fmt::Display for PdfError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PdfError::NotPdf => write!(f, "this is not a PDF file"),
-            PdfError::Encrypted => write!(f, "password-protected PDFs are not supported yet"),
+            PdfError::Encrypted => write!(f, "the protection data of this PDF is damaged, so it cannot be opened"),
+            PdfError::PasswordNeeded => write!(f, "this PDF needs a password"),
+            PdfError::WrongPassword => write!(f, "that password does not open this PDF"),
+            PdfError::Unsupported(s) => write!(f, "{s}"),
             PdfError::Damaged(s) => write!(f, "the PDF is damaged: {s}"),
             PdfError::TooLarge => write!(f, "the PDF is too large to open here"),
             PdfError::NoPages => write!(f, "the PDF has no pages"),
@@ -66,6 +75,10 @@ pub struct File {
     loading: RefCell<HashSet<u32>>,
     objstm: RefCell<HashMap<u32, Option<Rc<ObjStm>>>>,
     budget: Cell<usize>,
+    /// How the file is decrypted once a password opened it, and which objects own which streams (by where the stream's bytes start).
+    crypt: RefCell<Option<crate::crypt::Crypt>>,
+    stream_owner: RefCell<HashMap<usize, (u32, u16)>>,
+    encrypt_obj: Cell<Option<u32>>,
     /// The cross-reference data was damaged and the file was rebuilt by scanning.
     pub repaired: bool,
 }
@@ -101,6 +114,13 @@ fn rfind(hay: &[u8], needle: &[u8]) -> Option<usize> {
 
 impl File {
     pub fn open(data: Vec<u8>) -> Result<File, PdfError> {
+        File::open_with_password(data, "")
+    }
+
+    /// Open a file that may be protected: the empty password opens most protected files, `password` is tried as the user password and
+    /// then as the owner password. `PasswordNeeded` when none was given and the empty one does not open it, `WrongPassword` when one
+    /// was given and does not. Nothing of the password is kept.
+    pub fn open_with_password(data: Vec<u8>, password: &str) -> Result<File, PdfError> {
         if data.len() > MAX_FILE {
             return Err(PdfError::TooLarge);
         }
@@ -115,19 +135,49 @@ impl File {
             loading: RefCell::new(HashSet::new()),
             objstm: RefCell::new(HashMap::new()),
             budget: Cell::new(TOTAL_BUDGET),
+            crypt: RefCell::new(None),
+            stream_owner: RefCell::new(HashMap::new()),
+            encrypt_obj: Cell::new(None),
             repaired: false,
         };
         let ok = f.read_xref_chain().is_ok() && f.root_ok();
         if !ok {
             f.repair();
         }
-        if f.trailer.contains_key("Encrypt") {
-            return Err(PdfError::Encrypted);
+        if let Some(enc) = f.trailer.get("Encrypt").cloned() {
+            f.unlock(&enc, password)?;
         }
         if !f.root_ok() {
             return Err(PdfError::Damaged("no document catalog was found".into()));
         }
         Ok(f)
+    }
+
+    /// Read the Encrypt dictionary and open it with the password; from here on strings and streams are decrypted as they are loaded.
+    fn unlock(&mut self, enc: &Obj, password: &str) -> Result<(), PdfError> {
+        use crate::crypt::{CryptError, Params};
+        let Some(d) = self.resolve(enc).dict().cloned() else { return Err(PdfError::Encrypted) };
+        let id0 = match self.trailer.get("ID").map(|o| self.resolve(o)) {
+            Some(Obj::Arr(a)) => match a.first().map(|o| self.resolve(o)) {
+                Some(Obj::Str(s)) => (*s).clone(),
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        };
+        let params = Params::read(&d, &|o| self.resolve(o), id0).map_err(|e| match e {
+            CryptError::Unsupported(m) => PdfError::Unsupported(m),
+            _ => PdfError::Encrypted,
+        })?;
+        let crypt = params.open(password).map_err(|e| if password.is_empty() { PdfError::PasswordNeeded } else if e == CryptError::WrongPassword { PdfError::WrongPassword } else { PdfError::Encrypted })?;
+        // what was read so far was read raw: forget it, the objects are read again with the key
+        self.cache.borrow_mut().clear();
+        self.objstm.borrow_mut().clear();
+        *self.crypt.borrow_mut() = Some(crypt);
+        // the Encrypt dictionary itself is never decrypted
+        if let Obj::Ref(n, _) = enc {
+            self.encrypt_obj.set(Some(*n));
+        }
+        Ok(())
     }
 
     /// Give the decoding budget back (call at the start of each page render or text pass).
@@ -468,7 +518,10 @@ impl File {
             return Obj::Null; // a cycle (a stream whose Length points at itself)
         }
         let o = match self.xref.get(&num).copied() {
-            Some(Entry::At(off)) => self.parse_indirect_at(off, Some(num)).map(|(_, o)| o).unwrap_or(Obj::Null),
+            Some(Entry::At(off)) => {
+                let o = self.parse_indirect_at(off, Some(num)).map(|(_, o)| o).unwrap_or(Obj::Null);
+                self.decrypt_loaded(o, num, off)
+            }
             Some(Entry::InStm(s, idx)) => self.from_objstm(s, idx, num).unwrap_or(Obj::Null),
             _ => Obj::Null,
         };
@@ -479,6 +532,31 @@ impl File {
         }
         c.insert(num, o.clone());
         o
+    }
+
+    /// An object just read from the file body, with the file's protection taken off its strings (and its stream remembered for later).
+    fn decrypt_loaded(&self, o: Obj, num: u32, off: usize) -> Obj {
+        let c = self.crypt.borrow();
+        let Some(crypt) = c.as_ref() else { return o };
+        if self.encrypt_obj.get() == Some(num) {
+            return o;
+        }
+        let generation = {
+            let mut lx = Lexer::new(&self.data, off);
+            let _ = lx.next();
+            match lx.next() {
+                Tok::Obj(Obj::Int(g)) if (0..=65535).contains(&g) => g as u16,
+                _ => 0,
+            }
+        };
+        if let Obj::Stream(d, s, _) = &o {
+            // cross-reference streams are never encrypted, nor is a metadata stream the file says is plain
+            let kind = d.get("Type").and_then(|t| t.name().map(str::to_string));
+            if kind.as_deref() != Some("XRef") && !(kind.as_deref() == Some("Metadata") && !crypt.encrypt_metadata) {
+                self.stream_owner.borrow_mut().insert(*s, (num, generation));
+            }
+        }
+        crypt.decrypt_strings(&o, num, generation)
     }
 
     fn objstm(&self, n: u32) -> Option<Rc<ObjStm>> {
@@ -562,6 +640,11 @@ impl File {
             _ => vec![],
         };
         let mut data = raw.to_vec();
+        if let Some((num, generation)) = self.stream_owner.borrow().get(s).copied() {
+            if let Some(c) = self.crypt.borrow().as_ref() {
+                data = c.decrypt_stream(num, generation, &data);
+            }
+        }
         for (i, f) in names.iter().enumerate().take(8) {
             let name = f.name().unwrap_or("");
             let p = parms.get(i).cloned().unwrap_or(Obj::Null);

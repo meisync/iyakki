@@ -437,7 +437,20 @@ pub fn write_at(file: &File, offset: u64, data: &[u8]) -> Result<(), FsErr> {
     if offset > i64::MAX as u64 - data.len() as u64 {
         return Err(FsErr::Failure("offset out of range".into()));
     }
+    if opened_for_append(file) {
+        // SFTP says an append handle writes at the end whatever the offset is. Linux does that for pwrite on an O_APPEND file; macOS
+        // writes at the offset instead, so the end is asked for explicitly and the behaviour is the same everywhere.
+        use std::io::Write;
+        return (&*file).write_all(data).map_err(io_err);
+    }
     file.write_all_at(data, offset).map_err(io_err)
+}
+
+fn opened_for_append(file: &File) -> bool {
+    use std::os::fd::AsRawFd;
+    // SAFETY: F_GETFL only reads the status flags of a descriptor we own.
+    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+    flags >= 0 && flags & libc::O_APPEND != 0
 }
 
 fn clamp32(v: i64) -> u32 {

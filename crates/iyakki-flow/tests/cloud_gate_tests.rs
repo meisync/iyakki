@@ -213,3 +213,64 @@ fn a_notify_step_hands_its_to_to_the_host_and_a_desktop_host_still_makes_one_not
     let titles: Vec<String> = host.notices.lock().unwrap().iter().filter(|n| !n.needs_you).map(|n| n.title.clone()).collect();
     assert!(titles.contains(&"disk full".to_string()) && titles.contains(&"no to".to_string()), "{titles:?}");
 }
+
+#[test]
+fn the_engine_carries_the_hosts_run_token_to_every_secret_ask_and_keeps_it_out_of_the_saved_run_and_the_logs() {
+    let dir = tmp("run-token");
+    let (clock, host) = (FakeClock::new(1_000_000), FakeHost::new());
+    host.on_http(|_| ok_json("{}"));
+    host.secret_is("tok", "s3cret");
+    host.issue_tokens_as("rt-");
+    // the host's rule: a run that nobody started must present the token the host issued for exactly that run
+    host.secret_rule(|run, name| if run.attended() || run.token == format!("rt-{}", run.run_id) { None } else { Some(Err(format!("needs secret: `{name}`: no valid run token"))) });
+    let (e, store) = engine_with(&dir, &clock, &host, None, None);
+    let mut f = linear("job");
+    f.nodes[1].config = serde_json::json!({"url": "https://api.example.com/a", "headers": {"Authorization": "Bearer {{secret.tok}}", "X-Debug": "{{run.token}}"}});
+    publish(&store, f);
+    let id = e.start_run(StartRequest::new("job").trigger("interval", "trigger t")).unwrap().run_id;
+    let r = e.wait_for(&id, Duration::from_secs(5), |r| r.status.is_terminal() || r.status == RunStatus::Blocked).unwrap();
+    assert_eq!(r.status, RunStatus::Succeeded, "{:?}", r.nodes);
+    let asks = host.secret_asks.lock().unwrap().clone();
+    assert!(asks.iter().any(|(c, n)| c.trigger == "interval" && c.run_id == id && c.token == format!("rt-{id}") && n == "tok"), "{asks:?}");
+    // the token is memory only: not in the run as saved, and a template that prints it gets the redacted text in the run's record
+    let saved = std::fs::read_dir(dir.join("engine")).map(|d| d.flatten().filter_map(|e| std::fs::read_to_string(e.path()).ok()).collect::<Vec<_>>().join("\n")).unwrap_or_default();
+    assert!(!saved.contains(&format!("rt-{id}")), "the token reached the disk");
+    assert!(!serde_json::to_string(&r).unwrap().contains(&format!("rt-{id}")));
+    // a host that issues none: the ask carries an empty token and a rule that needs one refuses
+    let host2 = FakeHost::new();
+    host2.on_http(|_| ok_json("{}"));
+    host2.secret_is("tok", "s3cret");
+    host2.secret_rule(|run, name| if run.token.is_empty() { Some(Err(format!("needs secret: `{name}`: no valid run token"))) } else { None });
+    let (e2, store2) = engine_with(&tmp("run-token-2"), &clock, &host2, None, None);
+    let mut f2 = linear("job");
+    f2.nodes[1].config = serde_json::json!({"url": "https://api.example.com/a", "headers": {"Authorization": "Bearer {{secret.tok}}"}});
+    publish(&store2, f2);
+    let id2 = e2.start_run(StartRequest::new("job").trigger("interval", "trigger t")).unwrap().run_id;
+    let r2 = e2.wait_for(&id2, Duration::from_secs(5), |r| r.status.is_terminal() || r.status == RunStatus::Blocked).unwrap();
+    assert_ne!(r2.status, RunStatus::Succeeded);
+}
+
+#[test]
+fn the_engine_ends_the_hosts_run_token_when_a_run_finishes_fails_or_is_cancelled() {
+    let dir = tmp("run-token-end");
+    let (clock, host) = (FakeClock::new(1_000_000), FakeHost::new());
+    host.on_http(|_| ok_json("{}"));
+    host.issue_tokens_as("rt-");
+    let (e, store) = engine_with(&dir, &clock, &host, None, None);
+    let mut f = linear("job");
+    f.nodes[1].config = serde_json::json!({"url": "https://api.example.com/a"});
+    publish(&store, f);
+    let ok = e.start_run(StartRequest::new("job")).unwrap().run_id;
+    assert_eq!(e.wait_for(&ok, Duration::from_secs(5), |r| r.status.is_terminal()).unwrap().status, RunStatus::Succeeded);
+    assert_eq!(host.tokens_ended.lock().unwrap().clone(), vec![ok.clone()], "the token ended with the run, once");
+    // a run that fails
+    host.on_http(|_| Err(iyakki_flow::NodeError::new("the server said no")));
+    let bad = e.start_run(StartRequest::new("job")).unwrap().run_id;
+    let r = e.wait_for(&bad, Duration::from_secs(5), |r| r.status.is_terminal()).unwrap();
+    assert_ne!(r.status, RunStatus::Succeeded);
+    assert!(host.tokens_ended.lock().unwrap().contains(&bad), "a failed run's token ended too");
+    // a run cancelled before it started
+    let later = e.start_run(StartRequest::new("job").at(1_000_000 + 3_600_000)).unwrap().run_id;
+    e.cancel(&later).unwrap();
+    assert!(host.tokens_ended.lock().unwrap().contains(&later), "a run cancelled before it started ended its token");
+}

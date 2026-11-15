@@ -1111,6 +1111,24 @@ impl MediaPlayer {
         self.queue.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// Step the shared queue by `delta` (1 next, -1 previous) and play that track: the queue must be active and the new place inside it.
+    /// Returns the name of what plays now. The MEDIA app, when open, adopts the queue's new place by its revision.
+    pub fn skip(&self, delta: i64) -> Option<String> {
+        let q = self.queue_state();
+        if !q.active || q.items.is_empty() || q.pos >= q.items.len() {
+            return None;
+        }
+        let at = q.pos as i64 + delta;
+        if at < 0 || at as usize >= q.items.len() {
+            return None;
+        }
+        let path = q.items[at as usize].clone();
+        let label = path.rsplit('/').next().unwrap_or(&path).to_string();
+        self.play(&q.user, &label, &path).ok()?;
+        self.set_queue(&q.user, q.items, at as usize, true);
+        Some(label)
+    }
+
     pub fn stop(&self) {
         if let Some(mut c) = self.cur.lock().unwrap_or_else(|e| e.into_inner()).take() {
             c.run.stop();
@@ -1550,6 +1568,8 @@ pub mod tests {
 
     #[test]
     fn mp3_plays_through_the_in_house_player_and_everything_else_needs_an_external_one() {
+        // the sound goes to the play command of this test: the process-wide mixer switch (flipped by other tests) must not take it
+        let _route = crate::mixer::pin_command_route();
         let out = temp("builtin").join("sound.wav");
         let radio = crate::radio::RadioPlayer::default();
         let b = Builtin { radio: radio.clone(), play_cmd: Arc::new({ let o = out.display().to_string(); move || format!("tee {o}") }) };
@@ -1564,7 +1584,16 @@ pub mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(!run.alive(), "the track played to its end");
-        let wav = std::fs::read(&out).unwrap();
+        // the sound command is a separate process (tee): it may still be starting or flushing when the decoder has finished
+        let mut wav = Vec::new();
+        let t0 = std::time::Instant::now();
+        while t0.elapsed() < std::time::Duration::from_secs(20) {
+            wav = std::fs::read(&out).unwrap_or_default();
+            if wav.len() > 44 + 2 * 44100 * 2 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
         assert_eq!(&wav[..4], b"RIFF");
         assert!(wav.len() > 44 + 2 * 44100 * 2, "seconds of 16-bit audio reached the sound command: {} bytes", wav.len());
         // a file that is not MP3 data says so instead of staying silent; a missing sound command too

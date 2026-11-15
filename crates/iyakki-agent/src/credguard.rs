@@ -140,6 +140,14 @@ fn keyword_of(w: &str, prev: Option<&str>) -> bool {
     w == "key" && matches!(prev.map(str::to_lowercase).as_deref(), Some("api" | "secret" | "access" | "private"))
 }
 
+/// True when the word starting at `at` follows the word `machine` or `login` in the same entry (a netrc entry is one line or
+/// several lines up to the next blank line).
+fn netrc_line(text: &str, at: usize) -> bool {
+    let before = &text[..at];
+    let entry = before.rfind("\n\n").map_or(before, |i| &before[i + 2..]);
+    entry.split_whitespace().any(|w| matches!(w.to_lowercase().as_str(), "machine" | "login"))
+}
+
 /// Look for a credential in `text`. `None` when it looks like ordinary writing.
 pub fn detect(text: &str) -> Option<Found> {
     // a private key block takes everything from its header to its footer
@@ -204,7 +212,10 @@ pub fn detect(text: &str) -> Option<Found> {
                     hits.push((a, b, known));
                     continue;
                 }
-                let ok = if sep && !natural { explicit_value(v) || random_like(v, 16) } else { random_like(v, 16) };
+                // netrc style (`machine nas.local login bob password S3cret!`): a `password` word after `machine` or `login` on the
+                // same line is a label even without a separator
+                let netrc = !sep && !natural && matches!(w.to_lowercase().as_str(), "password" | "passwd") && netrc_line(text, s);
+                let ok = if (sep && !natural) || netrc { explicit_value(v) || random_like(v, 16) } else { random_like(v, 16) };
                 if ok && !KEYWORDS.contains(&v.to_lowercase().as_str()) {
                     let what = if w.to_lowercase().starts_with("pass") || w.to_lowercase().starts_with("pwd") { "password" } else if w.to_lowercase().contains("key") || prev.is_some_and(|p| p.eq_ignore_ascii_case("api")) { "API key" } else { "token" };
                     hits.push((a, b, what));
@@ -303,12 +314,14 @@ mod tests {
             ("{\"client_secret\": \"a1b2c3d4e5f6a7b8c9d0e1f2\"}", "a1b2c3d4e5f6a7b8c9d0e1f2"),
             ("curl -H \"Authorization: Bearer abc123def456ghi789jkl\" https://x.example/api", "abc123def456ghi789jkl"),
             ("postgres://admin:S3cr3tPass@db.internal:5432/app", "S3cr3tPass"),
+            ("machine nas.local login bob password Tr0ub4dor&3", "Tr0ub4dor&3"),
+            ("machine nas.local\n  login bob\n  password hunter2!xyz", "hunter2!xyz"),
         ] {
             let f = detect(t).unwrap_or_else(|| panic!("not found: {t}"));
             assert!(f.value.contains(value) || value.contains(&f.value), "{t}: found {:?}", f.value);
             assert!(!f.redacted.contains(value), "{t}: {}", f.redacted);
         }
-        for t in ["DB_PASSWORD=", "export DB_PASSWORD=$DB_PASSWORD", "{\"password\": \"\"}", "TOKEN_COUNT=4096", "client_secret: <your secret here>", "set API_KEY_FILE=/etc/app/key.txt", "the password field is required"] {
+        for t in ["DB_PASSWORD=", "export DB_PASSWORD=$DB_PASSWORD", "{\"password\": \"\"}", "TOKEN_COUNT=4096", "client_secret: <your secret here>", "set API_KEY_FILE=/etc/app/key.txt", "the password field is required", "my login password is hard to remember", "login password manager notes", "machine password policy"] {
             assert_eq!(detect(t), None, "{t}");
         }
     }

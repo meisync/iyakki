@@ -88,6 +88,16 @@ fn h264_arrives_as_access_units_with_the_parameter_sets_and_a_key_picture() {
 }
 
 #[test]
+fn leaving_is_answered_and_the_answer_is_read_even_with_pictures_in_front_of_it() {
+    let cam = FakeCamera::rtsp(Config { h264: true, interval_ms: 5, ..Default::default() });
+    let u = url::parse(&format!("rtsp://127.0.0.1:{}/live", cam.port)).unwrap();
+    let mut c = Client::open(conn(cam.port, 2000), &u, None).unwrap();
+    assert!(matches!(c.next_media().unwrap(), Media::H264(_)));
+    // pictures are still on their way when the TEARDOWN goes out: the answer is the first response after them
+    assert_eq!(c.teardown_checked().unwrap(), 200);
+}
+
+#[test]
 fn a_silent_camera_times_out_and_a_closing_one_ends_the_stream() {
     let cam = FakeCamera::rtsp(Config { frames: vec![JPG.to_vec()], interval_ms: 600, max_frames: Some(1), ..Default::default() });
     let u = url::parse(&format!("rtsp://127.0.0.1:{}/live", cam.port)).unwrap();
@@ -164,4 +174,133 @@ fn http_errors_are_plain_sentences() {
     let u = url::parse(&format!("http://127.0.0.1:{port}/video.mjpg")).unwrap();
     assert!(matches!(HttpMjpeg::open(mk(), &u, Some(("u".into(), "bad".into()))), Err(Error::Auth(_))));
     assert!(matches!(HttpMjpeg::open(mk(), &u, None), Err(Error::Auth(_))));
+}
+
+fn http_open(cam_port: u16, path: &str, creds: Option<(&str, &str)>) -> Result<HttpMjpeg<TcpStream>, Error> {
+    let u = url::parse(&format!("http://127.0.0.1:{cam_port}{path}")).unwrap();
+    HttpMjpeg::open(Box::new(move || Ok(conn(cam_port, 2000))), &u, creds.map(|(a, b)| (a.to_string(), b.to_string())))
+}
+
+#[test]
+fn a_single_picture_sent_in_chunks_is_put_together_every_time() {
+    let cam = FakeCamera::http(cfg(None, false));
+    let mut h = http_open(cam.port, "/snapshot-chunked.jpg", None).unwrap();
+    assert!(h.is_snapshot());
+    assert_eq!(h.next_jpeg().unwrap(), JPG, "the picture of the first request");
+    assert_eq!(h.next_jpeg().unwrap(), JPG, "and of the next one, fetched again");
+}
+
+#[test]
+fn redirects_to_another_path_on_the_camera_are_followed_and_remembered() {
+    let cam = FakeCamera::http(cfg(None, false));
+    let mut h = http_open(cam.port, "/moved-twice.jpg", None).unwrap();
+    assert_eq!(h.next_jpeg().unwrap(), JPG);
+    let before = cam.requests().len();
+    assert_eq!(h.next_jpeg().unwrap(), JPG);
+    let later: Vec<String> = cam.requests().into_iter().skip(before).collect();
+    assert_eq!(later, vec!["GET /snapshot.jpg"], "the next picture goes straight to the new address");
+}
+
+#[test]
+fn redirects_to_another_machine_to_https_in_a_loop_or_without_a_place_are_refused_with_a_sentence() {
+    let cam = FakeCamera::http(cfg(None, false));
+    for (path, word) in [("/moved-away.jpg", "another machine"), ("/moved-secure.jpg", "https"), ("/moved-loop.jpg", "too many"), ("/moved-nowhere.jpg", "did not say where")] {
+        match http_open(cam.port, path, None) {
+            Err(e) => assert!(e.to_string().contains(word), "{path}: {e}"),
+            Ok(_) => panic!("{path} should be refused"),
+        }
+    }
+}
+
+#[test]
+fn sha_256_digest_sign_in_works_over_http_and_the_wrong_password_is_still_refused() {
+    let mut c = cfg(Some(("u", "p")), true);
+    c.sha256 = true;
+    let cam = FakeCamera::http(c);
+    let mut h = http_open(cam.port, "/snapshot.jpg", Some(("u", "p"))).unwrap();
+    assert!(!h.basic);
+    assert_eq!(h.next_jpeg().unwrap(), JPG);
+    assert!(matches!(http_open(cam.port, "/snapshot.jpg", Some(("u", "bad"))), Err(Error::Auth(_))));
+}
+
+
+fn open_udp(cam: &FakeCamera) -> Client<TcpStream> {
+    let u = url::parse(&format!("rtsp://127.0.0.1:{}/live", cam.port)).unwrap();
+    let t = conn(cam.port, 500);
+    let peer = t.peer_addr().ok().map(|a| a.ip());
+    Client::open_with(t, &u, None, peer).unwrap()
+}
+
+#[test]
+fn a_camera_that_refuses_tcp_is_asked_for_udp_and_the_pictures_arrive_with_the_scan_intact() {
+    let cam = FakeCamera::rtsp(Config { udp_only: true, ..cfg(None, true) });
+    let mut c = open_udp(&cam);
+    let (_, _, _, scan) = split_jpeg(JPG).unwrap();
+    let mut got = 0;
+    for _ in 0..40 {
+        match c.next_media() {
+            Ok(Media::Jpeg(j)) => {
+                assert_eq!(sof_dims(&j), (48, 32));
+                let sos = j.windows(2).position(|w| w == [0xFF, 0xDA]).unwrap() + 14;
+                assert_eq!(&j[sos..j.len() - 2], scan.as_slice());
+                got += 1;
+                if got == 3 {
+                    break;
+                }
+            }
+            Ok(_) | Err(Error::Timeout) => {}
+            Err(e) => panic!("{e}"),
+        }
+    }
+    assert_eq!(got, 3, "three pictures arrived over UDP (some datagrams may be lost on a busy machine, the next picture is whole again)");
+    c.teardown();
+    let log = cam.requests();
+    assert_eq!(log.iter().filter(|l| l.starts_with("SETUP")).count(), 2, "TCP was tried first, then UDP: {log:?}");
+}
+
+#[test]
+fn udp_packets_from_another_port_of_the_camera_are_dropped_and_counted() {
+    let cam = FakeCamera::rtsp(Config { udp_only: true, udp_decoys: true, ..cfg(None, true) });
+    let mut c = open_udp(&cam);
+    let mut got = 0;
+    for _ in 0..60 {
+        if let Ok(Media::Jpeg(_)) = c.next_media() {
+            got += 1;
+            if got == 3 {
+                break;
+            }
+        }
+    }
+    assert_eq!(got, 3);
+    assert!(c.foreign_packets > 0, "the decoy sender was heard and ignored");
+}
+
+#[test]
+fn without_a_peer_address_a_camera_that_refuses_tcp_stays_refused_with_the_reason() {
+    let cam = FakeCamera::rtsp(Config { udp_only: true, ..cfg(None, true) });
+    let u = url::parse(&format!("rtsp://127.0.0.1:{}/live", cam.port)).unwrap();
+    match Client::open(conn(cam.port, 500), &u, None) {
+        Err(Error::Unsupported(m)) => assert!(m.contains("461"), "{m}"),
+        Err(e) => panic!("{e}"),
+        Ok(_) => panic!("opened without UDP"),
+    }
+}
+
+#[test]
+fn an_rtsp_stream_that_moved_to_another_path_of_the_camera_is_followed_and_other_places_are_refused() {
+    // the old address answers 302 with a path: DESCRIBE goes again to the new one over the same connection and the pictures arrive
+    let cam = FakeCamera::rtsp(Config { moved: Some(("/old".into(), "/live".into())), ..cfg(None, true) });
+    let u = url::parse(&format!("rtsp://127.0.0.1:{}/old", cam.port)).unwrap();
+    let mut c = Client::open(conn(cam.port, 2000), &u, None).unwrap();
+    assert!(matches!(c.next_media().unwrap(), Media::Jpeg(_)));
+    let log = cam.requests();
+    assert!(log.iter().any(|l| l.starts_with("DESCRIBE") && l.ends_with("/old")) && log.iter().any(|l| l.starts_with("DESCRIBE") && l.ends_with("/live")), "{log:?}");
+    assert!(log.iter().any(|l| l.starts_with("SETUP") && l.contains("/live")), "the rest of the dance uses the new address: {log:?}");
+    // another machine, another port, https, a loop and no place are all refused with a sentence, never followed
+    for (to, why) in [("rtsp://192.0.2.9/live", "another machine"), ("rtsp://127.0.0.1:1/live", "another machine or port"), ("http://127.0.0.1/live", "another machine or port"), ("/old", "kept moving"), ("", "did not say where")] {
+        let cam = FakeCamera::rtsp(Config { moved: Some(("/old".into(), to.into())), ..cfg(None, true) });
+        let u = url::parse(&format!("rtsp://127.0.0.1:{}/old", cam.port)).unwrap();
+        let e = Client::open(conn(cam.port, 2000), &u, None).err().unwrap_or_else(|| panic!("{to} must not be followed"));
+        assert!(matches!(&e, Error::Protocol(m) if m.contains(why)), "{to}: {e:?}");
+    }
 }

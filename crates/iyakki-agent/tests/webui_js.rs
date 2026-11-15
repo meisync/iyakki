@@ -76,6 +76,9 @@ function fakeFetch(answers, log) {
   ok(Cloud.canJoin(admin, { joined: false }) && !Cloud.canJoin(member, { joined: false }) && !Cloud.canJoin(admin, { joined: true }), "only a tenant administrator may join, and only a namespace they are not in");
   ok(Cloud.validName("ann") && !Cloud.validName("") && !Cloud.validName("a b") && !Cloud.validName("a/b") && !Cloud.validName("x".repeat(65)), "names");
   ok(Cloud.rotationText({ rotation: { rotated: ["a"], pending: ["tenant"] } }).includes("1 pending") && Cloud.rotationText({}) === "", "rotation sentence");
+  const trail = Cloud.trailText([{ time: 1060, change: "namespace web: created" }, { time: 1000, change: "tenant: olga made ann Admin" }, { time: "x", change: "bad" }, null, { time: 5 }], 20);
+  ok(trail.length === 2 && trail[0].includes("namespace web: created") && trail[1].includes("olga made ann Admin") && trail[1].startsWith("1970-01-01 00:16 UTC"), "the audit trail is shown as the service sends it (newest first), damaged lines left out");
+  ok(Cloud.trailText(undefined).length === 0 && Cloud.trailText(Array.from({ length: 30 }, (_, i) => ({ time: i, change: "c" + i })), 5).length === 5, "trail edge cases");
   const cp = Cloud.page(); ok(cp.available({ profile: "cloud" }) && !cp.available({ profile: "agent-api" }) && !cp.available(null), "Cloud access exists on a pod only");
   const rp = Remote.page(); ok(rp.available({ profile: "agent-api", admin: true }) && !rp.available({ profile: "agent-api", admin: false }) && !rp.available({ profile: "cloud", admin: true }), "Remote access is for administrators of a machine with a desktop");
 

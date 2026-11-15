@@ -9,6 +9,7 @@ pub mod export;
 pub mod render;
 mod runner;
 
+pub use render::{ImageTable, Picture, TableError};
 pub use runner::{Budgets, ServiceBackend, TileError, TileManifest, TileRunner, FrameStats};
 
 #[cfg(test)]

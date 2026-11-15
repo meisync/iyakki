@@ -813,7 +813,9 @@ mod tests {
         // seek: the piece in progress is cancelled and the chosen one is spoken
         r.seek(2);
         wait("piece 3", || page.spoken().last().is_some_and(|t| t == "The moon was hiding."));
-        assert!(page.cancels() >= 2);
+        // a seek starts a new reading; the old one's thread cancels its piece on its own schedule, so the cancel can reach the page
+        // after the new piece was sent: wait for it
+        wait("the cancel of the interrupted piece", || page.cancels() >= 2);
         // stop
         let before = page.cancels();
         r.stop();

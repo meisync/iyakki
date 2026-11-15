@@ -136,7 +136,7 @@ pub struct PendingApproval {
 /// How risky a tool that asks first is: what it can change.
 pub fn approval_risk(tool: &str) -> &'static str {
     let t = tool;
-    if t.starts_with("mcp__") || ["run_command", "sandbox_run", "install_cli", "remove_cli", "write_file", "cluster_start", "cluster_stop", "http_request", "terminal"].contains(&t) || t.contains("delete") && !t.starts_with("calendar") && !t.starts_with("alarm") {
+    if t.starts_with("mcp__") || ["run_command", "sandbox_run", "install_cli", "cli_download_list_check", "remove_cli", "write_file", "cluster_start", "cluster_stop", "http_request", "terminal"].contains(&t) || t.contains("delete") && !t.starts_with("calendar") && !t.starts_with("alarm") {
         "high"
     } else if t.starts_with("calendar_") || t.starts_with("alarm_") || (t.contains("media") && t != "media_download") || t.starts_with("task_") || t == "vault_request" {
         "low"
@@ -153,11 +153,15 @@ struct LiveEntry {
 }
 
 type FinishHook = Box<dyn Fn(&RunLog) + Send + Sync>;
+type SaveHook = Box<dyn Fn() + Send + Sync>;
 
 pub struct RunStore {
     dir: PathBuf,
     live: std::sync::Mutex<std::collections::BTreeMap<String, LiveEntry>>,
     on_finish: std::sync::Mutex<Option<FinishHook>>,
+    /// Told (with nothing but "something was saved") after every run record is written: the web service uses it to look at the
+    /// list at once instead of at its next turn.
+    on_save: std::sync::Mutex<Vec<SaveHook>>,
 }
 
 fn valid_id(id: &str) -> bool {
@@ -166,12 +170,17 @@ fn valid_id(id: &str) -> bool {
 
 impl RunStore {
     pub fn new(dir: &Path) -> RunStore {
-        RunStore { dir: dir.into(), live: Default::default(), on_finish: Default::default() }
+        RunStore { dir: dir.into(), live: Default::default(), on_finish: Default::default(), on_save: Default::default() }
     }
 
     /// Called with the record of every run that ends (completed, failed or stopped), after it is saved.
     pub fn set_on_finish(&self, f: impl Fn(&RunLog) + Send + Sync + 'static) {
         *self.on_finish.lock().unwrap_or_else(|p| p.into_inner()) = Some(Box::new(f));
+    }
+
+    /// Call `f` after every run record is saved (it must be quick: it runs on the saving thread).
+    pub fn add_on_save(&self, f: impl Fn() + Send + Sync + 'static) {
+        self.on_save.lock().unwrap_or_else(|p| p.into_inner()).push(Box::new(f));
     }
 
     /// The tool calls waiting for an answer in the runs going on now, oldest first. `user` limits them to one person's
@@ -260,7 +269,11 @@ impl RunStore {
             std::fs::rename(&tmp, d.join(&name)).map_err(|e| e.to_string())
         };
         write(format!("{}.json", log.id), serde_json::to_vec_pretty(log).map_err(|e| e.to_string())?)?;
-        write(format!("{}.ledger", log.id), ledger_for(log).to_bytes())
+        write(format!("{}.ledger", log.id), ledger_for(log).to_bytes())?;
+        for h in self.on_save.lock().unwrap_or_else(|p| p.into_inner()).iter() {
+            h();
+        }
+        Ok(())
     }
 
     /// Newest first.
@@ -769,6 +782,24 @@ mod tests {
         done.sort();
         assert_eq!(done, vec![("ann".to_string(), "completed".to_string()), ("bob".to_string(), "completed".to_string()), ("cy".to_string(), "completed".to_string())]);
         assert!(store.live().is_empty() && store.pending_approvals(None).is_empty());
+    }
+
+    #[test]
+    fn every_saved_record_tells_the_save_listeners_once() {
+        let s = RunStore::new(&tmp("onsave"));
+        let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c = n.clone();
+        s.add_on_save(move || {
+            c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        let log = RunLog { id: new_run_id(), user: "ann".into(), started: 1, prompt: "p".into(), status: "running".into(), events: vec![], session: None, task_id: None, row: None, agent: None };
+        s.save(&log).unwrap();
+        s.save(&log).unwrap();
+        assert_eq!(n.load(std::sync::atomic::Ordering::SeqCst), 2);
+        // a refused save tells nobody
+        let bad = RunLog { id: "x".into(), ..log };
+        assert!(s.save(&bad).is_err());
+        assert_eq!(n.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[test]

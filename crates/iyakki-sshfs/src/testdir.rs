@@ -94,16 +94,31 @@ pub fn find(prefix: &str, tag: &str) -> PathBuf {
     best.unwrap_or_else(|| panic!("no test folder {prefix} {tag} of this process")).1
 }
 
-/// A TCP port that is free now, for a test that gives it to a server a moment later. Not from the kernel's ephemeral range
-/// (`bind` to port 0 hands those out, and so does every outgoing connection of the other tests in this process): ports below it,
-/// each handed out once per process (8000 of them), probed on all addresses. The process id spreads concurrent test processes.
+/// A TCP port that is free now, for a test that gives it to a server a moment later. Same scheme as the agent's helper (the two crates'
+/// tests can run at the same time on one machine and share the claim folder): ports below the kernel's ephemeral range, each handed out
+/// once per process, probed on all addresses and claimed with an exclusive `flock` that lasts as long as this process.
 pub fn free_port() -> u16 {
-    static NEXT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     loop {
         let n = NEXT.fetch_add(1, Ordering::SeqCst);
-        let port = 20_000 + ((std::process::id() % 8_000) as u16).wrapping_mul(37).wrapping_add(n) % 8_000;
-        if std::net::TcpListener::bind(("0.0.0.0", port)).is_ok() {
+        let port = (20_000 + ((std::process::id() % 8_000) * 37 + n) % 8_000) as u16;
+        if claim_port(port) && std::net::TcpListener::bind(("0.0.0.0", port)).is_ok() {
             return port;
         }
     }
+}
+
+fn claim_port(port: u16) -> bool {
+    use std::os::fd::AsRawFd;
+    static HELD: std::sync::Mutex<Vec<std::fs::File>> = std::sync::Mutex::new(Vec::new());
+    // SAFETY: getuid has no arguments and cannot fail.
+    let dir = PathBuf::from(format!("/tmp/iyakki-test-ports-{}", unsafe { libc::getuid() }));
+    let _ = std::fs::create_dir_all(&dir);
+    let Ok(file) = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(dir.join(port.to_string())) else { return true };
+    // SAFETY: the descriptor is open and owned by `file`.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return false;
+    }
+    HELD.lock().unwrap_or_else(|e| e.into_inner()).push(file);
+    true
 }

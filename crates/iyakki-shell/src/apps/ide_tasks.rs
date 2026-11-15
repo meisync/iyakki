@@ -33,16 +33,19 @@ pub enum DTab {
     Files,
     Diff,
     Log,
+    /// The task's conversation as a chat: the request, what the agent said, its tool calls, the approvals (KI-640).
+    Chat,
 }
 
 impl DTab {
-    const ALL: [DTab; 4] = [DTab::Overview, DTab::Files, DTab::Diff, DTab::Log];
+    const ALL: [DTab; 5] = [DTab::Overview, DTab::Files, DTab::Diff, DTab::Log, DTab::Chat];
     fn label(self) -> &'static str {
         match self {
             DTab::Overview => "Summary",
             DTab::Files => "Files",
             DTab::Diff => "Diff",
             DTab::Log => "Log",
+            DTab::Chat => "Chat",
         }
     }
 }
@@ -316,6 +319,7 @@ impl TasksView {
             'd' => return TasksAct::Discard(id),
             'f' => return TasksAct::Followup(id),
             'k' => self.mgr.keep(&id),
+            'u' => iyakki_agent::taskenv::bring_my_changes(&self.mgr, &t),
             'b' => {
                 let r = self.mgr.rebase(&id);
                 self.stale();
@@ -349,7 +353,7 @@ impl TasksView {
     }
 
     pub fn handle(&mut self, ev: &Event) -> TasksAct {
-        if self.tab == DTab::Overview || self.tab == DTab::Diff || self.tab == DTab::Log {
+        if self.tab == DTab::Overview || self.tab == DTab::Diff || self.tab == DTab::Log || self.tab == DTab::Chat {
             if self.detail.handle(ev) {
                 return TasksAct::Used;
             }
@@ -439,7 +443,7 @@ impl TasksView {
                 }
                 return TasksAct::None;
             }
-            Key::Char(c) if "nspmdfkbtyxra".contains(c) => return self.act(c),
+            Key::Char(c) if "nspmdfkbtyxrau".contains(c) => return self.act(c),
             _ => return TasksAct::None,
         }
         self.detail_key.clear();
@@ -528,7 +532,7 @@ impl TasksView {
     }
 
     fn rebuild_detail(&mut self, t: &Task) {
-        let key = format!("{}:{}:{:?}:{}:{}:{}:{}:{}:{}", t.id, t.status.label(), self.tab, t.tokens, t.last, t.tests.len(), self.mgr.log(&t.id).len(), self.review_now(&t.id).map_or(0, |r| r.files.len() + r.check.is_some() as usize), self.collapsed.len());
+        let key = format!("{}:{}:{:?}:{}:{}:{}:{}:{}:{}:{}", t.id, t.status.label(), self.tab, t.tokens, t.last, t.tests.len(), self.mgr.log(&t.id).len(), self.mgr.chat(&t.id).len(), self.review_now(&t.id).map_or(0, |r| r.files.len() + r.check.is_some() as usize), self.collapsed.len());
         if key == self.detail_key {
             return;
         }
@@ -538,6 +542,27 @@ impl TasksView {
             DTab::Log => {
                 let l = self.mgr.log(&t.id);
                 if l.is_empty() { vec![("Nothing has happened yet.".into(), DIM)] } else { l.into_iter().map(|x| (x, [0, 0, 0, 0])).collect() }
+            }
+            DTab::Chat => {
+                use iyakki_agent::tasks::ChatWho;
+                let c = self.mgr.chat(&t.id);
+                if c.is_empty() {
+                    vec![("No conversation yet. It shows here once the task starts (the run log under Runs keeps the events).".into(), DIM)]
+                } else {
+                    let mut v: Vec<(String, [u8; 4])> = Vec::new();
+                    for l in c {
+                        let (who, col) = match l.who {
+                            ChatWho::You => ("You", CYAN),
+                            ChatWho::Agent => ("Agent", OK),
+                            ChatWho::Tool => ("Tool", MUTED),
+                            ChatWho::Note => ("Harness", AMBER),
+                        };
+                        v.push((who.to_string(), col));
+                        v.extend(l.text.lines().map(|x| (format!("  {x}"), if l.who == ChatWho::Tool { MUTED } else { TEXT })));
+                        v.push((String::new(), [0, 0, 0, 0]));
+                    }
+                    v
+                }
             }
             DTab::Diff => match self.review_now(&t.id) {
                 Some(r) if r.error.is_some() => vec![(r.error.unwrap_or_default(), ERR)],
@@ -565,11 +590,11 @@ impl TasksView {
 
     fn buttons(t: &Task) -> Vec<(&'static str, char, [u8; 4], &'static str)> {
         match t.status {
-            Status::Queued => vec![("Stop", 's', ERR, "Stop before it starts (s)")],
+            Status::Queued => vec![("My changes", 'u', CYAN, "Copy your uncommitted files into the task (u)"), ("Stop", 's', ERR, "Stop before it starts (s)")],
             Status::Running => vec![("Pause", 'p', rgb(170, 150, 255), "Save its place and stop (p)"), ("Stop", 's', ERR, "Stop the task (s)")],
             Status::NeedsYou => vec![("Allow", 'y', OK, "Allow what it asks (y)"), ("Deny", 'x', ERR, "Deny it (x)"), ("Stop", 's', ERR, "Stop the task (s)")],
-            Status::Paused | Status::Interrupted => vec![("Resume", 'r', OK, "Continue from the saved place (r)"), ("Discard", 'd', ERR, "Remove the task and its branch (d)")],
-            Status::Failed => vec![("Retry", 'r', OK, "Continue with fresh budgets (r)"), ("Follow-up", 'f', CYAN, "Tell it what to do next (f)"), ("Discard", 'd', ERR, "Remove the task and its branch (d)")],
+            Status::Paused | Status::Interrupted => vec![("Resume", 'r', OK, "Continue from the saved place (r)"), ("My changes", 'u', CYAN, "Copy your uncommitted files into the task (u)"), ("Discard", 'd', ERR, "Remove the task and its branch (d)")],
+            Status::Failed => vec![("Retry", 'r', OK, "Continue with fresh budgets (r)"), ("My changes", 'u', CYAN, "Copy your uncommitted files into the task (u)"), ("Follow-up", 'f', CYAN, "Tell it what to do next (f)"), ("Discard", 'd', ERR, "Remove the task and its branch (d)")],
             Status::Done => vec![("Merge", 'm', OK, "Apply it to the workspace (m)"), ("Tests", 't', AMBER, "Run the tests in the task's folder (t)"), ("Follow-up", 'f', CYAN, "Tell it what to do next (f)"), ("Rebase", 'b', CYAN, "Start from the latest commit (b)"), ("Keep", 'k', MUTED, "Keep the branch, remove the folder (k)"), ("Discard", 'd', ERR, "Remove the task and its branch (d)")],
             Status::Merged | Status::Discarded => vec![],
         }

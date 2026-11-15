@@ -1,7 +1,7 @@
 //! The CLI tile's Connections tab: saved SSH hosts (name, host, port, user, a key kept in the vault, an optional default command),
 //! a Connect action, host-key trust with the fingerprint shown first, and key generation into the vault. Nothing here holds a
-//! secret; the file of connections lists names only. There is no terminal emulator yet, so Connect runs the default command (or a
-//! quick check) without a prompt and streams its output into the Terminal tab (docs/CLI-SSH.md, docs/ALPHA-SCOPE.md).
+//! secret; the file of connections lists names only. Connect runs the default command (or a quick check) without a prompt and streams
+//! its output into the Terminal tab; Log in (L) opens a real terminal session in the tile (`cli_term.rs`, docs/CLI-SSH.md).
 
 use crate::safeclamp::SafeClamp;
 use std::sync::{Arc, Mutex};
@@ -72,6 +72,8 @@ pub struct Conns {
     pub out: Vec<(String, [u8; 4])>,
     /// A public key just made, shown in the panel until something else is chosen.
     fresh_pub: Option<(String, String)>,
+    /// The connection the person asked to log in to (key L): the tile starts the interactive session.
+    pub login: Option<Connection>,
 }
 
 impl Conns {
@@ -87,6 +89,7 @@ impl Conns {
             waiting: String::new(),
             out: Vec::new(),
             fresh_pub: None,
+            login: None,
         }
     }
 
@@ -125,6 +128,38 @@ impl Conns {
             return Err("Connecting needs a full terminal; ask an administrator.".into());
         }
         Ok(())
+    }
+
+    /// Say something in the Connections tab's status line.
+    pub fn say(&mut self, text: &str, ok: bool) {
+        self.status = Some((text.to_string(), ok));
+    }
+
+    /// L: log in with a terminal. Needs the same things as Connect (a full terminal, a host the account may reach) and a host key that
+    /// is already trusted: the question about a new key is asked by Trust key (T), never in the middle of a login.
+    fn request_login(&mut self, cx: &AppCx, c: &Connection) {
+        if let Err(e) = Self::can_connect(cx) {
+            self.status = Some((e, false));
+            return;
+        }
+        if !cx.session.policy.allows_host(&c.host) {
+            self.status = Some((format!("Your account may not reach {}.", c.host), false));
+            return;
+        }
+        if Self::env(cx).known_hosts().for_host(&c.host, c.port).is_empty() {
+            self.status = Some((format!("The host key of {} is not trusted yet: press T to see its fingerprint and trust it, then L.", c.host), false));
+            return;
+        }
+        self.status = None;
+        self.login = Some(c.clone());
+    }
+
+    /// A login the assistant asked for (the person approved the card): the connection by name, through the same checks as the L key.
+    pub fn login_by_name(&mut self, cx: &AppCx, name: &str) {
+        match Self::list(cx).into_iter().find(|c| c.name == name) {
+            Some(c) => self.request_login(cx, &c),
+            None => self.status = Some((format!("There is no saved connection called {name}."), false)),
+        }
     }
 
     fn open_form(&mut self, c: Option<&Connection>) {
@@ -167,7 +202,7 @@ impl Conns {
         let host = host.to_string();
         std::thread::spawn(move || {
             let r = env.client().ok_or_else(|| format!("No SSH client was found on this machine. {}", ssh::install_hint(std::env::consts::OS))).and_then(|c| ssh::probe(&c, &host, port));
-            shared.lock().unwrap().done = Some(Done::Probe(r, then));
+            shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner).done = Some(Done::Probe(r, then));
         });
     }
 
@@ -191,14 +226,14 @@ impl Conns {
         self.out.push((format!("$ ssh {}", iyakki_agent::exec::command_line("", &args).trim()), OK));
         let sink_shared = shared.clone();
         let sink: iyakki_agent::exec::Sink = Arc::new(move |t: &str| {
-            let mut s = sink_shared.lock().unwrap();
+            let mut s = sink_shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             s.streamed = true;
             s.buf.push_str(t);
         });
         let cwd = std::env::temp_dir();
         std::thread::spawn(move || {
             let r = ssh::run(&env, Mode::Person, "ssh", &args, &cwd, 120, &|_, _| Err("this connection names no local files".into()), Some(sink));
-            shared.lock().unwrap().done = Some(Done::Run(r));
+            shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner).done = Some(Done::Run(r));
         });
     }
 
@@ -212,20 +247,20 @@ impl Conns {
         let shared = self.start_wait(&format!("{} is running… (up to 2 minutes)", call.command()));
         let sink_shared = shared.clone();
         let sink: iyakki_agent::exec::Sink = Arc::new(move |t: &str| {
-            let mut s = sink_shared.lock().unwrap();
+            let mut s = sink_shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             s.streamed = true;
             s.buf.push_str(t);
         });
         std::thread::spawn(move || {
             let r = call.run(Some(sink));
-            shared.lock().unwrap().done = Some(Done::Run(r));
+            shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner).done = Some(Done::Run(r));
         });
         true
     }
 
     pub fn tick(&mut self, cx: &AppCx) {
         let (text, done, streamed) = {
-            let mut s = self.shared.lock().unwrap();
+            let mut s = self.shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             // whole lines now, the rest when the call ends
             let cut = if s.done.is_some() { s.buf.len() } else { s.buf.rfind('\n').map_or(0, |i| i + 1) };
             let text: String = s.buf.drain(..cut).collect();
@@ -383,6 +418,10 @@ impl Conns {
                 Some(c) => self.connect(cx, c),
                 None => self.status = Some(("There is no connection yet; press N to add one.".into(), false)),
             },
+            Event::Key(Key::Char('l')) => match &cur {
+                Some(c) => self.request_login(cx, c),
+                None => self.status = Some(("There is no connection yet; press N to add one.".into(), false)),
+            },
             Event::Key(Key::Char('t')) => match &cur {
                 Some(c) => self.start_probe(cx, &c.host.clone(), c.port, None),
                 None => self.status = Some(("Choose a connection first.".into(), false)),
@@ -427,7 +466,7 @@ impl Conns {
             CMode::Form(_) => "Tab next field · Enter next / save · Esc cancel",
             CMode::Trust(_) => "Y trust this key · any other key cancels",
             CMode::GenKey => "Enter make the key · Esc cancel",
-            _ => "↑↓ choose · Enter or C connect · N new · E edit · X remove · T trust host key · F forget it · G make a key · Tab next tab · Esc back",
+            _ => "↑↓ choose · Enter or C connect (no terminal) · L log in with a terminal · N new · E edit · X remove · T trust host key · F forget it · G make a key · Tab next tab · Esc back",
         }
     }
 
@@ -491,7 +530,7 @@ impl Conns {
         let mut ty = p.y + 16.0 * s;
         // how many rows of buttons the panel's width needs, so the text above them stops in time
         let size = 15.0 * s;
-        let items: [(&str, char, [u8; 4]); 7] = [("Connect (c)", 'c', ACCENT), ("New (n)", 'n', OK), ("Edit (e)", 'e', TEXT), ("Remove (x)", 'x', ERR), ("Trust key (t)", 't', TEXT), ("Forget key (f)", 'f', TEXT), ("Make key (g)", 'g', TEXT)];
+        let items: [(&str, char, [u8; 4]); 8] = [("Connect (c)", 'c', ACCENT), ("Log in (l)", 'l', ACCENT), ("New (n)", 'n', OK), ("Edit (e)", 'e', TEXT), ("Remove (x)", 'x', ERR), ("Trust key (t)", 't', TEXT), ("Forget key (f)", 'f', TEXT), ("Make key (g)", 'g', TEXT)];
         let (mut rows, mut used) = (1.0f32, 20.0 * s);
         for (label, _, _) in items {
             let bw = g.text_width(size, label, Face::Bold) + size * 1.7;

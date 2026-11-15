@@ -7,6 +7,18 @@
 use super::*;
 use iyakki_agent::webaccess as wa;
 
+// the SFTP server's switches, keys and card (F-FILE-06)
+#[path = "settings_sftp.rs"]
+pub(crate) mod sftp_page;
+
+// the machines a flow may run on (F-FLOW-16)
+#[path = "settings_machines.rs"]
+pub(crate) mod machines_page;
+
+// "Connect a client" (experimental): its own file, hooked in below at the buttons, the keys and the page
+#[path = "settings_connect.rs"]
+mod connect_page;
+
 /// What the page keeps between frames.
 #[derive(Default)]
 pub(super) struct RemotePanel {
@@ -14,6 +26,7 @@ pub(super) struct RemotePanel {
     on: bool,
     pub(super) scroll: f32,
     pub(super) max: f32,
+    connect: connect_page::ConnectPanel,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -23,12 +36,17 @@ pub(super) enum RemoteForm {
 
 impl SettingsApp {
     pub(super) fn remote_buttons(&self) -> Vec<Btn> {
-        if self.remote.on {
+        let mut v = if self.remote.on {
             vec![("Stop serving this desktop", ERR, 'e'), ("Change port", TEXT, 'p')]
         } else {
             vec![("Serve this desktop to browsers", ACCENT, 'e'), ("Change port", TEXT, 'p')]
-        }
+        };
+        v.extend(self.connect_buttons());
+        v.extend(self.sftp_buttons());
+        v.extend(self.machine_buttons());
+        v
     }
+
 
     /// Is there an administrator who can sign in with a password?
     fn remote_has_admin(cx: &AppCx) -> bool {
@@ -62,6 +80,9 @@ impl SettingsApp {
     }
 
     pub(super) fn handle_remote(&mut self, k: &Key, cx: &AppCx) {
+        if self.connect_key(k, cx) || self.sftp_key(k, cx) || self.machine_key(k, cx) {
+            return;
+        }
         match k {
             Key::Up => self.remote.scroll = (self.remote.scroll - 40.0).max(0.0),
             Key::Down => self.remote.scroll = (self.remote.scroll + 40.0).min(self.remote.max),
@@ -140,10 +161,9 @@ impl SettingsApp {
                 None => lines.push(("(the certificate is being made: look again in a moment)".into(), 13.0, DIM, Face::Sans)),
             }
         }
-        lines.push(("SFTP file server".into(), 14.0, TEXT, Face::Bold));
-        for (i, l) in iyakki_agent::sftp::status_lines(svc.dir()).into_iter().enumerate() {
-            lines.push((l, 13.0, if i == 0 { TEXT } else { MUTED }, Face::Sans));
-        }
+        self.sftp_lines(cx, &mut lines);
+        self.machine_lines(cx, &mut lines);
+        let qr_at = self.connect_lines(cx, &mut lines);
         lines.push(("What this exposes".into(), 14.0, TEXT, Face::Bold));
         lines.push((wa::EXPOSES.into(), 13.0, rgb(255, 196, 94), Face::Sans));
         lines.push(("Turn it off when you are done. The firewall port is opened for the local networks only while it is on, and closed when it is off.".into(), 12.0, DIM, Face::Sans));
@@ -153,11 +173,16 @@ impl SettingsApp {
         let mut y = a.y - self.remote.scroll;
         let mut used = 0.0f32;
         g.clipped(a, |g| {
-            for (t, size, c, face) in &lines {
+            for (li, (t, size, c, face)) in lines.iter().enumerate() {
                 let sz = size * s;
                 if *size >= 14.0 && face == &Face::Bold {
                     y += 6.0 * s;
                     used += 6.0 * s;
+                }
+                if qr_at == Some(li) {
+                    let h = self.connect_draw_qr(g, a.x, y, s);
+                    y += h;
+                    used += h;
                 }
                 for w in g.wrap(sz, t, *face, a.w) {
                     g.text(a.x, y, sz, *c, &w, *face);

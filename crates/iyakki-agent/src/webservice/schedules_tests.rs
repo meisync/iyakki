@@ -161,5 +161,5 @@ fn the_schedule_routes_are_in_the_api_document_and_need_the_flows_permission() {
     for p in ["/api/v1/schedules", "/api/v1/schedules/status", "/api/v1/schedules/preview", "/api/v1/schedules/{id}/pause", "/api/v1/schedules/{id}/resume", "/api/v1/schedules/{id}/{name}"] {
         assert!(paths.contains_key(p), "{p}");
     }
-    assert!(ROUTES.iter().filter(|r| r.id.starts_with("sched_")).all(|r| r.profiles == [Profile::Cloud] && r.needs == routes::Need::Flows && r.access == routes::Access::User));
+    assert!(ROUTES.iter().filter(|r| r.id.starts_with("sched_")).all(|r| r.profiles == [Profile::Cloud, Profile::FlowsRunner] && r.needs == routes::Need::Flows && r.access == routes::Access::User));
 }

@@ -97,7 +97,7 @@ impl OllamaServer {
 
     /// Called with the server's address each time it becomes ready (the services add it to Models there).
     pub fn set_on_ready(&self, f: impl Fn(&str) + Send + Sync + 'static) {
-        *self.on_ready.lock().unwrap() = Some(Box::new(f));
+        *self.on_ready.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Box::new(f));
     }
 
     pub fn url(&self) -> String {
@@ -113,11 +113,11 @@ impl OllamaServer {
     }
 
     pub fn state(&self) -> OllamaState {
-        self.state.lock().unwrap().clone()
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 
     fn set_state(&self, s: OllamaState) {
-        *self.state.lock().unwrap() = s;
+        *self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = s;
     }
 
     pub fn installed(&self) -> bool {
@@ -141,7 +141,7 @@ impl OllamaServer {
 
     fn ready(&self, version: &str, external: bool) {
         self.set_state(OllamaState::Running { external, version: version.to_string() });
-        if let Some(f) = self.on_ready.lock().unwrap().as_ref() {
+        if let Some(f) = self.on_ready.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
             f(&self.url());
         }
     }
@@ -177,7 +177,7 @@ impl OllamaServer {
             .process_group(0)
             .spawn()
             .map_err(|e| format!("could not start ollama: {e}"))?;
-        *self.child.lock().unwrap() = Some(child);
+        *self.child.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(child);
         self.set_state(OllamaState::Starting);
         let gen = self.gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         let me = self.clone();
@@ -193,7 +193,7 @@ impl OllamaServer {
         let began = Instant::now();
         while self.current(gen) {
             {
-                let mut c = self.child.lock().unwrap();
+                let mut c = self.child.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 match c.as_mut() {
                     Some(ch) => {
                         let life = iyakki_core_api::child_status(ch);
@@ -232,7 +232,7 @@ impl OllamaServer {
             self.set_state(OllamaState::Stopped);
             return Err("this Ollama was not started from here, so it is left running (it is simply not used as the local one any more)".into());
         }
-        let child = self.child.lock().unwrap().take();
+        let child = self.child.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
         self.gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let Some(mut child) = child else {
             self.set_state(OllamaState::Stopped);

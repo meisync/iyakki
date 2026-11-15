@@ -89,7 +89,7 @@ missing. See `docs/USER-GUIDE.md`, The IYAKKI menu.
   the k3s installer are refused, with the reason as the tool result and no approval prompt, in `run_command`, `terminal`, the IDE
   terminal and the sandbox cluster's `start()`.
 * **Assistant tools** (`k8stools.rs`): `k8s_status`, `k8s_get`, `k8s_describe`, `k8s_logs`, `k8s_events`, `k8s_apply`, `k8s_delete`,
-  `k8s_rollout_restart`, `deploy_build`, `deploy_load`, `deploy_status`; writes are confined to the workspace namespace (default
+  `k8s_rollout_restart`, `k8s_port_forward` (asks; 127.0.0.1 only) and `k8s_port_forwards` (list), `deploy_build`, `deploy_load`, `deploy_status`; writes are confined to the workspace namespace (default
   `<workspace>-dev`, created on the first approved apply), ask first and are audited as `k8s.*`; a production-looking cluster is
   read-only; `deploy_load` prefers a registry on `localhost:5000` when k3s's `registries.yaml` mirrors it and otherwise imports with
   `k3s ctr images import`, explaining the two fixes when that needs root.
@@ -319,8 +319,7 @@ partition passes **85 %** (it re-arms under 80 %).
 
 The default images (libre, hw, web) do **not** contain podman, and this work does not change them. The Podman variant of the page therefore refuses to run, saying so. To try it, the image needs, at least:
 `podman`, `conmon`, `crun`, `netavark` (+ `aardvark-dns`), `iptables`, `iproute2` and CA certificates, a kernel with cgroup v2, overlayfs, veth, bridge, VXLAN and netfilter (nat, conntrack,
-masquerade), and a writable `/var/lib/containers` on the data partition. `dist/buildroot/configs/iyakki_cluster.fragment` lists the Buildroot options; it is documented, **not built and not
-wired into `build.sh`**, and the size and RAM it adds must be measured first. Rootful Podman only (k3s cannot run rootless).
+masquerade), and a writable `/var/lib/containers` on the data partition. `dist/buildroot/configs/iyakki_cluster.fragment` lists the Buildroot options; it is wired into `build.sh` as `WITH_PODMAN=1` (any variant except the release image, which refuses it) and **not yet built**, and the size and RAM it adds must be measured first. Rootful Podman only (k3s cannot run rootless).
 
 ### Not done
 

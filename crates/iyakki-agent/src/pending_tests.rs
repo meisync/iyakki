@@ -77,6 +77,16 @@ fn start_job(jobs: &Jobs, t: &Tmp, label: &str, cmd: &str) -> String {
     jobs.start("alice", &Spec { label: label.into(), cmd: Cmd::Shell(cmd.into()), cwd: t.work(), workspace: String::new() }, &|_| Ok(())).unwrap().id
 }
 
+/// A shell command that does not start `then` before the test opens the gate (a file): the job is running for exactly as long as
+/// the test wants, however slow or loaded the machine is (a fixed `sleep` could run out while the test thread waited for a CPU).
+fn gated(t: &Tmp, gate: &str, then: &str) -> String {
+    format!("while [ ! -e '{}' ]; do sleep 0.02; done; {then}", t.work().join(gate).display())
+}
+
+fn open_gate(t: &Tmp, gate: &str) {
+    std::fs::write(t.work().join(gate), "go").unwrap();
+}
+
 fn end_of(jobs: &Jobs, id: &str) {
     jobs.wait("alice", id, Duration::from_secs(20)).unwrap();
 }
@@ -163,11 +173,12 @@ fn after_a_restart_work_nobody_can_vouch_for_is_lost_and_said_once_while_jobs_an
 fn a_finished_job_wakes_the_session_once_with_its_result_and_the_job_tools_do_not_note_it_again() {
     let t = Tmp::new("wake");
     let (_, l, jobs) = stack(&t);
-    let id = start_job(&jobs, &t, "emulator install", "echo emulator installed; sleep 0.3");
+    let id = start_job(&jobs, &t, "emulator install", &gated(&t, "g1", "echo emulator installed"));
     l.sync(&feed(&t));
     assert_eq!(l.list("").len(), 1, "a running job is mirrored without anyone registering it");
     l.register(Ticket { source: Source::Job, key: id.clone(), on_done: "start the app".into(), ..Ticket::default() });
     assert!(l.take_wake("", 0, None).is_none(), "nothing ended yet");
+    open_gate(&t, "g1");
     end_of(&jobs, &id);
     l.sync(&feed(&t));
     let wake = l.take_wake("", 0, Some((&jobs, "alice"))).expect("the job ended");
@@ -277,9 +288,10 @@ fn the_waker_thread_raises_the_flag_when_a_job_ends_and_hands_the_turn_to_an_idl
     let t = Tmp::new("thread");
     let (_, l, jobs) = stack(&t);
     let w = Waker::start_every(l, feed(&t), Duration::from_millis(30));
-    let id = start_job(&jobs, &t, "short build", "sleep 0.4; echo built");
+    let id = start_job(&jobs, &t, "short build", &gated(&t, "g2", "echo built"));
     std::thread::sleep(Duration::from_millis(150));
     assert!(!w.ready(), "still running");
+    open_gate(&t, "g2");
     end_of(&jobs, &id);
     let end = Instant::now() + Duration::from_secs(10);
     while !w.ready() && Instant::now() < end {
@@ -383,8 +395,13 @@ fn wait_for_registers_a_file_a_port_or_a_job_and_the_ticket_lands_with_what_the_
     l.sync(&feed(&t));
     assert!(tools.take_notes().iter().any(|n| n.contains("dev server") && n.contains("accepts connections")));
     // a running job, with the long-poll variant that blocks until it lands
-    let id = start_job(&jobs, &t, "slow", "sleep 0.5; echo slow done");
-    let t0 = Instant::now();
+    let id = start_job(&jobs, &t, "slow", &gated(&t, "g3", "echo slow done"));
+    // the gate opens a second after the test is about to block in the call, from another thread: the call really has to wait
+    let (t0, gate) = (Instant::now(), t.work().join("g3"));
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(1000));
+        let _ = std::fs::write(gate, "go");
+    });
     let r = tools.call("wait_for", &json!({"job_id": id, "block_seconds": 30})).unwrap();
     assert!(r.contains("slow") && r.contains("finished") && t0.elapsed() < Duration::from_secs(20), "{r}");
     assert!(tools.take_notes().is_empty(), "the long-poll delivered it");
@@ -407,7 +424,7 @@ fn pending_list_cancel_and_settings_work_by_chat_and_a_cancelled_job_is_stopped(
     assert!(l.take_wake("", 0, None).is_none(), "the one who cancelled needs no wake");
     let s = tools.call("pending_settings", &json!({"auto_continue": false, "max_wakes_per_day": 5, "max_wait_hours": 2})).unwrap();
     assert!(s.contains("auto-continue off") && s.contains("5 wakes") && s.contains("2h 00m"), "{s}");
-    assert_eq!(l.settings(), Settings { auto_continue: false, max_wakes_per_day: 5, max_wait_secs: 7200 });
+    assert_eq!(l.settings(), Settings { auto_continue: false, max_wakes_per_day: 5, max_wait_secs: 7200, separate_thread: false });
     assert!(tools.call("pending_list", &json!({})).unwrap().contains("auto-continue off"));
 }
 
@@ -473,14 +490,24 @@ fn the_reported_failure_a_run_that_promises_to_report_after_job_start_shows_wait
     let t = Tmp::new("story");
     let (tools, l, jobs) = stack(&t);
     let w = Waker::start_every(l.clone(), feed(&t), Duration::from_millis(30));
+    // the job blocks reading this pipe (a plain command the policy lets through) until the test writes a byte into it
+    assert!(std::process::Command::new("mkfifo").arg(t.work().join("g4")).status().unwrap().success());
     // turn 1: the model starts a build and promises to report back
-    let b = Script::new(vec![Script::call("job_start", json!({"command": "sleep 1; echo build ok", "label": "release build"})), Script::say("The build is running. I'll report back when it finishes.")]);
+    let b = Script::new(vec![Script::call("job_start", json!({"command": "head -c 1 g4; echo build ok", "label": "release build"})), Script::say("The build is running. I'll report back when it finishes.")]);
     let ev = run(b.clone(), tools.clone(), "build the release", true);
     assert!(final_text(&ev).contains("I'll report back"));
     assert_eq!(b.seen.lock().unwrap().len(), 2, "no nudge: something is pending, so the promise is kept");
     assert!(ev.iter().any(|e| matches!(e, RunEvent::Note { text } if text.starts_with("Waiting for: release build"))), "the chat shows the waiting state: {ev:?}");
     assert!(!ev.iter().any(|e| matches!(e, RunEvent::Note { text } if text.contains("continuing"))), "the stall guard did not push the model to act");
     // the session is idle; the job ends; the waker has a turn ready
+    // opened for reading and writing so that it does not wait for the reader, and kept open to the end of the test so that the byte
+    // is not lost if the job has not opened the pipe yet
+    let _gate = {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().read(true).write(true).open(t.work().join("g4")).unwrap();
+        f.write_all(b"g").unwrap();
+        f
+    };
     let end = Instant::now() + Duration::from_secs(15);
     while !w.ready() && Instant::now() < end {
         std::thread::sleep(Duration::from_millis(20));

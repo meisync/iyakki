@@ -34,6 +34,10 @@ USAGE:
                                       the firewall off until it is switched on in Settings (docs/FIREWALL.md); status shows the settings and the kernel
   iyakki vpn inspect FILE               offline: what is in a local .ovpn or WireGuard .conf (kind, whether it needs a user name and password,
                                       every setting name with ACCEPTED / IGNORED / REFUSED, block counts); never prints a value or a key
+  iyakki backup <areas|preview|create|inspect|restore>   back up one person's own data into one file (optionally encrypted) and restore it; see docs/BACKUP.md
+  iyakki checkup-result FILE            check the signature of a CHECK-UP result file and print the hardware-matrix rows it holds
+  iyakki doctor [--detail]              what is wrong with this computer, in plain words (the DOCTOR tile's checks as text; exit 1 when
+                                      something needs attention; the running system's own state is not checked from here)
   iyakki top [N]                        what the machine is doing: load, memory and the N busiest processes (default 15)
   iyakki dlmanifest keygen FILE | sign MANIFEST --key FILE | verify MANIFEST [--pubkey HEX|FILE] | check | gen
                                       the signed downloads manifest (versions and checksums of the download items; docs/development/DOWNLOADS-MANIFEST.md)
@@ -98,6 +102,12 @@ fn main() -> ExitCode {
     if std::env::args().nth(1).as_deref() == Some(iyakki_agent::linuxapps_init::SUBCOMMAND) {
         let args: Vec<String> = std::env::args().skip(1).collect();
         return ExitCode::from(iyakki_agent::linuxapps_init::main(&args).clamp(0, 255) as u8);
+    }
+    // the throw-away process of the guest self-test `iyakki.selftest=sandboxnet` (dist/qemu/README.md): it makes a network namespace
+    #[cfg(target_os = "linux")]
+    if std::env::args().nth(1).as_deref() == Some(iyakki_agent::linuxapps_net::selftest::SUBCOMMAND) {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        return ExitCode::from(iyakki_agent::linuxapps_net::selftest::probe_main(&args).clamp(0, 255) as u8);
     }
     iyakki_core::console::install_panic_hook();
     match iyakki_core::console::run_with_big_stack(real_main) {
@@ -240,8 +250,9 @@ fn real_main() -> ExitCode {
             Err(e) => fail(e),
         },
         // a container's HEALTHCHECK without curl: GET /healthz on the local listener (docs/CLOUD-IMAGES.md)
-        #[cfg(feature = "shell")]
+        #[cfg(feature = "headless")]
         "healthcheck" => ExitCode::from(iyakki_agent::healthcheck::cli_main(&args[1..], std::env::var("IYAKKI_HEALTH_URL").ok(), &mut |s| err!("{s}")).clamp(0, 255) as u8),
+        #[cfg(feature = "shell")]
         "web-open" => match args.get(1) {
             Some(url) => web_open(url),
             None => fail("usage: iyakki web-open URL".into()),
@@ -264,10 +275,27 @@ fn real_main() -> ExitCode {
         "shell" => run_shell(&args[1..]),
         #[cfg(feature = "web")]
         "web" => run_web(&args[1..]),
-        #[cfg(feature = "shell")]
+        #[cfg(feature = "headless")]
         "user" => user_cmd(&args[1..]),
         #[cfg(feature = "shell")]
         "release" => release_cmd(&args[1..]),
+        #[cfg(feature = "shell")]
+        "backup" => ExitCode::from(iyakki_agent::backup_cli::cli_main(&args[1..]).clamp(0, 255) as u8),
+        "checkup-result" => match args.get(1).map(std::fs::read_to_string) {
+            Some(Ok(t)) => match iyakki_agent::checkup_result::verify(&t) {
+                Ok(b) => {
+                    for l in iyakki_agent::checkup_result::lines(&b) {
+                        out!("{l}");
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(e),
+            },
+            Some(Err(e)) => fail(e.to_string()),
+            None => fail("usage: iyakki checkup-result FILE (checks a CHECK-UP result file and prints its matrix rows)".into()),
+        },
+        #[cfg(feature = "shell")]
+        "doctor" => doctor_cmd(&args[1..]),
         #[cfg(feature = "shell")]
         "top" => {
             let n = args.get(1).and_then(|n| n.parse::<usize>().ok()).unwrap_or(15).clamp(1, 200);
@@ -303,11 +331,15 @@ fn real_main() -> ExitCode {
         "serve" => {
             log::info!("IYAKKI {} starting", env!("CARGO_PKG_VERSION"));
             // `serve --profile NAME` (or IYAKKI_PROFILE): only the headless web service of that profile, no shell, no screen
-            #[cfg(feature = "shell")]
+            #[cfg(feature = "headless")]
             match iyakki_core::svc::parse_args(serve_args(&args), &|k| std::env::var(k).ok()) {
                 Ok(Some(ask)) => return serve_profile(&ask),
                 Ok(None) => {}
                 Err(e) => return fail(e),
+            }
+            // a build without the shell has nothing else to serve
+            if !cfg!(feature = "shell") {
+                return fail("this build is the headless web service only: use `iyakki serve --profile NAME` (or set IYAKKI_PROFILE)".into());
             }
             // Real boot = we are PID 1 *and* nothing has mounted /proc yet. A container's PID 1 (docker, k3s)
             // already has /proc, and must never try to mount filesystems or load kernel modules.
@@ -414,6 +446,24 @@ fn real_main() -> ExitCode {
                         out!("IYAKKI-SELFTEST installhere exit {rc}");
                         iyakki_core::boot::power_off();
                     }
+                    // the outbound-only sandbox network on a real kernel (dist/qemu/sandbox-net-test.sh); prints check lines and a RESULT line
+                    #[cfg(all(feature = "shell", target_os = "linux"))]
+                    Some("sandboxnet") => {
+                        let ports = iyakki_core::boot::cmdline_param(&cmdline, "iyakki.testnet").unwrap_or("0,0");
+                        let (a, d) = ports.split_once(',').unwrap_or(("0", "0"));
+                        let checks: Vec<_> = iyakki_agent::linuxapps_net::selftest::run(a.parse().unwrap_or(0), d.parse().unwrap_or(0)).into_iter().map(|(n, ok, d)| iyakki_core::selfcheck::check(&n, ok, d)).collect();
+                        for l in iyakki_core::selfcheck::lines("sandboxnet", &checks) {
+                            out!("{l}");
+                        }
+                        iyakki_core::boot::power_off();
+                    }
+                    // boot-order recording and prefetch on a real kernel (dist/qemu/boot-prefetch-test.sh); needs iyakki.bootrecord=1
+                    Some("bootlist") => {
+                        for l in iyakki_core::selfcheck::lines("bootlist", &bootlist_checks()) {
+                            out!("{l}");
+                        }
+                        iyakki_core::boot::power_off();
+                    }
                     // memory facts only (zram, swap, settings): for boots that test the kernel options and system.conf
                     Some("memory") => {
                         mem_report("memory");
@@ -450,11 +500,145 @@ fn real_main() -> ExitCode {
                         out!("IYAKKI-SELFTEST upgrade end");
                         iyakki_core::boot::power_off();
                     }
+                    // per-computer settings keyed by the real DMI strings (dist/qemu/computer-profile-test.sh): the settings store of a scratch folder on the data volume is opened for this computer;
+                    // `iyakki.hwset=NN` on the command line sets the sound volume to NN percent (a per-computer value) before the report
+                    #[cfg(target_os = "linux")]
+                    Some("computer") => {
+                        use iyakki_agent::hwprofile::{identify, Computers, RealFacts};
+                        let dir = std::path::Path::new(iyakki_core::boot::DATA_DIR).join("m80-computers");
+                        let _ = std::fs::create_dir_all(&dir);
+                        let id = identify(&RealFacts);
+                        out!("IYAKKI-SELFTEST computer id={} label={:?}", id.id, id.label);
+                        match iyakki_agent::settings::SettingsStore::open(&dir.join("settings.json")) {
+                            Ok(mut st) => {
+                                let c = Computers::open(&dir, &RealFacts, iyakki_agent::clock::now_unix(), st.get());
+                                let fresh = c.new_computer;
+                                st.attach_computers(c);
+                                out!("IYAKKI-SELFTEST computer new={} volume={} profiles={}", fresh, st.get().sound.volume_pct, st.computers().map_or(0, |c| c.list().len()));
+                                let cmd = iyakki_storage::cmdline_text();
+                                if let Some(v) = cmd.split_whitespace().find_map(|w| w.strip_prefix("iyakki.hwset=")).and_then(|v| v.parse::<u8>().ok()) {
+                                    let _ = st.update(|s| s.sound.volume_pct = v.into());
+                                    out!("IYAKKI-SELFTEST computer set volume={}", st.get().sound.volume_pct);
+                                }
+                            }
+                            Err(e) => out!("IYAKKI-SELFTEST computer error {e:?}"),
+                        }
+                        out!("IYAKKI-SELFTEST computer end");
+                        iyakki_core::boot::power_off();
+                    }
+                    // the USB controllers kept awake on the real sysfs (dist/qemu/usb-awake-test.sh): which PCI USB controllers sleep, then the same step the system takes
+                    #[cfg(target_os = "linux")]
+                    Some("usbawake") => {
+                        for l in iyakki_agent::usbawake::selftest_lines(std::path::Path::new("/")) {
+                            out!("IYAKKI-SELFTEST usbawake {l}");
+                        }
+                        out!("IYAKKI-SELFTEST usbawake end");
+                        iyakki_core::boot::power_off();
+                    }
+                    // the sound output list of the real /proc/asound (dist/qemu/sound-output-test.sh): waits for the cards the kernel finds, then prints what the selector makes of them
+                    #[cfg(target_os = "linux")]
+                    Some("sound") => {
+                        let cards = || iyakki_agent::audioout::cards_text(std::path::Path::new("/proc"));
+                        let t0 = std::time::Instant::now();
+                        while t0.elapsed().as_secs() < 20 && !cards().contains("]:") {
+                            std::thread::sleep(std::time::Duration::from_millis(250));
+                        }
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        for l in cards().lines() {
+                            out!("IYAKKI-SELFTEST sound card {}", l.trim());
+                        }
+                        // the card's own controls, as `amixer -c N contents` says them (the image ships amixer)
+                        let mixer = |card: u32| std::process::Command::new("amixer").args(["-c", &card.to_string(), "contents"]).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).to_string());
+                        let outs = iyakki_agent::audioout::scan(std::path::Path::new("/proc"), &mixer);
+                        for o in &outs {
+                            out!("IYAKKI-SELFTEST sound output key={} kind={} alsa={} label={:?} state={:?}", o.key(), o.kind.label(), o.alsa(), o.label(), o.state());
+                        }
+                        let c = iyakki_agent::audioout::choose(&outs, "");
+                        out!("IYAKKI-SELFTEST sound chosen {:?} because {}", c.output.as_ref().map(|o| o.key()), c.reason);
+                        out!("IYAKKI-SELFTEST sound end");
+                        iyakki_core::boot::power_off();
+                    }
+                    // the startup disk commands on the firmware's real variable store (dist/qemu/startup-disk-test.sh, a guest started through OVMF so that efivarfs exists)
+                    #[cfg(target_os = "linux")]
+                    Some("startupdisk") => {
+                        for step in ["status", "register", "first", "status", "revert", "status"] {
+                            out!("IYAKKI-SELFTEST startupdisk step {step}");
+                            let rc = iyakki_agent::startupdisk::cli(&[step.to_string()]);
+                            out!("IYAKKI-SELFTEST startupdisk rc {step} {rc}");
+                        }
+                        out!("IYAKKI-SELFTEST startupdisk end");
+                        iyakki_core::boot::power_off();
+                    }
+                    // /home on the data volume (dist/qemu/homebind-test.sh): reports what is mounted at /home, writes a note there the first time and reads it back the next time
+                    Some("homebind") => {
+                        let mounts = iyakki_storage::mounts_text();
+                        let home = mounts.lines().find(|l| l.split_whitespace().nth(1) == Some("/home")).unwrap_or("none");
+                        out!("IYAKKI-SELFTEST homebind mount {home}");
+                        out!("IYAKKI-SELFTEST homebind data {:?}", iyakki_storage::data_location(&iyakki_storage::Roots::real(), std::path::Path::new(iyakki_core::boot::DATA_DIR)));
+                        let note = std::path::Path::new("/home/m80-note.txt");
+                        match std::fs::read_to_string(note) {
+                            Ok(t) => out!("IYAKKI-SELFTEST homebind note {}", t.trim()),
+                            Err(_) => {
+                                let _ = std::fs::write(note, "home-survives-the-reboot\n");
+                                out!("IYAKKI-SELFTEST homebind note written");
+                            }
+                        }
+                        out!("IYAKKI-SELFTEST homebind end");
+                        iyakki_core::boot::power_off();
+                    }
+                    // a USB data disk pulled and plugged in again (dist/qemu/drive-loss-test.sh): the host script removes and re-adds the disk when it sees READY
+                    #[cfg(target_os = "linux")]
+                    Some("driveloss") => {
+                        use iyakki_core::selfcheck::check;
+                        use iyakki_core::storageloss::status_value;
+                        let state = || std::fs::read_to_string(iyakki_storage::loss::STATUS_FILE).unwrap_or_default();
+                        let val = |k: &str| status_value(&state(), k).unwrap_or("").to_string();
+                        let wait_for = |want: &dyn Fn(&str) -> bool, secs: u64| -> bool {
+                            let t0 = std::time::Instant::now();
+                            while t0.elapsed().as_secs() < secs {
+                                if want(&val("state")) {
+                                    return true;
+                                }
+                                std::thread::sleep(std::time::Duration::from_millis(250));
+                            }
+                            false
+                        };
+                        let dir = std::path::Path::new(iyakki_core::boot::DATA_DIR);
+                        let mut checks = Vec::new();
+                        let healthy = wait_for(&|s| s == "Healthy", 30);
+                        let dev = val("dev");
+                        checks.push(check("watching-the-data-disk", healthy, format!("state {} dev {dev} uuid {}", val("state"), val("uuid"))));
+                        // written AND synced before the loss: unsynced data of the last seconds may be lost (docs/STORAGE-LOSS.md), what was flushed must still be there afterwards
+                        let _ = std::fs::write(dir.join("m80-before"), "written-before-the-loss");
+                        let _ = std::fs::File::open(dir.join("m80-before")).and_then(|f| f.sync_all());
+                        let _ = std::fs::File::open(dir).and_then(|f| f.sync_all());
+                        out!("IYAKKI-SELFTEST driveloss READY");
+                        let lost = wait_for(&|s| s != "Healthy", 90);
+                        checks.push(check("the-loss-is-seen", lost, format!("state {} at uptime {} s", val("state"), val("since"))));
+                        let back = wait_for(&|s| s == "Reattachable" || s == "Healthy", 90);
+                        checks.push(check("the-same-disk-is-recognised-on-its-new-node", back, format!("state {}", val("state"))));
+                        // the automatic reattach may already have run; otherwise ask like the Reconnect button does
+                        let answer = if val("state") == "Healthy" { Ok("done by itself".to_string()) } else { iyakki_core::storageloss::cli_reattach(std::time::Duration::from_secs(60)) };
+                        checks.push(check("reattach", answer.is_ok(), format!("{answer:?}")));
+                        let healthy2 = wait_for(&|s| s == "Healthy", 30);
+                        let (dev2, uuid2) = (val("dev"), val("uuid"));
+                        checks.push(check("healthy-again-on-another-node", healthy2 && dev2 != dev, format!("dev {dev} -> {dev2}, uuid {uuid2}, reattached={}", val("reattached"))));
+                        checks.push(check("what-was-written-before-is-there", std::fs::read_to_string(dir.join("m80-before")).is_ok_and(|t| t == "written-before-the-loss"), format!("{:?}", std::fs::read_to_string(dir.join("m80-before")).ok())));
+                        let wrote = std::fs::write(dir.join("m80-after"), "written-after-the-return").and_then(|_| std::fs::File::open(dir.join("m80-after")).and_then(|f| f.sync_all())).is_ok();
+                        checks.push(check("writing-works-again", wrote, "m80-after written and synced"));
+                        let mounts = iyakki_storage::mounts_text();
+                        let line = mounts.lines().find(|l| l.split_whitespace().nth(1) == Some(iyakki_core::boot::DATA_DIR)).unwrap_or("none");
+                        checks.push(check("the-data-folder-is-mounted-from-the-new-node", line.contains(&dev2) && !line.contains(&format!("{dev} ")), line));
+                        for l in iyakki_core::selfcheck::lines("driveloss", &checks) {
+                            out!("{l}");
+                        }
+                        iyakki_core::boot::power_off();
+                    }
                     Some("persist2") => {
                         let dir = std::path::Path::new(iyakki_core::boot::DATA_DIR);
                         out!("IYAKKI-SELFTEST persist2 location {:?}", iyakki_storage::data_location(&iyakki_storage::Roots::real(), dir));
                         out!("IYAKKI-SELFTEST persist2 marker {:?}", std::fs::read_to_string(dir.join("marker")).unwrap_or_else(|e| format!("missing: {e}")));
-                        storage_cmd(&[]);
+                        let _ = storage_cmd(&[]);
                         out!("IYAKKI-SELFTEST persist2 end");
                         iyakki_core::boot::power_off();
                     }
@@ -697,7 +881,7 @@ fn swarm_run(a: &[String]) -> ExitCode {
     let res = rt.block_on(async {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait);
         loop {
-            match node.submit_any(iyakki_swarm::TaskRequest { wasm: wasm.clone(), entry: entry.clone() }).await {
+            match node.submit_scheduled(iyakki_swarm::TaskRequest { wasm: wasm.clone(), entry: entry.clone() }).await {
                 Err(iyakki_swarm::SwarmError::NoPeers) if std::time::Instant::now() < deadline => {
                     tokio::time::sleep(std::time::Duration::from_millis(250)).await
                 }
@@ -721,11 +905,44 @@ fn swarm_run(a: &[String]) -> ExitCode {
 }
 
 /// Memory facts for the boot self-tests: swap areas, zram settings, the saved system settings.
+/// The checks of `iyakki.selftest=bootlist`: the recorder wrote a list of files opened while booting, the prefetch reads it to the end,
+/// and with too little free memory it stops at once.
+fn bootlist_checks() -> Vec<iyakki_core::selfcheck::Check> {
+    use iyakki_core::bootprefetch as bp;
+    use iyakki_core::selfcheck::check;
+    let mut v = Vec::new();
+    #[cfg(target_os = "linux")]
+    {
+        let list = std::path::Path::new(bp::LIST_PATH);
+        for _ in 0..140 {
+            if list.is_file() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+        let text = std::fs::read_to_string(list).unwrap_or_default();
+        let entries = bp::parse_list(&text, bp::UNKNOWN_SIZE);
+        v.push(check("list-written", list.is_file() && !text.is_empty(), format!("{} ({} bytes)", bp::LIST_PATH, text.len())));
+        v.push(check("list-has-boot-files", entries.len() >= 20, format!("{} files", entries.len())));
+        let bad: Vec<_> = entries.iter().filter(|e| bp::SKIP_PREFIXES.iter().any(|p| e.path.to_string_lossy().starts_with(p))).take(3).collect();
+        v.push(check("list-skips-kernel-views", bad.is_empty(), format!("{bad:?}")));
+        let all = bp::prefetch_from(list, &iyakki_core::boot::available_ram);
+        v.push(check("prefetch-ran-to-the-end", all.contains("ended Done") && !all.contains("0 batch(es)"), all));
+        // the plan is made with the real memory; then only 100 MiB are reported free while it runs (memory that dropped after the plan was made)
+        let short = bp::prefetch_with(list, iyakki_core::boot::available_ram(), &|| 100 << 20);
+        v.push(check("prefetch-stops-when-memory-is-short", short.contains("MemoryShort") && short.contains("0 batch(es)"), short));
+    }
+    #[cfg(not(target_os = "linux"))]
+    v.push(check("linux-only", false, "the prefetch is for Linux"));
+    v
+}
+
 fn mem_report(stage: &str) {
     let rd = |p: &str| std::fs::read_to_string(p).unwrap_or_else(|e| format!("missing: {e}"));
     // a swap file is made in the background after login: give it time (up to 40 s) when one is configured
     let wants_file = |c: &str| c.lines().any(|l| l.trim().strip_prefix("swapfile=").is_some_and(|v| v != "off" && v != "0"));
-    if wants_file(&rd(iyakki_zram::CONF_PATH)) || iyakki_core::boot::cmdline_param(&iyakki_storage::cmdline_text(), "iyakki.swapfile").is_some_and(|v| v != "off" && v != "0") {
+    let experiment = iyakki_zram::compressed::resolve_experiment(&iyakki_storage::cmdline_text(), &rd(iyakki_zram::CONF_PATH)).0 == iyakki_zram::compressed::Experiment::On;
+    if experiment || wants_file(&rd(iyakki_zram::CONF_PATH)) || iyakki_core::boot::cmdline_param(&iyakki_storage::cmdline_text(), "iyakki.swapfile").is_some_and(|v| v != "off" && v != "0") {
         for _ in 0..80 {
             if rd("/proc/swaps").contains(iyakki_zram::SWAPFILE_PATH) {
                 break;
@@ -744,6 +961,9 @@ fn mem_report(stage: &str) {
         out!("IYAKKI-SELFTEST {stage} system.conf {l}");
     }
     out!("IYAKKI-SELFTEST {stage} hostname {}", rd("/etc/hostname").trim());
+    // the experimental compressed memory (dist/qemu/compressed-memory-test.sh): zswap on or off, and the swap file
+    out!("IYAKKI-SELFTEST {stage} zswap enabled {}", match iyakki_zram::zswap_enabled(&iyakki_zram::Env::real()) { Some(true) => "Y", Some(false) => "N", None => "absent" });
+    out!("IYAKKI-SELFTEST {stage} swapfile {}", std::fs::metadata(iyakki_zram::SWAPFILE_PATH).map_or("none".to_string(), |m| format!("{} bytes", m.len())));
 }
 
 /// `iyakki hostname [NAME]`: show the host name, or set it (needs root): applied now, written to /etc/hostname and kept in
@@ -911,21 +1131,32 @@ static SHARED_ENV: std::sync::Mutex<Option<iyakki_shell::shell::ShellEnv>> = std
 
 #[cfg(feature = "shell")]
 fn shell_env() -> Result<iyakki_shell::shell::ShellEnv, String> {
+    shell_env_with(false)
+}
+
+/// The environment of a headless web service (`serve --profile NAME`): the same set, but no sound is set up or probed.
+#[cfg(feature = "shell")]
+fn service_shell_env() -> Result<iyakki_shell::shell::ShellEnv, String> {
+    shell_env_with(true)
+}
+
+#[cfg(feature = "shell")]
+fn shell_env_with(headless: bool) -> Result<iyakki_shell::shell::ShellEnv, String> {
     let mut shared = SHARED_ENV.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(e) = shared.as_ref() {
         return Ok(e.share());
     }
-    let env = build_shell_env()?;
+    let env = build_shell_env(headless)?;
     let mine = env.share();
     *shared = Some(env);
     Ok(mine)
 }
 
 #[cfg(feature = "shell")]
-fn build_shell_env() -> Result<iyakki_shell::shell::ShellEnv, String> {
+fn build_shell_env(headless: bool) -> Result<iyakki_shell::shell::ShellEnv, String> {
     let host = std::sync::Arc::new(iyakki_core::host::CoreHost::new());
     let hwcheck = iyakki_core::boot::cmdline_param(&iyakki_storage::cmdline_text(), "iyakki.hwcheck") == Some("1");
-    let paths = iyakki_shell::shell::ShellPaths { hwcheck, ..Default::default() };
+    let paths = iyakki_shell::shell::ShellPaths { hwcheck, headless, ..Default::default() };
     let env = iyakki_shell::shell::ShellEnv::from_paths(&paths, host).map_err(|e| e.to_string())?;
     // firewall changes (and what happened at boot) go into the audit log
     {
@@ -1013,6 +1244,15 @@ fn start_shell_thread() {
                 iyakki_core::boot::finish_boot_screen();
                 // the sign-in screen is the first thing the shell draws: tell the boot loader this start worked (docs/BOOT-LOADER.md)
                 iyakki_core::bootconfirm::confirm_soon(std::time::Duration::from_secs(2));
+                // data migrations staged by an update (F-CORE-20): this version started, so the staged ones for it are confirmed and the
+                // ones staged for another version are rolled back; the old data is never dropped here
+                std::thread::spawn(|| {
+                    std::thread::sleep(std::time::Duration::from_secs(4));
+                    let data = std::env::var("IYAKKI_DATA").unwrap_or_else(|_| iyakki_shell::shell::ShellPaths::default().data);
+                    for (id, phase) in iyakki_agent::twophase::reconcile(std::path::Path::new(&data), iyakki_agent::relinfo::VERSION, iyakki_agent::clock::now_unix()) {
+                        log::info!("boot: data migration {id} is now {phase:?}");
+                    }
+                });
                 // a monitor that woke up during boot but was not seen: one more look (in the background)
                 iyakki_core::display::probe_once_in_background("the desktop started", iyakki_core::boot::screen_found);
                 if let Err(e) = iyakki_shell::backend::run_fb(sh, fb, &stop) {
@@ -1102,14 +1342,43 @@ fn release_cmd(a: &[String]) -> ExitCode {
         _ => fail("usage: iyakki release <keygen FILE | sign DIR --key FILE | verify DIR --pubkey HEX>".into()),
     }
 }
+/// `iyakki doctor [--detail]`: DOCTOR's checks printed as text, for a computer without a screen or a script (exit 0: nothing wrong,
+/// 1: a problem or warning, 2: bad use). The facts come from the same reader as the tile (`iyakki_agent::doctor_gather`); this process
+/// does not hold the running system's state, so the dev cluster, vault, VPN and failed services are not checked and the report says so.
+#[cfg(feature = "shell")]
+fn doctor_cmd(a: &[String]) -> ExitCode {
+    use iyakki_agent::doctor_gather as dg;
+    let detail = match dg::parse_cli(a) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    let paths = iyakki_shell::shell::ShellPaths::default();
+    let data = std::env::var("IYAKKI_DATA").unwrap_or(paths.data);
+    let audit_path = std::env::var("IYAKKI_AUDIT").unwrap_or(paths.audit);
+    let dir = std::path::Path::new(&data);
+    let settings = match iyakki_agent::settings::SettingsStore::open(&dir.join("settings.json")) {
+        Ok(s) => std::sync::Mutex::new(s),
+        Err(e) => return fail(format!("{data}/settings.json: {e}")),
+    };
+    let audit = std::sync::Arc::new(iyakki_shell::accounts::AuditLog::new(std::path::Path::new(&audit_path)));
+    let g = dg::Gather { dir, user: "", settings: &settings, live: None };
+    let slow: dg::SlowProbe = std::sync::Arc::new(dg::slow_probe);
+    let (text, code) = dg::cli_report(&g, std::sync::Arc::new(move |n| audit.recent(n)), detail, &slow);
+    out_raw!("{}", text);
+    ExitCode::from(code as u8)
+}
+
 
 /// `iyakki user add NAME [--role admin|operator|user|guest] [--password-stdin | --password-file FILE]` and `iyakki user list`:
 /// accounts for a machine with no screen (a server, a container) where the first-run setup screen cannot be used.
-#[cfg(feature = "shell")]
+#[cfg(feature = "headless")]
 fn user_cmd(a: &[String]) -> ExitCode {
     use iyakki_sec::policy::Role;
-    let users_path = std::env::var("IYAKKI_USERS").unwrap_or_else(|_| iyakki_shell::shell::ShellPaths::default().users);
-    let mut store = match iyakki_shell::accounts::UserStore::open(std::path::Path::new(&users_path)) {
+    let users_path = std::env::var("IYAKKI_USERS").unwrap_or_else(|_| iyakki_core::svc::USERS_PATH.to_string());
+    let mut store = match iyakki_accounts::UserStore::open(std::path::Path::new(&users_path)) {
         Ok(s) => s,
         Err(e) => return fail(format!("{users_path}: {e}")),
     };
@@ -1155,7 +1424,7 @@ fn user_cmd(a: &[String]) -> ExitCode {
                     out!("added {name} ({})", role.name());
                     ExitCode::SUCCESS
                 }
-                Err(iyakki_shell::accounts::AccountError::Exists) if if_missing => {
+                Err(iyakki_accounts::AccountError::Exists) if if_missing => {
                     out!("{name} already exists");
                     ExitCode::SUCCESS
                 }
@@ -1219,7 +1488,7 @@ fn start_devmode_watch() {
 
 /// `iyakki serve --profile NAME`: the headless web service (docs/development/MINIMAL-WEBSERVICE.md). With `--check` it only
 /// validates the configuration and says what would start.
-#[cfg(feature = "shell")]
+#[cfg(feature = "headless")]
 fn serve_profile(ask: &iyakki_core::svc::Ask) -> ExitCode {
     let chk = match iyakki_core::svc::load(ask) {
         Ok(c) => c,
@@ -1229,7 +1498,7 @@ fn serve_profile(ask: &iyakki_core::svc::Ask) -> ExitCode {
         out!("{}", iyakki_core::svc::summary(&chk));
         return ExitCode::SUCCESS;
     }
-    let env = match shell_env() {
+    let env = match service_env() {
         Ok(e) => e,
         Err(e) => return fail(e),
     };
@@ -1241,6 +1510,18 @@ fn serve_profile(ask: &iyakki_core::svc::Ask) -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => fail(e),
     }
+}
+
+/// The accounts, audit log, services and host the service works over: the shell's own set on a build with the shell (one set per
+/// machine), else a set made without the desktop.
+#[cfg(feature = "shell")]
+fn service_env() -> Result<iyakki_core::svc::ServiceEnv, String> {
+    service_shell_env().map(|e| iyakki_core::svc::ServiceEnv::from_shell(&e))
+}
+
+#[cfg(all(feature = "headless", not(feature = "shell")))]
+fn service_env() -> Result<iyakki_core::svc::ServiceEnv, String> {
+    iyakki_core::svc::ServiceEnv::headless(std::sync::Arc::new(iyakki_core::host::CoreHost::new()))
 }
 
 /// `iyakki web [ADDRESS]`: only the browser front end, for a server or a container with no screen.

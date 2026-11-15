@@ -132,7 +132,7 @@ pub fn plan(avail: f32, s: f32, widths: &[(Chip, f32)]) -> Vec<(Chip, R)> {
 pub fn draw(g: &mut Gfx, w: u32, s: f32, bar: &Bar, power: bool) -> Vec<(Chip, R)> {
     let s = bs(s);
     let bh = bar_h(s);
-    g.rect(0.0, 0.0, w as f32, bh, [10, 14, 28, 235]);
+    g.rect(0.0, 0.0, w as f32, bh, crate::fx::panel_alpha(235));
     g.rect(0.0, bh - 1.0, w as f32, 1.0, [70, 225, 255, 40]);
     let size = 13.0 * s;
     let dot = 7.0 * s;

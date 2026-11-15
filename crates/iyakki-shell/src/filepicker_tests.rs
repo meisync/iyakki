@@ -403,3 +403,27 @@ fn the_location_line_takes_typing_pasting_and_enter() {
     assert_eq!(p.dir, f.home.join("docs"));
     let _ = Path::new("");
 }
+
+#[test]
+fn a_screens_own_path_box_gets_browse_and_the_answer_through_pathpick() {
+    use crate::pathpick::{PathPick, Picked};
+    let f = fs("pathpick");
+    set_scope_override(Some(account_scope(&f, Role::User, true)));
+    let mut pp = PathPick::default();
+    assert_eq!(pp.event(&Event::Key(Key::Enter)), Picked::NotOpen, "closed: the screen keeps its events");
+    let mut g = Gfx::new(800, 480);
+    let w = PathPick::button(&mut g, 10.0, 10.0, 1.0, 49_999, [100, 200, 240, 255]);
+    assert!(w > 20.0 && g.hits.iter().any(|h| h.ev == Event::Tab(49_999) && h.label.starts_with("Browse")));
+    pp.open(PathKind::File, &["csv"], "Choose", &f.home.display().to_string());
+    assert!(pp.is_open());
+    pp.render(&mut g, R::new(0.0, 0.0, 800.0, 480.0), 1.0, [100, 200, 240, 255], false);
+    assert_eq!(pp.event(&Event::Key(Key::Esc)), Picked::Taken);
+    assert!(!pp.is_open(), "Esc closes it without an answer");
+    pp.open(PathKind::File, &["csv"], "Choose", &f.home.display().to_string());
+    let i = pp.names().iter().position(|n| n == "b.csv").expect("b.csv is listed");
+    assert_eq!(pp.event(&Event::Row(i)), Picked::Taken);
+    let last = pp.event(&Event::Key(Key::Enter));
+    assert_eq!(last, Picked::Chosen(f.home.join("b.csv")));
+    assert!(!pp.is_open());
+    set_scope_override(None);
+}

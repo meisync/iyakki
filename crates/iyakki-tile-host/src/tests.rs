@@ -220,3 +220,99 @@ fn exporters_escape_text() {
     let json = crate::export::to_json(&l, 100, 20);
     assert!(json.contains("a<b>&\\\"q\\\""));
 }
+
+
+mod pictures {
+    use crate::export::to_json_with_images;
+    use crate::render::{render_with, ImageTable, TableError, TABLE_BYTES, TABLE_PICTURES};
+    use iyakki_tile_abi::{Color, DisplayList, Op, Rect};
+
+    const BG: Color = Color(10, 20, 30, 255);
+
+    fn one(handle: u32, r: Rect) -> DisplayList {
+        let mut l = DisplayList::new();
+        l.push(Op::Image { handle, r });
+        l
+    }
+
+    fn two_by_two() -> ImageTable {
+        let mut t = ImageTable::new();
+        // red, green / blue, see-through yellow
+        t.put(5, 2, 2, vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 0]).unwrap();
+        t
+    }
+
+    #[test]
+    fn a_picture_is_scaled_by_nearest_neighbour_and_laid_over_by_its_alpha() {
+        let t = two_by_two();
+        let img = render_with(&one(5, Rect::new(2, 2, 8, 8)), 12, 12, BG, &t);
+        assert_eq!(img.pixel(2, 2), Color(255, 0, 0, 255), "top left quarter is red");
+        assert_eq!(img.pixel(5, 5), Color(255, 0, 0, 255));
+        assert_eq!(img.pixel(6, 2), Color(0, 255, 0, 255));
+        assert_eq!(img.pixel(2, 6), Color(0, 0, 255, 255));
+        assert_eq!(img.pixel(7, 7), Color(10, 20, 30, 255), "a fully see-through pixel leaves the background");
+        assert_eq!(img.pixel(0, 0), BG, "outside the rectangle nothing changed");
+        // a half see-through pixel mixes
+        let mut t2 = ImageTable::new();
+        t2.put(1, 1, 1, vec![200, 100, 0, 128]).unwrap();
+        let m = render_with(&one(1, Rect::new(0, 0, 2, 2)), 2, 2, BG, &t2);
+        assert_eq!(m.pixel(1, 1), Color(((200u32 * 128 + 10 * 127 + 127) / 255) as u8, ((100u32 * 128 + 20 * 127 + 127) / 255) as u8, ((0u32 * 128 + 30 * 127 + 127) / 255) as u8, 255));
+    }
+
+    #[test]
+    fn clips_and_the_surface_edge_cut_a_picture_and_unknown_handles_stay_grey_boxes() {
+        let t = two_by_two();
+        let mut l = DisplayList::new();
+        l.push(Op::PushClip { r: Rect::new(4, 4, 4, 4) });
+        l.push(Op::Image { handle: 5, r: Rect::new(0, 0, 12, 12) });
+        l.push(Op::PopClip);
+        let img = render_with(&l, 12, 12, BG, &t);
+        assert_eq!(img.pixel(3, 3), BG);
+        assert_ne!(img.pixel(4, 4), BG);
+        assert_eq!(img.pixel(8, 8), BG);
+        // partly off the surface: no panic, the visible part is right
+        let off = render_with(&one(5, Rect::new(8, 8, 8, 8)), 12, 12, BG, &t);
+        assert_eq!(off.pixel(8, 8), Color(255, 0, 0, 255));
+        // unknown handle, empty rectangle
+        let grey = render_with(&one(77, Rect::new(1, 1, 3, 3)), 6, 6, BG, &t);
+        assert_eq!(grey.pixel(2, 2), Color(128, 128, 128, 255));
+        let none = render_with(&one(5, Rect::new(1, 1, 0, 5)), 6, 6, BG, &t);
+        assert_eq!(none.pixel(1, 1), BG);
+    }
+
+    #[test]
+    fn the_table_is_capped_by_size_count_and_bytes_and_replacing_frees_the_old_bytes() {
+        let mut t = ImageTable::new();
+        assert_eq!(t.put(1, 0, 1, vec![]), Err(TableError::BadSize));
+        assert_eq!(t.put(1, 2, 2, vec![0; 15]), Err(TableError::BadSize));
+        assert_eq!(t.put(1, 1025, 1, vec![0; 1025 * 4]), Err(TableError::TooBig));
+        for h in 0..TABLE_PICTURES as u32 {
+            t.put(h, 1, 1, vec![1, 2, 3, 4]).unwrap();
+        }
+        assert_eq!(t.put(9999, 1, 1, vec![0; 4]), Err(TableError::TableFull));
+        t.put(3, 2, 2, vec![0; 16]).unwrap();
+        assert_eq!(t.bytes(), (TABLE_PICTURES - 1) * 4 + 16, "replacing a picture counts only the new bytes");
+        assert!(t.remove(3) && !t.remove(3));
+        let mut big = ImageTable::new();
+        for h in 0..4u32 {
+            big.put(h, 1024, 256, vec![0; 1024 * 256 * 4]).unwrap();
+        }
+        assert_eq!(big.bytes(), TABLE_BYTES);
+        assert_eq!(big.put(4, 1, 1, vec![0; 4]), Err(TableError::TableFull));
+        assert_eq!(big.len(), 4);
+    }
+
+    #[test]
+    fn the_browser_frame_carries_only_the_pictures_the_list_names_in_base64() {
+        let mut t = two_by_two();
+        t.put(6, 1, 1, vec![1, 2, 3, 4]).unwrap();
+        let j = to_json_with_images(&one(5, Rect::new(0, 0, 4, 4)), 10, 10, &t);
+        assert!(j.contains("\"images\":{\"5\":{\"w\":2,\"h\":2,\"rgba\":\"/wAA/wD/AP8AAP////8AAA==\"}}"), "{j}");
+        assert!(!j.contains("\"6\":"), "{j}");
+        assert!(j.ends_with("}}"));
+        // no picture named: the frame is the plain one
+        assert_eq!(to_json_with_images(&DisplayList::new(), 5, 5, &t), crate::export::to_json(&DisplayList::new(), 5, 5));
+        // a handle that is not in the table adds nothing
+        assert!(!to_json_with_images(&one(42, Rect::new(0, 0, 1, 1)), 5, 5, &t).contains("images"));
+    }
+}

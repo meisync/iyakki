@@ -333,6 +333,53 @@
       "Flow": {
         "type": "object"
       },
+      "FlowImport": {
+        "additionalProperties": false,
+        "properties": {
+          "flow": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "flow"
+        ],
+        "type": "object"
+      },
+      "FlowImported": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "type": "object"
+      },
+      "FlowIssues": {
+        "additionalProperties": false,
+        "properties": {
+          "issues": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "ok": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok",
+          "issues"
+        ],
+        "type": "object"
+      },
       "FlowList": {
         "additionalProperties": false,
         "properties": {
@@ -428,6 +475,19 @@
           "flow",
           "status"
         ],
+        "type": "object"
+      },
+      "FlowValidate": {
+        "additionalProperties": false,
+        "properties": {
+          "flow": {
+            "type": "object"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [],
         "type": "object"
       },
       "GitBranches": {
@@ -1059,6 +1119,35 @@
         ],
         "type": "object"
       },
+      "TenantAudit": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "type": "integer"
+          },
+          "lines": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "more": {
+            "type": "boolean"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "total": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "lines",
+          "total",
+          "more"
+        ],
+        "type": "object"
+      },
       "TenantConfig": {
         "type": "object"
       },
@@ -1234,6 +1323,9 @@
           "namespaces"
         ],
         "type": "object"
+      },
+      "Text": {
+        "type": "string"
       },
       "TileEvents": {
         "additionalProperties": false,
@@ -2110,7 +2202,7 @@
             "bearer": []
           }
         ],
-        "summary": "WebSocket (Upgrade; the upgrade itself is answered before the ordinary sign-in, because a browser cannot send a header, and signs in by its first message). The first message is {\"type\":\"auth\",\"token\":...}; the token is never in the address. Then only the caller's own `notification`, `count` and `approval` events, a ping every 25 seconds. Capped per person and per tenant.",
+        "summary": "WebSocket (Upgrade; the upgrade itself is answered before the ordinary sign-in, because a browser cannot send a header, and signs in by its first message). The first message is {\"type\":\"auth\",\"token\":...}; the token is never in the address. Then the caller's own `notification`, `count` and `approval` events and `changed` (an area name, after any change made through the API), a ping every 25 seconds. Capped per person and per tenant.",
         "x-access": "user"
       }
     },
@@ -2150,7 +2242,7 @@
           }
         },
         "security": [],
-        "summary": "Sign in with a machine account; returns a bearer token.",
+        "summary": "Sign in with a machine account; returns a bearer token. A program of a paired computer signs the request with its developer key instead and gets a token limited to its api scopes.",
         "x-access": "public",
         "x-audited": true
       }
@@ -3601,6 +3693,70 @@
         "security": [],
         "summary": "Liveness: the process is up (for a load balancer).",
         "x-access": "public"
+      }
+    },
+    "/metrics": {
+      "get": {
+        "operationId": "metrics",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Text"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "No or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The role does not allow this"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "The service's own numbers as Prometheus text: requests by route and status class, time spent, sign-ins by outcome, sessions, connections and runs. Administrators only; no user names, addresses or tokens.",
+        "x-access": "admin"
       }
     },
     "/readyz": {

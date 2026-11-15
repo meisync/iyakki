@@ -306,23 +306,197 @@ pub fn pixel_box(b: (f64, f64, f64, f64), w: u32, h: u32) -> IRect {
     (x0, y0, x1, y1)
 }
 
+// ------------------------------------------------------------------------------------------------ the starfield
+
+/// One star: centre, radius in pixels and brightness.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Star {
+    pub x: f32,
+    pub y: f32,
+    pub r: f32,
+    pub a: u8,
+}
+
+/// Seconds a star takes from the middle to the edge of the screen.
+pub const STAR_LIFE_SECS: f64 = 45.0;
+
+/// How many stars a screen of this size gets.
+pub fn star_count(w: u32, h: u32) -> usize {
+    ((u64::from(w) * u64::from(h)) / 9000).clamp(40, 400) as usize
+}
+
+fn unit(i: u32, salt: u32) -> f32 {
+    let mut x = i.wrapping_mul(0x9E37_79B1) ^ salt.wrapping_mul(0x85EB_CA6B);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x2C1B_3C6D);
+    x ^= x >> 12;
+    x = x.wrapping_mul(0x297A_2D39);
+    x ^= x >> 15;
+    (x >> 8) as f32 / 16_777_216.0
+}
+
+/// The stars at `t` seconds. Pure and total: every star returned is inside the screen, none when the screen has no size. A star is born
+/// dim at a fixed direction near the middle, speeds up (the distance goes with the square of its age), grows and brightens, and is reborn
+/// in the middle when it leaves.
+pub fn stars(w: u32, h: u32, t: f64) -> Vec<Star> {
+    if w == 0 || h == 0 {
+        return vec![];
+    }
+    let t = if t.is_finite() { t } else { 0.0 };
+    let (wf, hf) = (w as f32, h as f32);
+    let (cx, cy) = (wf / 2.0, hf / 2.0);
+    let maxr = cx.hypot(cy) * 1.1;
+    let mut v = Vec::new();
+    for i in 0..star_count(w, h) as u32 {
+        let ang = unit(i, 1) * std::f32::consts::TAU;
+        let reach = 0.15 + 0.85 * unit(i, 2);
+        let life = ((t / STAR_LIFE_SECS) as f32 + unit(i, 3)).rem_euclid(1.0);
+        let d = life * life * maxr * reach;
+        let (x, y) = (cx + ang.cos() * d, cy + ang.sin() * d);
+        let r = 0.5 + 2.0 * life;
+        if x - r < 0.0 || y - r < 0.0 || x + r > wf || y + r > hf {
+            continue;
+        }
+        v.push(Star { x, y, r, a: (30.0 + 225.0 * life).min(255.0) as u8 });
+    }
+    v
+}
+
+fn paint_stars(g: &mut Gfx, t: f64) {
+    g.clear(BLACK);
+    for s in stars(g.width(), g.height(), t) {
+        g.rect(s.x - s.r, s.y - s.r, 2.0 * s.r, 2.0 * s.r, [255, 255, 255, s.a]);
+    }
+}
+
+// ------------------------------------------------------------------------------------------------ the photo slideshow
+
+/// The slideshow's pictures: the list, and the two decoded ones kept (the one showing and the one fading in).
+#[derive(Default)]
+struct Slides {
+    dir: Option<std::path::PathBuf>,
+    scanned: bool,
+    order: Vec<std::path::PathBuf>,
+    started_at: f64,
+    cache: Vec<(std::path::PathBuf, tiny_skia::Pixmap)>,
+}
+
+/// A picture file as a pixmap no bigger than needed to cover a `sw` x `sh` screen with the zoom. `None` when it cannot be read.
+fn load_photo(path: &std::path::Path, sw: u32, sh: u32) -> Option<tiny_skia::Pixmap> {
+    let bytes = std::fs::read(path).ok()?;
+    let src = match iyakki_web::image::sniff(&bytes) {
+        iyakki_web::image::Kind::Png => tiny_skia::Pixmap::decode_png(&bytes).ok()?,
+        _ => {
+            let b = iyakki_web::image::decode(&bytes).ok()?;
+            let mut pm = tiny_skia::Pixmap::new(b.width, b.height)?;
+            for (d, s) in pm.data_mut().chunks_exact_mut(4).zip(b.rgba.chunks_exact(4)) {
+                let a = u32::from(s[3]);
+                let m = |c: u8| ((u32::from(c) * a + 127) / 255) as u8;
+                d.copy_from_slice(&[m(s[0]), m(s[1]), m(s[2]), s[3]]);
+            }
+            pm
+        }
+    };
+    let (iw, ih) = (src.width(), src.height());
+    let k = (f64::from(sw) / f64::from(iw)).max(f64::from(sh) / f64::from(ih)) * 1.1;
+    if k >= 1.0 {
+        return Some(src);
+    }
+    let (nw, nh) = (((f64::from(iw) * k).ceil() as u32).max(1), ((f64::from(ih) * k).ceil() as u32).max(1));
+    let mut out = tiny_skia::Pixmap::new(nw, nh)?;
+    let paint = PixmapPaint { quality: FilterQuality::Bilinear, ..PixmapPaint::default() };
+    out.draw_pixmap(0, 0, src.as_ref(), &paint, Transform::from_scale(nw as f32 / iw as f32, nh as f32 / ih as f32), None);
+    Some(out)
+}
+
+impl Slides {
+    fn get(&mut self, idx: usize, sw: u32, sh: u32) -> Option<&tiny_skia::Pixmap> {
+        let path = self.order.get(idx)?.clone();
+        if !self.cache.iter().any(|(p, _)| *p == path) {
+            let pm = load_photo(&path, sw, sh)?;
+            if self.cache.len() >= 3 {
+                self.cache.remove(0);
+            }
+            self.cache.push((path.clone(), pm));
+        }
+        self.cache.iter().find(|(p, _)| *p == path).map(|(_, pm)| pm)
+    }
+}
+
 /// Draws the saver and remembers where the logo was.
 #[derive(Default)]
 pub struct Painter {
     size: (u32, u32),
     prev: Option<IRect>,
+    slides: Slides,
 }
 
 impl Painter {
     /// Forget the picture: the next frame clears the whole screen to black.
     pub fn reset(&mut self) {
         self.prev = None;
+        self.slides.scanned = false;
+        self.slides.cache.clear();
+    }
+
+    /// Where the slideshow takes its pictures from (the signed-in person's Pictures folder); `None` shows the logo.
+    pub fn set_photos(&mut self, dir: Option<std::path::PathBuf>) {
+        if self.slides.dir != dir {
+            self.slides.dir = dir;
+            self.slides.scanned = false;
+            self.slides.cache.clear();
+        }
+    }
+
+    fn draw_slides(&mut self, g: &mut Gfx, t: f64) -> bool {
+        use iyakki_agent::saverslides as ss;
+        let (w, h) = (g.width(), g.height());
+        if !self.slides.scanned {
+            let list = self.slides.dir.as_deref().map(ss::list_photos).unwrap_or_default();
+            self.slides.order = ss::shuffled(&list, t as u64);
+            self.slides.started_at = t;
+            self.slides.scanned = true;
+        }
+        let Some(fr) = ss::frame_at(t - self.slides.started_at, self.slides.order.len()) else { return false };
+        g.clear(BLACK);
+        let mut shown = false;
+        let layers = [(fr.cur, 1.0f32, fr.local), fr.next.map_or((usize::MAX, 0.0, 0.0), |(i, m)| (i, m, fr.local - ss::SHOW_SECS))];
+        for (idx, opacity, local) in layers {
+            if opacity <= 0.0 {
+                continue;
+            }
+            if let Some(pm) = self.slides.get(idx, w, h) {
+                let (x, y, dw, dh) = ss::cover_rect(pm.width(), pm.height(), w, h, local);
+                let paint = PixmapPaint { opacity, quality: FilterQuality::Bilinear, ..PixmapPaint::default() };
+                let tr = Transform::from_translate(x, y).pre_scale(dw / pm.width() as f32, dh / pm.height() as f32);
+                g.pm.draw_pixmap(0, 0, pm.as_ref(), &paint, tr, None);
+                shown = true;
+            }
+        }
+        shown
     }
 
     /// Draw the frame at `t` seconds into `g`, changing only the rectangle the logo left and the one it moved to (the whole screen
     /// the first time, or when the size changed). `clock` is the time text of the clock style. Returns the rectangle that changed.
     pub fn draw(&mut self, g: &mut Gfx, style: Style, t: f64, clock: Option<&str>, s: f32) -> IRect {
         let (w, h) = (g.width(), g.height());
+        let style = match style {
+            Style::Starfield => {
+                paint_stars(g, t);
+                self.prev = None;
+                self.size = (w, h);
+                return (0, 0, w.min(i32::MAX as u32) as i32, h.min(i32::MAX as u32) as i32);
+            }
+            Style::Slideshow => {
+                if self.draw_slides(g, t) {
+                    self.prev = None;
+                    self.size = (w, h);
+                    return (0, 0, w.min(i32::MAX as u32) as i32, h.min(i32::MAX as u32) as i32);
+                }
+                Style::Logo // no pictures (or none readable): the logo, so the screen is never an empty black
+            }
+            other => other,
+        };
         let geo = geometry(style, w, h, t);
         let now = pixel_box(geo.bbox, w, h);
         let dirty = match self.prev {
@@ -695,5 +869,89 @@ mod tests {
             }
             g.save_png(&dir.join(format!("{name}.png"))).expect("png");
         }
+    }
+
+    #[test]
+    fn the_stars_are_deterministic_inside_the_screen_and_fly_outwards() {
+        for (w, h) in [(1920u32, 1080u32), (800, 480), (200, 150), (1, 1), (0, 0)] {
+            let a = stars(w, h, 12.5);
+            assert_eq!(a, stars(w, h, 12.5), "same time, same stars");
+            assert!(a.len() <= star_count(w, h));
+            for s in &a {
+                assert!(s.x - s.r >= 0.0 && s.y - s.r >= 0.0 && s.x + s.r <= w as f32 && s.y + s.r <= h as f32, "{s:?} outside {w}x{h}");
+            }
+        }
+        assert_eq!(star_count(1920, 1080), 230);
+        assert_eq!((star_count(10, 10), star_count(8000, 4000)), (40, 400));
+        // motion: a bit later the field is different, and the stars are on average farther from the middle than at birth
+        let (a, b) = (stars(1280, 720, 0.0), stars(1280, 720, 5.0));
+        assert_ne!(a, b);
+        assert!(a.len() >= 80, "a good part of the field is on screen at any time: {}", a.len());
+        // never still and never the same after a whole cycle shifted by a half
+        assert_ne!(stars(1280, 720, 0.0), stars(1280, 720, STAR_LIFE_SECS / 2.0));
+        let (c, d) = (stars(1280, 720, 0.0), stars(1280, 720, STAR_LIFE_SECS));
+        assert_eq!(c.len(), d.len(), "one life later the field repeats");
+        assert!(c.iter().zip(&d).all(|(p, q)| (p.x - q.x).abs() < 0.05 && (p.y - q.y).abs() < 0.05 && p.a.abs_diff(q.a) <= 1), "same places, up to rounding");
+        assert!(stars(100, 100, f64::NAN) == stars(100, 100, 0.0));
+    }
+
+    #[test]
+    fn the_starfield_paints_white_points_on_black_and_the_whole_screen_changes() {
+        let mut g = Gfx::new(320, 200);
+        let mut p = Painter::default();
+        let dirty = p.draw(&mut g, Style::Starfield, 3.0, None, 1.0);
+        assert_eq!(dirty, (0, 0, 320, 200));
+        let px = g.rgba().chunks_exact(4).filter(|c| c[0] > 40).count();
+        assert!(px > 20 && px < 320 * 200 / 10, "a sprinkle of lit pixels, not a wash: {px}");
+        assert!(g.rgba().chunks_exact(4).all(|c| c[0] == c[1] && c[1] == c[2]), "white and grey only");
+    }
+
+    fn photo_dir(tag: &str, colours: &[[u8; 3]]) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("iyakki-slideshow-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        for (i, c) in colours.iter().enumerate() {
+            let mut pm = tiny_skia::Pixmap::new(64, 48).unwrap();
+            pm.fill(tiny_skia::Color::from_rgba8(c[0], c[1], c[2], 255));
+            pm.save_png(d.join(format!("p{i}.png"))).unwrap();
+        }
+        d
+    }
+
+    fn centre(g: &Gfx) -> [u8; 3] {
+        let (w, h) = (g.width() as usize, g.height() as usize);
+        let i = ((h / 2) * w + w / 2) * 4;
+        [g.rgba()[i], g.rgba()[i + 1], g.rgba()[i + 2]]
+    }
+
+    #[test]
+    fn the_slideshow_shows_the_pictures_fades_between_them_and_falls_back_to_the_logo() {
+        let d = photo_dir("show", &[[250, 0, 0], [0, 0, 250]]);
+        let mut g = Gfx::new(200, 150);
+        let mut p = Painter::default();
+        p.set_photos(Some(d.clone()));
+        let dirty = p.draw(&mut g, Style::Slideshow, 100.0, None, 1.0);
+        assert_eq!(dirty, (0, 0, 200, 150));
+        let first = centre(&g);
+        assert!(first[0] > 200 && first[2] < 50 || first[2] > 200 && first[0] < 50, "one picture fills the screen: {first:?}");
+        // in the middle of the fade both are there
+        p.draw(&mut g, Style::Slideshow, 100.0 + 11.0, None, 1.0);
+        let mid = centre(&g);
+        assert!(mid[0] > 60 && mid[2] > 60, "a blend of both: {mid:?}");
+        // then the other picture
+        p.draw(&mut g, Style::Slideshow, 100.0 + 12.5, None, 1.0);
+        let second = centre(&g);
+        assert!(second[0].abs_diff(first[0]) > 150, "the next picture: {first:?} then {second:?}");
+        // an unreadable picture is skipped without a crash and an empty or missing folder shows the logo
+        std::fs::write(d.join("zz.png"), b"not a picture").unwrap();
+        let mut g2 = Gfx::new(200, 150);
+        let mut p2 = Painter::default();
+        p2.set_photos(Some(d.join("missing")));
+        p2.draw(&mut g2, Style::Slideshow, 5.0, None, 1.0);
+        assert!(g2.rgba().chunks_exact(4).any(|c| c[0] > 30 || c[1] > 30 || c[2] > 30), "the logo is drawn when there are no pictures");
+        let mut p3 = Painter::default();
+        p3.set_photos(None);
+        p3.draw(&mut g2, Style::Slideshow, 5.0, None, 1.0);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

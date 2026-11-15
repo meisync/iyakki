@@ -16,6 +16,11 @@ fn policy() -> Policy {
 
 /// Meeting notes 1.0.0 installed for alice, and a stick catalog that offers 1.2.0 asking for `perms`.
 fn with_update(tag: &str, perms: &[&str]) -> Fx {
+    with_update_min(tag, perms, "")
+}
+
+/// [`with_update`], the catalog saying the new version needs IYAKKI `min` or newer.
+fn with_update_min(tag: &str, perms: &[&str], min: &str) -> Fx {
     let f = fx(tag);
     let a = user("alice");
     let key = new_signing_key().unwrap();
@@ -28,6 +33,7 @@ fn with_update(tag: &str, perms: &[&str]) -> Fx {
     e.version = "1.2.0".into();
     e.signer = public_key_hex(&key);
     e.meta = meta("acme", perms);
+    e.meta.min_version = min.into();
     let stick = f.dir.join("stick");
     std::fs::create_dir_all(&stick).unwrap();
     std::fs::write(stick.join("mn.iyp"), &v2).unwrap();
@@ -436,4 +442,25 @@ fn with_no_added_source_and_no_list_address_a_daily_check_asks_nobody_and_it_is_
     assert!(matches!(due(&s, t0, t0 + 3600, None, "dev"), Due::Later(_)), "one hour later: not yet");
     assert_eq!(due(&s, t0, t0 + DAY + 3600, None, "dev"), Due::Now, "overdue after sign-in");
     let _ = std::fs::remove_dir_all(&f.dir);
+}
+
+// ---- F-CORE-26: an update that needs a newer IYAKKI says so (the badge text), and nothing else about it changes
+
+#[test]
+fn an_update_that_needs_a_newer_iyakki_says_so_in_the_list_the_notice_and_the_assistants_report() {
+    let f = with_update_min("uc-needs-newer", &[], "0.3.0");
+    let rep = run_check(&f, &FakeFetch::default(), &CheckSettings::default());
+    assert_eq!(rep.count(), 1, "it is still listed: the person should know it exists");
+    let u = &rep.updates[0];
+    assert_eq!(u.needs_newer_iyakki(), Some("0.3.0"), "{u:?}");
+    assert!(u.note.starts_with("Needs IYAKKI 0.3.0 or newer first") && !u.needs_review());
+    let (title, body, _) = super::updatenotice::summary(&rep.updates);
+    assert!(title.contains("1 app") && body.contains("1 of them needs a newer IYAKKI first."), "{title} / {body}");
+    // an update that works with the running IYAKKI has no such note
+    let g = with_update("uc-fine", &[]);
+    let ok = run_check(&g, &FakeFetch::default(), &CheckSettings::default());
+    assert_eq!(ok.updates[0].needs_newer_iyakki(), None);
+    assert!(!super::updatenotice::summary(&ok.updates).1.contains("newer IYAKKI"));
+    let _ = std::fs::remove_dir_all(&f.dir);
+    let _ = std::fs::remove_dir_all(&g.dir);
 }

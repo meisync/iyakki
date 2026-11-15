@@ -16,23 +16,55 @@ impl Tree {
         matches!(self.nodes.get(n).map(|x| &x.kind), Some(NodeKind::Element { .. }))
     }
 
-    pub fn new_element(&mut self, tag: &str) -> Result<usize, String> {
+    /// A new detached node: a released number if there is one, else the next at the end (up to the limit).
+    fn alloc(&mut self, node: Node) -> Result<usize, String> {
+        if let Some(i) = self.free.pop() {
+            self.free_set.remove(&i);
+            self.nodes[i] = node;
+            self.reused.push(i);
+            return Ok(i);
+        }
         if self.nodes.len() >= MAX_NODES {
             return Err("the page has too many elements".into());
         }
-        if tag.is_empty() || !tag.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '#')) {
-            return Err(format!("InvalidCharacterError: {tag:?} is not a valid element name"));
-        }
-        self.nodes.push(Node { kind: NodeKind::Element { tag: tag.to_ascii_lowercase(), attrs: vec![] }, children: vec![], parent: NONE });
+        self.nodes.push(node);
         Ok(self.nodes.len() - 1)
     }
 
-    pub fn new_text(&mut self, text: &str) -> Result<usize, String> {
-        if self.nodes.len() >= MAX_NODES {
-            return Err("the page has too many elements".into());
+    pub fn new_element(&mut self, tag: &str) -> Result<usize, String> {
+        if tag.is_empty() || !tag.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '#')) {
+            return Err(format!("InvalidCharacterError: {tag:?} is not a valid element name"));
         }
-        self.nodes.push(Node { kind: NodeKind::Text(text.to_string()), children: vec![], parent: NONE });
-        Ok(self.nodes.len() - 1)
+        self.alloc(Node { kind: NodeKind::Element { tag: tag.to_ascii_lowercase(), attrs: vec![] }, children: vec![], parent: NONE })
+    }
+
+    pub fn new_text(&mut self, text: &str) -> Result<usize, String> {
+        self.alloc(Node { kind: NodeKind::Text(text.to_string()), children: vec![], parent: NONE })
+    }
+
+    /// `top` and everything below it, if `top` hangs on nothing.
+    pub fn detached_subtree(&self, top: usize) -> Option<Vec<usize>> {
+        if top == 0 || top >= self.nodes.len() || self.nodes[top].parent != NONE || self.free_set.contains(&top) {
+            return None;
+        }
+        let mut out = vec![top];
+        let mut i = 0;
+        while i < out.len() {
+            out.extend(self.nodes[out[i]].children.iter().copied());
+            i += 1;
+        }
+        Some(out)
+    }
+
+    /// Give the numbers of these nodes (a subtree found by [`Tree::detached_subtree`], that nothing refers to any more) back.
+    pub fn release_nodes(&mut self, ids: &[usize]) {
+        for &n in ids {
+            // a number already on the free list is left alone: releasing the same subtree twice must not hand one number to two nodes
+            if n < self.nodes.len() && n != 0 && self.free_set.insert(n) {
+                self.nodes[n] = Node { kind: NodeKind::Text(String::new()), children: vec![], parent: NONE };
+                self.free.push(n);
+            }
+        }
     }
 
     /// Take a node out of its parent (it keeps its own children).
@@ -480,7 +512,7 @@ impl Tree {
 }
 
 fn escape_text(t: &str) -> String {
-    t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    t.replace('&', "&amp;").replace('\u{a0}', "&nbsp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

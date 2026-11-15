@@ -271,6 +271,7 @@ impl DevMode {
         self.shell_drop(computer);
         self.patch_untrust(computer);
         self.auto_forget(computer);
+        self.restart_forget(computer);
     }
 
     pub(super) fn shell_forget_all(&self) {
@@ -278,6 +279,7 @@ impl DevMode {
         let _ = std::fs::remove_file(self.dir().join("shell-auto.json"));
         let _ = std::fs::remove_file(self.dir().join("shell.json"));
         let _ = std::fs::remove_file(self.dir().join("patch-trust.json"));
+        self.restart_forget_all();
     }
 
     /// `SHELL ACCESS by laptop` while a grant is in force (for the top bar), `SHELL REQUEST from laptop` while one waits.

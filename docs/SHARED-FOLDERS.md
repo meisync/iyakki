@@ -85,7 +85,17 @@ to narrow it.
 ## Not done yet (planned) and not tried yet
 
 * The assistant has **no tool to share a folder** (on purpose, for safety); it can only describe how to do it.
-* Not offered: a zip of a whole folder (the tree has no zip writer), encryption (HTTPS), a `.local` name, IPv6 listening.
+* Not offered: encryption (HTTPS), a `.local` name, IPv6 listening.
+* **A whole folder as one zip** (F-SHARE-13): on a listing share, the link "Download this folder as a zip" (or `?zip` after a folder address) sends the folder stored without compression, built by the in-house zip writer. Hidden files, links that leave the folder and the deny list are left out as in the list; at most 5000 entries and 1 GiB; a file or archive over 4 GB is refused (plain zip, no zip64). Website shares have no zip.
 * **Unverified on hardware.** The tests drive the server on 127.0.0.1 only (many requests, hostile paths, limits, timeouts) and the page at four
   screen sizes. It has not been tried from real phones, TVs or media players, over Wi-Fi, with large videos, or on the images; a browser's own
   handling of `Content-Security-Policy: sandbox` for downloads, Basic-auth prompts and QR scanning are untested.
+
+## Media server for TVs and players (UPnP/DLNA, F-MEDIA-02)
+
+Off until you switch it on (ask the assistant: `media_server_set`; it asks you first). When it is on, TVs, phones and players on the local network find
+it by itself (SSDP) and can list and play the **audio and video files of your shared folders**, without a password: only those folders, nothing
+hidden, nothing that leaves the folder by a link. It answers only private and link-local addresses, needs a numeric address in `Host`, and
+stops when you sign out. Another media server on the same computer holding port 1900 stops it from starting (the assistant says so). Not
+tried with a real player yet; the firewall has no rule for it, so the Shared folders preset or a rule for the media port is needed.
+

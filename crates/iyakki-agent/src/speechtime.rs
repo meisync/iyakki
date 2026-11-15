@@ -587,8 +587,7 @@ impl crate::services::Services {
     pub fn allow_speech_server(&self, url: &str) -> Result<(), String> {
         let s = server_of(url);
         self.settings
-            .lock()
-            .unwrap()
+            .lock().unwrap_or_else(std::sync::PoisonError::into_inner)
             .update(|st| {
                 if !st.voice.remote_ok.contains(&s) {
                     st.voice.remote_ok.push(s.clone());

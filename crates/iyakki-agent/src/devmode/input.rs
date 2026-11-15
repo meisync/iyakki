@@ -2,6 +2,9 @@
 //! small queue the SHELL empties on its next beat and turns into its own pointer and key events: nothing is injected below the
 //! shell (no `/dev/uinput`), so only what the shell would do for a person at the keyboard happens. While a password field has
 //! focus (the shell says so with [`set_secret_focus`]) events are refused unless the computer also holds `input:password`.
+//! While an approval card is up on the screen (developer-mode shell/reboot/update ask, the power cards, a flow's permission ask) the
+//! shell says so with [`set_approval_card`] and the events are refused with [`APPROVAL_SENTENCE`]: those are answered by a person
+//! at the device, never by a paired computer. The shell also drops, and logs, anything that was queued before the card came up.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -27,6 +30,7 @@ pub enum InputEv {
 struct Hand {
     queue: HashMap<PathBuf, Vec<InputEv>>,
     secret: HashMap<PathBuf, bool>,
+    approval: HashMap<PathBuf, bool>,
 }
 
 fn hand() -> std::sync::MutexGuard<'static, Hand> {
@@ -111,4 +115,16 @@ pub fn set_secret_focus(data_dir: &Path, on: bool) {
 
 pub fn secret_focus(data_dir: &Path) -> bool {
     hand().secret.get(data_dir).copied().unwrap_or(false)
+}
+
+/// What a paired computer is told when its input meets an approval card.
+pub const APPROVAL_SENTENCE: &str = "an approval or power card is open on the device: answer this on the device's own screen (input from a paired computer never answers it)";
+
+/// The shell side: is an approval card (dev ask, power card, permission ask) up right now?
+pub fn set_approval_card(data_dir: &Path, on: bool) {
+    hand().approval.insert(data_dir.to_path_buf(), on);
+}
+
+pub fn approval_card(data_dir: &Path) -> bool {
+    hand().approval.get(data_dir).copied().unwrap_or(false)
 }

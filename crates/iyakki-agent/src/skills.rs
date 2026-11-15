@@ -163,7 +163,7 @@ impl SkillStore {
     }
 
     fn index(&self, s: &Skill) {
-        let mut kb = self.kb.lock().unwrap();
+        let mut kb = self.kb.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let ns = s.scope.ns();
         // replace any older version of this skill's index entry
         for d in kb.docs(&ns).into_iter().filter(|d| d.title == s.name) {
@@ -240,7 +240,7 @@ impl SkillStore {
             return Err(SkillError::NotFound);
         }
         std::fs::remove_file(self.scope_dir(scope).join(format!("{name}.md"))).map_err(|_| SkillError::NotFound)?;
-        let mut kb = self.kb.lock().unwrap();
+        let mut kb = self.kb.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let ns = scope.ns();
         for d in kb.docs(&ns).into_iter().filter(|d| d.title == name) {
             let _ = kb.remove_document(&ns, &d.id);
@@ -254,7 +254,7 @@ impl SkillStore {
             return vec![];
         }
         let mine = format!("skills/user/{user}");
-        let hits = self.kb.lock().unwrap().search_weighted(&[("skills/shared", 1.0), (mine.as_str(), 1.2)], query, k * 3);
+        let hits = self.kb.lock().unwrap_or_else(std::sync::PoisonError::into_inner).search_weighted(&[("skills/shared", 1.0), (mine.as_str(), 1.2)], query, k * 3);
         let mut out: Vec<Skill> = Vec::new();
         for h in hits {
             let scope = if h.ns == "skills/shared" { Scope::Shared } else { Scope::User(user.into()) };

@@ -106,29 +106,31 @@ pub const DARK: Theme = Theme {
     ring: 1.0,
 };
 
-/// Warm-neutral light: paper-like greys, the same elevation steps (page, card, hover, chosen), a deeper blue accent.
+/// Frosted daylight: white cards on a cool blue-grey ground, one deep blue accent, state colours that stay legible on
+/// every surface. The launcher draws a frosted island over the wallpaper on top of this palette (docs/design/launcher).
+/// Every value is checked by `every_theme_keeps_the_text_readable_on_every_ground` (4.5:1 for all ink on all grounds).
 pub const LIGHT: Theme = Theme {
     id: ThemeId::Light,
-    bg_top: rgb(250, 248, 244),
-    bg_bottom: rgb(238, 235, 229),
-    card: rgb(255, 254, 251),
-    card_hover: rgb(243, 240, 234),
-    card_sel: rgb(226, 233, 247),
-    border: rgb(200, 195, 185),
-    accent: rgb(37, 84, 196),
-    text: rgb(28, 30, 36),
-    muted: rgb(80, 84, 96),
-    dim: rgb(92, 96, 108),
-    err: rgb(172, 28, 36),
-    ok: rgb(18, 112, 60),
+    bg_top: rgb(237, 242, 250),
+    bg_bottom: rgb(227, 234, 245),
+    card: rgb(255, 255, 255),
+    card_hover: rgb(241, 245, 251),
+    card_sel: rgb(222, 233, 252),
+    border: rgb(211, 220, 232),
+    accent: rgb(17, 82, 209),
+    text: rgb(11, 13, 18),
+    muted: rgb(69, 76, 88),
+    dim: rgb(82, 91, 106),
+    err: rgb(179, 32, 28),
+    ok: rgb(20, 107, 60),
     field: rgb(255, 255, 255),
-    panel: rgb(233, 230, 223),
-    well: rgb(242, 239, 233),
-    amber: rgb(138, 78, 0),
-    cyan: rgb(0, 106, 140),
-    magenta: rgb(170, 30, 115),
-    button: rgb(246, 243, 237),
-    button_hot: rgb(232, 228, 220),
+    panel: rgb(238, 242, 249),
+    well: rgb(245, 248, 252),
+    amber: rgb(138, 90, 0),
+    cyan: rgb(14, 116, 144),
+    magenta: rgb(163, 25, 94),
+    button: rgb(243, 246, 251),
+    button_hot: rgb(231, 237, 247),
     ring: 1.0,
 };
 
@@ -160,6 +162,8 @@ pub const HIGH_CONTRAST: Theme = Theme {
 
 thread_local! {
     static CURRENT: Cell<ThemeId> = const { Cell::new(ThemeId::Dark) };
+    /// A theme a person wrote as a file (`usertheme`), drawn instead of the built-in one; its `id` is the built-in theme it grew from.
+    static CUSTOM: Cell<Option<&'static Theme>> = const { Cell::new(None) };
     /// Bumped on every change so caches of drawn pictures (the backdrop) know to rebuild.
     static GENERATION: Cell<u32> = const { Cell::new(0) };
 }
@@ -169,7 +173,23 @@ pub fn current_id() -> ThemeId {
 }
 
 pub fn current() -> &'static Theme {
-    current_id().theme()
+    CUSTOM.with(|c| c.get()).unwrap_or_else(|| current_id().theme())
+}
+
+/// Draw with a theme read from a file (its base decides how colours the apps made up are mapped), or go back to the built-in one.
+pub fn set_custom(t: Option<&'static Theme>) {
+    let was = CUSTOM.with(|c| c.get()).map(|x| x as *const Theme);
+    if was != t.map(|x| x as *const Theme) {
+        CUSTOM.with(|c| c.set(t));
+        GENERATION.with(|g| g.set(g.get().wrapping_add(1)));
+    }
+    if let Some(t) = t {
+        set_current(t.id);
+    }
+}
+
+pub fn is_custom() -> bool {
+    CUSTOM.with(|c| c.get()).is_some()
 }
 
 pub fn generation() -> u32 {
@@ -217,7 +237,33 @@ pub fn save(dir: &std::path::Path, user: &str, id: ThemeId) {
 
 /// Draw in the person's theme (or Dark with `None`, at the sign-in screen).
 pub fn apply(id: Option<ThemeId>) {
+    set_custom(None);
     set_current(id.unwrap_or_default());
+}
+
+/// The raw saved choice of a person (`dark`, `light`, `high-contrast` or `user:<file key>`), None when there is none.
+pub fn load_choice(dir: &std::path::Path, user: &str) -> Option<String> {
+    std::fs::read_to_string(path(dir, user)).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()).and_then(|v| v["theme"].as_str().map(String::from))
+}
+
+/// Keep a raw choice (see [`load_choice`]) with the person's other display settings.
+pub fn save_choice(dir: &std::path::Path, user: &str, choice: &str) {
+    let p = path(dir, user);
+    let mut v = std::fs::read_to_string(&p).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()).filter(|v| v.is_object()).unwrap_or_else(|| serde_json::json!({}));
+    v["theme"] = serde_json::json!(choice);
+    let tmp = p.with_extension("tmp");
+    if std::fs::write(&tmp, v.to_string()).is_ok() {
+        let _ = std::fs::rename(&tmp, &p);
+    }
+}
+
+/// Draw in the theme a person saved: a built-in one, or a theme file of theirs (when it is still there and still readable; otherwise
+/// the built-in theme that comes of the saved text, Dark when none).
+pub fn apply_for(dir: &std::path::Path, user: &str) {
+    apply(Some(load(dir, user)));
+    if let Some(key) = load_choice(dir, user).as_deref().and_then(|c| c.strip_prefix(crate::usertheme::CHOICE_PREFIX).map(String::from)) {
+        let _ = crate::usertheme::activate(dir, user, &key);
+    }
 }
 
 // ------------------------------------------------------------------------------------------------------ the mapping
@@ -225,10 +271,10 @@ pub fn apply(id: Option<ThemeId>) {
 /// The colour to put on screen for `c`, a colour written in the Dark palette. Dark returns `c` untouched.
 pub fn themed(c: [u8; 4]) -> [u8; 4] {
     let id = current_id();
-    if id == ThemeId::Dark {
+    if id == ThemeId::Dark && !is_custom() {
         return c;
     }
-    let t = id.theme();
+    let t = current();
     let with_a = |m: [u8; 4]| [m[0], m[1], m[2], c[3]];
     let pairs: [([u8; 4], [u8; 4]); 17] = [
         (DARK.bg_top, t.bg_top),

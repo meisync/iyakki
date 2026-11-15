@@ -103,7 +103,9 @@ impl AgentHost {
         if cams.is_empty() {
             return deny("no camera", "No camera is connected. Plug in a USB camera and run the flow again.".into());
         }
-        if !req.device.is_empty() && !cams.iter().any(|c| c.to_lowercase().contains(&req.device.to_lowercase())) {
+        // the camera the node names (any part of its listed name), else the usual one; the backend is asked for that very one
+        let named = if req.device.is_empty() { cams.first() } else { cams.iter().find(|c| c.to_lowercase().contains(&req.device.to_lowercase())) };
+        if !req.device.is_empty() && named.is_none() {
             return deny("unknown camera", format!("There is no connected camera called \"{}\". Connected: {}.", req.device.chars().take(60).collect::<String>(), cams.join("; ")));
         }
         if let Some(what) = self.svc.camera.in_use() {
@@ -115,7 +117,7 @@ impl AgentHost {
         let dir = if req.keep { self.cam_folder(&req.run_id).join("kept") } else { self.cam_folder(&req.run_id) };
         make_private(&dir).map_err(|e| NodeError::config(format!("cannot make the run's private picture folder: {e}")))?;
         let busy = self.svc.camera.begin(&self.user, &format!("the flow \"{}\" taking a photo", req.flow_id));
-        let shot = backend.photo(&dir);
+        let shot = backend.photo_from(&dir, &req.device);
         drop(busy);
         let path = shot.map_err(|e| NodeError::new(format!("The camera gave no picture: {e}")))?;
         self.cam_runs.0.lock().unwrap_or_else(|e| e.into_inner()).push((req.run_id.clone(), path.clone(), req.keep));
@@ -130,7 +132,7 @@ impl AgentHost {
                 log.push(format!("The picture goes only to {} {}.", p.model, p.place.describe(&p.host)));
             }
         }
-        Ok(CamPhotoResult { path: path.display().to_string(), taken_at: now, device: cams.first().cloned().unwrap_or_default(), log })
+        Ok(CamPhotoResult { path: path.display().to_string(), taken_at: now, device: named.cloned().unwrap_or_default(), log })
     }
 
     /// The run is over: delete its pictures (kept ones stay) and the folder when it is empty.

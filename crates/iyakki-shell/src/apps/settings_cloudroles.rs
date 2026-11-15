@@ -18,12 +18,15 @@ enum Ask {
     TenantMember,
     Namespace,
     NsMember(String),
+    /// The shared vault's provider: `builtin`, or `external address path token_secret [mount] [namespace]`.
+    Vault,
 }
 
 enum Sure {
     RemoveTenant(String),
     RemoveNs(String, String),
     DeleteNs(String),
+    Vault(iyakki_agent::sharedvault::Setting),
 }
 
 /// One selectable row of the page.
@@ -116,14 +119,15 @@ impl SettingsApp {
 
     pub(super) fn roles_buttons(&self) -> Vec<Btn> {
         if self.roles.sure.is_some() {
-            return vec![("Yes, remove", ERR, 'y'), ("Cancel", MUTED, '\u{1b}')];
+            let yes = if matches!(self.roles.sure, Some(Sure::Vault(_))) { "Yes, change it" } else { "Yes, remove" };
+            return vec![(yes, ERR, 'y'), ("Cancel", MUTED, '\u{1b}')];
         }
         if self.roles.ask.is_some() {
             return vec![("Add", ACCENT, '\n'), ("Cancel", MUTED, '\u{1b}')];
         }
         match &self.roles.cache {
             Some((_, Ok(None))) => vec![("Make me the owner", ACCENT, 'o')],
-            _ => vec![("Add person", ACCENT, 'm'), ("New namespace", TEXT, 'n'), ("Add to namespace", TEXT, 'a'), ("Join", TEXT, 'j'), ("Remove person", ERR, 'x'), ("Delete namespace", ERR, 'd')],
+            _ => vec![("Add person", ACCENT, 'm'), ("New namespace", TEXT, 'n'), ("Add to namespace", TEXT, 'a'), ("Join", TEXT, 'j'), ("Remove person", ERR, 'x'), ("Delete namespace", ERR, 'd'), ("Shared vault", TEXT, 'v')],
         }
     }
 
@@ -147,7 +151,7 @@ impl SettingsApp {
                 }
                 Event::Key(_) => {
                     self.roles.sure = None;
-                    self.ok("Nothing was removed.");
+                    self.ok("Nothing was changed.");
                 }
                 _ => return false,
             }
@@ -212,7 +216,41 @@ impl SettingsApp {
         }
     }
 
+    /// The typed shared-vault setting, as a checked `Setting`. A value that looks like a token is refused without being echoed.
+    pub(super) fn vault_setting_from(text: &str) -> Result<iyakki_agent::sharedvault::Setting, String> {
+        use iyakki_agent::sharedvault::{ExternalRef, Provider, Setting, FILE_VERSION};
+        let w: Vec<&str> = text.split_whitespace().collect();
+        if w.iter().any(|t| t.len() > 300 || t.contains("-----BEGIN") || t.starts_with("hvs.") || t.starts_with("s.")) {
+            return Err("a value looks like a token. Never type a token here: give the NAME of the vault secret that holds it.".into());
+        }
+        let s = match w.as_slice() {
+            ["builtin"] => Setting { v: FILE_VERSION, provider: Provider::Builtin, external: None },
+            ["external", address, path, token_secret, rest @ ..] if rest.len() <= 2 => Setting {
+                v: FILE_VERSION,
+                provider: Provider::External,
+                external: Some(ExternalRef { address: address.to_string(), mount: rest.first().map(|m| m.to_string()).unwrap_or_else(|| "secret".into()), path: path.to_string(), namespace: rest.get(1).map(|n| n.to_string()), token_secret: token_secret.to_string() }),
+            },
+            _ => return Err("Type builtin, or: external ADDRESS PATH TOKEN-SECRET-NAME [MOUNT] [NAMESPACE].".into()),
+        };
+        s.check()?;
+        Ok(s)
+    }
+
     fn roles_submit(&mut self, ask: Ask, text: String, cx: &AppCx) {
+        if matches!(ask, Ask::Vault) {
+            return match Self::vault_setting_from(&text) {
+                Ok(s) => self.roles.sure = Some(Sure::Vault(s)),
+                Err(e) => {
+                    let mut f = TextField::new("", false);
+                    f.set(&text);
+                    if e.contains("looks like a token") {
+                        f.set("");
+                    }
+                    self.roles.ask = Some((Ask::Vault, f));
+                    self.fail(e);
+                }
+            };
+        }
         let mut words = text.split_whitespace();
         let name = words.next().unwrap_or("").to_string();
         let role_word = words.next().map(|w| w.to_lowercase());
@@ -224,6 +262,7 @@ impl SettingsApp {
             return self.fail("Type one name, and for a person optionally a role after it.");
         }
         match ask {
+            Ask::Vault => {}
             Ask::Namespace => self.roles_apply(cx, |r, me| r.create_namespace(me, &name)),
             Ask::TenantMember => {
                 let role = match role_word.as_deref() {
@@ -251,6 +290,16 @@ impl SettingsApp {
             Sure::RemoveTenant(who) => self.roles_apply(cx, |r, me| r.remove_tenant_member(me, &who)),
             Sure::RemoveNs(ns, who) => self.roles_apply(cx, |r, me| r.remove_namespace_member(me, &ns, &who)),
             Sure::DeleteNs(ns) => self.roles_apply(cx, |r, me| r.delete_namespace(me, &ns)),
+            Sure::Vault(setting) => {
+                let me = cx.session.user.clone();
+                match setting.save(Self::svc(cx).dir(), &me) {
+                    Ok(()) => {
+                        cx.audit.record(&me, "settings.shared_vault_provider", setting.provider.word());
+                        self.ok(format!("{} Secrets already stored are not moved to the other system.", setting.summary()));
+                    }
+                    Err(e) => self.fail(e),
+                }
+            }
         }
         let len = self.roles_len(cx);
         let i = &mut self.sel[self.tab];
@@ -264,10 +313,14 @@ impl SettingsApp {
             Key::Down => return self.move_sel(1, len),
             Key::Home => return self.move_sel(-(len as i32), len),
             Key::End => return self.move_sel(len as i32, len),
-            Key::Char('m' | 'n' | 'a' | 'j' | 'x' | 'd' | 'o') => {}
+            Key::Char('m' | 'n' | 'a' | 'j' | 'x' | 'd' | 'o' | 'v') => {}
             _ => return,
         }
         if !self.admin(cx) {
+            return;
+        }
+        if matches!(k, Key::Char('v')) {
+            self.roles.ask = Some((Ask::Vault, TextField::new("builtin, or: external ADDRESS PATH TOKEN-SECRET-NAME [MOUNT] [NAMESPACE]", false)));
             return;
         }
         let me = cx.session.user.clone();
@@ -334,6 +387,7 @@ impl SettingsApp {
             Sure::RemoveTenant(who) => format!("Remove {who} from the tenant? They leave every namespace too. Their keys are to be rotated and their sessions ended; this page only changes the lists, the vault service does the rotation."),
             Sure::RemoveNs(ns, who) => format!("Remove {who} from namespace {ns}? The namespace's key is to be rotated and their sessions there ended; this page only changes the lists, the vault service does the rotation."),
             Sure::DeleteNs(ns) => format!("Delete namespace {ns}? Its member list goes with it."),
+            Sure::Vault(s) => format!("Change the shared vault to {}? Secrets already stored are not moved to the other system, and the built-in cryptography is not externally reviewed. Nothing secret is typed here: an external vault is reached with the NAME of a vault secret that holds its token.", s.provider.word()),
         }
     }
 
@@ -386,6 +440,7 @@ impl SettingsApp {
                 Ask::TenantMember => "Add to the tenant (name, then a role):".to_string(),
                 Ask::Namespace => "New namespace (a name):".to_string(),
                 Ask::NsMember(ns) => format!("Add to namespace {ns} (name, then a role):"),
+                Ask::Vault => "Shared vault provider (never a token, only the NAME of the secret that holds it):".to_string(),
             };
             line(g, &mut y, 13.0, MUTED, Face::Sans, &what);
             f.render(g, R::new(a.x, y, a.w.min(520.0 * s), 34.0 * s), true, s, blink(self.ticks), Face::Sans, FIELD_ID);

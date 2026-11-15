@@ -33,6 +33,15 @@ pub const RATE: u32 = 48_000;
 pub const CHANNELS: usize = 2;
 /// No data for this long: the mixer source ends.
 pub const IDLE_END: Duration = Duration::from_millis(400);
+/// Size asked for the pipe itself (one page, 4 KB = 21 ms of 48 kHz stereo; the kernel default of 64 KB is 340 ms). The engine's
+/// `file` plugin over a `null` slave has no clock of its own, so the pipe is the only thing that holds the page back: a deep pipe
+/// is a deep delay between picture and sound.
+pub const PIPE_BYTES: i32 = 4096;
+/// What the tap reads at a time (5 ms), so little audio waits in the tap itself while the ring is full.
+const READ_BYTES: usize = 1024;
+/// No data for this long: whatever is still queued is thrown away (a pause or a stop must not play on). A stall shorter than this
+/// plays out as before.
+pub const IDLE_FLUSH: Duration = Duration::from_millis(100);
 /// The name of the pipe next to the web profile.
 pub const FIFO_NAME: &str = "web-sound.fifo";
 /// How the mixer lists this source.
@@ -127,6 +136,7 @@ pub struct Tap {
     path: PathBuf,
     stop: Arc<AtomicBool>,
     state: Arc<AtomicU8>,
+    drop_now: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -136,11 +146,22 @@ impl Tap {
         make_fifo(path)?;
         // read AND write so the open never blocks and the pipe never reports "end" when the engine closes its side
         let file = std::fs::OpenOptions::new().read(true).write(true).custom_flags(libc::O_NONBLOCK).open(path).map_err(|e| format!("cannot open the sound pipe: {e}"))?;
+        // SAFETY: fcntl on a pipe descriptor we own; the result is only a size (a refusal leaves the default, which still works)
+        let got = unsafe { libc::fcntl(file.as_raw_fd(), crate::oscompat::F_SETPIPE_SZ, PIPE_BYTES) };
+        if got <= 0 {
+            log::info!("web sound: the pipe could not be made smaller; the delay will be larger");
+        }
         let stop = Arc::new(AtomicBool::new(false));
         let state = Arc::new(AtomicU8::new(TapState::Idle.code()));
-        let (s2, st2) = (stop.clone(), state.clone());
-        let thread = std::thread::Builder::new().name("iyakki-webmix".into()).spawn(move || run(file, opener, s2, st2)).map_err(|e| e.to_string())?;
-        Ok(Tap { path: path.to_path_buf(), stop, state, thread: Some(thread) })
+        let drop_now = Arc::new(AtomicBool::new(false));
+        let (s2, st2, d2) = (stop.clone(), state.clone(), drop_now.clone());
+        let thread = std::thread::Builder::new().name("iyakki-webmix".into()).spawn(move || run(file, opener, s2, st2, d2)).map_err(|e| e.to_string())?;
+        Ok(Tap { path: path.to_path_buf(), stop, state, drop_now, thread: Some(thread) })
+    }
+
+    /// Ask the tap to throw away what is queued (ring, pipe) at its next turn.
+    pub fn drop_queued(&self) {
+        self.drop_now.store(true, Ordering::SeqCst);
     }
 
     pub fn state(&self) -> TapState {
@@ -181,15 +202,46 @@ fn wait_readable(fd: i32, ms: i32) -> bool {
     r > 0 && p.revents & libc::POLLIN != 0
 }
 
-fn run(mut file: std::fs::File, opener: Opener, stop: Arc<AtomicBool>, state: Arc<AtomicU8>) {
+/// Throw away everything queued for the speaker: the source's ring, the half frame in `carry` and what waits in the pipe. The
+/// source stays open (a page that starts again feeds the same one); the mixer lets the card sleep when nothing comes.
+fn drop_all(file: &mut std::fs::File, carry: &mut Vec<u8>, src: &mut Option<SourceWriter>) {
+    carry.clear();
+    if let Some(s) = src.as_ref() {
+        s.flush();
+    }
+    let mut junk = [0u8; 4096];
+    while matches!(file.read(&mut junk), Ok(n) if n > 0) {}
+}
+
+/// The page stopped, paused or its tile was left: throw away the queued sound now (the tap does it within about 20 ms). Safe to
+/// call when the route is off.
+pub fn drop_queued() {
+    if let Some(t) = TAP.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        t.drop_queued();
+    }
+}
+
+fn run(mut file: std::fs::File, opener: Opener, stop: Arc<AtomicBool>, state: Arc<AtomicU8>, drop_now: Arc<AtomicBool>) {
     let fd = file.as_raw_fd();
-    let mut buf = vec![0u8; 8192];
+    let mut buf = vec![0u8; READ_BYTES];
     let mut carry: Vec<u8> = Vec::new();
     let mut src: Option<SourceWriter> = None;
     let mut last = Instant::now();
     let set = |s: TapState| state.store(s.code(), Ordering::SeqCst);
+    let mut flushed = true;
     while !stop.load(Ordering::SeqCst) {
-        if !wait_readable(fd, 50) {
+        if drop_now.swap(false, Ordering::SeqCst) {
+            drop_all(&mut file, &mut carry, &mut src);
+            flushed = true;
+            set(TapState::Idle);
+            continue;
+        }
+        if !wait_readable(fd, 20) {
+            if !flushed && last.elapsed() >= IDLE_FLUSH {
+                // the page stopped or paused: what is still queued would be heard after it
+                drop_all(&mut file, &mut carry, &mut src);
+                flushed = true;
+            }
             if src.is_some() && last.elapsed() >= IDLE_END {
                 if let Some(s) = src.take() {
                     s.finish();
@@ -203,6 +255,7 @@ fn run(mut file: std::fs::File, opener: Opener, stop: Arc<AtomicBool>, state: Ar
             _ => continue,
         };
         last = Instant::now();
+        flushed = false;
         let pcm = bytes_to_samples(&mut carry, &buf[..n]);
         if pcm.is_empty() {
             continue;
@@ -252,7 +305,7 @@ pub fn ensure(path: &Path) -> bool {
         return true;
     }
     *g = None;
-    let opener: Opener = Arc::new(|| crate::mixer::global_if_enabled().ok_or(MixError::Disabled)?.open_source_with(SourceKind::Media, RATE, CHANNELS, LABEL, false));
+    let opener: Opener = Arc::new(|| crate::mixer::global_if_enabled().ok_or(MixError::Disabled)?.open_live_source(SourceKind::Media, RATE, CHANNELS, LABEL));
     match Tap::start(path, opener) {
         Ok(t) => {
             *g = Some(t);
@@ -314,7 +367,7 @@ mod tests {
 
     fn opener_for(m: &Arc<Mixer>) -> Opener {
         let m = m.clone();
-        Arc::new(move || m.open_source_with(SourceKind::Media, RATE, CHANNELS, LABEL, false))
+        Arc::new(move || m.open_live_source(SourceKind::Media, RATE, CHANNELS, LABEL))
     }
 
     fn until(what: &str, f: impl Fn() -> bool) {
@@ -450,5 +503,154 @@ mod tests {
         assert!(status_text(true, true, None).contains("through the mixer") && status_text(false, true, None).contains("direct"));
         assert!(status_text(true, true, Some(TapState::Refused)).contains("silent"));
         assert!(status_text(true, true, Some(TapState::Carrying)).contains("through the mixer"));
+    }
+
+    /// A mixer paced like a card (realtime), with the browser numbers of the default configuration (100 ms target).
+    fn paced_mixer() -> (Arc<Mixer>, FakeSink, MixerCfg) {
+        let sink = FakeSink::new();
+        let cfg = MixerCfg { raise_priority: false, idle_ms: 20_000, ..MixerCfg::default() }.with_live_target_ms(crate::mixer::DEFAULT_LIVE_TARGET_MS);
+        (Arc::new(Mixer::start(cfg, Box::new(sink.clone()))), sink, cfg)
+    }
+
+    #[test]
+    fn the_page_sound_lags_by_less_than_the_bound_during_a_long_stream_with_a_page_that_writes_as_fast_as_the_pipe_allows() {
+        let _rt = crate::mixer::rt_serial();
+        // The worst case for lag: a page that fills every queue (what alsasink over a clockless `null` slave does). Chunk k carries
+        // the value 1000 + k; the time it was accepted by the pipe is noted, and the time the sink got it plus the device buffer
+        // (the fake card plays a period when the mixer hands it over plus the lead, the real one after its 40 ms buffer) is
+        // when it would be heard.
+        let d = dir("lag");
+        let (m, sink, cfg) = paced_mixer();
+        let fifo = d.join(FIFO_NAME);
+        let tap = Tap::start(&fifo, opener_for_live(&m)).unwrap();
+        let mut w = std::fs::OpenOptions::new().write(true).open(&fifo).unwrap();
+        let t0 = crate::mixer::engine::now_us() / 1000;
+        let mut accepted: Vec<u64> = Vec::new();
+        let secs = 6;
+        let chunks = secs * 100; // 10 ms each
+        let mut sent = 0usize;
+        // The mixer thread is a normal thread here (no real-time priority): on a loaded machine the scheduler can keep it off the CPU
+        // for longer than the bound, and that delay is the machine's, not the pipeline's. A probe thread measures how late a 5 ms
+        // sleep wakes up while the stream runs; the largest overshoot is added to the bound (about 0 to 1 ms on an idle machine).
+        let probe_stop = Arc::new(AtomicBool::new(false));
+        let probe = {
+            let stop = probe_stop.clone();
+            std::thread::spawn(move || {
+                let mut worst = 0u64;
+                while !stop.load(Ordering::Relaxed) {
+                    let t = std::time::Instant::now();
+                    std::thread::sleep(Duration::from_millis(5));
+                    worst = worst.max((t.elapsed().as_millis() as u64).saturating_sub(5));
+                }
+                worst
+            })
+        };
+        // a real page is paced by its sink: keep roughly real time on average but never wait for the queues to drain
+        while sent < chunks {
+            w.write_all(&pcm_bytes(480, 1000 + sent as i16)).unwrap();
+            accepted.push(crate::mixer::engine::now_us() / 1000);
+            sent += 1;
+            // the page can run at most 1 s ahead of the clock: sleeps when ahead, so the whole run takes about `secs` seconds
+            let due = t0 + sent as u64 * 10;
+            let ahead = due.saturating_sub(crate::mixer::engine::now_us() / 1000);
+            if ahead > 1000 {
+                std::thread::sleep(Duration::from_millis(ahead - 1000));
+            }
+        }
+        until("the mixer to receive the last chunk", || sink.lock().samples.iter().filter(|s| **s == 1000 + chunks as i16 - 1).count() > 0);
+        let lead_ms = (cfg.live_lead_periods * 20) as u64;
+        let l = sink.lock();
+        let mut worst = 0u64;
+        let mut count = 0;
+        for k in 100..chunks {
+            let v = 1000 + k as i16;
+            let Some(pos) = l.samples.iter().position(|s| *s == v) else { continue };
+            let Some(&(t_sink, _)) = l.stamps.iter().rev().find(|(_, at)| *at <= pos) else { continue };
+            let lag = (t_sink + lead_ms).saturating_sub(accepted[k]);
+            worst = worst.max(lag);
+            count += 1;
+        }
+        assert!(count > chunks as usize / 2, "only {count} chunks found in the sink");
+        drop(l);
+        // the 100 ms target plus the 10 ms in which the test notes the time of a chunk
+        eprintln!("worst page-sound lag over {count} chunks: {worst} ms");
+        probe_stop.store(true, Ordering::Relaxed);
+        let jitter = probe.join().unwrap();
+        // The longest time the mixer thread itself went without writing a period (the pace is one period of 20 ms): while it is
+        // off the CPU everything queues up by that much, which the probe above only sees in part.
+        let stall = {
+            let l = sink.lock();
+            l.stamps.windows(2).map(|w| w[1].0.saturating_sub(w[0].0)).max().unwrap_or(0).saturating_sub(20)
+        };
+        eprintln!("worst scheduling overshoot of a 5 ms sleep during the run: {jitter} ms; longest pause of the mixer thread beyond its period: {stall} ms");
+        assert!(worst <= crate::mixer::DEFAULT_LIVE_TARGET_MS as u64 + 10 + jitter + stall, "worst lag {worst} ms is above the bound (plus {jitter} ms of scheduling delay and {stall} ms of mixer-thread pause measured on this machine)");
+        drop(w);
+        drop(tap);
+        m.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_queue_is_empty_within_a_period_of_a_stop_and_a_pause_does_not_play_on() {
+        let _rt = crate::mixer::rt_serial();
+        let d = dir("stop");
+        let (m, _sink, _cfg) = paced_mixer();
+        let fifo = d.join(FIFO_NAME);
+        let tap = Tap::start(&fifo, opener_for_live(&m)).unwrap();
+        let mut w = std::fs::OpenOptions::new().write(true).open(&fifo).unwrap();
+        // fill every queue, then stop writing (a pause): the ring is flushed after IDLE_FLUSH, not played for seconds
+        for _ in 0..30 {
+            w.write_all(&pcm_bytes(480, 7000)).unwrap();
+        }
+        until("sound to be carried", || tap.state() == TapState::Carrying);
+        let queued = || m.sources().iter().find(|s| s.label == LABEL).map(|s| s.buffered_ms).unwrap_or(0);
+        let t_pause = Instant::now();
+        until("the ring to be empty after the pause", || queued() == 0);
+        let took = t_pause.elapsed();
+        assert!(took <= IDLE_FLUSH + Duration::from_millis(60), "the queue took {took:?} to empty after the page stopped");
+
+        // an explicit stop (the tile is left): within one 20 ms period (plus the tap's 20 ms poll), pipe included
+        let sent = std::thread::spawn(move || {
+            for _ in 0..8 {
+                if w.write_all(&pcm_bytes(480, 7000)).is_err() {
+                    break;
+                }
+            }
+            w
+        });
+        let w = sent.join().unwrap();
+        let t_stop = Instant::now();
+        tap.drop_queued();
+        until("the queues to be empty after a stop", || {
+            let mut left: libc::c_int = 0;
+            // SAFETY: FIONREAD on a live fd with a valid int pointer
+            let r = unsafe { libc::ioctl(w.as_raw_fd(), libc::FIONREAD as _, &mut left) };
+            queued() == 0 && r == 0 && left == 0
+        });
+        assert!(t_stop.elapsed() <= Duration::from_millis(60), "the stop took {:?}", t_stop.elapsed());
+        drop(w);
+        drop(tap);
+        m.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    fn opener_for_live(m: &Arc<Mixer>) -> Opener {
+        let m = m.clone();
+        Arc::new(move || m.open_live_source(SourceKind::Media, RATE, CHANNELS, LABEL))
+    }
+
+    #[test]
+    fn the_pipe_is_one_page_not_the_kernel_default() {
+        let d = dir("pipe");
+        let fifo = d.join(FIFO_NAME);
+        let opener: Opener = Arc::new(|| Err(MixError::Disabled));
+        let tap = Tap::start(&fifo, opener).unwrap();
+        let w = std::fs::OpenOptions::new().write(true).open(&fifo).unwrap();
+        // SAFETY: F_GETPIPE_SZ on a live pipe descriptor
+        let size = unsafe { libc::fcntl(w.as_raw_fd(), crate::oscompat::F_GETPIPE_SZ) };
+        assert!(size > 0 && size <= 8192, "pipe size {size}");
+        drop(w);
+        drop(tap);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

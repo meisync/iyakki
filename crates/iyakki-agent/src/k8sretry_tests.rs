@@ -335,6 +335,16 @@ fn the_feed_keeps_the_last_good_list_then_shows_the_banner_and_recovers() {
     let n = f.fetches();
     t.advance(16_000);
     wait_for("recovery", || f.fetches() > n && f.listing().is_some_and(|l| l.cluster == Cluster::Ok));
+    // The list is stored before the namespace summary is asked for (same thread, one after the other), and `status()` reports the
+    // namespace tracker when the list is fine: on a loaded machine the test used to look in between. The namespace call may also
+    // have been in flight with the old answer when the cluster came back, so it needs one more due time: move the fake clock on
+    // (waits cost nothing) until both have recovered.
+    let t0 = Instant::now();
+    while f.status().failing {
+        assert!(t0.elapsed() < Duration::from_secs(10), "the namespace summary never recovered: {:?} (fetches {}, ns fetches {}, was {n}); log:\n{}", f.status(), f.fetches(), f.ns_fetches(), _r.log.text());
+        t.advance(16_000);
+        std::thread::sleep(Duration::from_millis(10));
+    }
     assert!(!f.status().failing, "{:?} (fetches {}, was {n})", f.status(), f.fetches());
     assert!(!k.overlapped.load(Ordering::SeqCst), "two kubectl calls never ran at once");
 }

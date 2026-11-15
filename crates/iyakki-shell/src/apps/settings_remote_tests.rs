@@ -164,3 +164,10 @@ fn the_button_is_reached_by_keyboard_and_touch_and_the_page_fits_at_two_sizes() 
     let b = g.hits.iter().find(|x| x.ev == Event::Key(Key::Char('e'))).unwrap();
     assert!(b.rect.w >= 100.0 && b.rect.h > 0.0, "{:?}", b.rect);
 }
+
+#[test]
+fn the_search_words_client_and_connect_find_remote_access() {
+    for w in ["client", "connect"] {
+        assert!(Tab::Remote.keywords().contains(w), "{w}");
+    }
+}

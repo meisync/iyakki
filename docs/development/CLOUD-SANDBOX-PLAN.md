@@ -100,11 +100,14 @@ Tests: `sandbox/tests.rs`; policy and rule tests included there.
 ## 6. Seams and gaps (read before trusting any of this)
 
 * **Cluster access.** The tenant pod has no service account token. `JobExecutor` needs a `KubeApi` for the team's cluster; `K3sGate` checks
-  the binding, but turning the binding's vault credential into a kubeconfig for `Kubectl` is **not built**. Until the pod start installs a
+  the binding; since 2026-11-13 the binding's vault credential becomes the cluster door too (`sandbox/binding.rs`: a token or a stored kubeconfig,
+  a private 0600 file per call, `KubeApi::for_binding`). Until the pod start installs a
   `CloudRunner` (`wiring::install`), `run_command` in a tenant pod is refused (fail closed), never run on the pod.
 * **Results from a Job.** Logs are stdout and stderr together (the cluster does not separate them); exit code and OOM come from the pod
-  status. **Artifacts from a finished pod are not retrievable** with plain kubectl (the container is gone): the real `KubeApi::artifacts` returns
-  none. Planned: the run wrapper prints framed artifacts on its log, or an object-store hand-over.
+  status. **Artifacts from a finished pod are not retrievable** with plain kubectl (the container is gone): `KubeApi::artifacts` returns
+  none for the real cluster. Since 2026-11-13 a request that names files gets them through the log: the Job's command is wrapped
+  (`sandbox/frames.rs`) and prints each named file as one framed base64 line at the end of the log; the executor takes the frames out.
+  It needs `sh`, `base64` and `tr` in the image. An object-store hand-over is still an option.
 * **Proxy injection per run** needs a run-scoped rule interface in `iyakki-proxy`; refused until then. File delivery works (Secret, mode 0400).
   "Read once" is a convention of the program inside, not enforceable by Kubernetes.
 * **pids.** Kubernetes has no per-pod pid limit in a manifest (kubelet `podPidsLimit` is node-wide); the limit is checked against policy and

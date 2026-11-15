@@ -3,7 +3,7 @@
 Three ways, from least to most work. Models run best in **Ollama on the Mac itself** (it uses the GPU through Metal and the
 Mac's unified memory); IYAKKI then talks to it over the network.
 
-## 1. The desktop window, natively on macOS  (status: compiles for macOS, not yet run on a Mac)
+## 1. The desktop window, natively on macOS  (status: compiles and runs on an Apple silicon Mac mini, with limits; KI-078)
 
 ```
 xcode-select --install                                   # compiler and linker
@@ -25,7 +25,9 @@ compile everywhere but find no `/dev/fb0` or `/dev/input` on a Mac, so they stay
 **Bare-metal drivers are Linux only** (framebuffer, evdev, GPU/Wi-Fi/audio drivers, boot as init, data-disk mounting, zram/swap). On a Mac the
 story is the window (and Ollama), not booting IYAKKI; for the Mac mini 2014 booting from a stick see `MAC-HARDWARE.md`.
 
-What is expected to work: every tile that is plain code (chat, RAG, editor, browser, calendar, usage, skills, MCP). What is Linux-specific and must degrade cleanly, and has **not been run on a Mac**:
+**Run on a Mac (2026-11-11, alpha.3).** The window was started on a Mac mini (arm64) with only Rust installed, and a native AudioQueue sink carries the mixer's sound (the system consumed every frame queued; that it is *heard* needs a person listening). The window is always in desktop mode, the browser is the built-in reader (the full engine is a Linux helper), and the state is under `~/Library/Application Support/iyakki-dev`. Not verified: sound heard, a live radio stream, a live web page, mouse and keyboard in the window, Retina scaling. Limited on a Mac: Linux apps, VPN, hotspot, developer-mode patching, USB, Bluetooth, cameras, real disk management, AAC and HLS radio, the microphone, the wake phrase. The list in KI-078 of `KNOWN-ISSUES.md` is the current one; the paragraphs below were written before the run and describe what was expected.
+
+What is expected to work: every tile that is plain code (chat, RAG, editor, browser, calendar, usage, skills, MCP). What is Linux-specific and must degrade cleanly, and was not separately checked on a Mac:
 
 * `/proc` and `/sys` (SYSTEM tile, hardware tiles) are not there on macOS: those pages show zeros or "not available".
 * `ip`, `aplay`, `arecord` (network and sound settings, voice, the radio's sound) have no macOS equivalents wired in yet.

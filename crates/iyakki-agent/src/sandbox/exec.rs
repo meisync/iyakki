@@ -132,6 +132,10 @@ impl JobExecutor {
     }
 }
 
+fn browser_tier(adm: &Admitted) -> bool {
+    adm.tier() == Tier::Browser
+}
+
 struct Cleanup<'a> {
     kube: &'a dyn KubeApi,
     inj: &'a dyn Injector,
@@ -222,8 +226,13 @@ impl Executor for JobExecutor {
             std::thread::sleep(self.poll);
         };
         let cap = spec.limits.output_kib as usize * 1024 * 2;
-        let logs = self.kube.logs(&ns, &name, cap).unwrap_or_default();
-        let artifacts = self.kube.artifacts(&ns, &name).unwrap_or_default();
+        // files the request named come back framed at the end of the log (see `frames`); the text keeps the output cap
+        let named = !spec.artifacts.is_empty() && !browser_tier(adm);
+        let raw_logs = self.kube.logs(&ns, &name, if named { cap + super::frames::BUDGET } else { cap }).unwrap_or_default();
+        let (mut logs, framed) = if named { super::frames::split(&raw_logs, &spec.artifacts) } else { (raw_logs, vec![]) };
+        logs.truncate(cap);
+        let mut artifacts = self.kube.artifacts(&ns, &name).unwrap_or_default();
+        artifacts.extend(framed);
         let code = if state.succeeded { Some(0) } else { state.exit_code };
         let (exit_code, signal) = match code {
             Some(c) if (129..=159).contains(&c) => (None, Some(c - 128)),
@@ -373,7 +382,7 @@ impl NsLauncher for SelfLauncher {
                     break child.wait().map_err(|e| e.to_string())?;
                 }
                 Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-                Err(e) => return Err(e.to_string()),
+                Err(e) => return Err(if iyakki_core_api::child_status(&mut child) == iyakki_core_api::ChildState::Gone { "the sandbox ended and its exit status is not available (another reaper took it)".into() } else { e.to_string() }),
             }
         };
         Ok(NsOutput { code: status.code(), signal: status.signal(), timed_out, stdout: t1.join().unwrap_or_default(), stderr: t2.join().unwrap_or_default() })
@@ -428,6 +437,10 @@ impl Executor for WasmExecutor {
             Err(WasmError::Timeout) => {
                 o.timed_out = true;
                 o.stderr = b"stopped: the module ran longer than its time limit".to_vec();
+            }
+            Err(WasmError::Cancelled) => {
+                o.exit_code = Some(1);
+                o.stderr = b"stopped: the run was cancelled".to_vec();
             }
             Err(WasmError::Trap(m)) => {
                 o.exit_code = Some(1);

@@ -25,7 +25,8 @@ that. Rows `F-KBD-01` to `F-KBD-09` in `FEATURES.md` say what is partial and wha
 | WiFi, Bluetooth, Airplane (238, 237, 247) | Switches those radios and says what it did ("WiFi off", "Airplane mode on"). If the kernel switches by itself first, IYAKKI only reports it; it never switches twice. A hardware switch is reported, not overridden. |
 | Switch video mode (227) | A notice. |
 | Print (210) | Starts the screenshot (the same as F12). |
-| Screen lock (152), Super+L on a PC keyboard, and Control+Command+Q or Control+Command+L in the Mac profile | Locks the screen: a password prompt covers the desktop, the apps keep running ([the lock screen](SCREEN-SAVER.md#the-lock-screen)). |
+| Screen lock (152), Super+L on a PC keyboard, and Control+Command+L (or Control+Option+L) in the Mac profile (Option counts as Command there, so a wrong Option/Command swap setting does not matter; Control+Windows+L also locks in the PC profile) | Locks the screen: a password prompt covers the desktop, the apps keep running ([the lock screen](SCREEN-SAVER.md#the-lock-screen)). |
+| Control+Windows+S, and Control+Command+S (or Control+Option+S) in the Mac profile | Starts the screen saver now, even when the saver is set to never; any key or the pointer wakes it ([screen saver](SCREEN-SAVER.md#more-styles-and-a-start-now-key-f-scrn-05)). |
 | Calculator (140) | A notice: there is no calculator app. |
 | Home page (172) | From the launcher: opens the browser. |
 
@@ -43,8 +44,24 @@ software volume (HDMI, the T2 Mac speaker) it is the ALSA `IYAKKI` control; ever
 
 Ctrl+Alt with an arrow, a digit, Tab or M is the shell's, not an app's: Ctrl+Alt+1 to 9 apply a pane layout, Ctrl+Alt+0 opens the
 layout picker, Ctrl+Alt+arrows snap the open app to a side, Ctrl+Alt+Tab changes pane, Ctrl+Alt+Shift+arrows move a divider and
-Ctrl+Alt+M moves the open app to the next display (with several displays). Ctrl alone and Alt alone work as before. See
+Ctrl+Alt+M moves the open app to the next display (with several displays). Ctrl alone and Alt alone work as before. The desktop window (`./run.sh window`) takes the same chords from its keyboard events; a
+browser or desktop that keeps Ctrl+Alt+arrows for itself never delivers them to the window. See
 `docs/MULTI-DISPLAY.md`.
+
+## Desktop view keys
+
+A person can have several named desktop views on one screen (Settings, Desktop views). The shell takes these chords before any app sees a key:
+
+| Keys | What happens |
+|---|---|
+| Ctrl+Alt+Super+1 to 9 | Jump to view N (the Super key is the Windows key, or Command on a Mac keyboard). Ctrl+Alt+1 to 9 without Super still apply a pane layout. |
+| Ctrl+Alt+PageUp / PageDown | Previous / next view (browser-style set). Also works from the browser window. |
+| Control+Command+Q (or Control+Option+Q) in the Mac profile, Control+Windows+Q in the PC profile | Asks "Sign out? Open apps close and the vault locks." from any screen once signed in: Enter or y signs out, Esc or n stays (the buttons also take a click or a touch). Not shown on the sign-in screen or over the lock screen. After a sign-out the sign-in screen says "You signed out" for a few seconds. |
+| Control+Command+Left / Right | Previous / next view (Mac-style set). With Alt held it is a pane snap, as before. |
+
+Settings, Desktop views, **Keys** chooses the browser-style set, the Mac-style set or both (the default; no key is used twice). A step key whose set is off
+says so and does nothing. The lock and sign-out chords (Control+Command+L and Q, Super+L) and every other key are unchanged. A locked view asks for the password
+(the lock screen) when you switch to it.
 
 ## Settings, Keyboard (administrators)
 
@@ -57,6 +74,16 @@ Ctrl+Alt+M moves the open app to the next display (with several displays). Ctrl 
   plugged in may need to be plugged in again to pick up a change.
 * **Key repeat**: delay (200 to 1000 ms) and rate (10 to 40 per second), written to every keyboard with the kernel's `EVIOCSREP`
   and to keyboards plugged in later. Also the delay and rate of held volume and brightness keys. "Kernel's own" is 250 ms and 30 per second.
+* **Pointer speed** (mouse and touchpad; Settings -> Keyboard, row "Pointer speed"). The mouse (any relative device: `REL_X`/`REL_Y`) is
+  scaled in the input thread by a percentage, 25 to 300 (default 100); the touchpad has its own percentage that multiplies the pad's gain
+  (`touchpad.rs` `BASE_GAIN` and its speed-dependent acceleration). Buttons **Mouse slower / faster** (`[` `]`) and **Touchpad slower / faster**
+  (`,` `.`) step by 5 %; **Mouse speed preset** (`}`, `{` goes back) and **Touchpad speed preset** (`>`, `<`) jump between 25, 50, 75, 100, 150,
+  200, 250 and 300 %. The effect is immediate. Part-pixels are carried between events (`input::scale_rel`), so slow motion at 50 % is not lost
+  and a movement and its opposite are symmetric. Saved per computer under `keyboard` (`pointer_speed_pct`, `touchpad_speed_pct`; 0 = not
+  chosen = 100), restored at every start with the other keyboard choices, set from a terminal with `iyakki dev config set pointer.speed 150`
+  and `pointer.touchpad_speed`, and from chat with `pointer_speed_status` (free) and `pointer_speed_set` (asks; audit action
+  `settings.pointer_speed`). Searching Settings for "mouse", "pointer", "cursor", "speed" or "sensitivity" finds the Keyboard page.
+  Not tried on a real mouse yet (see F-INPUT-01 in FEATURES.md).
 * **Scrolling** (wheel and trackpad, every tile and the browser; `crates/iyakki-shell/src/scrolleng.rs`). One engine in the input
   thread turns raw wheel, hi-res wheel and two-finger movement into pixel steps. **Scroll speed** `s` (50 to 300 %, default 100),
   **Wheel lines** `y` (lines per click, 1 to 10, default 3), **Wheel direction** `w` (traditional by default), **Trackpad direction**
@@ -94,7 +121,7 @@ profile loads as Automatic) and works at once. `iyakki dev config keyboard.profi
 | Command+Up / Down | Top / bottom of the document (Ctrl+Home / End). |
 | Option+Left / Right | Word jump. Option+Backspace deletes the word before; Command+Backspace deletes to the line start. |
 | Command+Tab | The next pane (the same as Ctrl+Alt+Tab; Shift goes back). |
-| Command+Q, Control+Command+Q | Nothing. IYAKKI never quits on a key and has no lock shortcut. |
+| Command+Q | Nothing. IYAKKI never quits on a key. (Control+Command+Q asks to sign out and Control+Command+L locks, see the table above.) |
 | Control+C | Stays Control+C. |
 | Control+click | A right click (a two-finger tap on a trackpad already is one). |
 

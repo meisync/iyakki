@@ -108,11 +108,11 @@ impl DeviceWatch {
     }
 
     pub fn enabled(&self) -> bool {
-        self.state.lock().unwrap().enabled
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).enabled
     }
 
     pub fn set_enabled(&self, on: bool) {
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         st.enabled = on;
         self.save(&st);
     }
@@ -130,7 +130,7 @@ impl DeviceWatch {
     }
 
     fn observe_as(&self, seen: &[Neighbor], now: i64, scan: bool) -> Vec<Device> {
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if !st.enabled {
             return Vec::new();
         }
@@ -161,28 +161,28 @@ impl DeviceWatch {
         }
         self.save(&st);
         drop(st);
-        self.fresh.lock().unwrap().extend(new.iter().cloned());
+        self.fresh.lock().unwrap_or_else(std::sync::PoisonError::into_inner).extend(new.iter().cloned());
         new
     }
 
     /// The new devices nobody has been told about yet (each is returned once).
     pub fn take_fresh(&self) -> Vec<Device> {
-        std::mem::take(&mut *self.fresh.lock().unwrap())
+        std::mem::take(&mut *self.fresh.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
     }
 
     /// Every device, the untrusted ones first, then by when they were last seen.
     pub fn list(&self) -> Vec<Device> {
-        let mut v: Vec<Device> = self.state.lock().unwrap().devices.values().cloned().collect();
+        let mut v: Vec<Device> = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).devices.values().cloned().collect();
         v.sort_by(|a, b| a.trusted.cmp(&b.trusted).then(b.last_seen.cmp(&a.last_seen)).then(a.mac.cmp(&b.mac)));
         v
     }
 
     pub fn untrusted_count(&self) -> usize {
-        self.state.lock().unwrap().devices.values().filter(|d| !d.trusted).count()
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).devices.values().filter(|d| !d.trusted).count()
     }
 
     fn edit(&self, mac: &str, f: impl FnOnce(&mut Device)) -> bool {
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(d) = st.devices.get_mut(&mac.to_lowercase()) else { return false };
         f(d);
         self.save(&st);
@@ -194,7 +194,7 @@ impl DeviceWatch {
     }
 
     pub fn trust_all(&self) -> usize {
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut n = 0;
         for d in st.devices.values_mut().filter(|d| !d.trusted) {
             d.trusted = true;
@@ -211,7 +211,7 @@ impl DeviceWatch {
 
     /// Forget a device (if it comes back it is new again).
     pub fn forget(&self, mac: &str) -> bool {
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let gone = st.devices.remove(&mac.to_lowercase()).is_some();
         self.save(&st);
         gone

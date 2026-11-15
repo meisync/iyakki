@@ -385,20 +385,25 @@ impl CalendarApp {
             let l = cx.calendar.local(now);
             days_from_civil(l.year, l.month, l.day)
         };
-        let grid_w = (body.w * 0.6).min(760.0 * s);
+        // with no room for the day's plan beside it (it is not drawn then) the month takes the whole width
+        let grid_w = if body.w * 0.4 - 18.0 * s >= 180.0 * s { (body.w * 0.6).min(760.0 * s) } else { body.w };
         let (y, m) = (self.cur.0, self.cur.1);
         // month header
         let title = format!("{} {}", MONTHS[m as usize - 1], y);
-        g.text(body.x, body.y + 4.0 * s, 24.0 * s, TEXT, &title, Face::Bold);
         let mut hx = body.x + grid_w;
         for (l, ev) in [("›", 21usize), ("Today", 22), ("‹", 20)] {
             let bw = g.text_width(14.0 * s, l, Face::Bold) + 14.0 * s * 1.7;
             hx -= bw + 6.0 * s;
             g.button(hx, body.y, 14.0 * s, l, MUTED, Event::Tab(ev));
         }
+        // the month name keeps to the room left of the buttons
+        let title = g.fit(24.0 * s, &title, Face::Bold, (hx - body.x - 8.0 * s).max(40.0 * s));
+        g.text(body.x, body.y + 4.0 * s, 24.0 * s, TEXT, &title, Face::Bold);
         let gy = body.y + 46.0 * s;
         let cw = grid_w / 7.0;
         for (i, d) in WEEKDAYS.iter().enumerate() {
+            // the day names shrink to their first letter when the column is narrower than the word
+            let d: &str = if g.text_width(12.0 * s, d, Face::Bold) + 10.0 * s > cw { &d[..1] } else { d };
             g.text(body.x + i as f32 * cw + 8.0 * s, gy, 12.0 * s, DIM, d, Face::Bold);
         }
         let first = days_from_civil(y, m, 1);
@@ -727,7 +732,7 @@ mod tests {
             Fx { cal: FakeCal::default(), audit: FakeAudit::default(), usage: NoUsage }
         }
         fn cx(&self) -> TileCx<'_> {
-            TileCx { user: "root", manage_settings: true, usage: &self.usage, calendar: &self.cal, audit: &self.audit, remote: &iyakki_tile_api::remote::NoRemote, cameras: &iyakki_tile_api::cameras::NoCameras }
+            TileCx { user: "root", manage_settings: true, usage: &self.usage, calendar: &self.cal, audit: &self.audit, remote: &iyakki_tile_api::remote::NoRemote, cameras: &iyakki_tile_api::cameras::NoCameras, radio: &iyakki_tile_api::radio::NoRadio }
         }
     }
 

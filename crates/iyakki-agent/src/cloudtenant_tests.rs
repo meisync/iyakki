@@ -123,3 +123,16 @@ fn isolation_defaults_to_folders_and_volumes_is_refused_until_it_is_built() {
     assert!(e.contains("not deployed, by decision") && e.contains("storage.quota"), "{e}");
     assert!(TenantConfig::parse(r#"{"tenant":"acme","isolation":"folders"}"#).is_ok());
 }
+
+#[test]
+fn the_snapshot_key_source_is_checked_and_reaches_the_pod() {
+    let ok = with(|c| c.snapshot_keys = Some("kms:tenant/acme".into()));
+    assert!(ok.check().is_ok());
+    assert!(crate::cloudtenant::manifests(&ok).unwrap().contains("IYAKKI_SNAPSHOT_KEYS"));
+    assert!(crate::cloudtenant::manifests(&ok).unwrap().contains("kms:tenant/acme"));
+    assert!(!crate::cloudtenant::manifests(&with(|_| {})).unwrap().contains("IYAKKI_SNAPSHOT_KEYS"));
+    assert!(with(|c| c.snapshot_keys = Some("vault".into())).check().is_ok());
+    let e = with(|c| c.snapshot_keys = Some("kms:bad ref".into())).check().unwrap_err();
+    assert!(e.contains("snapshot_keys"), "{e}");
+    assert!(with(|c| c.snapshot_keys = Some("tape".into())).check().is_err());
+}

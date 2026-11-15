@@ -50,14 +50,14 @@ static KUBE_OVERRIDE: Mutex<Option<Arc<dyn Kube>>> = Mutex::new(None);
 
 /// Use another cluster client (tests and screenshots give a fake one); `None` goes back to `kubectl`.
 pub fn use_kube(k: Option<Arc<dyn Kube>>) {
-    *KUBE_OVERRIDE.lock().unwrap() = k;
+    *KUBE_OVERRIDE.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = k;
 }
 
 fn kube() -> Arc<dyn Kube> {
-    if let Some(k) = KUBE_OVERRIDE.lock().unwrap().clone() {
+    if let Some(k) = KUBE_OVERRIDE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone() {
         return k;
     }
-    let run: Arc<dyn ExecRunner> = CLUSTER_OVERRIDE.lock().unwrap().as_ref().map_or_else(|| Arc::new(iyakki_agent::wsexec::System) as Arc<dyn ExecRunner>, |w| w.0.clone());
+    let run: Arc<dyn ExecRunner> = CLUSTER_OVERRIDE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().map_or_else(|| Arc::new(iyakki_agent::wsexec::System) as Arc<dyn ExecRunner>, |w| w.0.clone());
     Arc::new(devcluster::RunnerKube { run })
 }
 
@@ -67,13 +67,13 @@ static CLUSTER_OVERRIDE: Mutex<Option<ClusterWorld>> = Mutex::new(None);
 /// Tests and screenshots give the IDE a fake executor and fake kubeconfig locations; `None` goes back to the real machine
 /// (and, in unit tests, to "look nowhere").
 pub fn use_cluster(w: Option<ClusterWorld>) {
-    *CLUSTER_OVERRIDE.lock().unwrap() = w;
+    *CLUSTER_OVERRIDE.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = w;
 }
 
 /// Where the IDE looks for a cluster: the override, the real machine, or (unit tests without an override) nowhere, so a
 /// test run never talks to a developer's own cluster.
 fn cluster_world() -> Option<ClusterWorld> {
-    if let Some(w) = CLUSTER_OVERRIDE.lock().unwrap().clone() {
+    if let Some(w) = CLUSTER_OVERRIDE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone() {
         return Some(w);
     }
     if cfg!(test) {
@@ -452,6 +452,8 @@ pub enum Confirm {
     /// Merge this task (id, what the dry run said).
     MergeTask(String, String),
     DiscardTask(String),
+    /// Close the IDE although tasks are still working (the question `taskenv::close_question` made).
+    CloseIde(String),
 }
 
 pub struct QuickOpen {
@@ -507,11 +509,19 @@ pub struct IdeApp {
     ctx_k8s: bool,
     /// The last context menu was opened over the Tasks tab's text.
     ctx_tasks: bool,
+    /// The person said yes to closing with tasks still working: the next `handle` returns Back.
+    leave_now: bool,
     /// The top bar's "⋯" menu holds the buttons that did not fit: (label, button number, colour); open or closed.
     pub top_overflow: Vec<(String, usize, [u8; 4])>,
     pub top_overflow_open: bool,
     /// An app the shell should open next (a table file asks for DATA): its id and the item in it.
     pub request: Option<(String, String)>,
+    /// The docked Preview (F-IDE-25): the running tile app beside the editor, the room it was given the last time and whether there is room.
+    pub preview: Option<super::embed::Embedded>,
+    pub preview_area: Option<R>,
+    pub preview_room: bool,
+    /// The folder of the app shown in the preview (Pop out opens it full screen).
+    pub preview_dir: Option<std::path::PathBuf>,
     /// A publish in progress (see `ide_tile`).
     pub publish: Option<super::ide_tile::PublishState>,
     /// Where the header drew the target chip, and the "Published: …" line it shows (kept so the disk is not read every frame).
@@ -538,7 +548,7 @@ impl IdeApp {
         let reg = Registry::load(cx.services.dir(), &cx.session.user);
         super::ide_bottom::set_cli_bin(cx.services.clis.bin_dir());
         iyakki_agent::linuxapps::set_ide_context(cx.services.dir(), &cx.session.user);
-        let mut app = IdeApp { reg, ws: vec![], active: None, session: session_id(), modal: None, layout: None, area: R::new(0.0, 0.0, 1280.0, 674.0), scale: 1.0, base_scale: 1.0, chat_scale: 1.0, density: super::ide_chrome::Density::from_index(crate::uisize::load_ide_density(cx.services.dir(), &cx.session.user)), mouse: (-1, -1), drag_div: None, redraw: true, ticks: 0, notice: None, last_fetches: 0, dir: cx.services.dir().to_path_buf(), user: cx.session.user.clone(), ctx_row: None, ctx_k8s: false, ctx_tasks: false, top_overflow: vec![], top_overflow_open: false, request: None, publish: None, last_target_chip: None, last_hint: None, platform: None, git: Default::default() };
+        let mut app = IdeApp { reg, ws: vec![], active: None, session: session_id(), modal: None, layout: None, area: R::new(0.0, 0.0, 1280.0, 674.0), scale: 1.0, base_scale: 1.0, chat_scale: 1.0, density: super::ide_chrome::Density::from_index(crate::uisize::load_ide_density(cx.services.dir(), &cx.session.user)), mouse: (-1, -1), drag_div: None, redraw: true, ticks: 0, notice: None, last_fetches: 0, dir: cx.services.dir().to_path_buf(), user: cx.session.user.clone(), ctx_row: None, ctx_k8s: false, ctx_tasks: false, top_overflow: vec![], top_overflow_open: false, request: None, preview: None, preview_area: None, preview_room: false, preview_dir: None, publish: None, last_target_chip: None, last_hint: None, platform: None, git: Default::default(), leave_now: false };
         if let Some(id) = app.reg.last.clone() {
             if let Err(e) = app.open_by_id(&id, cx) {
                 app.notice = Some((e, false));
@@ -719,13 +729,21 @@ impl IdeApp {
             _ => super::board::Mode::Kanban,
         };
         let features_mtime = std::fs::metadata(&features).and_then(|m| m.modified()).ok();
+        // the build and run panel starts programs for this person: their own home is their HOME (F-STORE-09)
+        let home = iyakki_agent::scope::system_home(&cx.session.user);
+        let mut term = Term::new(&root, &saved.term, allowed_cli);
+        term.runner.set_home(home.clone());
+        let mut problems = Problems::new(&root, &cfg.commands.test);
+        problems.runner.set_home(home.clone());
+        let mut cov = super::ide_bottom::Runner::new();
+        cov.set_home(home);
         let mut ws = Ws {
             tree,
             editor,
             chat,
-            term: Term::new(&root, &saved.term, allowed_cli),
-            problems: Problems::new(&root, &cfg.commands.test),
-            cov: super::ide_bottom::Runner::new(),
+            term,
+            problems,
+            cov,
             cov_plan: None,
             search: SearchPanel::new(&root),
             k8s: None,
@@ -1239,6 +1257,7 @@ impl IdeApp {
                 }
             }
             Confirm::MergeTask(id, _) => self.merge_task(&id, cx),
+            Confirm::CloseIde(_) => self.leave_now = true,
             Confirm::DiscardTask(id) => {
                 let Some(w) = self.active_mut() else { return };
                 match w.tasks.mgr.discard(&id) {
@@ -1485,6 +1504,18 @@ impl IdeApp {
         self.redraw = true;
     }
 
+    /// Ctrl+Shift+I and the Touch Bar's Deploy: the deploy form of this workspace, or the plain reason it cannot be opened now.
+    pub fn deploy_key(&mut self, cx: &AppCx) {
+        let Some(i) = self.active else { return };
+        if let Some(why) = self.ws.get(i).and_then(|w| w.deploy_block(cx)) {
+            if let Some(w) = self.ws.get_mut(i) {
+                w.say(format!("Deploy is off: {why}."), false);
+            }
+            return;
+        }
+        self.open_deploy_form(i);
+    }
+
     pub fn open_deploy_form(&mut self, i: usize) {
         let Some(w) = self.ws.get(i) else { return };
         let root = w.root();
@@ -1509,8 +1540,8 @@ impl IdeApp {
         let manifest = ["deploy/app.yaml", "deploy/deployment.yaml", "k8s/deployment.yaml", "deployment.yaml"].into_iter().find(|p| root.join(p).is_file()).unwrap_or("");
         let f = Form::new(&format!("Deploy · {} · {chip}", w.meta.name))
             .text("Image name", &super::ide_deploy::app_name(&w.meta.name), "lowercase, no registry or tag; the tag is a hash of the files")
-            .text("Build folder (Dockerfile)", &dir, "a folder of this workspace; . is the root")
-            .text("Manifest file", manifest, "empty: generate a starter Deployment and Service in deploy/")
+            .path("Build folder (Dockerfile)", &abs_in(&root, &dir), "a folder of this workspace (Ctrl+O browses); . is the root", crate::filepicker::PathKind::Folder, &[])
+            .path("Manifest file", &abs_in(&root, manifest), "empty: generate a starter Deployment and Service in deploy/ (Ctrl+O browses)", crate::filepicker::PathKind::File, &["yaml", "yml"])
             .text("Port", "8080", "the port the app listens on (starter manifest only)")
             .text("Namespace", &ns, "fixed: writes only touch this workspace's namespace (change it in the project settings)")
             .choice("Approval", &["ask for each step", "approve all steps for this deploy"], 0);
@@ -1534,6 +1565,30 @@ impl IdeApp {
         self.modal = Some(Modal::Form(FormKind::Registry, f));
     }
 
+    /// The chats that left entries in the active workspace's history, and the choices the settings form offers for them.
+    fn history_choices(&self, cx: &AppCx) -> Vec<(String, usize)> {
+        let Some(w) = self.active_ws() else { return vec![] };
+        iyakki_agent::history::History::sessions_of(&cx.services.kb, &cx.session.user, &w.meta.name).into_iter().take(20).collect()
+    }
+
+    /// The project settings with the assistant's memory of this workspace at the end: keep it, forget all of it, or forget what one chat left.
+    pub fn open_settings_form_with_history(&mut self, cx: &AppCx) {
+        self.open_settings_form();
+        let Some(w) = self.active_ws() else { return };
+        let name = w.meta.name.clone();
+        let total = iyakki_agent::history::History::workspaces_of(&cx.services.kb, &cx.session.user).into_iter().find(|x| x.name == iyakki_agent::history::History::workspace_key(&name)).map_or(0, |x| x.entries);
+        if total == 0 {
+            return;
+        }
+        let mut opts = vec!["keep it".to_string(), format!("forget all {total} entries")];
+        opts.extend(self.history_choices(cx).into_iter().map(|(c, n)| format!("forget the {n} entries of chat {c}")));
+        let refs: Vec<&str> = opts.iter().map(String::as_str).collect();
+        if let Some(Modal::Form(FormKind::Settings, f)) = &mut self.modal {
+            let taken = std::mem::replace(f, Form::new(""));
+            *f = taken.choice("Assistant's memory of this workspace (applied when saved, cannot be undone)", &refs, 0);
+        }
+    }
+
     pub fn open_settings_form(&mut self) {
         let Some(w) = self.active_ws() else { return };
         let c = &w.cfg;
@@ -1543,7 +1598,7 @@ impl IdeApp {
             .text("Label selector", &c.k8s.selector, "e.g. app=web (optional)")
             .text("Cluster profile (kubeconfig context)", &c.k8s.profile, "empty: the current context")
             .path("Kubeconfig file", &c.k8s.kubeconfig, "empty: $KUBECONFIG or the default", crate::filepicker::PathKind::File, &[])
-            .text("Features file", &c.features_file, "default FEATURES.md")
+            .path("Features file", &abs_in(&w.root(), &c.features_file), "default FEATURES.md (Ctrl+O browses)", crate::filepicker::PathKind::File, &["md"])
             .text("Test command", &c.commands.test, "e.g. cargo test")
             .text("Run command", &c.commands.run, "F5 runs this when the open file is not a script")
             .text("Coverage command", &c.commands.coverage, "empty: a detected tool (cargo llvm-cov, pytest --cov, go test -cover, jest --coverage)")
@@ -1585,6 +1640,7 @@ impl IdeApp {
             }
             FormKind::Settings => {
                 let dir = self.dir.clone();
+                let chats_for_forget = self.history_choices(cx);
                 let Some(w) = self.active_mut() else { return };
                 w.sync_registry();
                 let mut c = w.cfg.clone();
@@ -1593,7 +1649,7 @@ impl IdeApp {
                 c.k8s.selector = f.value(2).trim().to_string();
                 c.k8s.profile = f.value(3).trim().to_string();
                 c.k8s.kubeconfig = f.value(4).trim().to_string();
-                c.features_file = if f.value(5).trim().is_empty() { "FEATURES.md".into() } else { f.value(5).trim().to_string() };
+                c.features_file = if f.value(5).trim().is_empty() { "FEATURES.md".into() } else { rel_in(&w.root(), f.value(5).trim()) };
                 c.commands.test = f.value(6).trim().to_string();
                 c.commands.run = f.value(7).trim().to_string();
                 c.commands.coverage = f.value(8).trim().to_string();
@@ -1611,7 +1667,22 @@ impl IdeApp {
                 if let Err(e) = c.save(&w.root()) {
                     return fail(self, kind, f, e);
                 }
+                // the memory field is there only when the workspace has a history
+                let forget = if f.fields.len() > 11 { f.choice_idx(11) } else { 0 };
+                let ws_name = w.meta.name.clone();
                 w.cfg = c;
+                if forget > 0 {
+                    let user = cx.session.user.clone();
+                    let n = if forget == 1 {
+                        iyakki_agent::history::History::forget_workspace_of(&cx.services.kb, &user, &ws_name)
+                    } else {
+                        match chats_for_forget.get(forget - 2) {
+                            Some((chat, _)) => iyakki_agent::history::History::forget_session_of(&cx.services.kb, &user, &ws_name, chat),
+                            None => 0,
+                        }
+                    };
+                    cx.audit.record(&user, "settings.assistant.forget", &format!("{ws_name} (IDE): {n} entries"));
+                }
                 self.set_density(density);
                 let w = self.active_mut().unwrap();
                 w.problems.command = w.cfg.commands.test.clone();
@@ -1792,13 +1863,13 @@ impl IdeApp {
                 if image.is_empty() || !image.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "-_./".contains(c)) {
                     return fail(self, kind, f, "The image name uses lowercase letters, digits and - _ . / only.".into());
                 }
-                let dir = if f.value(1).is_empty() { ".".to_string() } else { f.value(1) };
+                let dir = if f.value(1).is_empty() { ".".to_string() } else { rel_in(&w.root(), &f.value(1)) };
                 match workspace::resolve_in(&w.root(), &dir) {
                     Ok(p) if p.is_dir() && (p.join("Dockerfile").is_file() || p.join("Containerfile").is_file()) => {}
                     Ok(_) => return fail(self, kind, f, format!("{dir} has no Dockerfile or Containerfile.")),
                     Err(e) => return fail(self, kind, f, e),
                 }
-                let manifest = f.value(2);
+                let manifest = rel_in(&w.root(), &f.value(2));
                 if !manifest.is_empty() {
                     match workspace::resolve_in(&w.root(), &manifest) {
                         Ok(p) if p.is_file() => {}
@@ -2376,11 +2447,13 @@ impl IdeApp {
             Key::Ctrl('C') => self.focus_pane(Pane::Chat),
             Key::Ctrl('T') => self.show_bottom(BTab::Terminal),
             Key::Ctrl('A') => self.send_to_chat(),
-            Key::Ctrl('R') => self.open_settings_form(),
+            Key::Ctrl('R') => self.open_settings_form_with_history(cx),
             Key::Ctrl('N') => self.open_new_app_form(),
             // the IDE's own size: denser and looser (separate from Settings → Display)
             Key::Ctrl('=' | '+') => self.set_density(self.density.step(false)),
             Key::Ctrl('-' | '_') => self.set_density(self.density.step(true)),
+            Key::Ctrl('U') => self.run_tests(cx),
+            Key::Ctrl('I') => self.deploy_key(cx),
             Key::F(5) => {
                 if !self.run_tile_app(cx) {
                     self.run_current(cx)
@@ -2618,7 +2691,7 @@ impl IdeApp {
                     self.set_density(if d == super::ide_chrome::Density::Dense { super::ide_chrome::Density::Comfortable } else { d.step(true) });
                 }
                 0 => self.modal = Some(Modal::Switcher { sel: 0 }),
-                1 => self.open_settings_form(),
+                1 => self.open_settings_form_with_history(cx),
                 2 => self.toggle_pane(Pane::Tree),
                 3 => self.toggle_pane(Pane::Bottom),
                 4 => self.toggle_pane(Pane::Chat),
@@ -2782,6 +2855,21 @@ pub fn render_child(g: &mut Gfx, pane: Pane, f: impl FnOnce(&mut Gfx)) {
 }
 
 impl App for IdeApp {
+    /// A form, a question, a list or a card drawn over the IDE, in the words it shows (F-A11Y-02): the screen reader says it once when it opens.
+    fn dialog_title(&self) -> Option<String> {
+        Some(match self.modal.as_ref()? {
+            Modal::Switcher { .. } => "Switch workspace".to_string(),
+            Modal::Form(_, f) => f.title.clone(),
+            Modal::Confirm(c) => self.confirm_words(c).0,
+            Modal::Quick(_) => "Open a file (type to search)".to_string(),
+            Modal::Lock(_) => "This workspace is open elsewhere".to_string(),
+            Modal::Info(title, _) => title.clone(),
+            Modal::Browse(f, ..) => format!("{}: choose a folder", f.title),
+            Modal::Card(c) => c.card.title.clone(),
+            Modal::Git(_) => "Git".to_string(),
+        })
+    }
+
     fn take_request(&mut self) -> Option<(String, String)> {
         self.request.take()
     }
@@ -2857,7 +2945,7 @@ impl App for IdeApp {
             "Ctrl+Shift+B  feature board    Ctrl+Shift+O  browser (the app you deployed)    Ctrl+Shift+K  cluster view    Ctrl+Shift+L  Git",
             "Ctrl+Shift+A  send the selection (or file) to the chat",
             "Ctrl+Shift+←→↑↓  resize the focused pane",
-            "F5  run the file (scripts) or the project's run command",
+            "F5  run the file (scripts) or the project's run command    Ctrl+Shift+U  run the tests    Ctrl+Shift+I  deploy (the form, when a cluster is connected)",
             "Ctrl+PageDown / PageUp  next / previous editor tab",
             "Ctrl+Shift+R  project settings (namespace, test command…)",
             "Ctrl+=  Ctrl+-  looser / denser IDE (Comfortable, Compact, Dense)",
@@ -2880,12 +2968,30 @@ impl App for IdeApp {
         std::mem::take(&mut self.redraw) || jobs
     }
 
+    fn leave_guard(&mut self, _cx: &AppCx) -> bool {
+        if self.modal.is_some() {
+            return true;
+        }
+        let q = self.ws.iter().find_map(|w| iyakki_agent::taskenv::close_question(&w.tasks.tasks()));
+        match q {
+            Some(q) => {
+                self.modal = Some(Modal::Confirm(Confirm::CloseIde(q)));
+                self.redraw = true;
+                false
+            }
+            None => true,
+        }
+    }
+
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
         let scoped = self.scoped_cx(cx);
         let cx = &scoped;
         match ev {
             Event::Tick => {
                 self.on_tick(cx);
+                if self.preview.is_some() {
+                    self.preview_event(ev, cx);
+                }
                 if self.platform.is_some() {
                     self.platform_event(ev, cx);
                 }
@@ -2893,6 +2999,9 @@ impl App for IdeApp {
             }
             Event::MouseMove(x, y) if self.platform.is_none() => {
                 self.mouse = (*x, *y);
+                if self.preview.is_some() {
+                    self.preview_event(ev, cx);
+                }
                 if let Some(g) = self.active.and_then(|i| self.ws.get_mut(i)).filter(|w| w.main_tab == MainTab::Git).and_then(|w| w.gitview.as_mut()) {
                     g.mouse(*x, *y);
                 }
@@ -2913,6 +3022,9 @@ impl App for IdeApp {
         }
         if self.modal.is_some() {
             self.modal_event(ev, cx);
+            return if std::mem::take(&mut self.leave_now) { Flow::Back } else { Flow::Stay };
+        }
+        if self.preview.is_some() && self.preview_event(ev, cx) {
             return Flow::Stay;
         }
         // focus follows a click: a press on the bare background of a pane (controls and fields send their own events, which
@@ -3372,5 +3484,27 @@ impl Drop for IdeApp {
             w.tasks.mgr.shutdown();
             workspace::release_lock(&w.root(), &self.session);
         }
+    }
+}
+
+/// A path of the workspace as the path fields show it: absolute, so Browse and the live check work (`.` is the root itself, an empty
+/// value stays empty).
+pub(crate) fn abs_in(root: &std::path::Path, rel: &str) -> String {
+    match rel.trim() {
+        "" => String::new(),
+        "." => root.display().to_string(),
+        r if std::path::Path::new(r).is_absolute() => r.to_string(),
+        r => root.join(r).display().to_string(),
+    }
+}
+
+/// The other way: a path the person typed or picked inside the workspace becomes relative to it again (`.` for the root); anything else
+/// is kept as it is for the checks that follow to refuse.
+pub(crate) fn rel_in(root: &std::path::Path, v: &str) -> String {
+    let v = v.trim();
+    match std::path::Path::new(v).strip_prefix(root) {
+        Ok(p) if p.as_os_str().is_empty() => ".".to_string(),
+        Ok(p) => p.display().to_string(),
+        Err(_) => v.to_string(),
     }
 }

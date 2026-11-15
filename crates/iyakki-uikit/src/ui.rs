@@ -24,6 +24,9 @@ pub enum Key {
     Char(char),
     /// Ctrl+letter. An uppercase letter means Shift was held too (Ctrl+Shift+V = `Ctrl('V')`).
     Ctrl(char),
+    /// Alt+key (a letter, a digit or a sign). An uppercase letter means Shift was held too. Only made while a tile asked for it
+    /// (`input::set_alt_passthrough`, the Linux window does): everywhere else Alt is ignored as it always was.
+    Alt(char),
     Enter,
     Backspace,
     Delete,

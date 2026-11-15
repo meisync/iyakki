@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::apps::tests::{cx_with_admin_store, services_in, temp_dir};
+use iyakki_zram::compressed::{self, Experiment};
 use iyakki_zram::Swapper;
 use std::path::Path;
 use std::sync::Mutex;
@@ -100,7 +101,7 @@ fn app(tag: &str, cmdline: &str, writable: bool, used: u64) -> (AppCx, SettingsA
     let cx = admin(tag);
     let (root, env) = machine(tag, used);
     let sw = Arc::new(FakeSwap::default());
-    let mut a = SettingsApp::new(&cx).with_memory(env, sw.clone(), root.join("system.conf"), cmdline, writable);
+    let mut a = SettingsApp::new(&cx).with_memory(Arc::new(iyakki_core_local::LocalMemory::new(env, sw.clone(), root.join("system.conf"))), cmdline, writable);
     goto_memory(&mut a, &cx);
     (cx, a, root, sw)
 }
@@ -260,4 +261,129 @@ fn geometry_and_click_paths_hold_at_four_sizes() {
     let ev = g.hits.iter().find(|h| h.label == "Zram").unwrap().ev.clone();
     a.handle(&ev, &cx);
     assert!(a.has_modal());
+}
+
+#[test]
+fn the_experimental_switch_is_off_by_default_changes_the_plan_saves_its_own_key_and_is_locked_by_the_boot_option() {
+    let (cx, mut a, root, _) = app("mem-exp", "", true, 1024);
+    assert_eq!(a.mem.exp, Experiment::Off);
+    assert!(a.mem_rows().iter().any(|r| r.0 == "Compressed memory, experimental" && r.1.starts_with("off") && r.2.is_none()), "labelled experimental, off");
+    assert!(!a.mem_dirty());
+    // on: the plan for a machine without a data disk is zram only, and the page says so before anything is applied
+    press(&mut a, &cx, 'e');
+    assert_eq!(a.mem.exp, Experiment::On);
+    assert!(a.mem_dirty());
+    assert!(status(&a).contains("Experimental") && status(&a).contains("zram only"), "{}", status(&a));
+    press(&mut a, &cx, 'p');
+    assert!(a.mem.preview.iter().any(|l| l.contains("zram")), "{:?}", a.mem.preview);
+    // saving writes the one key and keeps the others
+    press(&mut a, &cx, 'v');
+    let conf = std::fs::read_to_string(root.join("system.conf")).unwrap();
+    assert!(conf.contains("compressed-memory=on"), "{conf}");
+    assert_eq!(compressed::resolve_experiment("", &conf), (Experiment::On, false));
+    assert!(!a.mem_dirty());
+    press(&mut a, &cx, 'e');
+    press(&mut a, &cx, 'v');
+    assert!(std::fs::read_to_string(root.join("system.conf")).unwrap().contains("compressed-memory=off"));
+    // a boot option fixes it: the key does nothing and the row says why
+    let (cx2, mut b, _, _) = app("mem-exp-lock", "quiet iyakki.zram=exp", true, 1024);
+    assert_eq!(b.mem.exp, Experiment::On);
+    assert!(b.mem_rows().iter().any(|r| r.0 == "Compressed memory, experimental" && r.2 == Some("iyakki.zram=exp")));
+    press(&mut b, &cx2, 'e');
+    assert_eq!(b.mem.exp, Experiment::On);
+    assert!(status(&b).contains("Locked"), "{}", status(&b));
+    // a window on someone else's computer changes nothing
+    let (cx3, mut c, _, _) = app("mem-exp-ro", "", false, 1024);
+    press(&mut c, &cx3, 'e');
+    assert_eq!(c.mem.exp, Experiment::Off);
+}
+
+#[test]
+fn the_boot_order_switches_are_toggled_saved_to_system_conf_locked_by_boot_options_and_make_the_page_dirty() {
+    let (cx, mut a, root, _sw) = app("mem-bootspeed", "quiet", true, 1024);
+    let conf = root.join("system.conf");
+    assert!(!a.mem_dirty());
+    let rows = a.mem_rows();
+    assert!(rows.iter().any(|r| r.0 == "Record the boot order" && r.1 == "off") && rows.iter().any(|r| r.0 == "Read boot files ahead" && r.1 == "off"));
+    press(&mut a, &cx, 'o');
+    assert!(a.mem.bs.record && !a.mem.bs.prefetch && a.mem_dirty(), "unsaved edits make the page dirty");
+    assert!(status(&a).contains("Recording the boot order on") && status(&a).contains("not measured"), "{}", status(&a));
+    press(&mut a, &cx, 'b');
+    assert!(a.mem.bs.prefetch);
+    assert!(!conf.exists(), "nothing is written before Save");
+    press(&mut a, &cx, 'v');
+    let text = std::fs::read_to_string(&conf).unwrap();
+    assert!(text.contains("boot-record=on") && text.contains("boot-prefetch=on"), "{text}");
+    assert!(!a.mem_dirty());
+    let audit = std::fs::read_to_string(cx.audit.path()).unwrap_or_default();
+    assert!(audit.contains("boot-record=true boot-prefetch=true"), "{audit}");
+    // switching one off again is saved too, and the other keys stay
+    press(&mut a, &cx, 'b');
+    press(&mut a, &cx, 'v');
+    let text = std::fs::read_to_string(&conf).unwrap();
+    assert!(text.contains("boot-record=on") && text.contains("boot-prefetch=off"), "{text}");
+    assert!(draw(&mut a, &cx, 1280, 720).hits.iter().any(|h| h.label == "Record boot order"));
+    // a boot option fixes a switch: it cannot be changed here and Save leaves the file's key alone
+    let (cx2, mut b, root2, _sw2) = app("mem-bootspeed-locked", "iyakki.bootrecord=1 iyakki.prefetch=off", true, 1024);
+    assert!(b.mem.bs_saved.record_locked && b.mem.bs_saved.prefetch_locked && b.mem.bs.record && !b.mem.bs.prefetch);
+    press(&mut b, &cx2, 'o');
+    assert!(status(&b).contains("Locked by the boot option iyakki.bootrecord") && b.mem.bs.record);
+    press(&mut b, &cx2, 'b');
+    assert!(status(&b).contains("iyakki.prefetch") && !b.mem.bs.prefetch);
+    press(&mut b, &cx2, 'v');
+    let saved = std::fs::read_to_string(root2.join("system.conf")).unwrap_or_default();
+    assert!(!saved.contains("boot-record") && !saved.contains("boot-prefetch"), "{saved}");
+    // a desktop window changes nothing
+    let (cx3, mut c, _r3, _s3) = app("mem-bootspeed-ro", "", false, 1024);
+    press(&mut c, &cx3, 'o');
+    assert!(!c.mem.bs.record && status(&c).contains("changes nothing"), "{}", status(&c));
+}
+
+#[test]
+fn the_page_reads_changes_and_saves_through_cx_os_memory_on_a_fake_machine() {
+    use iyakki_core_fake::FakeOs;
+    let mut cx = admin("mem-fakeos");
+    let fake = Arc::new(FakeOs::new());
+    let mem = fake.memory_fake();
+    mem.set_stats(iyakki_core_api::memory::MemStats { total: 8 << 30, free: 4 << 30, available: 6 << 30, ..Default::default() });
+    mem.set_conf("hostname=box\n");
+    cx.os = fake.clone();
+    let mut a = SettingsApp::new(&cx);
+    a.go_to(Tab::Memory);
+    a.mem.writable = true;
+    a.mem_load(true);
+    assert_eq!(a.mem_ram(), 8 << 30, "the figures come from the fake machine");
+    press(&mut a, &cx, 'z');
+    clear_field(&mut a, &cx);
+    typ(&mut a, &cx, "2G");
+    key(&mut a, &cx, Key::Enter);
+    press(&mut a, &cx, 'v');
+    assert!(mem.conf().contains("zram=2G"), "{}", mem.conf());
+    assert!(mem.calls().iter().any(|c| c.starts_with("save_conf(zram=2G")), "{:?}", mem.calls());
+    press(&mut a, &cx, 'y');
+    press(&mut a, &cx, 'y');
+    settle(&mut a, &cx);
+    assert!(status(&a).starts_with("Applied"), "{}", status(&a));
+    let calls = mem.calls();
+    assert!(calls.iter().any(|c| c.starts_with("reconfigure(zram=2G,ram=")) && calls.iter().any(|c| c.starts_with("apply_swapfile")), "{calls:?}");
+    mem.refuse_reconfigure("the kernel said no");
+    press(&mut a, &cx, 'y');
+    press(&mut a, &cx, 'y');
+    settle(&mut a, &cx);
+    assert!(status(&a).contains("the kernel said no"), "{}", status(&a));
+}
+
+#[test]
+fn the_overview_warns_that_data_is_kept_in_memory_only_when_the_fake_machine_says_so() {
+    use iyakki_core_api::memory::DataPlace;
+    use iyakki_core_fake::FakeOs;
+    let mut cx = admin("mem-place");
+    let fake = Arc::new(FakeOs::new());
+    cx.os = fake.clone();
+    let a = SettingsApp::new(&cx);
+    let titles = |a: &SettingsApp| a.attention(&cx).into_iter().map(|t| t.title).collect::<Vec<_>>();
+    fake.memory_fake().set_data_place(DataPlace::Disk);
+    assert!(!titles(&a).iter().any(|t| t.contains("kept in memory only")), "{:?}", titles(&a));
+    fake.memory_fake().set_data_place(DataPlace::Memory);
+    assert!(titles(&a).iter().any(|t| t.contains("kept in memory only")), "{:?}", titles(&a));
 }

@@ -1,6 +1,7 @@
 //! The shell's side of the on-screen keyboard (`osk.rs`): draws it over everything, takes the presses that land on it, and hands its
 //! keys to the screen as the keys of a physical keyboard.
 
+use crate::stale_stats::mark_stale;
 use super::*;
 use crate::osk::{Act, Cap, Osk, Shift};
 
@@ -83,20 +84,20 @@ impl Shell {
                 if crate::osk::take_touch() {
                     self.osk.touched(self.tick);
                     crate::osk::set_touch_mode(true);
-                    self.stale = true;
+                    mark_stale!(self);
                 }
                 if let Some(b) = self.osk.button {
                     if b.contains(*x, *y) {
                         self.osk.manual = true;
                         self.osk.dismissed = false;
-                        self.stale = true;
+                        mark_stale!(self);
                         return true;
                     }
                 }
                 match self.osk.press(*x, *y, self.tick) {
                     None => false,
                     Some(key) => {
-                        self.stale = true;
+                        mark_stale!(self);
                         if let Some(k) = key {
                             self.osk_type(&k);
                         }
@@ -125,7 +126,7 @@ impl Shell {
         self.osk.typing = true;
         self.handle_awake(ev);
         self.osk.typing = false;
-        self.stale = true;
+        mark_stale!(self);
     }
 }
 

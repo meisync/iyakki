@@ -106,6 +106,10 @@ pub struct ProviderCfg {
     /// `image`, `stt`, `tts`. Saved the last time the typed list was read; `models` keeps only the chat models.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub model_kinds: std::collections::BTreeMap<String, String>,
+    /// The models of this provider write PDF files by themselves, so the assistant does not offer `pdf_create` (docs/PDF.md).
+    /// Additive; off unless set.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub native_pdf_output: bool,
 }
 
 fn yes() -> bool {
@@ -124,7 +128,7 @@ pub fn valid_model_name(s: &str) -> bool {
 
 impl ProviderCfg {
     pub fn new(id: &str, kind: Kind) -> ProviderCfg {
-        ProviderCfg { id: id.into(), kind, base_url: kind.default_base().map(str::to_string), key_ref: None, models: vec![], default_model: None, enabled: true, model_kinds: Default::default() }
+        ProviderCfg { id: id.into(), kind, base_url: kind.default_base().map(str::to_string), key_ref: None, models: vec![], default_model: None, enabled: true, model_kinds: Default::default(), native_pdf_output: false }
     }
 
     pub fn base(&self) -> Result<String, String> {
@@ -471,7 +475,13 @@ impl ProviderClient {
             (Kind::Anthropic, None) => return Err("API key unavailable".into()),
             (Kind::Gemini, Some(k)) => h.push(("x-goog-api-key".into(), k.to_string())),
             (Kind::Gemini, None) => return Err("API key unavailable".into()),
-            (_, Some(k)) => h.push(("Authorization".into(), format!("Bearer {}", &*k))),
+            (_, Some(k)) => {
+                h.push(("Authorization".into(), format!("Bearer {}", &*k)));
+                // Google's OpenAI-compatible endpoint (`crate::gemini`) also takes the key in its own header; never in the address
+                if self.cfg.base_url.as_deref().is_some_and(crate::gemini::is_google_url) {
+                    h.push(("x-goog-api-key".into(), k.to_string()));
+                }
+            }
             (_, None) => {}
         }
         Ok(h)
@@ -501,6 +511,11 @@ impl ProviderClient {
                 .ok()
                 .and_then(|v| v.pointer("/error/message").or_else(|| v.get("error").filter(|e| e.is_string())).and_then(Value::as_str).map(str::to_string))
                 .unwrap_or_else(|| snippet(&r.body));
+            // an error text never carries the key, even if a server echoes it
+            let msg = match self.key() {
+                Ok(Some(k)) => crate::gemini::redact(&msg, &k),
+                _ => msg,
+            };
             return Err(format!("HTTP {}: {}", r.status, msg));
         }
         serde_json::from_slice(&r.body).map_err(|_| "provider returned something that is not JSON".to_string())

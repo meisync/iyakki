@@ -57,12 +57,12 @@ grep -q 'vendor firmware file' "$W/v.log" && grep -q 'codec' "$W/v.log" || fail 
 ok "verify names vendor firmware and codec leftovers"
 
 # ---- 4. switches a release must refuse
-for sw in IYAKKI_INCLUDE_RESTRICTED_FIRMWARE=1 WEB_H264=1 IYAKKI_WEB_H264=1 WITH_FFMPEG=1; do
+for sw in IYAKKI_INCLUDE_RESTRICTED_FIRMWARE=1 WEB_H264=1 IYAKKI_WEB_H264=1 WITH_FFMPEG=1 WITH_PODMAN=1; do
   mkroot "$W/r4"
   if hook "$W/r4" IYAKKI_IMAGE_PROFILE=release "$sw"; then fail "the release profile accepted $sw"; fi
   grep -q 'release-profile' "$W/hook.log" || fail "no explanation for $sw: $(tail -n 3 "$W/hook.log")"
 done
-ok "IYAKKI_INCLUDE_RESTRICTED_FIRMWARE, WEB_H264 and WITH_FFMPEG are refused"
+ok "IYAKKI_INCLUDE_RESTRICTED_FIRMWARE, WEB_H264, WITH_FFMPEG and WITH_PODMAN are refused"
 mkroot "$W/r5"; hook "$W/r5" IYAKKI_IMAGE_PROFILE=release IYAKKI_RELEASE_AV_BRIDGE=0 || fail "bridge-less release failed"
 [ ! -e "$W/r5/usr/lib/iyakki-av" ] && grep -qx 'AV_BRIDGE=none' "$W/r5/etc/iyakki-release" || fail "IYAKKI_RELEASE_AV_BRIDGE=0 did not drop the bridge"
 ok "IYAKKI_RELEASE_AV_BRIDGE=0 drops the parked bridge"

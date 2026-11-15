@@ -408,3 +408,60 @@ fn the_shell_feeds_the_devices_popover_tooltip_and_redraws_when_it_appears() {
     sh.render(&mut g);
     assert!(sh.devpop.tip_text().is_none());
 }
+
+#[test]
+fn at_narrow_widths_the_app_header_drops_icons_instead_of_crossing_the_title_or_the_window_edge() {
+    let (mut sh, _) = signed_in("hdr-narrow");
+    let mut dropped_somewhere = false;
+    for (w, h) in [(360u32, 740u32), (390, 844), (800, 480)] {
+        for text in [1.0f32, 2.0] {
+            crate::ui::set_ui_size(text);
+            let mut g = Gfx::new(w, h);
+            sh.resize_for_test(w, h);
+            let s = scale_for(w, h);
+            let shown = bar_shown(w, s);
+            let r = bar_rects(w, s);
+            let mut items: Vec<(&str, R)> = vec![("back", r.back), ("bell", r.bell)];
+            if shown.help { items.push(("help", r.help)); }
+            if shown.shot { items.push(("shot", r.shot)); }
+            if shown.dev { items.push(("dev", r.dev)); }
+            if shown.clip { items.push(("clip", r.clip)); }
+            for (i, (na, a)) in items.iter().enumerate() {
+                assert!(a.x >= 0.0 && a.x + a.w <= w as f32 + 0.5, "{w}x{h}@{text}: {na} {a:?} leaves the window");
+                for (nb, b) in &items[i + 1..] {
+                    assert!(disjoint(*a, *b), "{w}x{h}@{text}: {na} {a:?} overlaps {nb} {b:?}");
+                }
+            }
+            let left = items.iter().map(|i| i.1.x).fold(f32::MAX, f32::min);
+            assert!(left >= 180.0 * s - 0.5 || left >= 0.0 && !shown.dev && !shown.clip, "{w}x{h}@{text}: room left for the title ({left})");
+            dropped_somewhere |= !shown.help;
+            for app in PApp::ALL {
+                sh.open_for_test(app);
+                sh.render(&mut g);
+            }
+        }
+    }
+    crate::ui::set_ui_size(1.0);
+    assert!(dropped_somewhere, "at 360 px the Help chip is dropped");
+    let (w, h) = (1280u32, 720u32);
+    sh.resize_for_test(w, h);
+    sh.open_for_test(PApp::Settings);
+    let mut g = Gfx::new(w, h);
+    sh.render(&mut g);
+    assert_eq!(bar_shown(w, scale_for(w, h)), BarShown { help: true, shot: true, clip: true, dev: true });
+}
+
+#[test]
+fn which_header_icons_fit_follows_the_width_and_never_drops_back_or_the_bell() {
+    let s = 1.0;
+    assert_eq!(bar_shown(1280, s), BarShown { help: true, shot: true, clip: true, dev: true });
+    assert_eq!(bar_shown(520, s), BarShown { help: false, shot: true, clip: true, dev: true });
+    assert_eq!(bar_shown(450, s), BarShown { help: false, shot: false, clip: false, dev: true });
+    assert_eq!(bar_shown(360, s), BarShown { help: false, shot: false, clip: false, dev: false });
+    for w in [320u32, 360, 390, 520, 700, 1280] {
+        let r = bar_rects(w, s);
+        assert!(r.back.x + r.back.w <= w as f32 && r.bell.x >= 0.0 && disjoint(r.bell, r.back), "{w}: Back and the bell stay in the window and apart");
+    }
+    let r = bar_rects(1280, 1.0);
+    assert_eq!((r.back.x, r.help.x, r.shot.x, r.dev.x, r.clip.x, r.bell.x), (1280.0 - 114.0, 1280.0 - 226.0, 1280.0 - 266.0, 1280.0 - 306.0, 1280.0 - 346.0, 1280.0 - 386.0));
+}

@@ -9,6 +9,9 @@ use std::collections::HashMap;
 
 pub const DISPLAY_MODE_LEN: usize = 32;
 pub const MODE_TYPE_PREFERRED: u32 = 1 << 3;
+/// `DRM_MODE_FLAG_INTERLACE` and `DRM_MODE_FLAG_DBLSCAN` of drm_mode.h.
+pub const MODE_FLAG_INTERLACE: u32 = 1 << 4;
+pub const MODE_FLAG_DBLSCAN: u32 = 1 << 5;
 pub const CONNECTED: u32 = 1;
 /// `DRM_FORMAT_XRGB8888`: 'X' 'R' '2' '4'.
 pub const FORMAT_XRGB8888: u32 = u32::from_le_bytes(*b"XR24");
@@ -48,6 +51,31 @@ impl ModeInfo {
     }
     pub fn preferred(&self) -> bool {
         self.typ & MODE_TYPE_PREFERRED != 0
+    }
+    /// The refresh rate in whole hertz, rounded, or `None` when it cannot be known. The kernel's own `vrefresh` field is 0 on some
+    /// drivers (amdgpu on a laptop panel, KI-210), so a 0 there is worked out from the timing: pixel clock (kHz) over
+    /// `htotal * vtotal`, with interlace (the frame is two fields), double scan and `vscan` taken into account. A mode without a
+    /// clock or totals has no rate: the answer is `None`, never 0.
+    pub fn refresh_hz(&self) -> Option<u32> {
+        if self.vrefresh > 0 {
+            return Some(self.vrefresh);
+        }
+        let (clock, h, mut v) = (u64::from(self.clock) * 1000, u64::from(self.htotal), u64::from(self.vtotal));
+        if clock == 0 || h == 0 || v == 0 {
+            return None;
+        }
+        if self.flags & MODE_FLAG_DBLSCAN != 0 {
+            v *= 2;
+        }
+        if self.vscan > 1 {
+            v *= u64::from(self.vscan);
+        }
+        let mut denom = h * v;
+        if self.flags & MODE_FLAG_INTERLACE != 0 {
+            denom /= 2; // the totals count one field; a frame is two
+        }
+        let hz = (clock + denom / 2) / denom.max(1);
+        u32::try_from(hz).ok().filter(|&hz| hz > 0)
     }
     /// A made-up mode for tests and the fake backend.
     pub fn make(w: u16, h: u16, hz: u32, preferred: bool) -> ModeInfo {
@@ -486,6 +514,10 @@ impl DrmBackend for RealDrm {
         modes.truncate((c2.count_modes as usize).min(modes.len()));
         encs.truncate((c2.count_encoders as usize).min(encs.len()));
         modes.retain(|m| m.hdisplay > 0 && m.vdisplay > 0);
+        // vrefresh is 0 from some drivers: fill it from the timing so every later reader sees the real rate (KI-210)
+        for m in &mut modes {
+            m.vrefresh = m.refresh_hz().unwrap_or(0);
+        }
         // which CRTCs can drive it: the union over its encoders; the mask is over the CRTC list
         let mut possible = 0;
         for e in encs {

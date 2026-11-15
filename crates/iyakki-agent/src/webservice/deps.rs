@@ -36,6 +36,24 @@ pub trait Extras: Send + Sync {
     fn flow_run_get(&self, _p: &Principal, _id: &str, _run: &str) -> ApiResult<Value> {
         Err(ApiError::Unsupported("this machine does not run flows".into()))
     }
+    /// Bring a flow (the JSON `flows_get` gives) in as a SAFE DRAFT of the person's own: not production, nothing auto-published, its
+    /// triggers off, a free id when the id is taken. Returns `{id, name}`.
+    fn flow_import(&self, _p: &Principal, _flow: &Value) -> ApiResult<Value> {
+        Err(ApiError::Unsupported("this machine does not run flows".into()))
+    }
+    /// What is wrong with a flow of the person's (by id), or with a flow given as JSON before it is imported: `[{node, level, message}]`.
+    fn flow_validate(&self, _p: &Principal, _id: Option<&str>, _flow: Option<&Value>) -> ApiResult<Vec<Value>> {
+        Err(ApiError::Unsupported("this machine does not run flows".into()))
+    }
+    /// Answer ONE step of one of the person's own runs that waits for a person (an approval step): the person's own authenticated call,
+    /// never a model's text. Refused when the run is not theirs, the step is not waiting, or it was already answered.
+    fn flow_run_decide(&self, _p: &Principal, _id: &str, _run: &str, _node: &str, _approved: bool) -> ApiResult<()> {
+        Err(ApiError::Unsupported("this machine does not run flows".into()))
+    }
+    /// Stop one run of one of the person's flows.
+    fn flow_run_stop(&self, _p: &Principal, _id: &str, _run: &str) -> ApiResult<()> {
+        Err(ApiError::Unsupported("this machine does not run flows".into()))
+    }
     /// The timed triggers of the person's own flows: `{flow, name, published, trigger, next, paused}`.
     fn schedules(&self, _p: &Principal) -> ApiResult<Vec<Value>> {
         Err(ApiError::Unsupported("this machine does not run schedules".into()))
@@ -55,6 +73,15 @@ pub trait Extras: Send + Sync {
     /// webhooks (the endpoint then does not exist: 404).
     fn hook_serve(&self, _auth: &dyn Authenticator, _audit: &dyn AuditSink, _rq: &crate::flows::webhook::HookRequest) -> Option<crate::flows::webhook::Answer> {
         None
+    }
+    /// The paired computer a developer key belongs to and the account it acts as: `(computer, account)`. `None`: no such key (or this
+    /// machine has no developer mode). Programs sign in to the service with such a key (`POST /api/v1/login`, signed).
+    fn paired_program(&self, _key_hex: &str) -> Option<(String, String)> {
+        None
+    }
+    /// The `api:*` scopes an administrator granted a paired computer, read afresh at every request of its programs.
+    fn program_scopes(&self, _computer: &str) -> Vec<String> {
+        Vec::new()
     }
     /// One data tool inside the person's own jail (`data_open`, `data_describe`, `data_query`).
     fn data_call(&self, p: &Principal, tool: &str, args: &Value) -> ApiResult<String>;

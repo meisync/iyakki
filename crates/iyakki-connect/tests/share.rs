@@ -100,7 +100,13 @@ fn encoding_and_character_tricks_do_not_escape() {
     }
     // percent signs, full-width dots, a trailing dot or space: only plain file names that do not exist (the page server decodes once;
     // what is left is a name, never a traversal)
+    // (a file system that ignores case, such as the default on a Mac, opens `A.TXT` as the file `a.txt` that really is in the folder: that is
+    // the same file, not an escape, so those two names are only tried where case counts)
+    let case_blind = d.root.join("A.TXT").exists();
     for p in ["%2e%2e/outside/secret.txt", "..%2foutside%2fsecret.txt", "%2e%2e", "\u{ff0e}\u{ff0e}/outside/secret.txt", "\u{2025}/x", "a.txt ", "a.txt.", "A.TXT", "sub/B.TXT"] {
+        if case_blind && matches!(p, "A.TXT" | "sub/B.TXT") {
+            continue;
+        }
         let r = s.read(p);
         assert!(matches!(r, Err(ShareError::NotFound | ShareError::Refused(_))), "{p:?}: {r:?}");
     }

@@ -9,7 +9,7 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use iyakki_proxy::Upstream;
@@ -57,6 +57,24 @@ pub enum SpeechEngine {
         #[serde(default)]
         voice: Option<String>,
     },
+    /// Speech to text only (EXPERIMENTAL, optional): Google Gemini, the recording sent inline in one request (`crate::gemini`). Used only
+    /// when the person chose it in Settings, and only after they answered yes to the consent card.
+    Gemini {
+        model: String,
+        /// Spoken language hint, e.g. `en`.
+        #[serde(default)]
+        language: Option<String>,
+        /// Where the key is (the vault entry the Settings page filled).
+        #[serde(default = "gemini_key_ref")]
+        key_ref: String,
+        /// Only changes the advice when the limit is reached.
+        #[serde(default)]
+        tier: crate::gemini::Tier,
+    },
+}
+
+fn gemini_key_ref() -> String {
+    crate::gemini::KEY_REF.to_string()
 }
 
 impl SpeechEngine {
@@ -65,6 +83,7 @@ impl SpeechEngine {
             SpeechEngine::Http { url, model, .. } => format!("HTTP · {model} · {}", iyakki_sec::url_host(url).unwrap_or_default()),
             SpeechEngine::Command { command } => format!("command · {}", command.split_whitespace().next().unwrap_or("")),
             SpeechEngine::Browser => "browser voice".to_string(),
+            SpeechEngine::Gemini { model, tier, .. } => format!("Google Gemini · {model} · {} tier (experimental)", tier.label()),
             SpeechEngine::Host { engine, .. } => crate::hostengines::Kind::from_id(engine).map_or_else(|| format!("{engine} (this computer)"), |k| format!("{} (on this computer)", k.label())),
         }
     }
@@ -84,6 +103,19 @@ impl SpeechEngine {
                 Ok(())
             }
             SpeechEngine::Command { command } => validate_command(command),
+            SpeechEngine::Gemini { model, language, key_ref, .. } => {
+                let m = model.trim().trim_start_matches("models/");
+                if !crate::providers::valid_model_name(m) || m.contains('/') {
+                    return Err("model name is required (letters, digits and . _ : - + @)".into());
+                }
+                if !["vault:", "env:", "file:", "ext:"].iter().any(|p| key_ref.starts_with(p)) {
+                    return Err("the Gemini key is kept in the vault: the reference starts with vault: (or env:, file:, ext:)".into());
+                }
+                if language.as_deref().is_some_and(|l| l.len() > 16 || !l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')) {
+                    return Err("language hint such as en or ta".into());
+                }
+                Ok(())
+            }
             SpeechEngine::Browser => Ok(()),
             SpeechEngine::Host { engine, program, voice } => crate::hostengines::validate_host(engine, program.as_deref(), voice.as_deref()),
         }
@@ -135,6 +167,10 @@ pub struct VoiceSettings {
     /// How easily the wake phrase triggers: 0 low (fewer false wakes, more misses), 1 normal, 2 high (the reverse). Moves the model's
     /// suggested threshold (`wakelisten::threshold_for`).
     pub my_wake_sens: u8,
+    /// Take the assistant's own voice out of what the microphone heard while it spoke (`echocancel`, F-VOICE-36). Off by default.
+    pub echo_cancel: bool,
+    /// A spoken "yes" may approve an ordinary ask in a voice session (`voiceassist`). Off by default: a tap or a key approves. The hard-ask list never accepts a spoken yes, whatever this says.
+    pub spoken_approvals: bool,
 }
 
 /// What is highlighted while text is read aloud (TALES, chat).
@@ -172,7 +208,7 @@ impl Highlight {
 
 impl Default for VoiceSettings {
     fn default() -> Self {
-        Self { stt: None, tts: None, record_cmd: DEFAULT_RECORD_CMD.into(), play_cmd: DEFAULT_PLAY_CMD.into(), auto_send: false, speak_replies: false, speed_pct: 100, highlight: Highlight::default(), align_words: true, remote_ok: Vec::new(), mic: String::new(), auto_stop: true, pause_ms: 1500, keep_listening: false, fix_wording: false, assistant_open: true, my_on: false, my_muted: false, my_follow_ms: 8000, my_wake: false, my_wake_sens: 1 }
+        Self { stt: None, tts: None, record_cmd: DEFAULT_RECORD_CMD.into(), play_cmd: DEFAULT_PLAY_CMD.into(), auto_send: false, speak_replies: false, speed_pct: 100, highlight: Highlight::default(), align_words: true, remote_ok: Vec::new(), mic: String::new(), auto_stop: true, pause_ms: 1500, keep_listening: false, fix_wording: false, assistant_open: true, my_on: false, my_muted: false, my_follow_ms: 8000, my_wake: false, my_wake_sens: 1, echo_cancel: false, spoken_approvals: false }
     }
 }
 
@@ -287,8 +323,33 @@ fn kill_tree(child: &mut Child) {
     let _ = child.wait();
 }
 
+/// Whether this process is a test binary (cargo puts them in `target/<profile>/deps`; the product never runs from there).
+pub(crate) fn is_test_binary() -> bool {
+    static IS: OnceLock<bool> = OnceLock::new();
+    // cargo before 1.100 puts a test program in target/<profile>/deps, cargo 1.100 in target/<profile>/build/<package>/<hash>/out (the product runs from neither)
+    *IS.get_or_init(|| {
+        cfg!(test)
+            || std::env::current_exe()
+                .ok()
+                .and_then(|e| e.parent().map(|p| p.file_name().is_some_and(|n| n == "deps") || (p.file_name().is_some_and(|n| n == "out") && p.ancestors().any(|a| a.file_name().is_some_and(|n| n == "build")))))
+                .unwrap_or(false)
+    })
+}
+
+/// The command to run for a sound player. In a test binary the real `aplay` (a bare name, or the usual system paths) is swapped
+/// for a program that swallows its input, so a test never opens (and never holds) this computer's sound device. Any other
+/// program, such as a fake `aplay` in a test's own folder, is left as it is.
+pub fn sound_player_argv(args: &[String]) -> Vec<String> {
+    let real = args.first().is_some_and(|a| matches!(a.as_str(), "aplay" | "/usr/bin/aplay" | "/bin/aplay" | "/usr/local/bin/aplay"));
+    if real && is_test_binary() {
+        return vec!["/bin/sh".into(), "-c".into(), "exec cat >/dev/null".into()];
+    }
+    args.to_vec()
+}
+
 pub(crate) fn command_for(args: &[String], cwd: Option<&Path>) -> Command {
     use std::os::unix::process::CommandExt;
+    let args = &sound_player_argv(args);
     let mut c = Command::new(&args[0]);
     c.process_group(0);
     c.args(&args[1..]).env_clear().env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin").env("LANG", "C.UTF-8");
@@ -310,7 +371,19 @@ pub(crate) fn command_for(args: &[String], cwd: Option<&Path>) -> Command {
 /// Run to completion with a timeout; returns (stdout, stderr). The child is killed on timeout.
 pub(crate) fn run_capture(mut cmd: Command, stdin: Option<&[u8]>, timeout: Duration) -> Result<(Vec<u8>, String), String> {
     cmd.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = cmd.spawn().map_err(|e| format!("cannot start `{}`: {e}", cmd.get_program().to_string_lossy()))?;
+    // ETXTBSY: a program written a moment ago can still be open for writing in a descriptor another thread's fork holds
+    // for a few microseconds; the exec succeeds when tried again.
+    let mut tries = 0;
+    let mut child = loop {
+        match cmd.spawn() {
+            Ok(c) => break c,
+            Err(e) if e.raw_os_error() == Some(26) && tries < 50 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => return Err(format!("cannot start `{}`: {e}", cmd.get_program().to_string_lossy())),
+        }
+    };
     if let (Some(data), Some(mut si)) = (stdin, child.stdin.take()) {
         let data = data.to_vec();
         std::thread::spawn(move || {
@@ -512,7 +585,7 @@ impl Recorder {
                 if n == 0 {
                     break;
                 }
-                let mut g = b2.lock().unwrap();
+                let mut g = b2.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 if g.len() < max {
                     let room = max - g.len();
                     g.extend_from_slice(&chunk[..n.min(room)]);
@@ -532,12 +605,12 @@ impl Recorder {
     }
 
     pub fn is_full(&self) -> bool {
-        self.buf.lock().unwrap().len() >= SAMPLE_RATE as usize * 2 * self.max_secs
+        self.buf.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len() >= SAMPLE_RATE as usize * 2 * self.max_secs
     }
 
     /// Loudness of the last ~150 ms, 0.0–1.0 (for a level meter).
     pub fn level(&self) -> f32 {
-        let g = self.buf.lock().unwrap();
+        let g = self.buf.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let n = (SAMPLE_RATE as usize * 2 * 150 / 1000).min(g.len()) & !1;
         let tail = &g[g.len() - n..];
         let pk = tail.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]]).saturating_abs()).max().unwrap_or(0);
@@ -565,7 +638,7 @@ impl Recorder {
             let _ = r.join();
         }
         let err = self.stderr.take().and_then(|h| h.join().ok()).unwrap_or_default();
-        let bytes = std::mem::take(&mut *self.buf.lock().unwrap());
+        let bytes = std::mem::take(&mut *self.buf.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
         if bytes.is_empty() {
             let why: String = err.lines().next().unwrap_or("no audio was captured").chars().take(160).collect();
             return Err(format!("the microphone produced no audio: {why}"));
@@ -805,6 +878,7 @@ fn clean_transcript(raw: &str) -> String {
 /// Speech to text. `wav` must be a WAV file (16 kHz mono works everywhere).
 pub fn transcribe(engine: &SpeechEngine, wav: &[u8], secrets: &Secrets, upstream: &dyn Upstream) -> Result<String, String> {
     match engine {
+        SpeechEngine::Gemini { model, language, key_ref, tier } => crate::gemini::transcribe(model, language.as_deref(), key_ref, *tier, wav, secrets, upstream).map(|t| clean_transcript(&t)),
         SpeechEngine::Browser | SpeechEngine::Host { .. } => Err("the browser voice and the speech engines of this computer only speak; choose an HTTP endpoint or a local command for speech-to-text".into()),
         SpeechEngine::Http { url, model, key_ref, language, .. } => {
             let mut fields = vec![("model", model.as_str()), ("response_format", "json")];
@@ -893,6 +967,7 @@ pub fn synthesize_with(engine: &SpeechEngine, text: &str, opts: &SpeakOpts, secr
     let speed = if opts.speed.is_finite() { opts.speed.clamp(0.5, 2.0) } else { 1.0 };
     let audio = match engine {
         SpeechEngine::Browser => return Err("the browser voice speaks inside the browser and makes no audio file".into()),
+        SpeechEngine::Gemini { .. } => return Err("Google Gemini is used for speech-to-text only; choose another reading voice".into()),
         SpeechEngine::Host { engine, program, voice } => {
             let spec = crate::hostengines::Spec::from_parts(engine, program.as_deref(), opts.voice.as_deref().filter(|v| !v.trim().is_empty()).or(voice.as_deref()))?;
             return crate::hostengines::synth_wav(&spec, &text, opts.lang.as_deref(), speed);
@@ -931,6 +1006,69 @@ pub fn synthesize_with(engine: &SpeechEngine, text: &str, opts: &SpeakOpts, secr
         return Err("the speech engine did not return WAV audio (set its output format to wav)".into());
     }
     Ok(audio)
+}
+
+/// Helpers for tests that watch the processes a test binary starts.
+#[cfg(test)]
+pub(crate) mod test_procs {
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    /// A script in a fresh temp folder that writes its pid to a file, then runs `body`. Returns (script path, pid file).
+    pub fn script(tag: &str, body: &str) -> (String, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("iyakki-proc-{tag}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos()));
+        std::fs::create_dir_all(&d).unwrap();
+        let (sh, pidfile) = (d.join("fake-player"), d.join("pid"));
+        std::fs::write(&sh, format!("#!/bin/sh\necho $$ > {}.tmp && mv {}.tmp {}\n{body}\n", pidfile.display(), pidfile.display(), pidfile.display())).unwrap();
+        std::fs::set_permissions(&sh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (sh.display().to_string(), pidfile)
+    }
+
+    /// The pid the script wrote (waits for it).
+    pub fn pid_from(pidfile: &PathBuf) -> u32 {
+        let end = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(p) = std::fs::read_to_string(pidfile).ok().and_then(|t| t.trim().parse().ok()) {
+                return p;
+            }
+            assert!(Instant::now() < end, "the player did not start");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Whether no process (not even a zombie waiting to be reaped) has this pid, waiting up to `within`.
+    pub fn gone(pid: u32, within: Duration) -> bool {
+        let end = Instant::now() + within;
+        loop {
+            // SAFETY: signal 0 only checks that the process exists
+            let alive = unsafe { libc::kill(pid as i32, 0) } == 0;
+            if !alive {
+                return true;
+            }
+            if Instant::now() >= end {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// The direct children of this process whose program name is `name`.
+    pub fn children_named(name: &str) -> Vec<u32> {
+        let me = std::process::id();
+        let mut out = Vec::new();
+        for e in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+            let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else { continue };
+            let Ok(stat) = std::fs::read_to_string(e.path().join("stat")) else { continue };
+            // "pid (comm) S ppid ...": comm may hold spaces and brackets, so cut after the last ')'
+            let ppid = stat.rsplit_once(')').and_then(|(_, r)| r.split_whitespace().nth(1)).and_then(|p| p.parse::<u32>().ok());
+            let comm = std::fs::read_to_string(e.path().join("comm")).unwrap_or_default();
+            if ppid == Some(me) && comm.trim() == name {
+                out.push(pid);
+            }
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -1244,5 +1382,60 @@ mod tests {
             println!("whisper-server heard {:?}", heard);
             assert!(norm(&heard).contains("deploy key") && norm(&heard).contains("vault"), "heard: {heard}");
         }
+    }
+
+    #[test]
+    fn a_test_binary_never_starts_the_real_aplay() {
+        use test_procs::*;
+        for cmd in ["aplay -q", "/usr/bin/aplay -q -D plughw:0,0"] {
+            let mut c = spawn_player(cmd).unwrap();
+            let comm = std::fs::read_to_string(format!("/proc/{}/comm", c.id())).unwrap_or_default();
+            assert_ne!(comm.trim(), "aplay", "{cmd}");
+            kill_child(&mut c);
+        }
+        // a fake of the same name in a test's own folder still runs as written
+        let argv = sound_player_argv(&["/tmp/x/aplay".to_string(), "-q".to_string()]);
+        assert_eq!(argv, ["/tmp/x/aplay", "-q"]);
+        assert!(children_named("aplay").is_empty(), "this test binary has an aplay child: some test opened the real sound device");
+    }
+
+    #[test]
+    fn a_hung_player_is_killed_and_reaped_when_the_player_is_dropped_or_its_thread_panics() {
+        use test_procs::*;
+        let _route = crate::mixer::pin_command_route();
+        let wav = encode_wav(&tone(440.0, 200), SAMPLE_RATE);
+        for how in ["drop", "stop", "panic"] {
+            let (prog, pidfile) = script(how, "trap '' TERM\nexec sleep 1000");
+            let p = Player::start(&format!("/bin/sh {prog}"), &wav).unwrap();
+            let pid = pid_from(&pidfile);
+            assert!(!gone(pid, Duration::ZERO), "{how}: running");
+            match how {
+                "drop" => drop(p),
+                "stop" => {
+                    let mut p = p;
+                    p.stop();
+                    assert!(gone(pid, Duration::from_secs(3)), "stop reaps it before the drop");
+                }
+                _ => {
+                    let t = std::thread::spawn(move || {
+                        let _owned = p;
+                        panic!("the owner died");
+                    });
+                    assert!(t.join().is_err());
+                }
+            }
+            assert!(gone(pid, Duration::from_secs(3)), "{how}: gone and reaped");
+        }
+    }
+
+    #[test]
+    fn a_speech_engine_process_is_killed_and_reaped_when_its_player_is_dropped() {
+        use test_procs::*;
+        let (prog, pidfile) = script("speech", "trap '' TERM\nexec sleep 1000");
+        let child = command_for(&["/bin/sh".to_string(), prog], None).stdin(Stdio::piped()).spawn().unwrap();
+        let p = Player::from_speech(child, b"hi".to_vec(), None, Duration::from_secs(60));
+        let pid = pid_from(&pidfile);
+        drop(p);
+        assert!(gone(pid, Duration::from_secs(3)));
     }
 }

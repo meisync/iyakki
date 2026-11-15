@@ -667,6 +667,38 @@ fn saving_the_log_goes_through_the_host_save_dialog_in_window_mode() {
 }
 
 #[test]
+fn saving_the_log_without_the_host_dialog_writes_a_file_in_the_home_folder_and_says_where() {
+    let _guard = iyakki_agent::hostfiles::test_guard();
+    iyakki_agent::hostfiles::set_enabled(false);
+    let mut f = fixture();
+    f.app.choose_scope(Scope::Ns("shop".into()));
+    f.open_first("web-crash");
+    f.key('l');
+    f.wait("logs", |f| f.app.det.logs.loaded && !f.app.det.logs.buf.lines.is_empty());
+    let home = iyakki_agent::scope::home_root(&f.app.user, f.cx.services.dir());
+    std::fs::create_dir_all(&home).unwrap();
+    let path = home.join("shop-web-crash.log");
+    let _ = std::fs::remove_file(&path);
+    f.click("Save");
+    assert!(crate::apps::App::take_host_save(&mut f.app).is_none(), "no dialog is asked for outside window mode");
+    let saved = std::fs::read_to_string(&path).expect("the log is a file in the person's home folder");
+    assert!(saved.contains("could not connect") && !saved.contains("2026-10-22T10"), "text without the timestamps: {saved}");
+    assert!(saved.ends_with('\n'), "one line per log line");
+    let said = f.app.status.clone().expect("the person is told");
+    assert!(said.1 && said.0.starts_with("Saved ") && said.0.contains("shop-web-crash.log"), "{said:?}");
+    // a folder the account may not write to: nothing is written and the sentence says so
+    f.cx.session.policy.fs_write = vec!["/nowhere-at-all".into()];
+    let _ = std::fs::remove_file(&path);
+    f.click("Save");
+    assert!(!path.exists(), "a refused save writes nothing");
+    assert!(f.app.status.as_ref().is_some_and(|s| !s.1 && s.0.contains("may not write")), "{:?}", f.app.status);
+    // an empty log has nothing to save
+    f.app.det.logs.buf.lines.clear();
+    f.click("Save");
+    assert!(f.app.status.as_ref().is_some_and(|s| s.0.contains("nothing to save")), "{:?}", f.app.status);
+}
+
+#[test]
 fn exec_is_a_copied_command_not_a_terminal() {
     let mut f = fixture();
     f.app.choose_scope(Scope::Ns("shop".into()));
@@ -1612,4 +1644,66 @@ fn the_routes_page_keys_work_and_the_card_fits_every_size() {
         let d = f.g.hits.iter().find(|x| x.label == "Done").unwrap().rect;
         assert!(p.x + p.w <= d.x + 0.5, "{w}x{h}: the buttons do not overlap");
     }
+}
+
+fn widgets_crd() -> Value {
+    json!({"kind":"CustomResourceDefinition","metadata":{"name":"widgets.example.com","creationTimestamp":ts(86_400)},
+        "spec":{"group":"example.com","scope":"Namespaced","names":{"kind":"Widget","plural":"widgets"},"versions":[{"name":"v1beta1","served":true,"storage":false},{"name":"v1","served":true,"storage":true}]}})
+}
+
+fn widget(name: &str, ns: &str, ready: bool, ago: u64) -> Value {
+    json!({"kind":"Widget","metadata":{"name":name,"namespace":ns,"creationTimestamp":ts(ago)},
+        "status":{"conditions":[{"type":"Ready","status": if ready { "True" } else { "False" },"reason":"Degraded"}]}})
+}
+
+#[test]
+fn a_custom_resource_definition_has_an_instances_tab_that_lists_what_the_cluster_holds_and_other_kinds_do_not() {
+    let mut f = fixture();
+    f.kube.answer("get customresourcedefinitions -o json", &list(vec![widgets_crd()]));
+    f.kube.answer("get customresourcedefinitions widgets.example.com -o json", &widgets_crd().to_string());
+    f.kube.answer("get widgets.example.com -A -o json", &list(vec![widget("alpha", "shop", true, 3 * 86_400), widget("beta", "empty", false, 600)]));
+    f.app.choose_kind(Kind::Crds);
+    f.open_first("widgets.example.com");
+    f.draw();
+    assert!(f.has_hit("Instances"), "a definition offers the tab");
+    f.click("Instances");
+    f.wait("the instances", |f| f.view_text().contains("2 instances"));
+    let text = f.view_text();
+    assert!(text.contains("2 instances of widgets.example.com"), "{text}");
+    assert!(text.contains("alpha in shop \u{b7} ") && text.contains(" old \u{b7} Ready"), "{text}");
+    assert!(text.contains("beta in empty \u{b7} ") && text.contains(" old \u{b7} Not ready: Degraded"), "{text}");
+    assert!(f.calls_with("get widgets.example.com -A -o json") == 1, "one read of the instances: {:?}", f.kube.calls());
+    // nothing here changes the cluster
+    assert!(f.kube.calls().iter().all(|c| !c.contains("apply") && !c.contains("delete") && !c.contains("patch")), "{:?}", f.kube.calls());
+    // the other tabs are still there and the key `i` comes back to the instances
+    f.key('s');
+    f.key('i');
+    f.wait("the instances again", |f| f.view_text().contains("alpha in shop"));
+    // a pod has no such tab: the button is not drawn and the key says why
+    f.app.choose_kind(Kind::Pods);
+    f.app.choose_scope(Scope::Ns("shop".into()));
+    f.open_first("web-crash");
+    f.draw();
+    assert!(!f.has_hit("Instances"));
+    f.key('i');
+    assert!(f.app.status.as_ref().is_some_and(|m| m.0.contains("Instances are for custom resource definitions") && !m.1), "{:?}", f.app.status);
+}
+
+#[test]
+fn a_definition_without_its_plural_name_and_a_cluster_that_answers_with_an_error_are_said_in_words() {
+    let mut f = fixture();
+    // the canned definition of the sample has no plural name: the tab says so instead of guessing an address
+    f.app.choose_kind(Kind::Crds);
+    f.open_first("widgets.example.com");
+    f.click("Instances");
+    f.wait("the sentence", |f| f.view_text().contains("Could not list the instances"));
+    assert!(f.view_text().contains("plural"), "{}", f.view_text());
+    let mut g = fixture();
+    g.kube.answer("get customresourcedefinitions -o json", &list(vec![widgets_crd()]));
+    g.kube.answer("get customresourcedefinitions widgets.example.com -o json", &widgets_crd().to_string());
+    g.kube.fail("get widgets.example.com", "error: the server doesn't have a resource type \"widgets\"");
+    g.app.choose_kind(Kind::Crds);
+    g.open_first("widgets.example.com");
+    g.click("Instances");
+    g.wait("the failure", |f| f.view_text().contains("Could not list the instances"));
 }

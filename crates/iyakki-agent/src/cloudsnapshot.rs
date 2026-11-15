@@ -157,6 +157,11 @@ impl Drop for SnapKey {
 }
 
 impl SnapKey {
+    /// The key's id (the first 16 hex digits of the SHA-256 of the key); never the key.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
     pub fn from_bytes(b: &[u8]) -> Result<SnapKey, String> {
         let key = <[u8; 32]>::try_from(b).map_err(|_| "a snapshot key is 32 bytes (64 hex digits)".to_string())?;
         Ok(SnapKey { id: hex(&Sha256::digest(key))[..16].to_string(), key })
@@ -184,7 +189,7 @@ impl SnapKey {
     }
 }
 
-fn key_id_ok(id: &str) -> bool {
+pub(crate) fn key_id_ok(id: &str) -> bool {
     id.len() == 16 && id.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
 }
 
@@ -910,6 +915,20 @@ fn mb(b: u64) -> String {
 struct CliKeys {
     ring: Option<KeyRing>,
     vault: Option<crate::cloudvaultd::Client>,
+    /// Envelope mode (`--keys kms:REF`): the keys sit wrapped in a folder, the master key is read from a file.
+    kms: Option<KmsHold>,
+}
+
+struct KmsHold {
+    kms: crate::cloudsnapshot_kms::LocalKms,
+    dir: crate::cloudsnapshot_kms::DirBlobs,
+    key_ref: String,
+}
+
+impl KmsHold {
+    fn ring(&self) -> crate::cloudsnapshot_kms::KmsKeyring<'_> {
+        crate::cloudsnapshot_kms::KmsKeyring { kms: &self.kms, blobs: &self.dir, key_ref: &self.key_ref }
+    }
 }
 
 impl KeySource for CliKeys {
@@ -917,21 +936,40 @@ impl KeySource for CliKeys {
         match (&self.ring, &self.vault) {
             (Some(r), _) if !r.0.is_empty() => r.current(),
             (_, Some(c)) => VaultKeyring { client: c }.current(),
-            _ => Err("no snapshot key given (--key-file FILE, or --vault-key FILE --as USER)".into()),
+            _ if self.kms.is_some() => self.kms.as_ref().map(|k| k.ring().current()).unwrap_or_else(|| Err(String::new())),
+            _ => Err("no snapshot key given (--key-file FILE, or --vault-key FILE --as USER, or --keys kms:REF --kms-master-key FILE)".into()),
         }
     }
     fn get(&self, id: &str) -> Result<SnapKey, String> {
         if let Some(Ok(k)) = self.ring.as_ref().map(|r| r.get(id)) {
             return Ok(k);
         }
-        match &self.vault {
-            Some(c) => VaultKeyring { client: c }.get(id),
-            None => Err(format!("no key {id} was given for this snapshot")),
+        match (&self.vault, &self.kms) {
+            (Some(c), _) => VaultKeyring { client: c }.get(id),
+            (None, Some(k)) => k.ring().get(id),
+            (None, None) => Err(format!("no key {id} was given for this snapshot")),
         }
     }
 }
 
-fn cli_keys(a: &[String]) -> Result<Option<CliKeys>, String> {
+fn cli_keys(a: &[String], data: &Path) -> Result<Option<CliKeys>, String> {
+    use crate::cloudsnapshot_kms::ProviderSetting;
+    // where the keys live: `--keys`, else the launch configuration's setting the pod carries, else what the other options say
+    let provider = opt(a, "--keys").or_else(|| std::env::var("IYAKKI_SNAPSHOT_KEYS").ok().filter(|s| !s.trim().is_empty())).map(|s| ProviderSetting::parse(&s)).transpose()?;
+    match &provider {
+        Some(ProviderSetting::File) if !a.iter().any(|x| x == "--key-file") => return Err("the key source is file: give --key-file FILE".into()),
+        Some(ProviderSetting::Vault) if opt(a, "--vault-key").is_none() => return Err("the key source is vault: give --vault-key FILE --as USER".into()),
+        _ => {}
+    }
+    let kms = match &provider {
+        Some(ProviderSetting::Kms(r)) => {
+            let mf = opt(a, "--kms-master-key").ok_or("the key source is kms: give --kms-master-key FILE (64 hex digits, kept by the operator)")?;
+            let kms = crate::cloudsnapshot_kms::LocalKms::from_hex(&std::fs::read_to_string(&mf).map_err(|e| format!("{mf}: {e}"))?)?;
+            let dir = opt(a, "--keyring-dir").map(PathBuf::from).unwrap_or_else(|| data.join("cloud").join("snapshot-keyring"));
+            Some(KmsHold { kms, dir: crate::cloudsnapshot_kms::DirBlobs(dir), key_ref: r.clone() })
+        }
+        _ => None,
+    };
     let all = |name: &str| -> Vec<String> { a.iter().enumerate().filter(|(_, x)| *x == name).filter_map(|(i, _)| a.get(i + 1).cloned()).collect() };
     let read = |f: &String| -> Result<SnapKey, String> { SnapKey::from_hex(&std::fs::read_to_string(f).map_err(|e| format!("{f}: {e}"))?) };
     let mut ring = Vec::new();
@@ -956,7 +994,7 @@ fn cli_keys(a: &[String]) -> Result<Option<CliKeys>, String> {
             }
         }
     };
-    Ok((!ring.is_empty() || vault.is_some()).then_some(CliKeys { ring: (!ring.is_empty()).then_some(KeyRing(ring)), vault }))
+    Ok((!ring.is_empty() || vault.is_some() || kms.is_some()).then_some(CliKeys { ring: (!ring.is_empty()).then_some(KeyRing(ring)), vault, kms }))
 }
 
 /// `iyakki cloud snapshot create | list | verify | restore | rekey | key-new | key-rotate | prune | cronjob` (the arguments after `snapshot`).
@@ -964,7 +1002,7 @@ pub fn cli(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
     let data = PathBuf::from(opt(a, "--data").unwrap_or_else(|| "/var/lib/iyakki".into()));
     let files = data.join("cloud").join("files");
     let snaps = opt(a, "--dir").map(PathBuf::from).unwrap_or_else(|| data.join("cloud").join("snapshots"));
-    let keys = cli_keys(a)?;
+    let keys = cli_keys(a, &data)?;
     let ks = || keys.as_ref().map(|k| k as &dyn KeySource);
     let id = || a.get(1).filter(|x| !x.starts_with("--")).cloned().ok_or_else(|| "give the snapshot id (see: iyakki cloud snapshot list)".to_string());
     match a.first().map(String::as_str) {
@@ -1039,9 +1077,33 @@ pub fn cli(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
             Ok(())
         }
         Some("key-rotate") => {
-            let c = keys.as_ref().and_then(|k| k.vault.as_ref()).ok_or("usage: iyakki cloud snapshot key-rotate --vault-key FILE --as USER")?;
+            if let Some(h) = keys.as_ref().and_then(|k| k.kms.as_ref()) {
+                let k = h.ring().rotate()?;
+                out(&format!("the current snapshot key is now {} (wrapped by {}; older keys stay in {}; run rekey on old snapshots, then prune)", k.id, h.key_ref, h.dir.0.display()));
+                return Ok(());
+            }
+            let c = keys.as_ref().and_then(|k| k.vault.as_ref()).ok_or("usage: iyakki cloud snapshot key-rotate --vault-key FILE --as USER (or --keys kms:REF --kms-master-key FILE)")?;
             let k = VaultKeyring { client: c }.rotate()?;
             out(&format!("the current snapshot key is now {} (older keys stay in the vault; run rekey on old snapshots, then prune)", k.id));
+            Ok(())
+        }
+        Some("keys-migrate") => {
+            // copy the keys of one keyring into the envelope keyring (`--keys kms:REF`) from key files or the vault, checking each copy
+            let to = keys.as_ref().and_then(|k| k.kms.as_ref()).ok_or("usage: iyakki cloud snapshot keys-migrate --keys kms:REF --kms-master-key FILE (--key-file F ... | --vault-key FILE --as USER --ids ID,ID)")?;
+            let ring = keys.as_ref().and_then(|k| k.ring.as_ref());
+            let ids: Vec<String> = match (ring, opt(a, "--ids")) {
+                (Some(r), _) => r.0.iter().map(|k| k.id.clone()).collect(),
+                (None, Some(s)) => s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect(),
+                (None, None) => return Err("give the key files, or --ids for keys held in the vault".into()),
+            };
+            let from: &dyn KeySource = match (ring, keys.as_ref().and_then(|k| k.vault.as_ref())) {
+                (Some(r), _) => r,
+                (None, Some(_)) => return Err("reading from the vault here needs the vault options and a vault keyring; use key files, or run again with --vault-key and without --keys".into()),
+                (None, None) => return Err("give the keys to copy (--key-file or --vault-key)".into()),
+            };
+            let cur = ids.first().map(String::as_str);
+            let m = crate::cloudsnapshot_kms::migrate(from, &ids, cur, &to.ring())?;
+            out(&format!("copied {} key(s) into the envelope keyring ({}); current: {}; nothing was removed from the source", m.copied.len(), to.key_ref, m.current.unwrap_or_default()));
             Ok(())
         }
         Some("prune") => {

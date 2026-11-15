@@ -10,11 +10,13 @@
   <a href="LICENSE">Apache-2.0</a> · free for any use · permissive dependencies only
 </p>
 
-> **Status: alpha (0.1.0-alpha.2), 2026-11-10.** IYAKKI is a preview **for developers and testers, not for production**.
-> The desktop window and the QEMU virtual machine are the long-tested paths; the USB image has booted on **four real computers (a Mac mini 2018, a
-> MacBook Pro 14,1, an HP laptop and a Lenovo laptop)**, and most of what was tried on real hardware was tried on the Mac mini; many features are partial
-> ([`FEATURES.md`](FEATURES.md)); data formats and upgrade paths are not promised to stay stable. The installer erases the whole drive you
-> pick: do not use it on a machine holding anything you cannot lose. Read [`KNOWN-ISSUES.md`](KNOWN-ISSUES.md) first, and the [`RELEASE-NOTES-0.1.0-alpha.2.md`](RELEASE-NOTES-0.1.0-alpha.2.md) (what was tried where).
+> **Status: alpha (0.1.0-alpha.3, prepared for 2026-11-16).** IYAKKI is a preview **for developers and testers, not for production**.
+> The desktop window and the QEMU virtual machine are the long-tested paths; the USB image has booted on **six real computers (a Mac mini 2018, a Mac mini 2014,
+> a MacBook Pro 14,1, a 2020 MacBook Pro, an HP laptop and a Lenovo laptop)**, and most of what was tried on real hardware was tried on the Mac mini 2018. Of 1426 rows in
+> [`FEATURES.md`](FEATURES.md), 425 are done (fully written and fully proven), 913 are partial and 57 are not started; data formats and upgrade paths are not
+> promised to stay stable. The installer erases the whole drive you pick: do not use it on a machine holding anything you cannot lose. Read
+> [`KNOWN-ISSUES.md`](KNOWN-ISSUES.md) first, and the [`RELEASE-NOTES-0.1.0-alpha.3.md`](RELEASE-NOTES-0.1.0-alpha.3.md) (what is new and what was tried where;
+> the notes of the earlier alphas stay next to it).
 
 ![The IYAKKI launcher](docs/media/shots/01-launcher.png)
 
@@ -28,7 +30,7 @@
 | **Run it in a virtual machine** | `./run.sh build` once (30-40 min), then `./run.sh vm` or `./run.sh vm-disk` (QEMU) | [`docs/INSTALL.md`](docs/INSTALL.md#4-virtual-machine) |
 | **Serve it in a browser / on Kubernetes** | `iyakki web`, or `kubectl apply -f dist/k3s-web.yaml` | [`docs/ADMIN-GUIDE.md`](docs/ADMIN-GUIDE.md#network-exposure) |
 
-Linux programs (Debian or Ubuntu with `apt`) run in a sandbox: **IYAKKI menu -> Linux apps** (`docs/LINUX-APPS.md`; downloaded at your click, nothing shipped; alpha, untried on a device). Chat needs a model: **SETTINGS -> Models** (Ollama, OpenAI-compatible, OpenAI, OpenRouter, Anthropic, Gemini; or the GPU of a Mac or another computer on your network: *Mac / GPU host*, `docs/MAC-MODEL-HOST.md`). Something wrong?
+Linux programs (Debian or Ubuntu with `apt`) run in a sandbox: **IYAKKI menu -> Linux apps** (`docs/LINUX-APPS.md`; downloaded at your click, nothing shipped; alpha: the install of a Debian sandbox failed on a Mac mini in the one image run, KI-075). Chat needs a model: **SETTINGS -> Models** (Ollama, OpenAI-compatible, OpenAI, OpenRouter, Anthropic, Gemini; or the GPU of a Mac or another computer on your network: *Mac / GPU host*, `docs/MAC-MODEL-HOST.md`). Something wrong?
 [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) and [`docs/FAQ.md`](docs/FAQ.md).
 
 **All documentation** is listed in [`docs/INDEX.md`](docs/INDEX.md): start here ([`INSTALL`](docs/INSTALL.md),
@@ -39,6 +41,8 @@ Linux programs (Debian or Ubuntu with `apt`) run in a sandbox: **IYAKKI menu -> 
 
 **Report an issue:** see [`CONTRIBUTING.md`](CONTRIBUTING.md#reporting-issues) and [`SUPPORT.md`](SUPPORT.md); security problems go to
 [`SECURITY.md`](SECURITY.md). Licence: [Apache-2.0](LICENSE). Community rules: [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
+
+**Project web page:** `site/` is a static GitHub Pages site (home, progress, privacy, 404; no script, no tracker). `python3 dist/site/build-site.py` rebuilds it from `FEATURES.md` and `python3 dist/site/check-site.py` checks that its counts equal the matrix; `.github/workflows/pages.yml` deploys it.
 
 ---
 
@@ -386,7 +390,7 @@ flowchart LR
 | Where | How | What you get | Status |
 |---|---|---|---|
 | **Desktop window** | `./run.sh window` | The full shell with every tile, on your real network and files | Works; the fastest way to try it |
-| **Bare metal** | Build the ISO, write it to a USB stick (`docs/BOOT-TEST.md`) | The full shell on a framebuffer, IYAKKI as PID 1, driver autoload, its own k3s for running code | Booted in QEMU (BIOS and UEFI) and on one Mac mini 2018 (T2) from a USB SSD (2026-10-18/19; Wi-Fi and Bluetooth not working there); other real hardware still to be tested. (Intel Macs boot USB sticks through the firmware's own boot picker, the Option key; what then works, and the Mac mini 2014 test list, are in `docs/MAC-HARDWARE.md`. Apple Silicon Macs: use the VM row.) |
+| **Bare metal** | Build the ISO, write it to a USB stick (`docs/BOOT-TEST.md`) | The full shell on a framebuffer, IYAKKI as PID 1, driver autoload, its own k3s for running code | Booted in QEMU (BIOS and UEFI) and on real computers from a USB SSD or an internal disk: a Mac mini 2018 (T2; since 2026-10-18), a 2020 MacBook Pro (T2), and, on the alpha.2 images, a MacBook Pro 14,1, an HP Pavilion 16 and a Lenovo laptop; a Mac mini 2014 booted a lean image (its Wi-Fi card has no driver, KI-094). What works on each is in `docs/HARDWARE.md`; every other machine is untested. (Intel Macs boot USB sticks through the firmware's own boot picker, the Option key; what then works, and the Mac mini 2014 test list, are in `docs/MAC-HARDWARE.md`. Apple Silicon Macs: use the VM row.) |
 | **Virtual machine** | `./run.sh vm`, `vm-direct`, `vm-disk`, `vm-arm` (ARM64 as on Apple Silicon); see `docs/LOCAL-TEST.md` | The same as bare metal | Works in QEMU |
 | **Docker** | `docker build -f dist/Dockerfile -t iyakki:0.1.0 .` | A tiny `scratch` image running the supervisor (`iyakki serve`) as an unprivileged user: WebAssembly sandbox, capability tokens, ledger, CLI; with `IYAKKI_WEB=1` also the whole desktop in a browser | Image and manifest written; the manifest passes `kubectl --dry-run` |
 | **Local K3s** | Load the image, `kubectl apply -f dist/k3s-manifest.yaml` | One supervisor per node (a DaemonSet), hardened (non-root, read-only root, all capabilities dropped, seccomp), joined into a LAN swarm that runs WebAssembly tasks on its peers | Same status as Docker |
@@ -424,7 +428,7 @@ The full, grouped map is [`docs/INDEX.md`](docs/INDEX.md). The core files:
 | File | Read it for |
 |---|---|
 | [`BOUNDARY.md`](BOUNDARY.md) | Every place our code touches the base OS, and the rules |
-| [`FEATURES.md`](FEATURES.md) | The feature matrix: one row per feature with status, progress and the tests that prove it (checked by a test) |
+| [`FEATURES.md`](FEATURES.md) | The feature matrix: one row per feature with status, Impl/Test (written and proven, e.g. `100/60`), a Manual column and the tests that prove it (checked by a test) |
 | [`LICENSING.md`](LICENSING.md) | Licensing policy, what ships in an image, firmware, third-party code |
 | [`Agent OS Architecture Specification.md`](Agent%20OS%20Architecture%20Specification.md) | The original design and roadmap |
 | [`docs/LOCAL-TEST.md`](docs/LOCAL-TEST.md) · [`docs/BOOT-TEST.md`](docs/BOOT-TEST.md) | Trying it on this computer, then on real hardware |
@@ -461,6 +465,14 @@ The full, grouped map is [`docs/INDEX.md`](docs/INDEX.md). The core files:
   (Settings, Voice). **STORE** has a Store switcher, *Add a store* from a portal link, and a private store you can run in your own cluster
   (**platform services**: Settings, Dev cluster, Platform services; also Gitea). Message boxes take 20,000 characters. zram swap and an
   on-device installer (Settings, System). All new, all tested with fakes: see KNOWN-ISSUES.md.
+
+* **New in alpha.3.** The full list with where each item was tried is [`RELEASE-NOTES-0.1.0-alpha.3.md`](RELEASE-NOTES-0.1.0-alpha.3.md). In short: **layered root and delta update
+  packs** (`docs/UPDATES.md`); **PDF writing** (the `pdf_create` chat tool, TALES and LEARN exports, `docs/PDF.md`) and text selection in the viewer; **`iyakki backup`** and
+  **`iyakki doctor`** on the command line (`docs/BACKUP.md`, `docs/DOCTOR.md`); **SDK 1.2** for tile apps (`docs/development/SDK-BRIDGE-V2.md`); a **UPnP/DLNA media server** for shared folders
+  and a **zip download** of a shared folder (`docs/SHARED-FOLDERS.md`); **web service API scopes** for programs paired through developer mode (`docs/DEVELOPER-MODE.md`); an
+  **outbound-only network** for Linux sandboxes (`docs/LINUX-APPS.md`); **bookmark folders, text-only zoom, start page pictures, streamed downloads and uploads** and a **uBlock-filters button** in the
+  browser; two **screen saver** styles and a start-now chord; **desktop views**; an SSH server with more ciphers and key types; and, experimental and off by default, **compressed memory**, a
+  **boot-order prefetch** (`docs/BOOT-SPEED.md`) and **Connect a client**. Most of it is tested with fakes only; the release notes say which parts were also seen on a machine.
 
 * **Chat sessions with memory.** Every chat is saved and listed in a side panel (hide/show with `Ctrl+W`). A chat opens on
   its last three days (up to 1000 messages) and older messages load as you scroll up. Each finished exchange is indexed in a
@@ -548,7 +560,7 @@ The full, grouped map is [`docs/INDEX.md`](docs/INDEX.md). The core files:
 | `iyakki-devctl` · `iyakki-hwinfo` | Settings controls (links, WiFi, sound, radios) and the hardware report for the boot hardware check |
 | `iyakki-swarm` | libp2p + mDNS: discover LAN peers and run WASM tasks on them |
 | `iyakki-usb` | host tool: writes an image to a USB stick safely |
-| `iyakki-ui` · `iyakki-gui` | the desktop window (`iyakki-desktop`); `iyakki-gui` is a separate Cargo workspace |
+| `iyakki-gui` | the desktop window (`iyakki-desktop`) and the small editor window; a separate Cargo workspace |
 
 `dist/` has the Dockerfile, the K3s manifest, the JavaScript-engine build script and the Buildroot external tree for
 bootable images.
@@ -576,7 +588,8 @@ audio, UVC cameras, TPM, watchdog, RTC and VM guest drivers. Ethernet and a WiFi
 ## Status
 
 Everything listed in `FEATURES.md` as *done* has unit tests; the file is checked by a test, so a row cannot claim a
-test that does not exist. At the time of writing: **311 features done, 301 partial, 65 planned**.
+test that does not exist. At the time of writing (`python3 dist/features/migrate-impl-test.py`, 1426 rows): **425 done** (fully written and fully proven),
+**913 partial** (677 fully written but not fully proven, 236 not fully written), **57 planned** (not started) and 31 deprecated.
 
 **Verified in this repo**
 * `cargo test --workspace` (the full run passes before each release; see `ALPHA-GATE.md`), licence audit for both workspaces (`cargo deny`), the third-party licence file
@@ -585,26 +598,31 @@ test that does not exist. At the time of writing: **311 features done, 301 parti
   autoload, DHCP, a sandboxed WASM guest, clean power-off, a data volume that survives a reboot
   (`dist/buildroot/qemu-test.sh`, `qemu-persist-test.sh`). Power-on to the sign-in screen: about 1.6 s in QEMU
   (`dist/buildroot/boot-time.py`).
-* On real hardware (one machine, a Mac mini 2018, Macmini8,1, T2, 2026-10-18/19): booting the install image from a USB SSD, persistent
-  `/home`, HDMI and built-in audio, a USB webcam, the k3s dev cluster and Store → Setup (formerly Quick install), Claude Code and Copilot CLI sign-in, and the full web
-  engine opening Google and YouTube (VP9 video plays).
+* On real hardware: a Mac mini 2018 (Macmini8,1, T2; 2026-10-18/19 and since, through developer mode and the check scripts in `dist/hwtest`): booting the install image from a USB SSD,
+  persistent `/home`, HDMI and built-in audio, a USB webcam, the k3s dev cluster and Store → Setup (formerly Quick install), Claude Code and Copilot CLI sign-in, and the full web
+  engine opening Google and YouTube (VP9 video plays). The alpha.2 image booted on a MacBook Pro 14,1, an HP Pavilion 16 and a Lenovo laptop (owner), a Mac mini 2014 booted a lean
+  image, and a 2020 MacBook Pro (T2) boots from USB and its internal disk. Per machine: [`docs/HARDWARE.md`](docs/HARDWARE.md).
+* Against a real Lemonade server on the LAN (2026-11-12): the assistant's tool use with a small model, speech, transcription, pictures, and the PDF exports; in a real Chrome (headless): the
+  web pages and the client page (`dist/browsertest`); the built-in browser engine against about 30 live sites (`docs/development/BROWSER-COMPAT.md`).
 * Against the real services: Ollama (list, chat, pulling a model, and installing and starting the real server), all eleven CLI
   tools from their vendors with checksums, a real k3s cluster running sandboxed code with its limits (in a privileged
   container and on the booted image), the Docker image on a real K3s, the browser front end in a real Chrome.
 * The static program on Alpine, Debian, Ubuntu, Fedora and Arch containers, and as a hardened systemd service.
 
 **Not verified**
-* Real hardware beyond what the release notes list: other PCs and Macs (`docs/BOOT-TEST.md` is the guide), touch outside the Mac mini, other GPUs. Wi-Fi
+* Real hardware beyond what the release notes list: other PCs and Macs (`docs/BOOT-TEST.md` is the guide), touch on other machines, other GPUs. Wi-Fi on the 2013 to 2015 Macs (Broadcom BCM4360) has no driver (KI-094). Wi-Fi
   and Bluetooth on a Mac need Apple's firmware, which the person installs on their own machine (it is not shipped); Wi-Fi association is recorded on Macs with that firmware
   (`docs/project/HARDWARE-MATRIX.md`), and Bluetooth pairing, phone sound and tether on one MacBook Pro 14,1. Secure Boot is verified in QEMU only; the T2 MacBook Pro 2019 patches were never booted; Apple Silicon is a VM only.
 * Live calls to OpenAI, Anthropic and Gemini (needs keys); picture generation (Ollama's image models run only on macOS);
   Copilot full tool use, Autopilot with external agents, Developer mode and tile-app publishing beyond loopback; the ARM64 cluster and CLI installs.
-* Platform services (Gitea, the private store), jobs, voice engines and TALES pictures: fakes and scripted stand-ins only, never a real cluster, speaker or picture model (`KNOWN-ISSUES.md`).
-* The `hw` image (firmware blobs) was never booted. The desktop window on a Mac (`docs/MACOS.md`).
+* Platform services (Gitea, the private store), jobs, voice engines and TALES pictures: mostly fakes and scripted stand-ins; a real model, speech and picture model on a Lemonade server and the dev
+  cluster of the Mac mini were used for some rows, never a managed cluster, and never a listener at the speaker for the new voice rows (`KNOWN-ISSUES.md`).
+* The `hw` image (firmware blobs) was never booted. The desktop window on a Mac (`docs/MACOS.md`) builds and runs on an Apple silicon Mac mini, but sound heard, keyboard and mouse input in the
+  window and several tiles are not verified there (KI-078). VPN, Linux sandboxes on an image and Secure Boot on real hardware are untried or failed (KI-003, KI-075, KI-076).
 
 **Known gaps**
 * Browser: no video decoding in the built-in engine; the full web engine (web and macweb images) plays YouTube (VP9/Opus) but not H.264/AAC
-  video such as TikTok's (not shipped on purpose: patent policy). The built-in engine has no canvas, no IndexedDB, no PDF viewer; Chinese, Japanese,
+  video such as TikTok's (not shipped on purpose: patent policy). The built-in engine has no IndexedDB, and a 2D canvas that takes drawing calls and draws nothing (it does have an in-house PDF viewer, `docs/PDF.md`); Chinese, Japanese,
   Korean and emoji text shows as boxes (Indic, Arabic and Hebrew scripts are shown).
   Details in `docs/BROWSER-ROADMAP.md`.
 * Radio plays MP3 only.

@@ -12,7 +12,7 @@
 //! Skipped (passes, saying so) when `node` is not installed. This is NOT a real browser: see `real_browser_screenshot_if_available`.
 
 use iyakki_tile_abi::{Color, DisplayList, Event, Op, Rect};
-use iyakki_tile_host::{export, render};
+use iyakki_tile_host::{export, render, ImageTable};
 use std::path::{Path, PathBuf};
 
 const BG: Color = Color(200, 210, 220, 255);
@@ -79,6 +79,43 @@ fn glyph_sheet(size: u32) -> (DisplayList, i32, i32) {
     (l, 700, 60)
 }
 
+/// Pictures a tile draws by handle: a 2 x 2 with one see-through pixel, a 3 x 1 strip (scaled by a ratio that is not whole), and a 5 x 4
+/// ramp with partly see-through pixels. Handle 99 is deliberately missing (it draws as a grey box).
+fn picture_table() -> ImageTable {
+    let mut t = ImageTable::new();
+    t.put(1, 2, 2, vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 0]).unwrap();
+    t.put(2, 3, 1, vec![10, 20, 30, 255, 200, 100, 50, 128, 250, 250, 250, 255]).unwrap();
+    let mut ramp = Vec::new();
+    for y in 0..4u8 {
+        for x in 0..5u8 {
+            ramp.extend_from_slice(&[x * 60, y * 80, 255 - x * 50, 60 + x * 45]);
+        }
+    }
+    t.put(3, 5, 4, ramp).unwrap();
+    t
+}
+
+fn pictures_case() -> (DisplayList, i32, i32) {
+    let mut l = DisplayList::new();
+    l.push(Op::Rect { r: Rect::new(0, 0, 120, 90), color: Color(230, 230, 200, 255) });
+    l.push(Op::Image { handle: 1, r: Rect::new(4, 4, 30, 30) }); // blown up by whole steps
+    l.push(Op::Image { handle: 1, r: Rect::new(40, 4, 7, 5) }); // shrunk, not a whole ratio
+    l.push(Op::Image { handle: 2, r: Rect::new(60, 4, 31, 9) });
+    l.push(Op::Image { handle: 3, r: Rect::new(4, 40, 37, 29) });
+    l.push(Op::PushClip { r: Rect::new(50, 30, 30, 30) });
+    l.push(Op::Image { handle: 3, r: Rect::new(40, 20, 60, 50) }); // clipped on every side
+    l.push(Op::PopClip);
+    l.push(Op::Image { handle: 3, r: Rect::new(100, 70, 40, 40) }); // runs off the surface
+    l.push(Op::Image { handle: 99, r: Rect::new(90, 30, 20, 20) }); // not in the table: grey box
+    l.push(Op::Image { handle: 1, r: Rect::new(60, 70, 0, 10) }); // empty rectangle: nothing
+    l.push(text(4, 74, 7, 0, Color(0, 0, 0, 255), "PICTURES"));
+    (l, 120, 90)
+}
+
+fn table_for(name: &str) -> ImageTable {
+    if name == "pictures" { picture_table() } else { ImageTable::new() }
+}
+
 fn all_cases() -> Vec<(String, DisplayList, i32, i32)> {
     let mut v = counter_lists();
     let (l, w, h) = synthetic();
@@ -87,6 +124,8 @@ fn all_cases() -> Vec<(String, DisplayList, i32, i32)> {
         let (l, w, h) = glyph_sheet(s);
         v.push((format!("glyphs-{s}"), l, w, h));
     }
+    let (l, w, h) = pictures_case();
+    v.push(("pictures".into(), l, w, h));
     v.push(("empty".into(), DisplayList::new(), 40, 30));
     v
 }
@@ -94,11 +133,26 @@ fn all_cases() -> Vec<(String, DisplayList, i32, i32)> {
 fn write_cases(dir: &Path) {
     let mut names = vec![];
     for (name, list, w, h) in all_cases() {
-        std::fs::write(dir.join(format!("{name}.json")), export::to_json(&list, w, h)).unwrap();
-        std::fs::write(dir.join(format!("{name}.rgba")), render::render(&list, w, h, BG).rgba).unwrap();
+        let table = table_for(&name);
+        std::fs::write(dir.join(format!("{name}.json")), export::to_json_with_images(&list, w, h, &table)).unwrap();
+        std::fs::write(dir.join(format!("{name}.rgba")), render::render_with(&list, w, h, BG, &table).rgba).unwrap();
         names.push(name);
     }
     std::fs::write(dir.join("cases.txt"), names.join("\n")).unwrap();
+}
+
+/// Not a test: writes the pictures for the real-browser harness (`dist/browsertest/`) into the folder named by
+/// `$IYAKKI_BROWSERTEST_GOLDEN`: the display lists as the service sends them and the Rust reference renderer's RGBA (the files the
+/// node tests use).
+#[test]
+#[ignore = "run by dist/browsertest/run_pages.py"]
+fn write_browser_goldens() {
+    let Some(dir) = std::env::var_os("IYAKKI_BROWSERTEST_GOLDEN") else {
+        eprintln!("SKIP: IYAKKI_BROWSERTEST_GOLDEN is not set");
+        return;
+    };
+    std::fs::create_dir_all(&dir).unwrap();
+    write_cases(Path::new(&dir));
 }
 
 fn node_available() -> bool {
@@ -137,7 +191,7 @@ let total = 0, maxDiff = 0, differing = 0;
 for (const n of names) {
   const frame = JSON.parse(fs.readFileSync(path.join(dir, n + ".json"), "utf8"));
   const want = fs.readFileSync(path.join(dir, n + ".rgba"));
-  const got = R.render(frame.ops, frame.width, frame.height, bg);
+  const got = R.render(frame.ops, frame.width, frame.height, bg, frame.images);
   let d = 0, px = 0;
   ok(got.rgba.length === want.length, n + ": same buffer size (" + want.length + ")");
   for (let i = 0; i < want.length; i += 4) {
@@ -334,6 +388,25 @@ const tick = () => new Promise((r) => setImmediate(r));
   ok(mk({ width: 99999, height: -3 }).size().w === 4096 && mk({ width: 99999, height: -3 }).size().h === 1, "the size is clamped");
   t.stop(); t.send({ type: "tick", dt_ms: 1 }); const nStop = posts.length; await fire();
   ok(posts.length === nStop, "after stop nothing more is sent");
+
+  // a tile that has capabilities (it reads a service) is given the passage of time; one without gets none
+  {
+    const p2 = [], tm = [];
+    const ap = { post: async (pp, b) => { p2.push(JSON.parse(JSON.stringify(b))); return { ok: true, status: 200, data: { frame: { width: 360, height: 400, ops: [] } } }; } };
+    const go = async () => { const live = tm.filter(Boolean); tm.length = 0; for (const x of live) x[0](); await tick(); await tick(); };
+    const base = { api: ap, canvas: {}, tile: "runs", width: 360, height: 400, renderer, devicePixelRatio: 1, matchMedia: () => ({ matches: false }), setTimeout: (f, ms) => { tm.push([f, ms]); return tm.length; }, clearTimeout: () => {}, onState: () => {} };
+    const tt = T.openTile(Object.assign({ tickMs: 1000 }, base));
+    tt.start();
+    ok(tm.some((x) => x && x[1] === 1000), "a ticker is asked for once a second");
+    await go(); await go(); await go();
+    ok(p2.some((b) => b.events.some((e) => e.type === "tick" && e.dt_ms === 1000)), "the passage of time is sent as a tick event");
+    tt.stop();
+    const n2 = p2.length; await go();
+    ok(p2.length === n2, "a stopped tile gets no more ticks");
+    tm.length = 0;
+    const plain = T.openTile(base); plain.start();
+    ok(tm.length === 1 && tm[0][1] === 0, "without tickMs only the first picture is asked for");
+  }
 
   // ---- the page: DOM stand-ins
   const node = (tag) => ({ tag, attrs: {}, kids: [], text: "", className: "", listeners: {}, value: "", hidden: false, style: {}, clientWidth: 600,

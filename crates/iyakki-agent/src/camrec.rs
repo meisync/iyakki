@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::camrec_format::{self as fmt, ReadErr, RecKey, RecKind, Segment, SegmentWriter};
+use crate::camrec_seal;
 use crate::cameras::{CamSecrets, FeedErr, Hub, Spec, Who};
 use crate::clock::{Local, Zone};
 use iyakki_rtsp as rtsp;
@@ -323,7 +324,8 @@ impl RecSource for NetSource {
         match url.scheme {
             rtsp::url::Scheme::Rtsp => {
                 let t = crate::cameras::tcp(&url.host, url.port)?;
-                let client = rtsp::client::Client::open(t, &url, creds).map_err(crate::cameras::map_err)?;
+                let peer = t.peer_addr().ok().map(|a| a.ip());
+                let client = rtsp::client::Client::open_with(t, &url, creds, peer).map_err(crate::cameras::map_err)?;
                 let (kind, params) = match &client.codec {
                     rtsp::sdp::Codec::H264 { sps, pps, .. } => {
                         let mut p = Vec::new();
@@ -543,6 +545,8 @@ struct State {
     disk_blocked: HashMap<String, (String, Instant)>,
     last_retention: Option<Instant>,
     shown: Vec<String>,
+    /// The last check of the files against the ledger, per camera, kept for a minute.
+    seal_cache: HashMap<String, (Instant, Vec<String>)>,
 }
 
 /// One camera as the recordings page shows it.
@@ -560,6 +564,8 @@ pub struct RecStatus {
     /// The person is the owner: may turn recording on, play it back, export and read the log.
     pub owner: bool,
     pub key_note: &'static str,
+    /// Recordings found cut at the end or missing (owner only, from the ledger of `camrec_seal`); empty when all is well.
+    pub file_problems: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -970,6 +976,7 @@ impl Recorder {
                 let e = v.remove(i);
                 if std::fs::remove_file(dir.join(&e.rel)).is_ok() {
                     bytes += e.bytes;
+                    self.note_removed(cam, &e.rel);
                     // empty day, month and year folders go too
                     let mut p = dir.join(&e.rel);
                     for _ in 0..3 {
@@ -1222,6 +1229,8 @@ impl Recorder {
                     continue;
                 }
             };
+            self.fold_pending(&spec.id, &key);
+            let seal_key: &RecKey = &key;
             set(RecState::Waiting("connecting to the camera".into()));
             let mut feed = match self.env.source.open(&spec) {
                 Ok(f) => f,
@@ -1245,13 +1254,13 @@ impl Recorder {
             let why_lost: Option<String>;
             loop {
                 if stop.load(Ordering::SeqCst) {
-                    self.close_segment(&spec.id, &info, cur.take());
+                    self.close_segment(&spec.id, &key, &info, cur.take());
                     break 'outer;
                 }
                 // rotate on time, check the disk and the key now and then
                 if let Some((w, _, _, t0)) = &cur {
                     if t0.elapsed() >= Duration::from_millis(self.env.segment_ms) || w.bytes >= SEGMENT_MAX_BYTES {
-                        self.close_segment(&spec.id, &info, cur.take());
+                        self.close_segment(&spec.id, &key, &info, cur.take());
                     }
                 }
                 if last_check.elapsed() >= Duration::from_secs(10).min(Duration::from_millis(self.env.segment_ms)) {
@@ -1259,14 +1268,14 @@ impl Recorder {
                     if let Err(m) = self.room() {
                         self.enforce();
                         if let Err(m2) = self.room() {
-                            self.close_segment(&spec.id, &info, cur.take());
+                            self.close_segment(&spec.id, &key, &info, cur.take());
                             let _ = m;
                             set(RecState::Problem(m2));
                             return;
                         }
                     }
                     if self.load_key(&spec).is_err() {
-                        self.close_segment(&spec.id, &info, cur.take());
+                        self.close_segment(&spec.id, &key, &info, cur.take());
                         why_lost = Some("the vault that holds the recording key was locked".into());
                         break;
                     }
@@ -1281,14 +1290,14 @@ impl Recorder {
                                 Ok(j) => (j, fmt::F_KEY),
                                 Err(e) => {
                                     // never store a picture the privacy masks could not be applied to
-                                    self.close_segment(&spec.id, &info, cur.take());
+                                    self.close_segment(&spec.id, &key, &info, cur.take());
                                     set(RecState::Problem(e));
                                     return;
                                 }
                             },
                             Unit::H264 { annex_b, key } => {
                                 if masks_on {
-                                    self.close_segment(&spec.id, &info, cur.take());
+                                    self.close_segment(&spec.id, seal_key, &info, cur.take());
                                     set(RecState::Problem("privacy masks are set for recordings and cannot be applied to H.264 video (no decoder); recording stopped. Remove the masks or switch the camera to Motion-JPEG.".into()));
                                     return;
                                 }
@@ -1321,7 +1330,7 @@ impl Recorder {
                                 }
                                 Err(e) if e.contains("unusable size") => {}
                                 Err(e) => {
-                                    self.close_segment(&spec.id, &info, cur.take());
+                                    self.close_segment(&spec.id, &key, &info, cur.take());
                                     set(RecState::Problem(e));
                                     return;
                                 }
@@ -1330,7 +1339,7 @@ impl Recorder {
                     }
                     Err(FeedErr::Timeout) => {}
                     Err(FeedErr::Lost(m)) | Err(FeedErr::Auth(m)) | Err(FeedErr::Busy(m)) | Err(FeedErr::Addon(m)) => {
-                        self.close_segment(&spec.id, &info, cur.take());
+                        self.close_segment(&spec.id, &key, &info, cur.take());
                         why_lost = Some(format!("the camera stopped sending ({})", scrub(&m)));
                         break;
                     }
@@ -1340,7 +1349,6 @@ impl Recorder {
             nap(pause);
             pause = (pause * 2).min(Duration::from_secs(30));
         }
-        self.close_segment(&spec.id, &info, None);
         set(RecState::Off);
     }
 
@@ -1364,7 +1372,58 @@ impl Recorder {
         Err("could not find a free file name".into())
     }
 
-    fn close_segment(&self, cam: &str, info: &Arc<Mutex<WorkInfo>>, seg: Option<(SegmentWriter, PathBuf, String, Instant)>) {
+    /// The keeping rules removed a file: written down (without the key, which may be locked) as a pending line, signed the next time the recorder has the key.
+    fn note_removed(&self, cam: &str, rel: &str) {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(self.cam_dir(cam).join("seals.pending")) {
+            let _ = writeln!(f, "{rel}");
+        }
+    }
+
+    fn append_ledger(&self, cam: &str, text: &str) {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(self.cam_dir(cam).join("seals.txt")) {
+            let _ = f.write_all(text.as_bytes());
+        }
+    }
+
+    /// Turn the pending removal notes into signed ledger lines.
+    fn fold_pending(&self, cam: &str, key: &RecKey) {
+        let p = self.cam_dir(cam).join("seals.pending");
+        let Ok(t) = std::fs::read_to_string(&p) else { return };
+        let mut out = String::new();
+        for rel in t.lines().take(100_000) {
+            out.push_str(&camrec_seal::gone_line(key, rel.trim()));
+        }
+        self.append_ledger(cam, &out);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// Recordings that were cut at the end or are missing without the keeping rules having removed them, in words. Needs the key.
+    pub fn check_files(&self, cam: &str, key: &RecKey) -> Vec<String> {
+        let dir = self.cam_dir(cam);
+        let Ok(mut ledger) = std::fs::read_to_string(dir.join("seals.txt")) else { return Vec::new() };
+        if let Ok(p) = std::fs::read_to_string(dir.join("seals.pending")) {
+            for rel in p.lines().take(100_000) {
+                ledger.push_str(&camrec_seal::gone_line(key, rel.trim()));
+            }
+        }
+        let frames_of = |rel: &str| fmt::scan(&dir.join(rel)).ok().map(|s| s.frames.len() as u32);
+        camrec_seal::verify(key, &ledger, &frames_of).iter().map(camrec_seal::Finding::words).collect()
+    }
+
+    fn file_problems(&self, spec: &Spec) -> Vec<String> {
+        if let Some((at, v)) = self.st().seal_cache.get(&spec.id) {
+            if at.elapsed() < Duration::from_secs(60) {
+                return v.clone();
+            }
+        }
+        let found = self.load_key(spec).map(|k| self.check_files(&spec.id, &k)).unwrap_or_default();
+        self.st().seal_cache.insert(spec.id.clone(), (Instant::now(), found.clone()));
+        found
+    }
+
+    fn close_segment(&self, cam: &str, key: &RecKey, info: &Arc<Mutex<WorkInfo>>, seg: Option<(SegmentWriter, PathBuf, String, Instant)>) {
         let Some((w, path, rel, _)) = seg else { return };
         drop(w);
         if let Ok(mut i) = info.lock() {
@@ -1372,7 +1431,10 @@ impl Recorder {
         }
         let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         match scan_entry(&self.cam_dir(cam), &rel, len) {
-            Some(e) if e.frames > 0 => self.index_add(cam, e),
+            Some(e) if e.frames > 0 => {
+                self.append_ledger(cam, &camrec_seal::sealed_line(key, &e.rel, e.frames, e.end_ms));
+                self.index_add(cam, e)
+            }
             _ => {
                 let _ = std::fs::remove_file(&path);
             }
@@ -1412,6 +1474,7 @@ impl Recorder {
             newest_ms: e.last().map(|x| x.end_ms),
             owner,
             key_note: KEY_NOTE,
+            file_problems: if owner { self.file_problems(&spec) } else { Vec::new() },
         })
     }
 

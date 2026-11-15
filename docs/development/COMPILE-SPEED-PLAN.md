@@ -155,9 +155,9 @@ So a one-line change builds a **runnable musl image binary in 10 to 22 s** inste
 
 Not measured here: the saving itself (3 m 49 s in the 2026-11-07 log) needs a release build; the device-profile call above compiled each crate once.
 
-### Phase 1 item 3: faster linker (not installed, off)
+### Phase 1 item 3: faster linker (optional flag, done 2026-11-11)
 
-`which ld.lld mold lld` finds none on the dev PC. Nothing was installed. `.cargo/config.toml` holds the exact block for the host target (dev and test builds), commented out, and the command line for a device build of the musl target (cargo cannot scope rustflags to one profile, and the musl target is shared with release, so it is an environment value, not a config line). To enable: `sudo apt install lld` (or `mold`), remove the `# ` of the block. Not measured.
+`lld` 21.1.8 is now installed on the dev PC (`/usr/bin/ld.lld`; mold is not). `dist/buildroot/linker.sh` (sourced by `repack.sh --cargo` and `quick-push.sh --cargo`) adds `IYAKKI_LINKER=lld|mold|auto`: default off; it sets the target's `CARGO_TARGET_*_RUSTFLAGS` for that one cargo call only (the value replaces the `.cargo/config.toml` flags, so the musl stack-size flag is repeated); ignored with a note for `IYAKKI_PROFILE=release`; a missing linker is a note and the default linker is used, never an error. A musl hello-world linked with `-fuse-ld=lld` and the stack-size flag runs. `.cargo/config.toml` still holds the commented block for host (dev/test) builds. Not measured: the link time of the 90 MB binary (other builds were running); changing the flags rebuilds every crate once. Licences: LLVM lld Apache-2.0 with LLVM exception, mold MIT; build tools, never shipped.
 
 ### Phase 1 item 5 and stage 2: repack without re-pruning (done)
 
@@ -187,3 +187,67 @@ Test: `dist/buildroot/test-repack-cache.sh` (23 checks on fake folders: stable k
 | 1. Compile (device profile, one line) | 8 m 50 s + 3 m 49 s | 10 to 22 s warm (5 m 12 s once, cold) |
 | 2. Repack | about 2 m 25 s | 92 s with zstd -19, **21 s** with push mode |
 | 3. Lean image | 16 s | skipped in push mode |
+
+### Pipeline quick wins: status check 2026-11-11
+
+| Item | State | Evidence |
+|---|---|---|
+| (a) `device` profile | done | `Cargo.toml [profile.device]`; `[profile.release]` untouched; `repack.sh`/`quick-push.sh` default dev path uses it |
+| (b) one cargo call | done | `grep -c 'cargo build' repack.sh` shows one joint call (+ the two-call fallback only if it fails); features compared (see above); test checks it |
+| (c) firmware prune cache | done | 3 233 files / 1 280 MiB pruned once per key; warm repack 92 s vs 154 s cold (noisy, other builds running); 21 s with `--fast-zstd`; a dry run prints "mod+fw cache miss/hit" |
+| (d) skip lean image and full pack for a push | done (script) | `quick-push.sh` never calls `lean-image.sh`; pack is still the full 420 MB until the Phase 4 delta |
+| (e) lld/mold optional | done (this change) | `linker.sh`, 6 new checks in `test-repack-cache.sh` (29 total) |
+| (f) dry-run and release unchanged | checked | `repack.sh pc --dry-run` (dev: profile release, cache miss; `IYAKKI_IMAGE_PROFILE=release`: "mod+fw cache off (release image)", no linker, no cache) and `quick-push.sh --help` run; no release code path changed; `cargo test -p iyakki-relcheck` now also runs `test-repack-cache.sh` |
+
+Not done: a real end-to-end `quick-push.sh` run, an image from the device profile booted in QEMU, the lld link time. Phase 2 (crate split) is untouched; it is what brings the compile of a tile below the budget for the *native* binary, and a binary delta (Phase 4) is what shrinks stages 4 and 5.
+
+## Phase 2 first measurable step (2026-11-11)
+
+Measured on the dev PC (16 cores, 28 GB), `CARGO_BUILD_JOBS=3`, cargo under `systemd-run --user --scope -p MemoryMax=9G -p MemorySwapMax=6G`, dev profile, load average 0.3 to 4 (other sessions were editing and building in the same workspace, notably `iyakki-agent/src/store/*` and `iyakki-core-api`, which makes some runs rebuild the agent: those are marked **\***). Two edits per cell, in order, no cell is a benchmark. The two kinds of edit: a **literal** (one string literal changed inside a function, a real code change) and a **probe** (one appended `const`, the 2026-11-07 method). The probe is cheaper for the compiler; literal numbers are the honest ones. Tiles still in the shell: the two biggest by lines x commits among those not being edited by others (`story.rs` 10 051 lines x 6, `chat.rs` 5 705 x 13; `settings`, `browser`, `store` are bigger but were excluded for the reason in `COMPILE-SPLIT-PILOT-5.md`). Already split: `iyakki-tile-calendar` (957 lines).
+
+| Command | calendar crate (split), literal | `story.rs` (shell), literal | `chat.rs` (shell), literal | **`iyakki-tile-pdf` (moved now), literal** |
+|---|---|---|---|---|
+| `cargo check` of the tile's crate (shell tiles: `-p iyakki-shell`) | 0.2 s, 0.2 s | 3.0 s, 3.1 s | 4.3 s, 3.0 s | **0.2 s, 0.2 s** |
+| `cargo test --no-run` (tile: own crate; shell tiles: `-p iyakki-shell`) | 0.3 s, 0.3 s (one 10.7 s\*) | 30.9 s, 30.3 s | 12.1 s, 11.7 s | **0.4 s, 0.3 s** |
+| `cargo build -p iyakki-core` (dev binary, links the whole program) | 6.1 s, 6.1 s | 17.4 s, 29.2 s | 6.3 s, 6.2 s | **7.5 s, 6.7 s** |
+| `cargo test -p iyakki-shell --no-run` (a tile in the crate relinks the 462 MB test binary) | n/a | (above) | (above) | 13.1 s, 11.7 s |
+
+Probe runs (appended const), for comparison with the 2026-11-07 table: calendar crate: check 0.2 s, 0.2 s; test build 0.2 s, 0.3 s; `build -p iyakki-core` 8.2 s\*, 6.9 s; `test -p iyakki-shell --no-run` 13.7 s, 11.5 s. `story.rs`: check 41.8 s\*, 2.9 s; build 144.8 s\*, 22.1 s; shell test build 62.0 s\*, 12.2 s. `chat.rs`: check 14.7 s, 19.9 s; build 6.3 s, 6.5 s; shell test build 11.8 s, 17.0 s. `pdfview.rs` before the move (probe): build 7.7 s (one run failed because another session's agent edit did not compile at that moment), shell test build 120.7 s\*, 95.3 s\* (agent being rebuilt by someone else's edit): no clean "before" for exactly this file, use the `chat.rs` / `story.rs` rows as the reference for a tile in the shell.
+
+What the numbers say:
+
+* The three budgets of the plan's first table are **met in the dev profile with or without the split** for `cargo check` (under 10 s) and for the dev binary of a small tile (under 45 s); a big tile in the shell (`story`) already costs 17 to 29 s for `build -p iyakki-core` and 30 s for the shell test build, which is where the split pays.
+* For a **tile in its own crate** the loop is: check 0.2 s, its own tests built and linked in 0.3 to 0.4 s (24 MB test binary, links `iyakki-uikit`, `iyakki-tile-api`, `iyakki-pdf`, `iyakki-web`, no agent: `cargo tree -p iyakki-tile-pdf -e all` has no `iyakki-agent`), against 12 to 30 s and a 462 MB test binary for any tile that is still in the shell. The tests themselves: 8 pdf tests in 4.9 s.
+* The dev binary relink (`build -p iyakki-core`) costs 6 to 7 s whichever way, because the 90 MB program is relinked either way: the split does not change this floor, only the lld option and the binary delta can.
+* The real device build is not in this table (see the 2026-11-07 device-profile numbers: 10 to 22 s per line; unchanged by this step).
+
+### `cargo build --timings` (dev profile, cold)
+
+`cargo build -p iyakki-core --timings` into an empty scratch target directory (so every crate is compiled), 2 min 39 s wall, `CARGO_BUILD_JOBS=3`, load 2.5 at start. 435 units, 333 s of summed compile time. Where it goes (seconds of compile time, all units of the crate):
+
+| Crate | s | Note |
+|---|---|---|
+| **`iyakki-agent`** | **79.5** | one compile unit, 350 000 lines; the critical path is agent (80 s) then shell (31 s) then core (4 s) |
+| **`iyakki-shell`** | **30.8** | the tiles left in it, after the toolkit and four tile crates moved out |
+| `cranelift-codegen` (+ `-assembler-x64`, `wasmtime*`, `pulley`, `wasmparser`) | 18.6 (+ about 25) | the WASM runtime of `iyakki-js` / `iyakki-wasm`: third party, compiled once, not touched by edits |
+| `iyakki-flow` | 11.8 | |
+| `iyakki-devctl`, `iyakki-js`, `iyakki-web`, `iyakki-core` | 5.1, 4.2, 4.2, 3.9 | |
+
+So the first cold-build cost is dominated by the agent, then the shell; every edit to either rebuilds its whole crate (incremental reduces it, the 3 to 30 s above). The shell shrinks by one tile per move; the agent is Phase 3. The HTML report was written to a scratch target directory outside the repository (`cargo-timings/` of the scratch `CARGO_TARGET_DIR`); not saved in the repo.
+
+### What moved, and what the next steps are
+
+* `pdfview` -> `crates/iyakki-tile-pdf` (`COMPILE-SPLIT-PILOT-5.md`): 962 lines and 8 tests; the browser's `PdfView` keeps working through a newtype in the shell. First `tile_crate_deps.allow` exception (`iyakki-pdf`), to be accepted or replaced by a trait.
+* Candidates in the same style (small agent surface, tests that can use a fake), by lines x commits and not touched by others today: `doctor` (393), `checkup` (566), `skills` (575), `learn` (575), `mcp` (625), `runs` (671), `mesh` (853), `linuxwin` (877). Then the ones that need a service trait first: `git_tile` (1 924 + 1 770 test lines, 21 agent edges: git connections, jobs, keys), `k8s_tile`, `data`, `edit`, `dash`, `media`, `ide`.
+* Biggest wins still waiting on the trait seam: `story` (86 agent edges), `chat` (301), `settings` (102), `browser` (85), `store` (118). They are also the files in the list of what other sessions edit.
+* Phase 3 (agent by domain) is untouched; it is 80 of about 115 s on the critical path of a cold build.
+* Phase 4 stages 4 and 5 (binary delta) are untouched. The lean push below closes only the pack-size gap.
+
+### Lean push (quick-push.sh `--lean`, nightly-push.sh) (2026-11-11)
+
+`quick-push.sh` made a full-initrd pack (the 420 MB payload). A **lean install** keeps the system in `boot/root.sfs` on a 457 MB boot partition with about 21 MB free, so that pack does not fit. New:
+
+* `quick-push.sh --lean [--lean-level N]` (or `IYAKKI_PUSH_TARGET=lean`; `--full` overrides): after the repack it runs `lean-image.sh REPACKED/images OUT/lean --root sfs --level N` (N = 3 by default for speed; 19 for a nightly) and makes the pack with `iyakki dev update-pack OUT/lean/iyakki-lean-x86_64.img -o PACKDIR --variant pc`. It refuses to start without `IYAKKI_SB_KEY` and `IYAKKI_SB_CERT` (readable files), exports them to the repack, and checks the kernel signature with `sbverify` when that tool exists (otherwise a note). It never asks the device what kind of install it is (that would be talking to it): the person says it with the flag or the variable.
+* `dist/buildroot/nightly-push.sh -o PACKDIR [--version V] [--level 19]`: `quick-push.sh --cargo --lean --lean-level 19`, then boots the lean image in QEMU with `qemu-lean-test.py IMAGE --entry 1 --serial-only` and **fails** (exit 1, no command printed) unless the serial console shows `root boot/root.sfs mounted` and `switching root`; then prints `iyakki dev update PACKDIR` and `iyakki dev reboot`. It has no network or device step of its own.
+* `dist/buildroot/test-quick-push.sh` (27 checks on stubs: no cargo, no QEMU, no image): the missing-environment failure, the order repack -> lean-image -> update-pack from the lean image, levels, the full mode unchanged, the environment variable and `--full`, nightly pass and both failing boot cases, nightly never prints a command after a failed boot, and no ssh/scp/curl or program call in `nightly-push.sh`.
+* **Not verified**: a real end-to-end run (cargo, repack, lean image, pack, QEMU boot, `dev update` on a device). The stubs prove the wiring; the real `lean-image.sh` needs the base images and the first-stage binary (`target/x86_64-unknown-linux-musl/release/iyakki-stage1`, or `IYAKKI_STAGE1`), and that the pack from the lean image installs on a lean device has not been tried here.

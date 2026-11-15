@@ -3,6 +3,7 @@
 //! group that does not exist, and one-step undo. The rules and the stored data are in `iyakki_agent::layout`; this file only
 //! draws and asks. Moving a tile changes where it is listed, never what the app may do.
 
+use crate::stale_stats::mark_stale;
 use super::*;
 use crate::ctxmenu::{Item, Menu, Outcome};
 use iyakki_agent::layout::{app_key, sys_key, Layout};
@@ -153,7 +154,7 @@ impl Shell {
         self.save_layout();
         self.lay.undo = Some(old);
         self.lay.notice = Some((msg, self.tick + NOTICE_TICKS));
-        self.stale = true;
+        mark_stale!(self);
         let n = self.group_items().len();
         self.sel = self.sel.min(n.saturating_sub(1));
     }
@@ -232,7 +233,7 @@ impl Shell {
     fn open_menu(&mut self, kind: MenuKind, items: Vec<Item>, at: (i32, i32)) {
         let (w, h) = self.size;
         self.lay.menu = Some((kind, Menu::open(items, at, (w, h), scale_for(w, h), false)));
-        self.stale = true;
+        mark_stale!(self);
     }
 
     /// The centre of the selected tile (where a menu opened with the keyboard appears).
@@ -294,14 +295,14 @@ impl Shell {
             NameFor::New(_) => String::new(),
         };
         self.lay.card = Some(Card::Name { target, text, err: String::new() });
-        self.stale = true;
+        mark_stale!(self);
     }
 
     fn open_delete_card(&mut self, id: &str) {
         let Some(label) = self.layout.label_of(id) else { return };
         let n = self.layout.count_in(id);
         self.lay.card = Some(Card::Delete { id: id.to_string(), label, n, focus: 1 });
-        self.stale = true;
+        mark_stale!(self);
     }
 
     /// A Store app names a group that does not exist (and the person has not been asked about it yet): ask, once.
@@ -315,7 +316,7 @@ impl Shell {
         });
         if let Some((app, title, asked)) = found {
             self.lay.card = Some(Card::Ask { app, title, asked, focus: 0 });
-            self.stale = true;
+            mark_stale!(self);
         }
     }
 
@@ -336,7 +337,7 @@ impl Shell {
                 }
                 "pickup" => {
                     self.lay.carry = Some(key);
-                    self.stale = true;
+                    mark_stale!(self);
                 }
                 "reset-tile" => self.reset_tile(&key),
                 "reset-all" => self.reset_all(),
@@ -398,7 +399,7 @@ impl Shell {
                 if let Some(Card::Name { err, .. }) = self.lay.card.as_mut() {
                     *err = e;
                 }
-                self.stale = true;
+                mark_stale!(self);
             }
         }
     }
@@ -431,7 +432,7 @@ impl Shell {
         let Some(Card::Ask { app, title, asked, .. }) = self.lay.card.take() else { return };
         let (target, note) = self.layout.answer_app_group(&app, &asked, create);
         self.save_layout();
-        self.stale = true;
+        mark_stale!(self);
         let name = self.layout.label_of(&target).unwrap_or_else(|| "Apps".into());
         match note {
             Some(why) => self.say(format!("{title} is in {name}: {why}")),
@@ -445,7 +446,7 @@ impl Shell {
             return false;
         }
         if self.lay.carry.take().is_some() {
-            self.stale = true;
+            mark_stale!(self);
         }
         let row = self.chip_row();
         let gs = self.groups();
@@ -477,7 +478,7 @@ impl Shell {
             if *until <= self.tick {
                 self.lay.notice = None;
                 self.lay.undo = None;
-                self.stale = true;
+                mark_stale!(self);
             }
         }
         if self.session.is_none() || !matches!(self.screen, Screen::Launcher) || self.clip.is_some() || self.help || self.ring.is_some() {
@@ -491,19 +492,19 @@ impl Shell {
                 let before = m.sel;
                 m.hover(*x, *y);
                 if m.sel != before {
-                    self.stale = true;
+                    mark_stale!(self);
                 }
             }
             return false;
         }
         if let Some(card) = self.lay.card.clone() {
             self.card_event(card, ev);
-            self.stale = true;
+            mark_stale!(self);
             return true;
         }
         if self.lay.menu.is_some() {
             self.menu_event(ev);
-            self.stale = true;
+            mark_stale!(self);
             return true;
         }
         // an offered Undo
@@ -516,7 +517,7 @@ impl Shell {
             match ev {
                 Event::Key(Key::Esc) => {
                     self.lay.carry = None;
-                    self.stale = true;
+                    mark_stale!(self);
                     return true;
                 }
                 Event::Key(Key::Enter) => {
@@ -527,7 +528,7 @@ impl Shell {
                 }
                 Event::MouseDown(x, y) => {
                     self.lay.carry = None;
-                    self.stale = true;
+                    mark_stale!(self);
                     let row = self.chip_row();
                     let gs = self.groups();
                     if let Some(i) = row.chips.iter().find(|(_, r)| r.contains(*x, *y)).map(|(i, _)| *i) {

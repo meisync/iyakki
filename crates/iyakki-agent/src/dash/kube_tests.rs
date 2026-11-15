@@ -719,3 +719,76 @@ fn building_the_dash_environment_for_an_administrator_seeds_the_default_once_and
     assert!(super::store::Dashboards::open(&sam_home).load(super::seed::DASHBOARD_ID).is_err());
     let _ = std::fs::remove_dir_all(&d);
 }
+
+// ---- KI-090: twenty panels at once never show an error when the runner answers within its budget
+
+struct Slow {
+    now: std::sync::atomic::AtomicUsize,
+    peak: std::sync::atomic::AtomicUsize,
+    calls: std::sync::atomic::AtomicUsize,
+    /// every first call of a read answers with a cut half answer (a killed run), the second one is right
+    flaky: bool,
+}
+
+impl Kubectl for Slow {
+    fn kubectl(&self, a: &[&str]) -> Result<String, String> {
+        self.kubectl_big(a)
+    }
+    fn kubectl_big(&self, args: &[&str]) -> Result<String, String> {
+        use std::sync::atomic::Ordering::SeqCst;
+        let n = self.now.fetch_add(1, SeqCst) + 1;
+        self.peak.fetch_max(n, SeqCst);
+        std::thread::sleep(Duration::from_millis(30));
+        self.now.fetch_sub(1, SeqCst);
+        let first = self.calls.fetch_add(1, SeqCst) % 2 == 0;
+        if self.flaky && first {
+            return Err("{".into());
+        }
+        let _ = args;
+        Ok(r#"{"items":[{"metadata":{"namespace":"a","name":"c"},"status":{"phase":"Bound"},"spec":{}}]}"#.into())
+    }
+}
+
+#[test]
+fn twenty_panels_at_once_use_at_most_four_runs_and_show_no_error() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let slow = Arc::new(Slow { now: 0.into(), peak: 0.into(), calls: 0.into(), flaky: false });
+    let c = Arc::new(KubeCluster::new(slow.clone(), Duration::ZERO));
+    let reads = [KubeRead::Nodes, KubeRead::Pods, KubeRead::Events, KubeRead::Deployments, KubeRead::Services, KubeRead::Pvcs];
+    let hs: Vec<_> = (0..20).map(|i| {
+        let (c, k) = (c.clone(), reads[i % reads.len()].clone());
+        std::thread::spawn(move || c.kube_read(&k))
+    }).collect();
+    for h in hs {
+        assert!(h.join().unwrap().is_ok(), "a panel showed an error");
+    }
+    assert!(slow.peak.load(SeqCst) <= 4, "more than 4 kubectl runs at once: {}", slow.peak.load(SeqCst));
+}
+
+#[test]
+fn one_cut_answer_is_retried_once_before_an_error_shows() {
+    let slow = Arc::new(Slow { now: 0.into(), peak: 0.into(), calls: 0.into(), flaky: true });
+    let c = KubeCluster::new(slow, Duration::ZERO);
+    assert!(c.kube_read(&KubeRead::Pvcs).is_ok());
+}
+
+#[test]
+fn a_cut_answer_that_keeps_failing_names_the_cause_not_a_brace() {
+    let c = KubeCluster::new(Spy::new(Err("{".into())), Duration::ZERO);
+    let e = c.kube_read(&KubeRead::Pvcs).unwrap_err();
+    assert!(e.message.contains("invalid or cut answer"), "{}", e.message);
+    let t = KubeCluster::new(Spy::new(Err("timeout: kubectl did not answer in time".into())), Duration::ZERO).kube_read(&KubeRead::Pvcs).unwrap_err();
+    assert!(t.message.contains("timeout"), "{}", t.message);
+}
+
+#[test]
+fn kubectl_result_names_each_cause() {
+    use crate::wsexec::Out;
+    let r = |o: Out| super::cluster::kubectl_result(&o);
+    assert!(r(Out { timed_out: true, stdout: "{\n \"a\"".into(), ..Default::default() }).unwrap_err().starts_with("timeout"));
+    assert!(r(Out { truncated: true, code: Some(0), stdout: "{".into(), ..Default::default() }).unwrap_err().starts_with("invalid output"));
+    assert!(r(Out { code: Some(1), stderr: "The connection to the server was refused".into(), ..Default::default() }).unwrap_err().contains("refused"));
+    // the exit status was taken by the PID-1 reaper but the answer is whole
+    assert_eq!(r(Out { status_lost: true, code: None, stdout: "{}".into(), ..Default::default() }).unwrap(), "{}");
+    assert!(r(Out { code: None, stdout: "{\n".into(), ..Default::default() }).unwrap_err().starts_with("invalid output"));
+}

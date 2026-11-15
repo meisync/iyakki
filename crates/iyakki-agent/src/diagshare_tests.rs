@@ -107,6 +107,7 @@ fn inputs() -> Inputs {
         engine_log: "100 helper: v4l2src busy\n101 key sk-abcdefghijklmnopqrstuvwxyz0123456789 seen".into(),
         boot_log: "booted\nCookie: s3cr3tC00kieValue99".into(),
         switches: vec!["developer mode".into()],
+        compat: vec!["core 0.1.0-alpha.2 · contract 0.1 (serves from 0.1) · client protocol 1 to 1".into(), "peer computer dev-laptop · developer mode · heard 12 s ago".into(), "deprecated names: none".into()],
         checkup: vec!["1 passed, 1 failed, 0 skipped, 10 not done yet".into(), "Microphone: Fail - Only silence was heard (USB Audio).".into(), "  advice: contact me at ann@example.org".into()],
     }
 }
@@ -119,6 +120,10 @@ fn the_preview_is_exactly_the_file_and_holds_none_of_the_secrets() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let p = save(&b, &dir, "bundle.txt").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600, "KI-095: a diagnostics file is private to the account");
+    }
     let written = std::fs::read(&p).unwrap();
     assert_eq!(written, shown.as_bytes(), "byte for byte what was shown");
     for s in SECRETS {
@@ -154,4 +159,14 @@ fn an_empty_section_says_so_and_the_file_name_is_a_plain_dated_name() {
     assert_eq!(file_name(0), "iyakki-diagnostics-19700101-000000.txt");
     assert_eq!(file_name(1_800_000_000), "iyakki-diagnostics-20270115-080000.txt");
     assert_eq!(file_name(951_782_400 + 3661), "iyakki-diagnostics-20000229-010101.txt", "a leap day");
+}
+
+#[test]
+fn the_bundle_has_a_compatibility_section_after_the_version_with_the_report_lines() {
+    let b = build(&inputs());
+    let titles: Vec<&str> = b.sections.iter().map(|s| s.title.as_str()).collect();
+    assert_eq!(&titles[..2], ["Version", "Compatibility"], "{titles:?}");
+    let c = &b.sections[1];
+    assert!(c.lines.iter().any(|l| l.starts_with("core 0.1.0-alpha.2 · contract 0.1")) && c.lines.iter().any(|l| l.contains("deprecated names: none")), "{:?}", c.lines);
+    assert!(preview(&b).contains("=== Compatibility ==="));
 }

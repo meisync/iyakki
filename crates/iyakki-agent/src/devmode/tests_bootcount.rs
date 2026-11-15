@@ -128,3 +128,34 @@ fn a_rollback_arms_the_counter_too() {
     assert_eq!(read_state(&r.boot.root), State::Armed);
     assert!(!mark_good(&r.boot.root).is_err());
 }
+
+/// The real guard, arm and mark-good code on a boot partition folder made by `dist/qemu/boot-counter-test.sh` (a real GRUB then reads it; ignored by default: it needs
+/// `IYAKKI_BOOTCOUNT_DIR` and `IYAKKI_BOOTCOUNT_MODE`). `prepare`: the menu in `boot/grub/grub.cfg` (it must already have the previous-version entry) gets the guard and the counter
+/// is armed; `arm`: arm again; `good`: the running system says the start was good.
+#[test]
+#[ignore]
+fn boot_counter_steps_on_a_folder_for_a_real_grub_run() {
+    let (Ok(dir), Ok(mode)) = (std::env::var("IYAKKI_BOOTCOUNT_DIR"), std::env::var("IYAKKI_BOOTCOUNT_MODE")) else {
+        crate::qeprintln!("skipped: needs IYAKKI_BOOTCOUNT_DIR and IYAKKI_BOOTCOUNT_MODE (run it through dist/qemu/boot-counter-test.sh)");
+        return;
+    };
+    let root = Path::new(&dir);
+    match mode.as_str() {
+        "prepare" => {
+            let p = find_ci(root, "boot/grub/grub.cfg").unwrap();
+            let guarded = with_guard(&std::fs::read_to_string(&p).unwrap()).unwrap();
+            std::fs::write(&p, guarded).unwrap();
+            arm(root).unwrap();
+            assert_eq!(read_state(root), State::Armed);
+        }
+        "arm" => {
+            arm(root).unwrap();
+            assert_eq!(read_state(root), State::Armed);
+        }
+        "good" => {
+            assert!(mark_good(root).unwrap(), "something was waiting to be marked good");
+            assert_eq!(read_state(root), State::Idle);
+        }
+        other => panic!("unknown mode {other}"),
+    }
+}

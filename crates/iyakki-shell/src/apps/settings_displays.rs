@@ -60,7 +60,7 @@ impl SettingsApp {
         let sw = memgate::read_switch(cx.services.dir());
         let st = hub().status();
         let modes: Vec<DisplayMode> = st.outputs.iter().filter(|o| o.connected).filter_map(|o| o.current.or(o.modes.first().map(|m| (m.0, m.1)))).map(|(w, h)| DisplayMode { w, h }).collect();
-        let mem = memgate::read_mem_now();
+        let mem = memgate::read_mem_os(&*cx.os);
         let a = memgate::features_with(sw, mem, &modes, &[]);
         (memgate::memory_line(&a, mem), sw)
     }
@@ -104,6 +104,11 @@ impl SettingsApp {
                     hub().identify(crate::display::outputs::now_ms() + 3000);
                 }
                 self.ok("A number is shown on each display for three seconds.");
+            }
+            Key::Char('l') | Key::Char('L') => {
+                // the kernel reads the connected displays again; a display that now offers a bigger size is used at once
+                let line = crate::display::look_again(&crate::display::drm_dir());
+                self.ok(format!("Looking at the displays again: {line}."));
             }
             _ if !st.kms => self.fail(format!("The shell does not drive the displays here: {}.", if st.why_not.is_empty() { "unknown".to_string() } else { st.why_not.clone() })),
             Key::Char('r') | Key::Char('R') => {
@@ -178,7 +183,7 @@ impl SettingsApp {
 
     pub(super) fn displays_buttons(&self) -> Vec<Btn> {
         let (acc, mut_, err) = (ACCENT, TEXT, ERR);
-        let mut v = vec![("Resolution", mut_, 'r'), ("Main display", mut_, 'p'), ("Side", mut_, 'a'), ("Mirror / Extend", mut_, 'm'), ("Identify", acc, 'i'), ("Touch screen", mut_, 't'), ("Next touch screen", mut_, 'd'), ("Touch calibration", acc, 'c'), ("Apply", acc, 'y')];
+        let mut v = vec![("Resolution", mut_, 'r'), ("Main display", mut_, 'p'), ("Side", mut_, 'a'), ("Mirror / Extend", mut_, 'm'), ("Identify", acc, 'i'), ("Look again", acc, 'l'), ("Touch screen", mut_, 't'), ("Next touch screen", mut_, 'd'), ("Touch calibration", acc, 'c'), ("Apply", acc, 'y')];
         if hub().status().trial_secs.is_some() {
             v.push(("Keep", acc, 'k'));
             v.push(("Go back", err, 'v'));

@@ -26,9 +26,16 @@ const META_OIFNAME: u32 = 7;
 const CT_KEY_STATE: u32 = 0;
 const META_MARK: u32 = 3;
 const NFT_SET_TIMEOUT: u32 = 0x10;
+const NFT_SET_INTERVAL: u32 = 0x4;
+const NFT_SET_CONCAT: u32 = 0x80;
+/// nft's data type number of a service (port) in a concatenation.
+const TYPE_INET_SERVICE: u32 = 13;
+const NFT_SET_ELEM_INTERVAL_END: u32 = 1;
 /// `ipaddr` / `ip6addr` in nft's data type table (a hint for listings; the kernel keeps it).
 const TYPE_IPADDR: u32 = 7;
 const TYPE_IP6ADDR: u32 = 8;
+
+const NFPROTO_BRIDGE: u8 = 7;
 
 pub const MAX_RULES: usize = 500;
 pub const MAX_SETS: usize = 8;
@@ -57,6 +64,31 @@ impl Hook {
             Hook::Forward => NF_INET_FORWARD,
             Hook::Output => NF_INET_LOCAL_OUT,
             Hook::Postrouting => NF_INET_POST_ROUTING,
+        }
+    }
+}
+
+/// The protocol family a table lives in. Almost everything here is `inet`; `bridge` is for rules that must see frames between the
+/// ports of one bridge (isolating the phones of a Bluetooth access point from each other), where only interface names and a
+/// verdict can be matched (see [`TableSpec::check_in`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Family {
+    #[default]
+    Inet,
+    Bridge,
+}
+
+impl Family {
+    fn proto(self) -> u8 {
+        match self {
+            Family::Inet => NFPROTO_INET,
+            Family::Bridge => NFPROTO_BRIDGE,
+        }
+    }
+    pub fn word(self) -> &'static str {
+        match self {
+            Family::Inet => "inet",
+            Family::Bridge => "bridge",
         }
     }
 }
@@ -110,6 +142,14 @@ pub struct SetSpec {
     pub timeout: bool,
     /// Host addresses present from the start.
     pub members: Vec<IpAddr>,
+    /// Address ranges (first and last address, both inside, one family, not overlapping) present from the start. A set with
+    /// any makes an interval set (`NFT_SET_INTERVAL`): each range is written as a start element and an `interval end` element.
+    #[serde(default)]
+    pub ranges: Vec<(IpAddr, IpAddr)>,
+    /// An `address . port` interval set (concatenation of the address and a destination port, F-FW-14): address span and port span
+    /// per element. When not empty, `members` and `ranges` stay empty.
+    #[serde(default)]
+    pub concat: Vec<((IpAddr, IpAddr), (u16, u16))>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -165,6 +205,28 @@ impl TableSpec {
             }
             for r in &c.rules {
                 self.check_rule(c, r)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// [`TableSpec::check`] plus what the family allows. A bridge table has no sets and no nat chains, and its rules match interface
+    /// names only (no address, protocol, port, mark or connection state: frames of a bridge are not necessarily IP).
+    pub fn check_in(&self, family: Family) -> Result<(), String> {
+        self.check()?;
+        if family == Family::Bridge {
+            if !self.sets.is_empty() {
+                return Err("a bridge table has no sets".into());
+            }
+            for c in &self.chains {
+                if c.kind == ChainKind::Nat {
+                    return Err("a bridge table has no nat chain".into());
+                }
+                for e in c.rules.iter().flatten() {
+                    if !matches!(e, Expr::IifIs(_) | Expr::IifNot(_) | Expr::OifIs(_) | Expr::OifNot(_) | Expr::Accept | Expr::Drop | Expr::Return) {
+                        return Err("a bridge table matches interface names only".into());
+                    }
+                }
             }
         }
         Ok(())
@@ -327,7 +389,11 @@ fn encode_expr(buf: &mut Vec<u8>, e: &Expr, sets: &[SetSpec], l4: &mut u8) {
 }
 
 fn tmsg(out: &mut Vec<u8>, t: u16, flags: u16, seq: u32, f: impl FnOnce(&mut Vec<u8>)) {
-    msg(out, ty(t), NLM_F_REQUEST | NLM_F_ACK | flags, seq, NFPROTO_INET, 0, f);
+    tmsg_in(Family::Inet, out, t, flags, seq, f);
+}
+
+fn tmsg_in(family: Family, out: &mut Vec<u8>, t: u16, flags: u16, seq: u32, f: impl FnOnce(&mut Vec<u8>)) {
+    msg(out, ty(t), NLM_F_REQUEST | NLM_F_ACK | flags, seq, family.proto(), 0, f);
 }
 
 fn key_elems(buf: &mut Vec<u8>, ips: &[(IpAddr, Option<u64>)]) {
@@ -343,10 +409,124 @@ fn key_elems(buf: &mut Vec<u8>, ips: &[(IpAddr, Option<u64>)]) {
     });
 }
 
+/// The messages that make the named sets of a table (and fill them), numbered from `*seq`; rules refer to a set by its position + 1.
+pub(super) fn encode_sets(out: &mut Vec<u8>, table: &str, sets: &[SetSpec], seq: &mut u32, acks: &mut usize) {
+    for (i, s) in sets.iter().enumerate() {
+        if !s.concat.is_empty() {
+            encode_concat_set(out, table, s, i as u32 + 1, seq, acks);
+            continue;
+        }
+        *seq += 1;
+        *acks += 1;
+        tmsg(out, NFT_MSG_NEWSET, NLM_F_CREATE, *seq, |b| {
+            attr(b, 1, &cstr(table));
+            attr(b, 2, &cstr(&s.name));
+            attr(b, 3, &be32(if s.timeout { NFT_SET_TIMEOUT } else { 0 } | if s.ranges.is_empty() { 0 } else { NFT_SET_INTERVAL }));
+            attr(b, 4, &be32(if s.v4 { TYPE_IPADDR } else { TYPE_IP6ADDR }));
+            attr(b, 5, &be32(if s.v4 { 4 } else { 16 }));
+            attr(b, 10, &be32(i as u32 + 1));
+        });
+        if !s.members.is_empty() {
+            *seq += 1;
+            *acks += 1;
+            let items: Vec<(IpAddr, Option<u64>)> = s.members.iter().map(|m| (*m, None)).collect();
+            tmsg(out, NFT_MSG_NEWSETELEM, NLM_F_CREATE, *seq, |b| {
+                attr(b, 1, &cstr(table));
+                attr(b, 2, &cstr(&s.name));
+                key_elems(b, &items);
+                attr(b, 4, &be32(i as u32 + 1));
+            });
+        }
+        if !s.ranges.is_empty() {
+            *seq += 1;
+            *acks += 1;
+            tmsg(out, NFT_MSG_NEWSETELEM, NLM_F_CREATE, *seq, |b| {
+                attr(b, 1, &cstr(table));
+                attr(b, 2, &cstr(&s.name));
+                range_elems(b, &s.ranges);
+                attr(b, 4, &be32(i as u32 + 1));
+            });
+        }
+    }
+}
+
+/// The bytes of one concatenated key: the address, then the port in network order padded to a whole 32-bit word.
+fn concat_key(ip: &IpAddr, port: u16) -> Vec<u8> {
+    let mut k = addr_bytes(ip);
+    k.extend_from_slice(&port.to_be_bytes());
+    k.extend_from_slice(&[0, 0]);
+    k
+}
+
+/// An `address . port` interval set and its elements, byte for byte what `nft` sends for `type ipv4_addr . inet_service; flags
+/// interval`: flags interval and concatenation, the type `(address type << 6) | service`, the padded key length, a description with
+/// the length of each field, and each element as a start key plus (attribute 10) the last key, inclusive.
+fn encode_concat_set(out: &mut Vec<u8>, table: &str, s: &SetSpec, id: u32, seq: &mut u32, acks: &mut usize) {
+    let alen: u32 = if s.v4 { 4 } else { 16 };
+    *seq += 1;
+    *acks += 1;
+    tmsg(out, NFT_MSG_NEWSET, NLM_F_CREATE, *seq, |b| {
+        attr(b, 1, &cstr(table));
+        attr(b, 2, &cstr(&s.name));
+        attr(b, 3, &be32(NFT_SET_INTERVAL | NFT_SET_CONCAT));
+        attr(b, 4, &be32(((if s.v4 { TYPE_IPADDR } else { TYPE_IP6ADDR }) << 6) | TYPE_INET_SERVICE));
+        attr(b, 5, &be32(alen + 4));
+        attr(b, 10, &be32(id));
+        nest(b, 9 /* DESC */, |d| {
+            nest(d, 2 /* CONCAT */, |c| {
+                for len in [alen, 2] {
+                    nest(c, 1 /* LIST_ELEM */, |e| attr(e, 1 /* FIELD_LEN */, &be32(len)));
+                }
+            });
+        });
+    });
+    *seq += 1;
+    *acks += 1;
+    tmsg(out, NFT_MSG_NEWSETELEM, NLM_F_CREATE, *seq, |b| {
+        attr(b, 1, &cstr(table));
+        attr(b, 2, &cstr(&s.name));
+        nest(b, 3 /* ELEMENTS */, |l| {
+            for ((a, z), (p, q)) in &s.concat {
+                nest(l, 1, |e| {
+                    nest(e, 1 /* KEY */, |k| attr(k, 1, &concat_key(a, *p)));
+                    nest(e, 10 /* KEY_END */, |k| attr(k, 1, &concat_key(z, *q)));
+                });
+            }
+        });
+        attr(b, 4, &be32(id));
+    });
+}
+
+/// The address right after `ip` (all zeros after the last one, which is how an interval that runs to the end is closed).
+fn successor(ip: &IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(a) => IpAddr::V4(std::net::Ipv4Addr::from(u32::from(*a).wrapping_add(1))),
+        IpAddr::V6(a) => IpAddr::V6(std::net::Ipv6Addr::from(u128::from(*a).wrapping_add(1))),
+    }
+}
+
+/// Interval elements: for each range a start element and an end element (the key right after the range, flagged `interval end`).
+fn range_elems(buf: &mut Vec<u8>, ranges: &[(IpAddr, IpAddr)]) {
+    nest(buf, 3 /* ELEMENTS */, |l| {
+        for (lo, hi) in ranges {
+            nest(l, 1, |e| nest(e, 1 /* KEY */, |k| attr(k, 1, &addr_bytes(lo))));
+            nest(l, 1, |e| {
+                nest(e, 1 /* KEY */, |k| attr(k, 1, &addr_bytes(&successor(hi))));
+                attr(e, 3 /* FLAGS */, &be32(NFT_SET_ELEM_INTERVAL_END));
+            });
+        }
+    });
+}
+
 /// One batch: make the table if missing, delete it with everything in it, make it again with its sets, chains and rules. All of
 /// it or none of it. Returns the bytes and how many acknowledgements to expect.
 pub fn encode_apply(spec: &TableSpec, seq0: u32) -> Result<(Vec<u8>, usize), String> {
-    spec.check()?;
+    encode_apply_in(spec, Family::Inet, seq0)
+}
+
+/// [`encode_apply`] for a table of the given family.
+pub fn encode_apply_in(spec: &TableSpec, family: Family, seq0: u32) -> Result<(Vec<u8>, usize), String> {
+    spec.check_in(family)?;
     let mut out = Vec::new();
     let mut seq = seq0;
     let mut acks = 0;
@@ -354,35 +534,13 @@ pub fn encode_apply(spec: &TableSpec, seq0: u32) -> Result<(Vec<u8>, usize), Str
     for (t, fl) in [(NFT_MSG_NEWTABLE, NLM_F_CREATE), (NFT_MSG_DELTABLE, 0), (NFT_MSG_NEWTABLE, NLM_F_CREATE)] {
         seq += 1;
         acks += 1;
-        tmsg(&mut out, t, fl, seq, |b| attr(b, 1, &cstr(&spec.name)));
+        tmsg_in(family, &mut out, t, fl, seq, |b| attr(b, 1, &cstr(&spec.name)));
     }
-    for (i, s) in spec.sets.iter().enumerate() {
-        seq += 1;
-        acks += 1;
-        tmsg(&mut out, NFT_MSG_NEWSET, NLM_F_CREATE, seq, |b| {
-            attr(b, 1, &cstr(&spec.name));
-            attr(b, 2, &cstr(&s.name));
-            attr(b, 3, &be32(if s.timeout { NFT_SET_TIMEOUT } else { 0 }));
-            attr(b, 4, &be32(if s.v4 { TYPE_IPADDR } else { TYPE_IP6ADDR }));
-            attr(b, 5, &be32(if s.v4 { 4 } else { 16 }));
-            attr(b, 10, &be32(i as u32 + 1));
-        });
-        if !s.members.is_empty() {
-            seq += 1;
-            acks += 1;
-            let items: Vec<(IpAddr, Option<u64>)> = s.members.iter().map(|m| (*m, None)).collect();
-            tmsg(&mut out, NFT_MSG_NEWSETELEM, NLM_F_CREATE, seq, |b| {
-                attr(b, 1, &cstr(&spec.name));
-                attr(b, 2, &cstr(&s.name));
-                key_elems(b, &items);
-                attr(b, 4, &be32(i as u32 + 1));
-            });
-        }
-    }
+    encode_sets(&mut out, &spec.name, &spec.sets, &mut seq, &mut acks);
     for c in &spec.chains {
         seq += 1;
         acks += 1;
-        tmsg(&mut out, NFT_MSG_NEWCHAIN, NLM_F_CREATE, seq, |b| {
+        tmsg_in(family, &mut out, NFT_MSG_NEWCHAIN, NLM_F_CREATE, seq, |b| {
             attr(b, 1, &cstr(&spec.name));
             attr(b, 3, &cstr(&c.name));
             nest(b, 4, |h| {
@@ -395,7 +553,7 @@ pub fn encode_apply(spec: &TableSpec, seq0: u32) -> Result<(Vec<u8>, usize), Str
         for r in &c.rules {
             seq += 1;
             acks += 1;
-            tmsg(&mut out, NFT_MSG_NEWRULE, NLM_F_CREATE | NLM_F_APPEND, seq, |b| {
+            tmsg_in(family, &mut out, NFT_MSG_NEWRULE, NLM_F_CREATE | NLM_F_APPEND, seq, |b| {
                 attr(b, 1, &cstr(&spec.name));
                 attr(b, 2, &cstr(&c.name));
                 nest(b, 4, |e| {
@@ -413,13 +571,18 @@ pub fn encode_apply(spec: &TableSpec, seq0: u32) -> Result<(Vec<u8>, usize), Str
 
 /// One batch that removes the table (made first so that deleting a missing table is not an error).
 pub fn encode_remove(name: &str, seq0: u32) -> Result<(Vec<u8>, usize), String> {
+    encode_remove_in(Family::Inet, name, seq0)
+}
+
+/// [`encode_remove`] for a table of the given family.
+pub fn encode_remove_in(family: Family, name: &str, seq0: u32) -> Result<(Vec<u8>, usize), String> {
     if !name_ok(name, 31) || name == TABLE {
         return Err("not a table this writer may remove".into());
     }
     let mut out = Vec::new();
     batch_begin(&mut out, seq0);
-    tmsg(&mut out, NFT_MSG_NEWTABLE, NLM_F_CREATE, seq0 + 1, |b| attr(b, 1, &cstr(name)));
-    tmsg(&mut out, NFT_MSG_DELTABLE, 0, seq0 + 2, |b| attr(b, 1, &cstr(name)));
+    tmsg_in(family, &mut out, NFT_MSG_NEWTABLE, NLM_F_CREATE, seq0 + 1, |b| attr(b, 1, &cstr(name)));
+    tmsg_in(family, &mut out, NFT_MSG_DELTABLE, 0, seq0 + 2, |b| attr(b, 1, &cstr(name)));
     batch_end(&mut out, seq0 + 3);
     Ok((out, 2))
 }
@@ -444,8 +607,13 @@ pub fn encode_elem(table: &str, set: &str, ip: IpAddr, timeout_secs: Option<u64>
 
 /// A plain "get this table" request; the answer is the table or an ENOENT error.
 pub fn encode_get_table(name: &str, seq: u32) -> Vec<u8> {
+    encode_get_table_in(Family::Inet, name, seq)
+}
+
+/// [`encode_get_table`] for a table of the given family.
+pub fn encode_get_table_in(family: Family, name: &str, seq: u32) -> Vec<u8> {
     let mut out = Vec::new();
-    msg(&mut out, ty(NFT_MSG_GETTABLE), NLM_F_REQUEST, seq, NFPROTO_INET, 0, |b| attr(b, 1, &cstr(name)));
+    msg(&mut out, ty(NFT_MSG_GETTABLE), NLM_F_REQUEST, seq, family.proto(), 0, |b| attr(b, 1, &cstr(name)));
     out
 }
 
@@ -457,7 +625,7 @@ mod tests {
         let tun = IfName::Exact("iyvpn0".into());
         TableSpec {
             name: "iyakki_vpn".into(),
-            sets: vec![SetSpec { name: "vpn_dest4".into(), v4: true, timeout: true, members: vec![] }, SetSpec { name: "vpn_dest6".into(), v4: false, timeout: true, members: vec![] }],
+            sets: vec![SetSpec { name: "vpn_dest4".into(), v4: true, timeout: true, members: vec![], ranges: vec![], concat: vec![] }, SetSpec { name: "vpn_dest6".into(), v4: false, timeout: true, members: vec![], ranges: vec![], concat: vec![] }],
             chains: vec![ChainSpec {
                 name: "output".into(),
                 kind: ChainKind::Filter,
@@ -565,6 +733,74 @@ mod tests {
         assert!(b.windows(16).any(|w| w == lo.as_slice()));
         // the prefix match compares exactly the prefix bytes
         assert!(b.windows(3).any(|w| w == b"cni"));
+    }
+
+    fn isolation() -> TableSpec {
+        TableSpec {
+            name: "iyakki_share_br".into(),
+            sets: vec![],
+            chains: vec![ChainSpec {
+                name: "forward".into(),
+                kind: ChainKind::Filter,
+                hook: Hook::Forward,
+                priority: -200,
+                policy_accept: true,
+                rules: vec![vec![Expr::IifIs(IfName::Exact("bnep0".into())), Expr::Drop], vec![Expr::IifIs(IfName::Prefix("bnep".into())), Expr::OifIs(IfName::Prefix("bnep".into())), Expr::Drop]],
+            }],
+        }
+    }
+
+    #[test]
+    fn a_bridge_table_is_written_in_the_bridge_family_on_the_forward_hook_with_interface_names_only() {
+        let (b, acks) = encode_apply_in(&isolation(), Family::Bridge, 1).unwrap();
+        let m = msgs(&b);
+        // every table message carries the bridge family (7); the two batch markers carry the unspecified family
+        let fams: Vec<u8> = m.iter().filter(|(t, _)| (t >> 8) == 10).map(|(_, p)| p[0]).collect();
+        assert_eq!(fams.len(), 3 + 1 + 2, "table x3, chain, rules");
+        assert!(fams.iter().all(|f| *f == 7), "{fams:?}");
+        assert_eq!(acks, 6);
+        // the same spec in the inet family says 1, so the family is really what changed
+        let (inet, _) = encode_apply_in(&isolation(), Family::Inet, 1).unwrap();
+        assert!(msgs(&inet).iter().filter(|(t, _)| (t >> 8) == 10).all(|(_, p)| p[0] == 1));
+        // the chain hooks on forward (2) at priority -200 (the bridge filter priority)
+        let chain = &m.iter().find(|(t, _)| t & 0xff == 3 && t >> 8 == 10).unwrap().1;
+        let hook = attrs(&chain[4..]).into_iter().find(|(t, _)| *t == 4).unwrap().1.to_vec();
+        let h = attrs(&hook);
+        assert_eq!(h.iter().find(|(t, _)| *t == 1).unwrap().1, &2u32.to_be_bytes());
+        assert_eq!(h.iter().find(|(t, _)| *t == 2).unwrap().1, &(-200i32).to_be_bytes());
+        // a rule is: load the incoming interface name, compare, drop
+        let rules: Vec<Vec<String>> = m.iter().filter(|(t, _)| t & 0xff == 6).map(|(_, p)| expr_names(p)).collect();
+        assert_eq!(rules[0], ["meta", "cmp", "immediate"]);
+        assert_eq!(rules[1], ["meta", "cmp", "meta", "cmp", "immediate"]);
+        let mut n = b"bnep0\0".to_vec();
+        n.resize(16, 0);
+        assert!(b.windows(16).any(|w| w == n.as_slice()));
+        // removal and the existence question use the family too
+        let (rm, _) = encode_remove_in(Family::Bridge, "iyakki_share_br", 9).unwrap();
+        assert!(msgs(&rm).iter().filter(|(t, _)| (t >> 8) == 10).all(|(_, p)| p[0] == 7));
+        let get = encode_get_table_in(Family::Bridge, "iyakki_share_br", 3);
+        assert_eq!(get[16], 7, "{get:?}");
+        assert_eq!(encode_remove("iyakki_share_br", 9).unwrap().1, encode_remove_in(Family::Inet, "iyakki_share_br", 9).unwrap().1);
+    }
+
+    #[test]
+    fn a_bridge_table_refuses_what_a_bridge_cannot_match() {
+        let mut t = isolation();
+        t.chains[0].rules.push(vec![Expr::Daddr("10.0.0.0".parse().unwrap(), 8), Expr::Drop]);
+        assert!(encode_apply_in(&t, Family::Bridge, 1).unwrap_err().contains("interface names only"));
+        assert!(encode_apply_in(&t, Family::Inet, 1).is_ok(), "the same rule is fine in inet");
+        let mut t = isolation();
+        t.sets.push(SetSpec { name: "s".into(), v4: true, timeout: false, members: vec![], ranges: vec![], concat: vec![] });
+        assert!(encode_apply_in(&t, Family::Bridge, 1).unwrap_err().contains("no sets"));
+        let mut t = isolation();
+        t.chains[0].kind = ChainKind::Nat;
+        t.chains[0].hook = Hook::Postrouting;
+        t.chains[0].rules = vec![vec![Expr::Masquerade]];
+        assert!(encode_apply_in(&t, Family::Bridge, 1).unwrap_err().contains("no nat chain"));
+        // the Firewall's own table is still never written through this one
+        let mut t = isolation();
+        t.name = "iyakki_fw".into();
+        assert!(encode_apply_in(&t, Family::Bridge, 1).is_err());
     }
 
     #[test]

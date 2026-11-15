@@ -45,6 +45,12 @@ pub fn route() -> Route {
     if crate::mixer::enabled() { Route::Mixer } else { Route::PlayCommand }
 }
 
+/// The mixer for a player that streams its own decoded sound (the video player), when Settings -> Sound has it on. The only other
+/// door to the mixer setting besides `open_output`: callers go through here, not through `mixer::global_if_enabled`.
+pub fn mixer_if_on() -> Option<&'static Mixer> {
+    crate::mixer::global_if_enabled()
+}
+
 /// Whether several programs can sound at once through the mixer (the SDK's `Busy` answers depend on it).
 pub fn mixing() -> bool {
     route() == Route::Mixer

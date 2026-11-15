@@ -2,6 +2,7 @@
 //! audited, the detected controls with their tests, who may change what, and the page at four screen sizes.
 
 use super::*;
+use crate::apps::settings::kbd_page::pointer_next;
 use crate::apps::tests::{cx_with_admin_store, services_in, temp_dir, Offline};
 use std::path::{Path, PathBuf};
 
@@ -462,4 +463,141 @@ fn the_reset_touch_screen_button_is_next_to_the_probe_button_and_a_plain_status_
     assert!(a.keyboard_buttons().iter().any(|b| b.0 == "Probe touch screen"));
     let text = a.kbd_rows(&cx).iter().map(|(l, v, _)| format!("{l}: {v}")).collect::<Vec<_>>().join("\n");
     assert!(text.contains("Touch recovery: ") && text.contains("Reset touch screen"), "{text}");
+}
+
+// ---- pointer speed (mouse and touchpad)
+
+fn speeds(cx: &AppCx) -> (u32, u32) {
+    cx.services.settings.lock().unwrap().get().keyboard.pointer_speeds()
+}
+
+#[test]
+fn pointer_speed_steps_by_five_and_by_preset_stays_in_range_is_saved_applied_and_audited() {
+    let cx = admin("kb-pointer");
+    let mut a = SettingsApp::new(&cx).with_keyboard_sys(fake_sys("kb-pointer"));
+    goto(&mut a, &cx, Tab::Keyboard);
+    assert_eq!(speeds(&cx), (100, 100), "defaults");
+    assert!(a.kbd_rows(&cx).iter().any(|(l, v, _)| l == "Pointer speed" && v.contains("mouse 100%") && v.contains("touchpad 100%")));
+    key(&mut a, &cx, Key::Char(']'));
+    key(&mut a, &cx, Key::Char(']'));
+    assert_eq!(speeds(&cx).0, 110);
+    assert_eq!(crate::input::mouse_speed_pct(), 110, "applied at once");
+    assert!(status(&a).contains("Mouse speed: 110%"), "{}", status(&a));
+    key(&mut a, &cx, Key::Char('['));
+    assert_eq!(speeds(&cx).0, 105);
+    key(&mut a, &cx, Key::Char('}'));
+    assert_eq!(speeds(&cx).0, 150, "next named speed");
+    key(&mut a, &cx, Key::Char('{'));
+    key(&mut a, &cx, Key::Char('{'));
+    assert_eq!(speeds(&cx).0, 75);
+    // the touchpad has its own value
+    key(&mut a, &cx, Key::Char('.'));
+    key(&mut a, &cx, Key::Char('>'));
+    assert_eq!(speeds(&cx), (75, 150));
+    assert_eq!(crate::input::pad_config().speed_pct, 150);
+    // the ends: stepping never leaves 25..=300, presets wrap round
+    for _ in 0..80 {
+        key(&mut a, &cx, Key::Char('['));
+    }
+    assert_eq!(speeds(&cx).0, 25);
+    key(&mut a, &cx, Key::Char('{'));
+    assert_eq!(speeds(&cx).0, 300, "below the lowest preset wraps to the highest");
+    for _ in 0..80 {
+        key(&mut a, &cx, Key::Char(']'));
+    }
+    assert_eq!(speeds(&cx).0, 300);
+    key(&mut a, &cx, Key::Char('}'));
+    assert_eq!(speeds(&cx).0, 25);
+    let saved = cx.services.settings.lock().unwrap().get().keyboard.clone();
+    assert!(saved.validate().is_ok());
+    // "Reset to profile defaults" brings both back to 100
+    key(&mut a, &cx, Key::Char('x'));
+    assert_eq!(speeds(&cx), (100, 100));
+    crate::input::request_pointer_speed(100, 100);
+}
+
+#[test]
+fn the_pointer_step_function_is_total() {
+    for now in 0..=400u32 {
+        for (up, preset) in [(true, false), (false, false), (true, true), (false, true)] {
+            let n = pointer_next(now, up, preset);
+            assert!((25..=300).contains(&n), "{now} {up} {preset} -> {n}");
+        }
+    }
+    assert_eq!((pointer_next(100, true, false), pointer_next(100, false, false)), (105, 95));
+    assert_eq!((pointer_next(97, true, false), pointer_next(97, false, false)), (100, 95));
+}
+
+#[test]
+fn only_administrators_change_the_pointer_speed() {
+    let mut cx = admin("kb-pointer-user");
+    cx.session.user = "amy".into();
+    cx.session.role = iyakki_sec::policy::Role::User;
+    cx.session.policy = iyakki_sec::policy::Role::User.template();
+    let mut a = SettingsApp::new(&cx).with_keyboard_sys(fake_sys("kb-pointer-user"));
+    a.tabs.push(Tab::Keyboard);
+    goto(&mut a, &cx, Tab::Keyboard);
+    key(&mut a, &cx, Key::Char(']'));
+    key(&mut a, &cx, Key::Char('>'));
+    assert_eq!(speeds(&cx), (100, 100), "not changed");
+}
+
+#[test]
+fn the_pointer_buttons_are_on_the_page_at_every_size_and_work_by_click() {
+    let cx = admin("kb-pointer-btn");
+    let mut a = SettingsApp::new(&cx).with_keyboard_sys(fake_sys("kb-pointer-btn"));
+    goto(&mut a, &cx, Tab::Keyboard);
+    let help = SettingsApp::kbd_help("Pointer speed").unwrap();
+    assert!(help.len() > 20 && help.len() < 220, "{help}");
+    for (w, h) in [(360u32, 740u32), (800, 480), (1280, 720), (1920, 1080), (2560, 1600), (3840, 2160)] {
+        let mut g = Gfx::new(w, h);
+        g.clear(rgb(0, 0, 0));
+        let s = (w as f32 / 1280.0).min(h as f32 / 720.0).clamp(0.6, 3.0);
+        a.render(&mut g, R::new(0.0, 72.0, w as f32, h as f32 - 72.0), s, &cx, 0);
+        for label in ["Mouse slower", "Mouse faster", "Mouse speed preset", "Touchpad slower", "Touchpad faster", "Touchpad speed preset"] {
+            let hit = g.hits.iter().find(|x| x.label == label).unwrap_or_else(|| panic!("{w}x{h}: {label} is not reachable"));
+            let r = hit.rect;
+            assert!(r.w > 0.0 && r.h > 0.0 && r.x >= 0.0 && r.y >= 0.0 && r.x + r.w <= w as f32 + 0.5 && r.y + r.h <= h as f32 + 0.5, "{w}x{h} {label}: {r:?} outside the screen");
+        }
+    }
+    // a click on the button (which arrives as its key) changes the speed
+    let mut g = Gfx::new(1280, 720);
+    a.render(&mut g, R::new(0.0, 72.0, 1280.0, 648.0), 1.0, &cx, 0);
+    let ev = g.hits.iter().find(|x| x.label == "Mouse faster").unwrap().ev.clone();
+    a.handle(&ev, &cx);
+    assert_eq!(speeds(&cx).0, 105);
+    let ev = g.hits.iter().find(|x| x.label == "Touchpad slower").unwrap().ev.clone();
+    a.handle(&ev, &cx);
+    assert_eq!(speeds(&cx).1, 95);
+    crate::input::request_pointer_speed(100, 100);
+}
+
+#[test]
+fn searching_mouse_pointer_speed_cursor_or_touchpad_finds_the_keyboard_page() {
+    let cx = admin("kb-pointer-search");
+    for word in ["mouse", "pointer", "speed", "cursor", "sensitivity", "touchpad", "mouse speed", "pointer speed"] {
+        let mut a = SettingsApp::new(&cx).with_keyboard_sys(fake_sys("kb-pointer-search"));
+        key(&mut a, &cx, Key::Ctrl('f'));
+        for c in word.chars() {
+            key(&mut a, &cx, Key::Char(c));
+        }
+        let at = a.tabs().iter().position(|t| *t == Tab::Keyboard).unwrap();
+        assert!(a.nav_matches().contains(&at), "searching \"{word}\" should find the Keyboard page");
+    }
+    assert!(Tab::Keyboard.blurb().contains("mouse and touchpad speed"));
+}
+
+#[test]
+fn three_finger_drag_is_off_by_default_toggles_on_the_page_reaches_the_touchpad_and_the_reset_turns_it_off() {
+    let cx = admin("kb-3f");
+    let mut a = SettingsApp::new(&cx).with_keyboard_sys(fake_sys("kb-3f"));
+    goto(&mut a, &cx, Tab::Keyboard);
+    let on = |cx: &AppCx| cx.services.settings.lock().unwrap().get().keyboard.three_finger_drag_on();
+    assert!(!on(&cx) && !crate::input::pad_config().three_finger_drag);
+    key(&mut a, &cx, Key::Char('j'));
+    assert!(on(&cx) && crate::input::pad_config().three_finger_drag, "{}", status(&a));
+    assert!(a.kbd_rows(&cx).iter().any(|r| r.0 == "Trackpad" && r.1.contains("three-finger drag on")));
+    key(&mut a, &cx, Key::Char('x')); // Reset to profile defaults
+    assert!(!on(&cx), "the reset puts the pointer choices back, drag off");
+    crate::input::request_three_finger_drag(false);
 }

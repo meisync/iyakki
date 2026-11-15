@@ -126,19 +126,19 @@ fn the_about_page_scrolls_and_stays_inside_its_lines() {
     m.handle_key(&Key::Char('a'));
     let mut g = Gfx::new(1280, 720);
     m.render(&mut g, 1280, 720, 0.9, 0);
-    let first = m.scroll;
+    let first = m.list.offset;
     m.handle_key(&Key::PageDown);
-    assert!(m.scroll > first);
+    assert!(m.list.offset > first);
     m.handle_hit(&Event::Scroll(-1));
-    let after_wheel = m.scroll;
+    let after_wheel = m.list.offset;
     m.handle_key(&Key::End);
     m.render(&mut g, 1280, 720, 0.9, 0);
-    let end = m.scroll;
+    let end = m.list.offset;
     assert!(end > after_wheel);
     m.handle_key(&Key::Down);
-    assert_eq!(m.scroll, end, "never past the end");
+    assert_eq!(m.list.offset, end, "never past the end");
     m.handle_key(&Key::Home);
-    assert_eq!(m.scroll, 0);
+    assert_eq!(m.list.offset, 0.0);
 }
 
 #[test]
@@ -349,4 +349,40 @@ fn load_the_bluetooth_driver_anyway_is_offered_only_while_the_drivers_are_held_a
         assert!(iyakki_agent::macfw::NO_BCM4364_FILE.contains(w), "{w}");
     }
     assert!(iyakki_agent::macfw::LOAD_ANYWAY_HELP.contains("cannot pair"));
+}
+
+#[test]
+fn the_video_firmware_and_folder_boxes_have_browse_inside_the_panel_and_the_picker_answers_into_the_right_box() {
+    for (page, code) in [(Page::Media, BROWSE_VIDEO), (Page::Mac, BROWSE_MAC), (Page::Linux, BROWSE_FOLDER)] {
+        for (w, h) in SIZES {
+            let mut m = opened();
+            m.open_page(page);
+            let s = (w as f32 / 1280.0).min(h as f32 / 720.0).clamp(0.6, 3.0);
+            let mut g = Gfx::new(w, h);
+            m.render(&mut g, w, h, s, 0);
+            let b: Vec<_> = g.hits.iter().filter(|x| x.ev == Event::Tab(code)).collect();
+            if page == Page::Linux {
+                // the folder box shows on the sandbox form only (not while a terminal or the confirm box is up)
+                assert!(b.len() <= 1, "{page:?} {w}x{h}");
+            } else {
+                assert_eq!(b.len(), 1, "{page:?} {w}x{h}: one Browse button");
+            }
+            for x in &b {
+                assert!(x.rect.x >= 0.0 && x.rect.x + x.rect.w <= w as f32 + 0.5, "{page:?} {w}x{h}: inside the width");
+            }
+        }
+    }
+    let mut m = opened();
+    m.open_page(Page::Media);
+    assert_eq!(m.handle_hit(&Event::Tab(BROWSE_VIDEO)), Outcome::Nothing);
+    assert!(m.pick.is_open());
+    let mut g = Gfx::new(1280, 720);
+    m.render(&mut g, 1280, 720, 1.0, 0);
+    assert!(!g.hits.is_empty());
+    assert_eq!(m.handle_key(&Key::Esc), Outcome::Nothing);
+    assert!(!m.pick.is_open() && m.page == Page::Media, "Esc closes the picker, not the page");
+    // the answer goes to the box that asked
+    m.open_pick(PickFor::Video);
+    m.pick_for = PickFor::Video;
+    assert!(m.pick.is_open());
 }

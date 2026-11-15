@@ -490,3 +490,78 @@ fn an_image_a_strong_writer_returns_is_used_as_it_is_and_a_bad_one_falls_back_wi
     assert_eq!((d.how, d.ext), ("video reply", "mp4"));
     assert!(!StoryOptions::default().video, "video clips are off by default");
 }
+
+#[test]
+fn an_animal_hero_is_not_turned_into_a_child_by_he_and_his() {
+    // the sheet a real qwen3-8b was asked for in the live run: the prompt had no way to say "an animal"
+    let story = "# The Fox\n\nOne evening a small red fox named Finn wandered through the forest. He found a pond. He pawed the water and his tail swayed. He slept by the bank, his nose tucked in.";
+    let sheet = CharacterSheet::derive("a small fox who finds the moon in a pond", "", story);
+    assert!(!sheet.human, "{}", sheet.describe());
+    // the model's reply fills the person's keys anyway (it has to give something): the animal stays an animal
+    let reply = r#"{"name":"Finn","gender":"boy","age":"child","skin":"light","hair":"red","hair_style":"curly","top":"red","bottom":"blue","bottom_style":"shorts","shoes":"red","hat":"none","companion":"none","companion_color":""}"#;
+    let merged = CharacterSheet::from_reply(reply, &sheet).unwrap();
+    assert!(!merged.human && merged.describe() == "an animal (no human character)", "{}", merged.describe());
+    // a story that names a child stays a story about a child
+    assert!(CharacterSheet::derive("a boy and his pet fox", "", "Raj walked with his fox. He smiled.").human);
+    // and the model can say so itself
+    assert!(!CharacterSheet::from_reply(r#"{"human": false, "name": "Pip"}"#, &CharacterSheet::derive("a day out", "", "Pip went out. She laughed. She sang. She ran.")).unwrap().human);
+    assert!(super::sheet::sheet_messages(&StoryOptions::default(), story, &sheet)[0].content.contains("human (true when the main character is a person, false when it is an animal)"));
+}
+
+/// A scripted web for the approved-link tests: the answers by address, and every address asked for.
+struct Web(Vec<(String, iyakki_web::Response)>, Mutex<Vec<String>>);
+impl iyakki_web::Fetch for Web {
+    fn get(&self, url: &iyakki_web::Url) -> Result<iyakki_web::Response, String> {
+        self.1.lock().unwrap().push(url.to_string());
+        self.0.iter().find(|(k, _)| *k == url.to_string()).map(|(_, r)| r.clone()).ok_or_else(|| "no route".to_string())
+    }
+}
+
+#[test]
+fn links_in_a_reply_are_listed_for_the_person_and_one_approved_link_is_fetched_judged_and_kept() {
+    use reply::{fetch_link, web_links};
+    let reply = "Here: ![a](https://cdn.example.org/a.png) and ![b](http://plain.example.org/b.png) and ![c](https://cdn.example.org/a.png) ![d](https://img.example.net/d.png)";
+    assert_eq!(web_links(reply), vec!["https://cdn.example.org/a.png".to_string(), "https://img.example.net/d.png".to_string()], "https only, each once");
+    let png = bytes(samples::PNG_HEX);
+    let ok = |body: &[u8]| iyakki_web::Response { status: 200, content_type: "image/png".into(), body: body.to_vec(), ..Default::default() };
+    let web = Web(vec![("https://cdn.example.org/a.png".into(), ok(&png)), ("https://cdn.example.org/page".into(), ok(b"<html>not a picture</html>")), ("https://cdn.example.org/gone".into(), iyakki_web::Response { status: 404, ..Default::default() })], Mutex::new(vec![]));
+    let allow = |h: &str| h != "blocked.example.org";
+    let f = fetch_link("https://cdn.example.org/a.png", &web, &allow, false).unwrap();
+    assert_eq!((f.ext, f.origin), ("png", "a link you approved"));
+    assert!(!f.bytes.windows(4).any(|w| w == b"tEXt"), "metadata is stripped like any picture");
+    // refusals, each before or without a usable picture
+    assert!(fetch_link("http://cdn.example.org/a.png", &web, &allow, false).unwrap_err().contains("https"));
+    assert!(fetch_link("https://blocked.example.org/x.png", &web, &allow, false).unwrap_err().contains("not an address this account may fetch"));
+    for local in ["https://localhost/x.png", "https://192.168.1.5/x.png", "https://127.0.0.1/x.png", "https://10.0.0.2/x.png"] {
+        assert!(fetch_link(local, &web, &allow, false).is_err(), "{local}");
+    }
+    assert!(fetch_link("https://cdn.example.org/gone", &web, &allow, false).unwrap_err().contains("404"));
+    assert!(fetch_link("https://cdn.example.org/page", &web, &allow, false).unwrap_err().contains("not a picture"), "judged by its first bytes, not by what the address claims");
+    assert!(fetch_link("not an address", &web, &allow, false).is_err());
+    let asked = web.1.lock().unwrap().clone();
+    assert!(!asked.iter().any(|u| u.contains("localhost") || u.contains("192.168") || u.contains("127.0.0.1") || u.contains("blocked") || u.starts_with("http://")), "{asked:?}");
+}
+
+#[test]
+fn a_drawing_whose_reply_only_linked_to_a_picture_offers_the_link_and_fetches_nothing() {
+    let sheet = CharacterSheet::derive("a fox", "", "A fox ran.");
+    let chat = Fake::new(|_| Ok("![scene](https://cdn.example.org/x/scene.png)".to_string()));
+    let o = StoryOptions { drawing: DrawingMode::Rich, ..StoryOptions::default() };
+    let sc = scene("A fox ran.");
+    let d = draw_picture(&chat, "A fox", &o, &sc, &sheet, &DrawCfg { strong: true, story_text: "A fox ran.", feedback: "", workdir: None, allow_video: false }).unwrap();
+    assert_eq!(d.ext, "svg", "the built-in picture is drawn meanwhile");
+    assert_eq!(d.links, vec!["https://cdn.example.org/x/scene.png".to_string()]);
+}
+
+#[test]
+fn a_message_that_gives_an_address_for_a_picture_is_recognised_and_other_messages_are_not() {
+    use reply::asks_for_link;
+    assert_eq!(asks_for_link("use https://cdn.example.org/a.png for picture 2", 3), Some((1, "https://cdn.example.org/a.png".to_string())));
+    assert_eq!(asks_for_link("Scene 3: (https://img.example.net/x.jpg).", 3), Some((2, "https://img.example.net/x.jpg".to_string())));
+    assert_eq!(asks_for_link("please use this picture https://cdn.example.org/a.png", 1), Some((0, "https://cdn.example.org/a.png".to_string())), "one picture only: no number needed");
+    assert_eq!(asks_for_link("please use this picture https://cdn.example.org/a.png", 3), None, "which one?");
+    assert_eq!(asks_for_link("picture 9 https://cdn.example.org/a.png", 3), None, "there is no picture 9");
+    assert_eq!(asks_for_link("picture 2 http://cdn.example.org/a.png", 3), None, "https only");
+    assert_eq!(asks_for_link("make the fox bigger in picture 2", 3), None);
+    assert_eq!(asks_for_link("see https://en.example.org/wiki/Fox for facts about foxes", 3), None, "an address with no word about a picture is an ordinary message");
+}

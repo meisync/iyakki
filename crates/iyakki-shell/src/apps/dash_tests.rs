@@ -259,6 +259,44 @@ fn every_screen_fits_at_the_four_sizes_with_the_chat_open_and_closed() {
 }
 
 #[test]
+fn the_default_cluster_dashboard_with_its_many_panels_fits_the_four_sizes_without_overlap() {
+    let mut f = fixture("k3s-geo");
+    let t = iyakki_agent::dash::templates::find("k3s-local").unwrap();
+    let d = t.instantiate("kube-local", "k3s-local");
+    let n = d.panels.len();
+    assert!(n >= 15, "the default dashboard has its many panels: {n}");
+    f.app.open_dashboard_for_test(d);
+    settle(&mut f);
+    for (w, h) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (800, 480)] {
+        for chat in [false, true] {
+            f.app.go_for_test("board");
+            f.app.set_chat_for_test(chat);
+            let g = draw(&mut f, w, h);
+            let ctx = format!("k3s-local {w}x{h} chat={chat}");
+            for hit in &g.hits {
+                if hit.label == "backdrop" || hit.label == "slot-mark" {
+                    continue;
+                }
+                let r = hit.rect;
+                assert!(r.x >= -1.0 && r.x + r.w <= w as f32 + 1.0 && r.y + r.h <= h as f32 + 1.0, "{ctx}: `{}` at {r:?}", hit.label);
+            }
+            assert!(super::component::route::duplicate_ids(&g.hits).is_empty(), "{ctx}");
+            let panels = f.app.panel_rects_for_test();
+            for (i, (_, a1)) in panels.iter().enumerate() {
+                assert!(a1.w > 20.0 && a1.h > 20.0, "{ctx}: a panel is squeezed to {a1:?}");
+                for (_, b1) in panels.iter().skip(i + 1) {
+                    assert!(a1.x + a1.w <= b1.x + 0.5 || b1.x + b1.w <= a1.x + 0.5 || a1.y + a1.h <= b1.y + 0.5 || b1.y + b1.h <= a1.y + 0.5, "{ctx}: panels overlap {a1:?} {b1:?}");
+                }
+            }
+            // not an empty screen
+            let lit = g.rgba().chunks(4).filter(|p| (p[0] as u32 + p[1] as u32 + p[2] as u32) > 300).count();
+            assert!(lit > 1500, "{ctx}: only {lit} lit pixels");
+        }
+    }
+    f.app.set_chat_for_test(false);
+}
+
+#[test]
 fn buttons_of_one_toolbar_never_overlap() {
     let mut f = board("tb");
     let labels = ["Dashboards", "Zoom out", "Refresh", "+ Panel", "Sources", "Undo", "Redo", "Save", "Export", "AI", "5m", "15m", "1h", "6h", "24h", "7d"];
@@ -1108,6 +1146,33 @@ fn an_account_that_is_not_an_administrator_cannot_share_and_a_viewer_cannot_save
 }
 
 #[test]
+fn a_dashboard_shared_with_me_is_listed_with_my_role_and_opens_with_a_note_that_says_what_i_may_do() {
+    use iyakki_agent::dash::share::Grant;
+    let mut f = fixture_c("share-role-label", Arc::new(iyakki_agent::dash::cluster::NoCluster), false);
+    let me = f.env.user.clone();
+    let mut owner = (*f.env).clone();
+    owner.user = "amy".into();
+    owner.home = f.env.people.home("amy", &f.env.data_dir);
+    owner.policy = iyakki_sec::policy::Role::Admin.template();
+    assert!(!iyakki_agent::dash::seed::seed_defaults(&owner.data_dir, &owner.home, "amy", true).unwrap().is_empty());
+    for (grant, row, note) in [
+        (Grant::viewer(&me), "you are viewer", "Shared with you by amy: you are a viewer, you can look, not change."),
+        (Grant::operator(&me), "you are operator", "You are an operator of amy's dashboard: you can change its panels"),
+    ] {
+        owner.set_shares(iyakki_agent::dash::seed::DASHBOARD_ID, &[grant]).unwrap();
+        f.app.reload_for_test();
+        let n = f.app.list_len_for_test();
+        assert!(n >= 1, "the shared dashboard is in the list");
+        f.app.select_list_for_test(n - 1);
+        let g = draw(&mut f, 1280, 720);
+        assert!(g.text_log.iter().any(|(_, _, s)| s.contains(row)), "the row says {row}: {:?}", g.text_log.iter().map(|l| l.2.clone()).filter(|s| s.contains("panel")).collect::<Vec<_>>());
+        key(&mut f, Key::Enter);
+        assert!(f.app.status_for_test().contains(note), "{}", f.app.status_for_test());
+        key(&mut f, Key::Esc);
+    }
+}
+
+#[test]
 fn the_dialog_refuses_an_unknown_role_and_a_viewer_row_says_what_you_are() {
     let mut f = fixture("share-role");
     f.env.sources().save(iyakki_agent::dash::seed::default_source()).unwrap();
@@ -1122,4 +1187,82 @@ fn the_dialog_refuses_an_unknown_role_and_a_viewer_row_says_what_you_are() {
     assert!(f.env.shared_with("k3s-local").is_empty());
     key(&mut f, Key::Esc);
     assert!(!f.app.modal_open_for_test());
+}
+
+/// A cluster that answers its Services only after a while.
+struct SlowCluster(Vec<SvcInfo>, u64);
+impl ClusterApi for SlowCluster {
+    fn service(&self, ns: &str, name: &str) -> Result<SvcInfo, DashError> {
+        self.0.iter().find(|s| s.ns == ns && s.name == name).cloned().ok_or_else(|| DashError::config(format!("no Service {name} in {ns}")))
+    }
+    fn services(&self) -> Result<Vec<SvcInfo>, DashError> {
+        std::thread::sleep(std::time::Duration::from_millis(self.1));
+        Ok(self.0.clone())
+    }
+    fn host_listens(&self, _: u16) -> bool {
+        false
+    }
+}
+
+fn open_add_form(f: &mut Fixture, kind_word: &str) {
+    f.app.go_for_test("sources");
+    key(f, Key::Char('a'));
+    types(f, kind_word);
+    key(f, Key::Enter);
+}
+
+#[test]
+fn an_open_add_form_fills_its_address_when_a_slow_cluster_answers_and_never_over_what_was_typed() {
+    let es = SvcInfo { ns: "iyakki-data".into(), name: "elasticsearch".into(), kind: "ClusterIP".into(), cluster_ip: "10.43.4.5".into(), ports: vec![("http".into(), 9200)], app: "elasticsearch".into(), ready: Some(true) };
+    // the answer comes after the screen's wait: the form opens with the note, the tick fills the address in
+    let mut f = fixture_c("late-fill", Arc::new(SlowCluster(vec![es.clone()], 1200)), true);
+    let t = std::time::Instant::now();
+    open_add_form(&mut f, "Elasticsearch");
+    assert!(t.elapsed() < std::time::Duration::from_millis(1100), "the screen waited {:?}", t.elapsed());
+    let (v, note) = f.app.source_form_field_for_test("Address").expect("the form is open");
+    assert_eq!(v, "");
+    assert!(note.contains("still looking") && note.contains("fills in here"), "{note}");
+    let mut got = String::new();
+    for _ in 0..200 {
+        tick(&mut f, 1);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        got = f.app.source_form_field_for_test("Address").unwrap().0;
+        if !got.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(got, "cluster://iyakki-data/elasticsearch:9200");
+    assert!(f.app.source_form_field_for_test("Address").unwrap().1.contains("found in the cluster"));
+    key(&mut f, Key::Esc);
+    // an address the person typed meanwhile is kept; only the note changes
+    let mut g = fixture_c("late-keep", Arc::new(SlowCluster(vec![es], 900)), true);
+    open_add_form(&mut g, "Elasticsearch");
+    g.app.fill_source_form_for_test(&[("Address", "http://es.internal:9200")]);
+    for _ in 0..200 {
+        tick(&mut g, 1);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        if g.app.source_form_field_for_test("Address").unwrap().1.contains("found in the cluster") {
+            break;
+        }
+    }
+    let (v, note) = g.app.source_form_field_for_test("Address").unwrap();
+    assert_eq!(v, "http://es.internal:9200");
+    assert!(note.contains("found in the cluster"), "{note}");
+    // a form that was closed takes nothing: a new form of another kind is not filled from the old lookup
+    key(&mut g, Key::Esc);
+    tick(&mut g, 3);
+    assert!(g.app.source_form_field_for_test("Address").is_none());
+}
+
+#[test]
+fn a_picker_and_a_question_over_the_dashboards_are_announced_by_their_own_words() {
+    let mut f = fixture("a11y");
+    let a = &mut f.app;
+    assert_eq!(a.dialog_title(), None, "no dialog on the page itself");
+    a.ask_for_test("kind");
+    assert_eq!(a.dialog_title().as_deref(), Some("What kind of data source?"));
+    a.ask_for_test("leave");
+    assert_eq!(a.dialog_title().as_deref(), Some("This dashboard has unsaved changes. Leave and lose them?"));
+    a.ask_for_test("none");
+    assert_eq!(a.dialog_title(), None);
 }

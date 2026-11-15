@@ -10,6 +10,18 @@ if [ -z "${IYAKKI_TMP_SET:-}" ]; then
   mkdir -p "$TMPDIR" 2>/dev/null || { export TMPDIR="$HOME/.cache/iyakki-tmp"; mkdir -p "$TMPDIR"; }
   export IYAKKI_TMP_SET=1
 fi
+# Disk guard (2026-11-12: a full disk crashed the editor and the agents): incremental compile data grew to hundreds of GB, so the release
+# scripts compile without it, and a build refuses to start when the disk holds less than IYAKKI_MIN_FREE_GB (default 40) free.
+export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
+iyakki_free_gb() { df -Pk "${1:-$ROOT}" 2>/dev/null | awk 'NR==2 {print int($4/1048576)}'; }
+iyakki_require_free_disk() {
+  local need="${IYAKKI_MIN_FREE_GB:-40}" have
+  have="$(iyakki_free_gb "${1:-$ROOT}")"
+  if [ -n "$have" ] && [ "$have" -lt "$need" ]; then
+    echo "REFUSED: only ${have} GB free on the disk of ${1:-$ROOT}, at least ${need} GB are needed (remove old target/ folders, images and packs, then retry)" >&2
+    return 1
+  fi
+}
 # remove iyakki-* entries older than a day from TMPDIR (and /tmp when it is ours to clean)
 iyakki_tmp_clean() {
   find "$TMPDIR" -maxdepth 1 -name 'iyakki-*' -mtime +0 -exec rm -rf {} + 2>/dev/null || true

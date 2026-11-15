@@ -786,7 +786,7 @@ impl BrowserApp {
         let h = 56.0 * s + rows as f32 * rh;
         let (x, y) = (view.x + (view.w - w) / 2.0, view.y + 16.0 * s);
         let h = h.min(view.h - 24.0 * s);
-        g.rrect(x, y, w, h, 10.0 * s, [8, 11, 24, 246]);
+        g.rrect(x, y, w, h, 10.0 * s, crate::fx::panel_alpha(246));
         g.rrect_outline(x, y, w, h, 10.0 * s, 1.5 * s * factor, color);
         g.text(x + 14.0 * s, y + 8.0 * s, 15.0 * s, color, &format!("{} · {} of {}", r.kind.title(), r.hits.len(), r.all.len()), Face::Bold);
         let q = if r.query.is_empty() { "Type to search".to_string() } else { r.query.clone() };

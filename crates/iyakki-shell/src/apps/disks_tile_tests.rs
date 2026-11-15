@@ -543,7 +543,7 @@ fn settings_storage_and_the_file_picker_lead_to_the_drives() {
         }
     }
     // the file picker: a Drives button; without an open drive (or without the right to read /media) it says so and stays put
-    let base = std::env::temp_dir().join(format!("pk-drives-{}", std::process::id()));
+    let base = iyakki_agent::testdir::base().join(format!("pk-drives-{}", std::process::id()));
     let home = base.join("home/amy");
     std::fs::create_dir_all(&home).unwrap();
     let mut p = Role::User.template();
@@ -560,7 +560,7 @@ fn settings_storage_and_the_file_picker_lead_to_the_drives() {
 
 #[test]
 fn the_pickers_drives_button_goes_to_the_open_drives_of_the_account_and_is_drawn_inside_the_window_at_four_sizes() {
-    let base = std::env::temp_dir().join(format!("pk-drives2-{}", std::process::id()));
+    let base = iyakki_agent::testdir::base().join(format!("pk-drives2-{}", std::process::id()));
     let home = base.join("home/amy");
     let media = home.join("media");
     std::fs::create_dir_all(media.join("STICK")).unwrap();
@@ -834,19 +834,21 @@ fn resize_shows_the_dry_run_then_needs_the_typed_name_and_waits_out_a_visible_co
         assert!(f.app.countdown_left().is_none() && f.f.calls().len() == writes, "{wrong:?}");
     }
     // the label, typed exactly, starts the countdown (not the change)
-    f.app.cancel_window = std::time::Duration::from_secs(5);
+    // a long window: the countdown shows the seconds left against the wall clock, so on a busy machine a short one loses a second between steps
+    f.app.cancel_window = std::time::Duration::from_secs(3600);
     if let Modal::Review(r) = &mut f.app.modal {
         r.field.set("data");
     }
     f.draw();
     assert!(f.has_hit(&Event::Tab(T_APPLY)));
     f.ev(Event::Tab(T_APPLY));
-    assert_eq!(f.app.countdown_left(), Some(5));
+    let left = |f: &Fx| f.app.countdown_left().filter(|n| (3590..=3600).contains(n));
+    assert!(left(&f).is_some(), "{:?}", f.app.countdown_left());
     assert!(f.app.job.is_none() && f.f.calls().len() == writes, "nothing is written during the window");
     assert!(!f.has_hit(&Event::Tab(T_APPLY)) && f.has_hit(&Event::Tab(T_CANCEL)), "only Cancel is offered while it counts down");
     // typing does nothing then; Cancel stops it
     f.type_text("x");
-    assert_eq!(f.app.countdown_left(), Some(5));
+    assert!(left(&f).is_some(), "{:?}", f.app.countdown_left());
     f.ev(Event::Tab(T_CANCEL));
     assert!(matches!(f.app.modal, Modal::None) && f.msg().contains("Cancelled") && f.f.calls().len() == writes);
     assert_eq!(f.app.snap.disk("sdc").unwrap().parts[0].size_bytes, 40 << 20);

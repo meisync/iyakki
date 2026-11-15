@@ -277,11 +277,11 @@ const SIZES: [(u32, u32, f32); 6] = [(360, 740, 1.0), (800, 480, 1.0), (1280, 72
 #[test]
 fn it_lists_every_step_not_done_yet_and_opens_the_chosen_one() {
     let f = fixture("list");
-    assert_eq!(f.app.results.len(), 12);
+    assert_eq!(f.app.results.len(), 14);
     assert!(f.app.results.iter().all(|r| r.outcome == Outcome::Pending));
     assert!(f.g.hits.iter().filter(|h| h.label == "step").count() >= 5, "the steps are rows");
     let t = f.text();
-    assert!(t.contains("0 passed, 0 failed, 0 skipped, 12 not done yet") && t.contains("Screen") && t.contains("Shows four colour bars"), "{t}");
+    assert!(t.contains("0 passed, 0 failed, 0 skipped, 14 not done yet") && t.contains("Screen") && t.contains("Shows four colour bars"), "{t}");
     assert!(f.has_hit(&Event::Tab(T_RUN)) && f.has_hit(&Event::Tab(T_AGAIN)) && f.has_hit(&Event::Tab(T_SHARE)) && f.has_hit(&Event::Tab(T_DOCTOR)));
     assert_eq!((f.app.title(), f.app.icon()), ("Check-up", crate::gfx::Icon::Checkup));
     assert!(f.app.hint().contains("Enter start") && !f.app.help().is_empty());
@@ -300,7 +300,7 @@ fn the_machines_own_steps_answer_at_once_and_the_list_moves_on() {
     f.start(StepId::Bluetooth);
     f.start(StepId::Power);
     assert_eq!([f.outcome(StepId::Wifi), f.outcome(StepId::Bluetooth), f.outcome(StepId::Power)], [Outcome::Pass, Outcome::Pass, Outcome::Skipped]);
-    assert!(f.text().contains("No battery"), "the power row says it");
+    assert!(f.result(StepId::Power).note.contains("No battery"), "the power step says it");
 }
 
 #[test]
@@ -314,7 +314,7 @@ fn up_and_down_choose_steps_and_enter_starts_the_chosen_one() {
     for _ in 0..30 {
         f.key(Key::Down);
     }
-    assert_eq!(f.app.sel, 11, "stays on the last step");
+    assert_eq!(f.app.sel, 13, "stays on the last step");
     assert!(f.app.active.is_none(), "choosing never starts anything");
     assert!(matches!(f.key(Key::Esc), Flow::Back));
 }
@@ -446,7 +446,7 @@ fn a_speaker_that_cannot_play_or_a_machine_without_a_sound_card_fails_in_words()
 #[test]
 fn nothing_is_recorded_until_the_person_starts_the_microphone_step() {
     let mut f = fixture("mic-consent");
-    for _ in 0..12 {
+    for _ in 0..14 {
         f.key(Key::Down);
         f.app.wants_redraw();
     }
@@ -604,7 +604,7 @@ fn the_result_goes_to_share_diagnostics_through_doctors_preview() {
     f.chr('n');
     f.start(StepId::Network);
     let report = iyakki_agent::checkup::last_report();
-    assert_eq!(report[0], "1 passed, 1 failed, 0 skipped, 10 not done yet");
+    assert_eq!(report[0], "1 passed, 1 failed, 0 skipped, 12 not done yet");
     assert!(report.iter().any(|l| l.starts_with("Screen: Fail")) && report.iter().any(|l| l.starts_with("Network: Pass")));
     f.chr('s');
     assert_eq!(f.app.take_request(), Some(("doctor".into(), "share".into())));
@@ -746,4 +746,33 @@ fn the_real_readers_run_on_this_computer_without_panicking() {
         a.begin(i, &cx);
         assert_ne!(a.results[i].outcome, Outcome::Pending, "{id:?}");
     }
+}
+
+#[test]
+fn a_finished_check_up_leaves_a_signed_result_that_maps_to_the_matrix_and_a_half_one_leaves_none() {
+    let mut f = fixture("signed");
+    let file = f.cx.services.dir().join(iyakki_agent::checkup_result::FILE_NAME);
+    let _ = std::fs::remove_file(&file);
+    f.app.results[0].outcome = Outcome::Pass;
+    f.app.keep_report();
+    assert!(!file.exists(), "steps are still not done");
+    for r in f.app.results.iter_mut() {
+        r.outcome = Outcome::Pass;
+    }
+    f.app.results[9].outcome = Outcome::Fail;
+    // the graphics card step has not been able to ask the cluster: the GPU cell is not guessed
+    let gi = StepId::ALL.iter().position(|s| *s == StepId::Gpu).unwrap();
+    f.app.results[gi].outcome = Outcome::Skipped;
+    f.app.keep_report();
+    let b = iyakki_agent::checkup_result::verify(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(b.cells.iter().find(|c| c.capability == "Wi-Fi").unwrap().status, "failing");
+    assert_eq!(b.cells.iter().find(|c| c.capability == "Display, internal").unwrap().status, "verified");
+    assert!(b.cells.iter().any(|c| c.capability == "GPU for k3s" && c.status == "untested"), "the GPU was not asked, so it is not guessed");
+    // the cluster saw it: the cell is verified, with the step's own words
+    f.app.results[gi].outcome = Outcome::Pass;
+    f.app.results[gi].note = "AMD Radeon 780M (amdgpu): the dev cluster sees 1 GPU.".into();
+    f.app.keep_report();
+    let b = iyakki_agent::checkup_result::verify(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    let c = b.cells.iter().find(|c| c.capability == "GPU for k3s").unwrap();
+    assert!(c.status == "verified" && c.note.contains("sees 1 GPU"), "{c:?}");
 }

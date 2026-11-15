@@ -321,11 +321,11 @@ mod tests {
     #[test]
     fn a_failed_signature_leaves_no_trace_in_the_replay_memory() {
         let (keys, k, replay) = setup();
-        let bad = DeviceKey::from_seed([9; 32]).sign_request_with_nonce("ann", "POST", LOGIN_PATH, NOW, b"", &"ab".repeat(16));
+        let bad = DeviceKey::from_seed([9; 32]).sign_request_with_nonce("ann", "POST", LOGIN_PATH, NOW, b"", &"ab".repeat(16)).unwrap();
         assert_eq!(check(&bad, &keys, &replay, NOW), Err(REFUSED));
         assert_eq!(replay.seen.lock().unwrap().len(), 0, "a stranger fills nothing");
         // the real owner may use that nonce afterwards
-        assert!(check(&k.sign_request_with_nonce("ann", "POST", LOGIN_PATH, NOW, b"", &"ab".repeat(16)), &keys, &replay, NOW).is_ok());
+        assert!(check(&k.sign_request_with_nonce("ann", "POST", LOGIN_PATH, NOW, b"", &"ab".repeat(16)).unwrap(), &keys, &replay, NOW).is_ok());
     }
 
     #[test]

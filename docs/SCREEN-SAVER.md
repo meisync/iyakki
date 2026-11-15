@@ -20,7 +20,7 @@ as buttons (click one, or Up/Down to pick a card and Enter for the next choice, 
 | When the screen is idle | Do nothing, Screen saver, Turn the screen off | Screen saver |
 | Idle for | Never, 1, 2, 5, 10, 15, 30 minutes | 10 minutes |
 | Then turn the screen off after | Not at all, 1, 5, 10, 30 minutes (more minutes after the saver started; only with the saver) | 10 minutes |
-| Screen saver style | IYAKKI logo, Logo and clock, Small logo (OLED friendly), Breathing logo | IYAKKI logo |
+| Screen saver style | IYAKKI logo, Logo and clock, Small logo (OLED friendly), Breathing logo, Stars, Photos (the last two since alpha.3, see "More styles" below) | IYAKKI logo |
 | Dim the screen first | Do not dim, 50 %, 25 %, 10 % of the brightness you had | 50 % |
 | Shorter on battery | On (every time above is halved while on the battery, never below 15 seconds) or Off | On |
 | Try it now | Preview: the saver for 5 seconds, or until a key, a click or a movement | |
@@ -108,7 +108,7 @@ even the right password is refused during it. The typed password is wiped after 
 
 | Way to lock | Notes |
 |---|---|
-| Super+L (a PC keyboard) or the keyboard's lock key (KEY_SCREENLOCK) | Not in the Mac profile, where Command+L is the browser's address bar and a Mac keyboard has no lock key: there, Control+Command+Q (as on a Mac) or Control+Command+L locks, or use the Power menu |
+| Super+L (a PC keyboard) or the keyboard's lock key (KEY_SCREENLOCK) | Not in the Mac profile, where Command+L is the browser's address bar and a Mac keyboard has no lock key: there, Control+Command+L (or Control+Option+L) locks, or use the Power menu. (Control+Command+Q signs out, after a confirm card.) |
 | Power menu: Lock (also `l` on the power key's card) | Was "sign out"; now it locks |
 | Settings -> Display & sound -> Screen saver -> "Lock the screen now" | Asks the shell by a small file in the data folder |
 | The assistant: `lock_screen` | Asks nothing (it only protects the person). The assistant can lock but never unlock |
@@ -134,9 +134,20 @@ Someone who is not signed in sees the normal sign-in screen, unchanged (the lock
 password can only restart the computer (or have an administrator reset it); there is no "sign out" on the lock screen on purpose, so a
 stranger cannot end someone's runs.
 
+## More styles and a start-now key (F-SCRN-05)
+
+* **Starfield** ("Stars"): points of light fly slowly outwards from the middle, brighter and bigger as they go; the field is a pure function of
+  the time, so it never freezes and nothing burns in.
+* **Photo slideshow** ("Photos"): the pictures of the signed-in person's own `Pictures` folder (PNG, JPEG, GIF, WebP; plain files up to 32 MiB, at most
+  500), in a shuffled order, each for 12 seconds with a 2 second cross-fade and a slow zoom. With no pictures, or none that can be read, the logo is shown.
+  At the sign-in screen there is no person, so the logo shows. Nothing is uploaded or indexed; the folder is listed when the saver starts.
+* **Start it now**: Control+Windows+S (Control+Command+S in the Mac profile). Any key or the pointer wakes it. It starts even when the saver is set
+  to "never". The assistant's `screensaver_set` accepts the styles `starfield` and `slideshow`; `screensaver_preview` starts the saver.
+
+Not yet looked at on a real screen: the motion, the cross-fade and the CPU cost of redrawing the whole picture each frame on the Mac mini.
+
 ## Not built (follow-ups)
 
-- Photo slideshow from Pictures, a starfield behind the logo, and a key chord to start the saver now (Preview is on the Settings page).
 - Video playing inside the web browser as a reason to keep the screen on.
 - Backlight and blank calls on the several-displays path.
 

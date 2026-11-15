@@ -6,7 +6,7 @@
 
 use super::control::{self, Backend};
 use super::plan::{apply_policy, make_plan};
-use super::view::choices;
+use super::view::choices_with;
 use super::policy::Who;
 use super::{human_duration, Request, State, DEFAULT_IDLE_HOURS};
 
@@ -92,7 +92,8 @@ pub fn status_text(s: &super::Status) -> Vec<String> {
 pub fn run(b: &dyn Backend, cmd: Cmd, out: &mut dyn FnMut(&str), wait_ms: u64) -> i32 {
     match cmd {
         Cmd::List => {
-            let c = choices(&b.interfaces(), b.wifi_ap());
+            let wifi = b.wifi_ap();
+            let c = choices_with(&b.interfaces(), wifi, if wifi { None } else { b.wifi_ap_why() }.as_deref());
             out("internet comes from (a link that has a route to the internet):");
             if c.uplinks.is_empty() {
                 out("  none: no connection on this computer has a route to the internet");

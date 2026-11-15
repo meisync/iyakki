@@ -8,6 +8,8 @@
 #        Output in target/buildroot-web. WEB_H264=1 also ships H.264/AAC. WEB_AV_ADDON=0 leaves out the inactive audio and video bridge
 #        (default 1: only the LGPL gst-libav plugin, no FFmpeg; the person downloads the libraries). See docs/FULL-BROWSER.md.
 #        WEB_MEDIA=1 adds camera, microphone, screen share and WebRTC for pages (default 0: it rebuilds WPE WebKit, ~9 h; configs/iyakki_web_media.fragment).
+#   WITH_PODMAN=1 (any variant but the release image): also build podman, conmon, crun and netavark for the "k3s in Podman" variant of Settings -> Dev
+#        cluster: configs/iyakki_cluster.fragment (adds tens of MB; native k3s needs none of it).
 #   WITH_FFMPEG=1 (any variant): also build ffmpeg + ffprobe (LGPL, no ffplay) into the image: configs/iyakki_media.fragment.
 #   x86_64 (default): BIOS+UEFI hybrid ISO.  aarch64: UEFI disk image for VMs on Apple Silicon Macs / ARM64 boards.
 # Needs: rustup + musl-tools (static iyakki), and Buildroot's host deps (see its manual).
@@ -91,6 +93,11 @@ if [ "$VARIANT" = "web" ] || [ "$VARIANT" = "macweb" ]; then
     # FFmpeg built LGPL-only with the three decoders, to make the add-on's libraries (docs/development/AV-ADDON-BUILD.md); the image keeps none of it
     [ "${WITH_FFMPEG:-0}" = 1 ] || cat "$HERE/configs/iyakki_web_av_addon_libs.fragment" >> "$OUT/defconfig"
   fi
+  # DEFAULT ON (WEB_SPEED=0 turns it off): Brotli in libsoup and WOFF2 fonts in WebKit (both MIT, small; built and booted in QEMU on 2026-11-13).
+  # OPTIONAL (WEB_VAAPI=1): VA-API hardware video decoding (Intel gen9.5 and older); never in a release image.
+  # The consolidated web-engine rebuild is: WEB_IRIS=1 WEB_MEDIA=1 WEB_VAAPI=1 ./build.sh web (docs/BROWSER-SPEED.md); iris stays opt-in (hours and about 1 GB).
+  if [ "${WEB_SPEED:-1}" = 1 ]; then cat "$HERE/configs/iyakki_web_speed.fragment" >> "$OUT/defconfig"; fi
+  if [ "${WEB_VAAPI:-0}" = 1 ]; then cat "$HERE/configs/iyakki_web_vaapi.fragment" >> "$OUT/defconfig"; fi
   # OPTIONAL, default OFF: camera, microphone, screen share and WebRTC in the page (WPE media-stream + GStreamer capture and webrtc plugins).
   # Rebuilds WPE WebKit (about 9 h without ccache). docs/development/BROWSER-MEDIA-DEVICES.md. external.mk reads IYAKKI_WEB_MEDIA.
   if [ "${WEB_MEDIA:-0}" = 1 ]; then cat "$HERE/configs/iyakki_web_media.fragment" >> "$OUT/defconfig"; export IYAKKI_WEB_MEDIA=1; else export IYAKKI_WEB_MEDIA=0; fi
@@ -103,6 +110,7 @@ fi
 if [ "$IMAGE_PROFILE" = release ]; then cat "$HERE/configs/iyakki_no_firmware.fragment" "$HERE/configs/iyakki_release.fragment" >> "$OUT/defconfig"; fi
 # OPTIONAL, any variant: ffmpeg and ffprobe (LGPL build) for IYAKKI's own media player. docs/MEDIA-PLAYER.md.
 if [ "${WITH_FFMPEG:-0}" = 1 ]; then cat "$HERE/configs/iyakki_media.fragment" >> "$OUT/defconfig"; fi
+if [ "${WITH_PODMAN:-0}" = 1 ]; then cat "$HERE/configs/iyakki_cluster.fragment" >> "$OUT/defconfig"; fi
 # OPTIONAL, x86_64 mac/macweb (the kernel donor of the PC image): NVIDIA's open GPU kernel modules, built out of tree (package/nvidia-open).
 # Nothing proprietary: the vendor libraries and firmware are downloaded by the installer (docs/GPU-K3S.md).
 if [ "${IYAKKI_NVIDIA_OPEN:-0}" = 1 ]; then
@@ -193,6 +201,7 @@ fi
 # IYAKKI_PROFILE=fast: quicker build for testing (uses every core, bigger binary); the default is the full release build
 PROFILE="${IYAKKI_PROFILE:-release}"
 if [ "$PROFILE" = release ]; then PFLAG=--release; else PFLAG="--profile $PROFILE"; fi
+. "$HERE/linker.sh"; iyakki_export_rustflags "$RUST_TARGET"   # no builder path in the programs (linker.sh)
 (cd "$ROOT" && cargo build $PFLAG --target "$RUST_TARGET" -p iyakki-core)
 export IYAKKI_BIN="$ROOT/target/$RUST_TARGET/$PROFILE/iyakki"
 # The small static private store server goes into the image too (/usr/share/iyakki/store-server/<arch>/), so the Private store wizard
@@ -208,6 +217,9 @@ export IYAKKI_VERSION="$(sed -n 's/^version *= *"\(.*\)"/\1/p' "$ROOT/Cargo.toml
 export IYAKKI_BUILD_DATE="$(date -u +%Y-%m-%d)"
 export IYAKKI_GIT_DESCRIBE="$(cd "$ROOT" && git describe --tags --always --dirty 2>/dev/null || echo unknown)"
 export IYAKKI_VARIANT="$VARIANT-$ARCH"
+# the kernel and the NVIDIA module record whoami@hostname in their version banner: never a person's name (dist/buildroot/build-identity)
+export KBUILD_BUILD_USER=iyakki KBUILD_BUILD_HOST=iyakki-build
+export PATH="$HERE/build-identity:$PATH"
 
 # JOBS also caps the compilers started inside packages (Buildroot reads BR2_JLEVEL for those): WebKit needs ~2-3 GB per compiler
 JL="${JOBS:-$(nproc)}"

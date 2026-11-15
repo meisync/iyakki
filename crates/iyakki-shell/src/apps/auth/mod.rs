@@ -16,15 +16,16 @@
 //! Audit lines name only the action and the service (`auth.add issuer=...`), never a secret or a code.
 
 mod page;
-#[cfg(test)]
-mod tests;
+mod port;
+pub use self::port::CxPort;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use iyakki_agent::authcodes::{self, Book, CodeVault, NewEntry, ServicesVault, VaultProblem};
+use iyakki_agent::authcodes::{self, Book, CodeVault, NewEntry, VaultProblem};
 use iyakki_agent::totp::{self, Algo};
 
+use self::port::AuthPort;
 use super::widgets::{Form, FormEvent};
 use super::{App, AppCx, Flow};
 use crate::gfx::{rgb, Icon};
@@ -119,8 +120,20 @@ fn locked_words() -> &'static str {
 }
 
 impl AuthApp {
-    pub fn new(cx: &AppCx) -> AuthApp {
-        AuthApp::with_vault(Box::new(ServicesVault { svc: cx.services.clone(), user: cx.session.user.clone() }), Box::new(iyakki_agent::clock::now_unix))
+    pub fn new(port: &dyn AuthPort) -> AuthApp {
+        AuthApp::with_vault(port.vault(), Box::new(iyakki_agent::clock::now_unix))
+    }
+
+    fn handle_with(&mut self, ev: &Event, port: &dyn AuthPort) -> Flow {
+        self.redraw = true;
+        let mode = std::mem::replace(&mut self.mode, Mode::Browse);
+        match mode {
+            Mode::Browse => self.browse(ev, port),
+            other => {
+                self.form_event(other, ev, port);
+                Flow::Stay
+            }
+        }
     }
 
     /// An app over any vault and clock (tests).
@@ -265,7 +278,7 @@ impl AuthApp {
         }
     }
 
-    fn submit_add(&mut self, mut form: Form, presets: Vec<Opts>, cx: &AppCx) {
+    fn submit_add(&mut self, mut form: Form, presets: Vec<Opts>, port: &dyn AuthPort) {
         let secret = form.raw(2);
         let (mut issuer, mut account, mut opts) = (form.value(0), form.value(1), presets.get(form.choice_idx(4)).copied().unwrap_or(USUAL));
         let mut secret_text = secret.trim().to_string();
@@ -292,7 +305,7 @@ impl AuthApp {
         let new = NewEntry::typed(&issuer, &account, &secret_text, opts, &group);
         match self.commit(|b| b.add(&new)) {
             Ok(_) => {
-                cx.audit.record(&cx.session.user, "auth.add", &format!("issuer={issuer}"));
+                port.audit("auth.add", &format!("issuer={issuer}"));
                 self.say("Added. The secret is saved in your vault and is not shown again.", true);
                 if let Some(i) = self.book.groups.iter().position(|g| *g == group) {
                     self.group = i;
@@ -347,7 +360,7 @@ impl AuthApp {
 
     // ------------------------------------------------------------------------------------------------------------ actions
 
-    fn copy_code(&mut self, i: usize, cx: &AppCx) {
+    fn copy_code(&mut self, i: usize, port: &dyn AuthPort) {
         if !self.clock_ok() {
             return self.say("The clock is not set, so no code can be made.", false);
         }
@@ -357,17 +370,17 @@ impl AuthApp {
             Some(c) => {
                 // a secret: not kept in the clipboard history, pastes once, wiped after a minute
                 clipboard::copy_secret(&c);
-                cx.audit.record(&cx.session.user, "auth.copy", &format!("issuer={issuer}"));
+                port.audit("auth.copy", &format!("issuer={issuer}"));
                 self.say("Copied.", true);
             }
             None => self.say("This code is damaged and cannot be made. Delete it and add it again.", false),
         }
     }
 
-    fn delete_entry(&mut self, id: u64, cx: &AppCx) {
+    fn delete_entry(&mut self, id: u64, port: &dyn AuthPort) {
         match self.commit(|b| b.delete(id)) {
             Ok(e) => {
-                cx.audit.record(&cx.session.user, "auth.delete", &format!("issuer={}", e.issuer));
+                port.audit("auth.delete", &format!("issuer={}", e.issuer));
                 self.say("Deleted.", true);
                 self.sel = self.sel.min(self.entries_len().saturating_sub(1));
             }
@@ -375,7 +388,7 @@ impl AuthApp {
         }
     }
 
-    fn submit_group(&mut self, mut form: Form, old: Option<String>, cx: &AppCx) {
+    fn submit_group(&mut self, mut form: Form, old: Option<String>, port: &dyn AuthPort) {
         let name = form.value(0);
         let r = match &old {
             None => self.commit(|b| b.add_group(&name)),
@@ -383,7 +396,7 @@ impl AuthApp {
         };
         match r {
             Ok(n) => {
-                cx.audit.record(&cx.session.user, if old.is_some() { "auth.group.rename" } else { "auth.group.add" }, &format!("name={n}"));
+                port.audit(if old.is_some() { "auth.group.rename" } else { "auth.group.add" }, &format!("name={n}"));
                 if let Some(i) = self.book.groups.iter().position(|g| *g == n) {
                     self.group = i;
                     self.sel = 0;
@@ -399,10 +412,10 @@ impl AuthApp {
         }
     }
 
-    fn delete_group(&mut self, name: &str, cx: &AppCx) {
+    fn delete_group(&mut self, name: &str, port: &dyn AuthPort) {
         match self.commit(|b| b.delete_group(name)) {
             Ok(n) => {
-                cx.audit.record(&cx.session.user, "auth.group.delete", &format!("name={name}"));
+                port.audit("auth.group.delete", &format!("name={name}"));
                 self.say(if n == 0 { "Group deleted.".to_string() } else { format!("Group deleted. Its {n} code{} moved to {}.", if n == 1 { "" } else { "s" }, self.book.groups[0]) }, true);
                 self.group = 0;
                 self.sel = 0;
@@ -413,10 +426,10 @@ impl AuthApp {
 
     // ------------------------------------------------------------------------------------------------------------ events
 
-    fn browse(&mut self, ev: &Event, cx: &AppCx) -> Flow {
+    fn browse(&mut self, ev: &Event, port: &dyn AuthPort) -> Flow {
         let n_codes = self.entries_len();
         match ev {
-            Event::Key(k) => return self.browse_key(k, cx),
+            Event::Key(k) => return self.browse_key(k, port),
             Event::Paste(t) if totp::looks_like_link(t) => self.open_add_from(t),
             Event::Tab(T_ADD) => self.open_add(),
             Event::Tab(T_LINK) => self.open_paste_link(),
@@ -457,7 +470,7 @@ impl AuthApp {
             Event::Tab(n) if (T_COPY..T_COPY + 300).contains(n) && n - T_COPY < n_codes => {
                 self.sel = n - T_COPY;
                 self.focus = Focus::Codes;
-                self.copy_code(self.sel, cx);
+                self.copy_code(self.sel, port);
             }
             Event::Tab(n) if (T_EDIT..T_EDIT + 300).contains(n) && n - T_EDIT < n_codes => {
                 self.sel = n - T_EDIT;
@@ -491,14 +504,14 @@ impl AuthApp {
         Flow::Stay
     }
 
-    fn browse_key(&mut self, k: &Key, cx: &AppCx) -> Flow {
+    fn browse_key(&mut self, k: &Key, port: &dyn AuthPort) -> Flow {
         let lower = match k {
             Key::Char(c) => Some(c.to_ascii_lowercase()),
             _ => None,
         };
         if !self.ready() {
             return match k {
-                Key::Enter | Key::Char('r' | 'R') => self.browse(&Event::Tab(T_RETRY), cx),
+                Key::Enter | Key::Char('r' | 'R') => self.browse(&Event::Tab(T_RETRY), port),
                 Key::Esc => Flow::Back,
                 _ => Flow::Stay,
             };
@@ -509,10 +522,10 @@ impl AuthApp {
             (_, Some('p')) => self.open_paste_link(),
             (_, Some('s')) => self.open_scan(),
             (_, Some('n')) => {
-                return self.browse(&Event::Tab(T_NEWGROUP), cx);
+                return self.browse(&Event::Tab(T_NEWGROUP), port);
             }
             (Key::F(2), _) | (_, Some('r')) => {
-                return self.browse(&Event::Tab(T_RENAME), cx);
+                return self.browse(&Event::Tab(T_RENAME), port);
             }
             (Key::Esc, _) => {
                 if self.focus == Focus::Codes && self.book.groups.len() > 1 {
@@ -535,7 +548,7 @@ impl AuthApp {
                         self.sel = 0;
                     }
                     Key::Right | Key::Enter => self.focus = Focus::Codes,
-                    Key::Delete => return self.browse(&Event::Tab(T_DELGROUP), cx),
+                    Key::Delete => return self.browse(&Event::Tab(T_DELGROUP), port),
                     _ => {}
                 },
                 Focus::Codes => {
@@ -544,14 +557,14 @@ impl AuthApp {
                         Key::Up => self.sel = self.sel.saturating_sub(1),
                         Key::Down => self.sel = (self.sel + 1).min(n.saturating_sub(1)),
                         Key::Left => self.focus = Focus::Groups,
-                        Key::Enter => self.copy_code(self.sel, cx),
+                        Key::Enter => self.copy_code(self.sel, port),
                         Key::Delete => {
                             if let Some(id) = self.id_at(self.sel) {
                                 self.mode = Mode::DelEntry(id);
                             }
                         }
                         _ => match lower {
-                            Some('c') => self.copy_code(self.sel, cx),
+                            Some('c') => self.copy_code(self.sel, port),
                             Some('e') => {
                                 if let Some(id) = self.id_at(self.sel) {
                                     self.open_edit(id);
@@ -616,18 +629,18 @@ impl AuthApp {
         true
     }
 
-    fn form_event(&mut self, mode: Mode, ev: &Event, cx: &AppCx) {
+    fn form_event(&mut self, mode: Mode, ev: &Event, port: &dyn AuthPort) {
         match mode {
             Mode::Add(mut f, presets) => match f.handle_event(ev) {
                 FormEvent::Cancel => {}
-                FormEvent::Submit => self.submit_add(f, presets, cx),
+                FormEvent::Submit => self.submit_add(f, presets, port),
                 _ => self.mode = Mode::Add(f, presets),
             },
             Mode::Edit(id, mut f) => match f.handle_event(ev) {
                 FormEvent::Cancel => {}
                 FormEvent::Submit => match self.commit(|b| b.edit(id, &f.value(0), &f.value(1))) {
                     Ok(()) => {
-                        cx.audit.record(&cx.session.user, "auth.edit", &format!("issuer={}", f.value(0)));
+                        port.audit("auth.edit", &format!("issuer={}", f.value(0)));
                         self.say("Saved.", true);
                     }
                     Err(e) => {
@@ -644,7 +657,7 @@ impl AuthApp {
                     match self.commit(|b| b.move_to(id, &to)) {
                         Ok(()) => {
                             let issuer = self.book.entry(id).map(|e| e.issuer.clone()).unwrap_or_default();
-                            cx.audit.record(&cx.session.user, "auth.move", &format!("issuer={issuer} group={to}"));
+                            port.audit("auth.move", &format!("issuer={issuer} group={to}"));
                             self.say(format!("Moved to {to}."), true);
                             self.sel = self.sel.min(self.entries_len().saturating_sub(1));
                         }
@@ -658,21 +671,21 @@ impl AuthApp {
             },
             Mode::NewGroup(mut f) => match f.handle_event(ev) {
                 FormEvent::Cancel => {}
-                FormEvent::Submit => self.submit_group(f, None, cx),
+                FormEvent::Submit => self.submit_group(f, None, port),
                 _ => self.mode = Mode::NewGroup(f),
             },
             Mode::Rename(old, mut f) => match f.handle_event(ev) {
                 FormEvent::Cancel => {}
-                FormEvent::Submit => self.submit_group(f, Some(old), cx),
+                FormEvent::Submit => self.submit_group(f, Some(old), port),
                 _ => self.mode = Mode::Rename(old, f),
             },
             Mode::DelGroup(name) => match ev {
-                Event::Key(Key::Char('y' | 'Y')) => self.delete_group(&name, cx),
+                Event::Key(Key::Char('y' | 'Y')) => self.delete_group(&name, port),
                 Event::Key(Key::Esc) | Event::Key(Key::Char('n' | 'N')) => {}
                 _ => self.mode = Mode::DelGroup(name),
             },
             Mode::DelEntry(id) => match ev {
-                Event::Key(Key::Char('y' | 'Y')) => self.delete_entry(id, cx),
+                Event::Key(Key::Char('y' | 'Y')) => self.delete_entry(id, port),
                 Event::Key(Key::Esc) | Event::Key(Key::Char('n' | 'N')) => {}
                 _ => self.mode = Mode::DelEntry(id),
             },
@@ -719,15 +732,7 @@ impl App for AuthApp {
     }
 
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
-        self.redraw = true;
-        let mode = std::mem::replace(&mut self.mode, Mode::Browse);
-        match mode {
-            Mode::Browse => self.browse(ev, cx),
-            other => {
-                self.form_event(other, ev, cx);
-                Flow::Stay
-            }
-        }
+        self.handle_with(ev, &CxPort(cx))
     }
 
     fn scroll_px(&mut self, px: i32, _cx: &AppCx) -> bool {
@@ -748,3 +753,8 @@ impl App for AuthApp {
         self.draw(g, area, s, tick);
     }
 }
+
+#[cfg(test)]
+mod fake_tests;
+#[cfg(test)]
+mod tests;

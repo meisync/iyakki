@@ -183,7 +183,7 @@ impl SessionStore {
             return Err("no such chat".into());
         }
         std::fs::remove_file(self.user_dir(user)?.join(format!("{id}.json"))).map_err(|e| e.to_string())?;
-        let _ = self.kb.lock().unwrap().drop_namespace(&namespace(id));
+        let _ = self.kb.lock().unwrap_or_else(std::sync::PoisonError::into_inner).drop_namespace(&namespace(id));
         Ok(())
     }
 
@@ -193,7 +193,7 @@ impl SessionStore {
             return;
         }
         let text = format!("You asked: {question}\nAssistant answered: {answer}");
-        let mut kb = self.kb.lock().unwrap();
+        let mut kb = self.kb.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let _ = kb.add_document(&namespace(&s.id), &s.title, &format!("earlier in this chat"), &text, Default::default());
     }
 
@@ -202,7 +202,7 @@ impl SessionStore {
         if self.load(user, id).is_none() || query.trim().is_empty() || k == 0 {
             return vec![];
         }
-        self.kb.lock().unwrap().search_weighted(&[(namespace(id).as_str(), 1.0)], query, k)
+        self.kb.lock().unwrap_or_else(std::sync::PoisonError::into_inner).search_weighted(&[(namespace(id).as_str(), 1.0)], query, k)
     }
 }
 

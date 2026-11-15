@@ -59,10 +59,10 @@ fn a_service_search_for_the_audio_sink_finds_the_one_record_and_other_searches_f
         assert_eq!(&r[5..9], &[0, 0, 0, 0], "{other:#x}");
     }
     // the public browse root and the L2CAP protocol are in the record too
-    for u in [0x1002u16, 0x0100, 0x0019] {
+    for (u, n) in [(0x1002u16, 2u8), (0x0100, 2), (0x0019, 1)] {
         let mut p = pattern(u);
         p.extend_from_slice(&[0, 10, 0]);
-        assert_eq!(&sdp_respond(&sdp_req(0x02, 9, &p), "IYAKKI")[5..9], &[0, 1, 0, 1]);
+        assert_eq!(&sdp_respond(&sdp_req(0x02, 9, &p), "IYAKKI")[5..9], &[0, n, 0, n], "{u:#x}");
     }
 }
 
@@ -402,4 +402,87 @@ fn the_audio_path_says_why_when_the_speaker_cannot_be_opened_or_stops_taking_sou
     *log.fail_write.lock().unwrap() = true;
     p.on_media(&media(3, &[frame(1)]));
     assert_eq!(p.error.as_deref(), Some("the speaker went away"));
+}
+
+#[test]
+fn the_remote_control_target_record_is_found_and_read_by_its_own_handle() {
+    let mut p = pattern(0x110c);
+    p.extend_from_slice(&[0, 10, 0]);
+    let r = sdp_respond(&sdp_req(0x02, 3, &p), "IYAKKI");
+    assert_eq!(&r[5..9], &[0, 1, 0, 1]);
+    assert_eq!(&r[9..13], &SDP_AVRCP_HANDLE.to_be_bytes());
+    // the AVCTP protocol UUID is in the remote-control record only
+    let mut p = pattern(0x0017);
+    p.extend_from_slice(&[0, 10, 0]);
+    assert_eq!(&sdp_respond(&sdp_req(0x02, 3, &p), "IYAKKI")[9..13], &SDP_AVRCP_HANDLE.to_be_bytes());
+    let mut p = SDP_AVRCP_HANDLE.to_be_bytes().to_vec();
+    p.extend_from_slice(&[1, 0]);
+    p.extend_from_slice(&all_attrs());
+    p.push(0);
+    let r = sdp_respond(&sdp_req(0x04, 4, &p), "IYAKKI Audio");
+    assert_eq!(r[0], 0x05, "{r:?}");
+    let a = attribute_pairs(&r, 0);
+    let ids: Vec<u16> = a.iter().map(|(i, _)| *i).collect();
+    assert_eq!(ids, vec![0x0000, 0x0001, 0x0004, 0x0005, 0x0009, 0x0100, 0x0311]);
+    // the protocol list names L2CAP with PSM 0x0017 and AVCTP 1.3
+    let raw = crate::avrcp::sdp_record(SDP_AVRCP_HANDLE, "x");
+    let proto = &raw.iter().find(|(i, _)| *i == 0x0004).unwrap().1;
+    assert!(proto.windows(3).any(|w| w == [0x09, 0x00, 0x17]), "{proto:?}");
+    assert!(proto.windows(3).any(|w| w == [0x09, 0x01, 0x03]), "{proto:?}");
+}
+
+/// The phone's whole evening against the real endpoint and the real audio path: it finds the sink in SDP, discovers, configures, opens, starts, plays
+/// packets (with one lost), suspends (the speaker is freed), starts again and closes. The glue between the endpoint's actions and the audio path is the
+/// same as in `a2dp_sys::run_session`, which owns the sockets.
+#[test]
+fn a_phone_finds_configures_starts_streams_loses_a_packet_suspends_and_closes_and_the_speaker_follows() {
+    use crate::avdtp::{Action, Msg, MsgType, SbcInfo, Sink, OUR_SEID, SIG_DISCOVER, SIG_GET_CAPABILITIES, SIG_OPEN, SIG_SET_CONFIGURATION, SIG_START, SIG_SUSPEND, SIG_CLOSE};
+    let log = Log::default();
+    let mut path = AudioPath::new(Box::new(FakeFactory(log.clone())), "Pixel 8");
+    let mut sink = Sink::new();
+    // SDP: the phone searches for the audio sink class and finds the one record
+    let mut p = pattern(0x110b);
+    p.extend_from_slice(&[0, 10, 0]);
+    assert_eq!(&sdp_respond(&sdp_req(0x02, 3, &p), "IYAKKI")[5..9], &[0, 1, 0, 1]);
+    let mut label = 0u8;
+    let mut say = |sink: &mut Sink, path: &mut AudioPath, signal: u8, params: Vec<u8>| {
+        label = (label + 1) % 16;
+        let (reply, acts) = sink.handle(&Msg { label, kind: MsgType::Command, signal, params });
+        for a in acts {
+            match a {
+                Action::Started => path.start(),
+                Action::Suspended | Action::Ended => path.stop(),
+                _ => {}
+            }
+        }
+        reply.expect("every command is answered").kind
+    };
+    let seid = vec![OUR_SEID << 2];
+    assert_eq!(say(&mut sink, &mut path, SIG_DISCOVER, vec![]), MsgType::Accept);
+    assert_eq!(say(&mut sink, &mut path, SIG_GET_CAPABILITIES, seid.clone()), MsgType::Accept);
+    let mut cfg = vec![OUR_SEID << 2, 2 << 2, 1, 0, 7, 6, 0, 0];
+    cfg.extend_from_slice(&SbcInfo { freq: 0x20, mode: 0x01, blocks: 0x80, subbands: 0x04, alloc: 0x01, min_bitpool: 2, max_bitpool: 53 }.to_bytes());
+    assert_eq!(say(&mut sink, &mut path, SIG_SET_CONFIGURATION, cfg), MsgType::Accept);
+    assert_eq!(say(&mut sink, &mut path, SIG_OPEN, seid.clone()), MsgType::Accept);
+    // media that arrives before Start is not played
+    path.on_media(&media(1, &[frame(0)]));
+    assert!(log.opened.lock().unwrap().is_empty());
+    assert_eq!(say(&mut sink, &mut path, SIG_START, seid.clone()), MsgType::Accept);
+    path.on_media(&media(2, &[frame(0), frame(1)]));
+    assert_eq!(log.opened.lock().unwrap().clone(), vec![(44100, 2, "Pixel 8".to_string())]);
+    assert_eq!(*log.written.lock().unwrap(), 2 * 128 * 2);
+    // packet 3 is lost; 4 and later wait, then the gap is declared and the rest plays, silence in its place
+    for q in 4..=8u16 {
+        path.on_media(&media(q, &[frame(2)]));
+    }
+    assert!(path.stats().lost_packets >= 1 && path.playing(), "{:?}", path.stats());
+    assert!(*log.written.lock().unwrap() > 2 * 128 * 2 * 4);
+    // suspend frees the speaker; start again opens it once more
+    assert_eq!(say(&mut sink, &mut path, SIG_SUSPEND, seid.clone()), MsgType::Accept);
+    assert_eq!((*log.closed.lock().unwrap(), path.playing()), (1, false));
+    assert_eq!(say(&mut sink, &mut path, SIG_START, seid.clone()), MsgType::Accept);
+    path.on_media(&media(9, &[frame(3)]));
+    assert_eq!(log.opened.lock().unwrap().len(), 2);
+    assert_eq!(say(&mut sink, &mut path, SIG_CLOSE, seid), MsgType::Accept);
+    assert_eq!((*log.closed.lock().unwrap(), path.playing()), (2, false));
 }

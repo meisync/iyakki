@@ -27,7 +27,7 @@ fn the_list_is_free_and_every_change_asks_every_time_with_no_standing_grant() {
         assert!(!t.pre_approved(n) && !t.approved_always(n));
     }
     assert!(hard_ask("domains_list", &json!({})).is_none());
-    assert_eq!(crate::toolblock::group_of("domain_route_add"), crate::toolblock::Group::System);
+    assert_eq!(crate::toolblock::group_of("domain_route_add"), crate::toolblock::Group::Network);
 }
 
 #[test]

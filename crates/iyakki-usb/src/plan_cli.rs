@@ -36,6 +36,10 @@ OPTIONS:
   --boot-part <n>        reuse: the partition number that becomes BOOT (FAT32, formatted)
   --data-part <n>        reuse: the partition number that becomes DATA (formatted)
   --keep-esp             dual boot: keep the disk's EFI System Partition; add only EFI/IYAKKI and a boot entry
+  --bios --bios-save F   also set up legacy BIOS boot on a shared disk (GRUB into the empty gap behind sector 0, or the BIOS boot
+                         partition); sector 0 and that area are saved to F first (an absolute path that does not exist yet)
+  --bios-restore F --target-file P   undo --bios: put the sectors saved in F back on P (an image file or a device path)
+  --bios-replace-boot-code   allow replacing another system's boot code in sector 0 (it is saved first; GRUB must chainload it)
   --delete-part N        delete existing partition N first (repeatable; free-space and custom mode); its space is used; erases its data
   --boot-mib <n>, --data-mib <n>    custom sizes
   --table <t>            auto | gpt | mbr (a new table; existing tables are kept)
@@ -68,6 +72,12 @@ pub struct Opts {
     pub boot_part: Option<u32>,
     pub data_part: Option<u32>,
     pub keep_esp: bool,
+    /// Legacy BIOS boot on a shared disk: `--bios --bios-save <file>` (and `--bios-replace-boot-code` to replace another system's boot code).
+    pub bios: bool,
+    pub bios_replace: bool,
+    pub bios_save: Option<String>,
+    /// `--bios-restore <save file> --target-file <image or device path>`: undo `--bios`.
+    pub bios_restore: Option<String>,
     /// `--delete-part N` (repeatable): delete this existing partition first (free-space and custom mode).
     pub delete_parts: Vec<u32>,
     pub boot_mib: Option<u64>,
@@ -103,6 +113,10 @@ pub fn parse(args: &[String]) -> Result<Opts, String> {
             "--machine" => o.machine = true,
             "--no-boot-entry" => o.no_boot_entry = true,
             "--keep-esp" => o.keep_esp = true,
+            "--bios" => o.bios = true,
+            "--bios-replace-boot-code" => o.bios_replace = true,
+            "--bios-restore" => o.bios_restore = Some(it.next().ok_or("--bios-restore needs the save file")?.to_string()),
+            "--bios-save" => o.bios_save = Some(it.next().ok_or("--bios-save needs a file name")?.to_string()),
             "--delete-part" => o.delete_parts.push(num(a, it.next())? as u32),
             "--confirm-running-disk" => o.confirm_running_disk = true,
             "--disk" => o.disk = Some(it.next().ok_or("--disk needs a drive name")?.trim_start_matches("/dev/").to_string()),
@@ -155,6 +169,9 @@ impl Opts {
             boot_part: self.boot_part,
             data_part: self.data_part,
             keep_esp: self.keep_esp,
+            bios: self.bios,
+            bios_replace: self.bios_replace,
+            bios_save: self.bios_save.clone().unwrap_or_default(),
             boot_mib: self.boot_mib,
             data_mib: self.data_mib,
             table: TableChoice::parse(self.table.as_deref().unwrap_or("auto"))?,
@@ -335,6 +352,11 @@ pub fn run_inner(args: &[String], m: &Machine, boot_mode: bool) -> Result<i32, S
     #[cfg(not(target_os = "linux"))]
     if o.target_file.is_none() {
         return Err("the partition planner reads disks through Linux (/sys) and is not available on this system yet (macOS and Windows hosts: docs/INSTALLER.md). `iyakki-usb --install` still writes a whole USB stick here.".into());
+    }
+    if let Some(save) = &o.bios_restore {
+        let target = o.target_file.clone().ok_or("--bios-restore needs --target-file <the image file or the device path>")?;
+        println!("{}", crate::biosshared::restore_file(Path::new(save), &target)?);
+        return Ok(0);
     }
     if let Some(f) = &o.apply_plan {
         return apply_plan_file(&o, m, f);

@@ -37,6 +37,9 @@ pub struct TileEntry {
     pub dir: Option<PathBuf>,
     pub scope: Scope,
     pub caps: Caps,
+    /// A `wasm` tile: the app carries a WebAssembly module (`"wasm"` in `app.json`) that the sandboxed tile host runs, only while
+    /// Settings -> Developer mode -> WASM tiles (experimental) is on.
+    pub wasm: bool,
 }
 
 impl TileEntry {
@@ -84,7 +87,7 @@ fn save_dev(svc: &Services, apps: Vec<DevApp>) -> Result<(), String> {
 fn entry_of(b: &Bundle, key: String, version: &str, publisher: String, trust: String, dev: bool, dir: Option<PathBuf>, scope: Scope) -> TileEntry {
     let m = &b.manifest;
     let pic = b.icon_file().map(|(p, d)| (p.to_string(), d.bytes().to_vec()));
-    TileEntry { key, name: m.id.clone(), title: m.name.clone(), icon: if pic.is_some() { String::new() } else { m.icon.clone() }, icon_picture: pic, group: m.group.clone(), version: version.into(), publisher, trust, dev, dir, scope, caps: m.caps.clone() }
+    TileEntry { key, name: m.id.clone(), title: m.name.clone(), icon: if pic.is_some() { String::new() } else { m.icon.clone() }, icon_picture: pic, group: m.group.clone(), version: version.into(), publisher, trust, dev, dir, scope, caps: m.caps.clone(), wasm: b.wasm_module().is_some() }
 }
 
 /// The tile apps this person sees in the launcher: installed for them, installed for everyone, and (if they added them) dev apps.
@@ -181,7 +184,7 @@ pub fn open(svc: &Arc<Services>, policy: &Policy, user: &str, e: &TileEntry, web
     let hosts = super::tile::reachable_hosts(&bundle.manifest, policy);
     let app = e.name.clone();
     // the model, the voice and the usage log of this system, for the apps that declared `llm` or `speech`
-    TileRuntime::open_sdk(bundle, info, TileStorage::open(&storage_path), web, hosts, None, |out| Some(TileSdk::for_services(svc, user, &app, out)))
+    TileRuntime::open_sdk(bundle, info, TileStorage::open(&storage_path), web, hosts, None, |out| Some(TileSdk::for_services_as(svc, user, &app, out, policy)))
 }
 
 /// A number that changes when a file of a dev app changes (the tile reloads when it does).
@@ -211,4 +214,27 @@ pub fn dev_stamp(dir: &Path) -> u64 {
 /// Is this file text the shell may show as the app's source (used by the info panel)? Pictures are not.
 pub fn is_text(d: &FileData) -> bool {
     matches!(d, FileData::Text(_))
+}
+
+/// Why a WASM tile does not start while the switch is off.
+pub const WASM_OFF: &str = "WASM tiles are an experimental feature and are off. Turn them on in Settings -> Developer mode (key W), or ask the assistant to turn them on.";
+
+/// Is the experimental WASM tile switch on (off by default)?
+pub fn wasm_enabled(svc: &Services) -> bool {
+    svc.settings.lock().map(|s| s.get().wasm_tiles).unwrap_or(false)
+}
+
+/// Open a `wasm` tile: its module runs in the `iyakki-tile-host` sandbox (fuel, time and memory budgets, no service calls: the app
+/// gets no tool access from this loader). Refused while the experimental switch is off, and for accounts that may not run tile apps.
+pub fn open_wasm(svc: &Arc<Services>, policy: &Policy, user: &str, e: &TileEntry) -> Result<iyakki_tile_host::TileRunner, String> {
+    if !allowed(policy) {
+        return Err("your account may not run tile apps".into());
+    }
+    if !wasm_enabled(svc) {
+        return Err(WASM_OFF.into());
+    }
+    let bundle = bundle_of(svc, user, e)?;
+    let module = bundle.wasm_module().ok_or("this app has no WebAssembly module")?;
+    let seed = e.name.bytes().fold(0x9e37_79b9u64, |a, b| a.wrapping_mul(31).wrapping_add(b as u64));
+    iyakki_tile_host::TileRunner::load(module, iyakki_tile_host::TileManifest::new(&e.name, &[]), iyakki_tile_host::Budgets::default(), None, seed).map_err(|x| x.to_string())
 }

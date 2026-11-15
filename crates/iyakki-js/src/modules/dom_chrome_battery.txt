@@ -1,0 +1,215 @@
+# name | expression (a string or JSON of the result)
+children count | a.children.length
+childNodes count | a.childNodes.length
+first child name | a.firstChild.nodeName
+last element child | a.lastElementChild.textContent
+next sibling | a.nextElementSibling.id
+previous sibling | p.previousElementSibling.id
+parent | p.parentNode.tagName
+contains | document.body.contains(a) + ',' + a.contains(p)
+textContent | p.textContent
+innerText-free text | a.textContent
+innerHTML | p.innerHTML
+outerHTML | a.outerHTML
+tagName and nodeType | a.tagName + a.nodeType + a.firstChild.nodeType
+className | a.className
+classList contains | a.classList.contains('x') + ',' + a.classList.contains('z')
+classList length | a.classList.length
+classList toggle | (a.classList.toggle('q'), a.className)
+classList add remove | (a.classList.add('m','n'), a.classList.remove('x'), a.className)
+classList replace | (a.classList.replace('y','w'), a.className)
+dataset read | a.dataset.k
+dataset write | (a.dataset.fooBar = '1', a.getAttribute('data-foo-bar'))
+getAttribute | a.getAttribute('title') + ',' + a.getAttribute('nope')
+hasAttribute | a.hasAttribute('title') + ',' + a.hasAttribute('nope')
+setAttribute | (a.setAttribute('lang','en'), a.lang + a.getAttribute('lang'))
+removeAttribute | (a.removeAttribute('title'), a.hasAttribute('title'))
+attributes length | a.attributes.length
+attributes names | Array.from(a.attributes).map(x => x.name).join()
+id and title props | a.id + a.title
+hidden prop | a.hidden
+style set | (a.style.color = 'red', a.getAttribute('style'))
+style cssText | (a.style.cssText = 'margin:1px;color:blue', a.style.marginTop + '|' + a.style.color)
+style removeProperty | (a.style.setProperty('padding','2px'), a.style.removeProperty('padding'), a.getAttribute('style') || '')
+querySelector id | document.querySelector('#a').id
+querySelectorAll count | document.querySelectorAll('li').length
+querySelector complex | document.querySelector('ul > li:last-child').textContent
+querySelector attr | document.querySelector('[data-k=v]').id
+querySelector not | document.querySelectorAll('li:not(:first-child)').length
+querySelector nth | document.querySelector('li:nth-child(2)').textContent
+querySelector missing | document.querySelector('.nope')
+matches | a.matches('div.x') + ',' + a.matches('p')
+closest | document.querySelector('li').closest('ul').id
+getElementsByTagName | document.getElementsByTagName('span').length
+getElementsByClassName | document.getElementsByClassName('x').length
+createElement | (e = document.createElement('div'), e.tagName + e.childNodes.length + (e.parentNode === null))
+appendChild | (e = document.createElement('i'), a.appendChild(e), a.lastChild === e)
+append many | (a.append('t', document.createElement('b')), a.childNodes.length)
+prepend | (a.prepend('z'), a.firstChild.textContent)
+insertBefore | (e = document.createElement('u'), a.insertBefore(e, a.firstChild), a.firstChild.tagName)
+remove | (p.remove(), document.getElementById('p'))
+replaceWith | (a.firstElementChild.replaceWith('x'), a.firstChild.nodeValue)
+cloneNode deep | a.cloneNode(true).outerHTML
+cloneNode shallow | a.cloneNode(false).outerHTML
+insertAdjacentHTML | (a.insertAdjacentHTML('beforeend', '<em>e</em>'), a.lastElementChild.tagName)
+innerHTML set | (a.innerHTML = '<i>1</i><i>2</i>', a.children.length)
+textContent set | (a.textContent = '<b>', a.innerHTML)
+createTextNode | document.createTextNode('hi').nodeValue
+createDocumentFragment | (f = document.createDocumentFragment(), f.append(document.createElement('s'), document.createElement('s')), f.childNodes.length)
+fragment append | (f = document.createDocumentFragment(), f.append(document.createElement('s')), a.appendChild(f), f.childNodes.length + ',' + a.lastElementChild.tagName)
+input value | document.getElementById('in').value
+input value set | (i = document.getElementById('in'), i.value = 'x', i.value + ',' + i.getAttribute('value'))
+input type default | document.createElement('input').type
+anchor properties | (l = document.getElementById('lnk'), [l.pathname, l.search, l.hash, l.hostname === location.hostname].join())
+anchor href absolute | document.getElementById('lnk').href.indexOf('/path?q=1#h') > 0
+document title | (document.title = 'T', document.title)
+document body and head | document.body.tagName + document.head.tagName + document.documentElement.tagName
+document readyState | document.readyState
+document characterSet | document.characterSet
+document contentType | document.contentType
+document doctype | document.doctype.name
+event dispatch order | (log = [], a.addEventListener('x', () => log.push('a')), document.body.addEventListener('x', () => log.push('body')), a.dispatchEvent(new Event('x', {bubbles:true})), log.join())
+event no bubble | (log = [], a.addEventListener('x', () => log.push('a')), document.body.addEventListener('x', () => log.push('body')), a.dispatchEvent(new Event('x')), log.join())
+event capture | (log = [], document.body.addEventListener('x', () => log.push('cap'), true), a.addEventListener('x', () => log.push('a')), a.dispatchEvent(new Event('x', {bubbles:true})), log.join())
+event stopPropagation | (log = [], a.addEventListener('x', e => { log.push('a'); e.stopPropagation() }), document.body.addEventListener('x', () => log.push('body')), a.dispatchEvent(new Event('x', {bubbles:true})), log.join())
+event preventDefault | (e = new Event('x', {cancelable:true}), a.addEventListener('x', ev => ev.preventDefault()), a.dispatchEvent(e) + ',' + e.defaultPrevented)
+event once | (n = 0, a.addEventListener('x', () => n++, {once:true}), a.dispatchEvent(new Event('x')), a.dispatchEvent(new Event('x')), n)
+event target and currentTarget | (r = '', document.body.addEventListener('x', e => r = e.target.id + e.currentTarget.tagName), a.dispatchEvent(new Event('x', {bubbles:true})), r)
+CustomEvent detail | (r = '', a.addEventListener('c', e => r = JSON.stringify(e.detail)), a.dispatchEvent(new CustomEvent('c', {detail:{k:1}})), r)
+click handler | (n = 0, a.onclick = () => n++, a.click(), n)
+removeEventListener | (n = 0, f = () => n++, a.addEventListener('x', f), a.removeEventListener('x', f), a.dispatchEvent(new Event('x')), n)
+keyboard event props | (e = new KeyboardEvent('keydown', {key:'a', code:'KeyA', ctrlKey:true}), e.key + e.code + e.ctrlKey + e.type)
+mouse event props | (e = new MouseEvent('click', {clientX:5, clientY:6, button:1}), e.clientX + ',' + e.clientY + ',' + e.button)
+URL parse | (u = new URL('https://u:p@h.org:8080/a/b?x=1&y=2#f'), [u.protocol, u.username, u.host, u.port, u.pathname, u.search, u.hash, u.origin].join('|'))
+URL relative | new URL('../c?z=1', 'https://h.org/a/b/d').href
+URLSearchParams | (p2 = new URLSearchParams('a=1&b=2&a=3'), p2.getAll('a').join() + p2.get('b') + p2.toString())
+URLSearchParams set | (p2 = new URLSearchParams('a=1'), p2.set('b','x y'), p2.append('c','&'), p2.toString())
+location parts | [location.protocol, location.hostname, location.pathname].join('|')
+history length | typeof history.length
+JSON roundtrip | JSON.stringify(JSON.parse('{"a":[1,2,{"b":null}],"c":"d"}'))
+JSON stringify options | JSON.stringify({a:1,b:[1,2]}, null, 2)
+Date UTC | new Date(Date.UTC(2020, 1, 29, 12, 30)).toISOString()
+Date parse | Date.parse('2020-03-01T00:00:00Z')
+Date fields | (d = new Date('2021-12-31T23:59:59Z'), d.getUTCFullYear() + ',' + d.getUTCMonth() + ',' + d.getUTCDay())
+Number formats | [0.1 + 0.2, (1234.5678).toFixed(2), (255).toString(16), Number('0x10'), parseInt('12px'), parseFloat('1.5e2x')].join()
+String methods | ['abc'.padStart(5, '-'), 'a-b-c'.split('-').length, ' x '.trim(), 'abc'.at(-1), 'aXbX'.replaceAll('X', '_'), 'abc'.localeCompare('abd')].join()
+Array methods | [[3, 1, 2].sort().join(), [1, 2, 3].flatMap(x => [x, x]).length, Array.from({length: 3}, (_, i) => i * 2).join(), [1, [2, [3]]].flat(Infinity).join(), [1, 2, 3].findLast(x => x < 3)].join('|')
+Object methods | JSON.stringify([Object.entries({a:1,b:2}), Object.fromEntries([['x', 1]]), Object.keys('ab')])
+Map and Set | (m = new Map([[1, 'a'], [2, 'b']]), s = new Set([1, 1, 2]), m.get(2) + s.size + [...m.keys()].join())
+WeakMap and Symbol | (w = new WeakMap(), k = {}, w.set(k, 1), w.get(k) + typeof Symbol.iterator + Symbol('x').toString())
+destructuring and spread | (({a, ...r} = {a:1, b:2, c:3}), a + JSON.stringify(r))
+classes and getters | (class A { get v() { return 7 } static s() { return 's' } }, new A().v + A.s())
+generators | [...(function* () { yield 1; yield* [2, 3] })()].join()
+async ordering | (log = [], Promise.resolve().then(() => log.push('micro')), setTimeout(() => log.push('timer'), 0), log.push('sync'), 'queued')
+regex features | ['2020-05-06'.match(/(?<y>\d+)-(?<m>\d+)/).groups.m, 'aBc'.replace(/b/i, '_'), /a.c/s.test('a\nc'), 'x1y2'.match(/\d/g).join()].join()
+typeof globals | ['structuredClone', 'queueMicrotask', 'TextEncoder', 'TextDecoder', 'AbortController', 'fetch', 'Blob', 'FileReader', 'FormData', 'MutationObserver', 'requestAnimationFrame', 'performance', 'crypto', 'atob', 'btoa', 'CSS', 'DOMParser', 'XMLHttpRequest', 'WebSocket', 'Worker', 'MessageChannel', 'BroadcastChannel', 'Intl', 'ResizeObserver', 'IntersectionObserver', 'customElements', 'EventTarget', 'Node', 'HTMLElement', 'HTMLInputElement', 'SVGElement', 'getSelection', 'scrollTo', 'getComputedStyle', 'matchMedia', 'localStorage', 'sessionStorage', 'indexedDB', 'caches', 'navigator'].map(n => typeof globalThis[n]).join()
+base64 | btoa('hello') + atob('aGk=')
+TextEncoder | new TextEncoder().encode('é€').join()
+structuredClone | JSON.stringify(structuredClone({a:[1,{b:2}], d:new Date(0)}))
+AbortController | (c = new AbortController(), c.abort(), c.signal.aborted)
+localStorage | (localStorage.setItem('k', 'v'), localStorage.getItem('k') + localStorage.length + localStorage.getItem('none'))
+sessionStorage | (sessionStorage.clear(), sessionStorage.setItem('a', '1'), sessionStorage.key(0) + sessionStorage.length)
+cookie | (document.cookie = 'c1=v1; path=/', document.cookie)
+MutationObserver | (n = 0, new MutationObserver(() => n++).observe(a, {childList:true}), a.appendChild(document.createElement('s')), 'set')
+DOMParser | new DOMParser().parseFromString('<p id=z>q</p>', 'text/html').getElementById('z').textContent
+Element prototype chain | [a instanceof HTMLElement, a instanceof Element, a instanceof Node, a instanceof EventTarget, document.createElement('input') instanceof HTMLInputElement, document.createElement('a') instanceof HTMLAnchorElement].join()
+constructor names | [a.constructor.name, document.createElement('span').constructor.name, document.constructor.name, document.createElement('input').constructor.name, document.body.constructor.name].join()
+Object.prototype.toString | [a, document, window, a.classList, a.style, a.attributes].map(x => Object.prototype.toString.call(x)).join()
+NodeList forEach and iteration | (r = [], document.querySelectorAll('li').forEach(x => r.push(x.textContent)), [...document.querySelectorAll('li')].map(x => x.textContent).join() + r.join())
+HTMLCollection live | (c = document.getElementsByTagName('li'), n1 = c.length, document.querySelector('ul').appendChild(document.createElement('li')), n1 + ',' + c.length)
+dataset enumeration | (a.dataset.b = '2', Object.keys(a.dataset).join())
+element ids global | typeof window.a
+template content | (t = document.createElement('template'), t.innerHTML = '<td>x</td>', t.content.childNodes.length)
+form elements | (f = document.createElement('form'), f.innerHTML = '<input name=q value=1><select name=s><option value=o selected>o</option></select>', f.elements.length + f.elements.q.value + f.elements.s.value)
+select options | (s = document.createElement('select'), s.innerHTML = '<option>a</option><option selected>b</option>', s.selectedIndex + s.value + s.options.length)
+checkbox | (c = document.createElement('input'), c.type = 'checkbox', c.checked = true, c.checked + ',' + c.hasAttribute('checked'))
+textarea | (t = document.createElement('textarea'), t.value = 'a\nb', t.value.length + t.textContent)
+label for | (l = document.createElement('label'), l.htmlFor = 'x', l.getAttribute('for'))
+focus and activeElement | (i = document.getElementById('in'), i.focus(), document.activeElement.id)
+scroll properties | typeof a.scrollTop + typeof window.scrollY + typeof document.documentElement.scrollHeight
+sort stability and locale | ['b', 'a', 'C'].sort((x, y) => x.localeCompare(y)).join()
+Intl number | new Intl.NumberFormat('en-US').format(1234567.891)
+toLocaleString | (1234.5).toLocaleString('en-US')
+Error properties | (() => { try { null.x } catch (e) { return e.name + ',' + (e instanceof TypeError) } })()
+Error message type | (() => { try { undefined.f() } catch (e) { return typeof e.message } })()
+eval-free Function | new Function('a', 'b', 'return a + b')(2, 3)
+labels and optional chaining | (o = {a:{b:null}}, o?.a?.b?.c + ',' + (o.x ?? 'dflt'))
+bigint | (2n ** 64n).toString()
+parse p implied end | (d = document.createElement('div'), d.innerHTML = '<p>a<p>b', d.innerHTML)
+parse li implied end | (d = document.createElement('div'), d.innerHTML = '<ul><li>1<li>2</ul>', d.innerHTML)
+parse adoption agency | (d = document.createElement('div'), d.innerHTML = '<b><i>x</b>y</i>', d.innerHTML)
+parse table tbody | (d = document.createElement('div'), d.innerHTML = '<table><tr><td>x</table>', d.innerHTML)
+parse unclosed span | (d = document.createElement('div'), d.innerHTML = '<div><span>x</div>y', d.innerHTML)
+parse nested anchors | (d = document.createElement('div'), d.innerHTML = '<a href=x>1<a href=y>2</a>', d.innerHTML)
+parse div in p | (d = document.createElement('div'), d.innerHTML = '<p>a<div>b</div>', d.innerHTML)
+parse select options | (d = document.createElement('div'), d.innerHTML = '<select><option>a<option>b</select>', d.innerHTML)
+parse headings | (d = document.createElement('div'), d.innerHTML = '<h1>a<h2>b', d.innerHTML)
+parse void tags | (d = document.createElement('div'), d.innerHTML = '<br/><img src=x><hr>', d.innerHTML)
+parse attributes | (d = document.createElement('div'), d.innerHTML = '<input value="a&amp;b" disabled>', d.innerHTML)
+parse entities | (d = document.createElement('div'), d.innerHTML = '&lt;&gt;&amp;&nbsp;&copy;&#65;&#x42;', d.innerHTML)
+parse duplicate attributes | (d = document.createElement('div'), d.innerHTML = '<p class=a class=b>x', d.innerHTML)
+parse textarea raw | (d = document.createElement('div'), d.innerHTML = '<textarea><b>x</b></textarea>', d.innerHTML)
+parse script raw | (d = document.createElement('div'), d.innerHTML = '<script>1<2</script>', d.innerHTML)
+parse dl | (d = document.createElement('div'), d.innerHTML = '<dl><dt>a<dd>b<dt>c</dl>', d.innerHTML)
+parse td without table | (d = document.createElement('div'), d.innerHTML = '<table><td>a<td>b', d.innerHTML)
+parse table in p | (d = document.createElement('div'), d.innerHTML = '<p><table></table>', d.innerHTML)
+parse attribute quotes | (d = document.createElement('div'), d.innerHTML = '<div title=\'a"b\'>x', d.innerHTML)
+parse comment | (d = document.createElement('div'), d.innerHTML = '<!--c--><p>x', d.innerHTML)
+parse ruby | (d = document.createElement('div'), d.innerHTML = '<ruby>a<rt>b</ruby>', d.innerHTML)
+parse nested forms | (d = document.createElement('div'), d.innerHTML = '<form><form>x', d.innerHTML)
+parse li alone | (d = document.createElement('div'), d.innerHTML = '<li>a<li>b', d.innerHTML)
+parse stray end tag | (d = document.createElement('div'), d.innerHTML = 'x</div>y</p>z', d.innerHTML)
+parse uppercase tags | (d = document.createElement('div'), d.innerHTML = '<DIV CLASS=A><P>x</P></DIV>', d.innerHTML)
+parse unquoted attr with slash | (d = document.createElement('div'), d.innerHTML = '<a href=/x/y>z</a>', d.innerHTML)
+parse bad nesting | (d = document.createElement('div'), d.innerHTML = '<b>1<p>2</b>3</p>', d.innerHTML)
+parse button in button | (d = document.createElement('div'), d.innerHTML = '<button>a<button>b', d.innerHTML)
+parse head elements in body | (d = document.createElement('div'), d.innerHTML = '<title>t</title><meta charset=x><p>x', d.innerHTML)
+parse nobr and font | (d = document.createElement('div'), d.innerHTML = '<font color=red>a<font size=2>b</font></font>', d.innerHTML)
+parse pre leading newline | (d = document.createElement('div'), d.innerHTML = '<pre>\nx</pre>', d.innerHTML)
+parse lt in text | (d = document.createElement('div'), d.innerHTML = '1 < 2 and a<b', d.innerHTML)
+url 0 '../d' | new URL('../d', 'https://h.org/a/b/c?x=1#f').href
+url 1 './e' | new URL('./e', 'https://h.org/a/b/c?x=1#f').href
+url 2 '/f' | new URL('/f', 'https://h.org/a/b/c?x=1#f').href
+url 3 '//other.com/g' | new URL('//other.com/g', 'https://h.org/a/b/c?x=1#f').href
+url 4 '?q' | new URL('?q', 'https://h.org/a/b/c?x=1#f').href
+url 5 '#h' | new URL('#h', 'https://h.org/a/b/c?x=1#f').href
+url 6 '' | new URL('', 'https://h.org/a/b/c?x=1#f').href
+url 7 'g/../h' | new URL('g/../h', 'https://h.org/a/b/c?x=1#f').href
+url 8 '..//x' | new URL('..//x', 'https://h.org/a/b/c?x=1#f').href
+url 9 'a b' | new URL('a b', 'https://h.org/a/b/c?x=1#f').href
+url 10 'ü' | new URL('ü', 'https://h.org/a/b/c?x=1#f').href
+url 11 '%41' | new URL('%41', 'https://h.org/a/b/c?x=1#f').href
+url 12 'HTTP://UP.org:443/x' | new URL('HTTP://UP.org:443/x', 'https://h.org/a/b/c?x=1#f').href
+url 13 'https://h.org:80/' | new URL('https://h.org:80/', 'https://h.org/a/b/c?x=1#f').href
+url 14 'http://h.org:80/' | new URL('http://h.org:80/', 'https://h.org/a/b/c?x=1#f').href
+url 15 'mailto:a@b' | new URL('mailto:a@b', 'https://h.org/a/b/c?x=1#f').href
+url 16 'javascript:1' | new URL('javascript:1', 'https://h.org/a/b/c?x=1#f').href
+url 17 'data:text/plain,x' | new URL('data:text/plain,x', 'https://h.org/a/b/c?x=1#f').href
+url 18 'https://[::1]:8080/' | new URL('https://[::1]:8080/', 'https://h.org/a/b/c?x=1#f').href
+url 19 'https://u:p@h.org/' | new URL('https://u:p@h.org/', 'https://h.org/a/b/c?x=1#f').href
+url 20 '/a/./b/../c' | new URL('/a/./b/../c', 'https://h.org/a/b/c?x=1#f').href
+url 21 '/a//b' | new URL('/a//b', 'https://h.org/a/b/c?x=1#f').href
+url 22 '/a/%2e%2e/b' | new URL('/a/%2e%2e/b', 'https://h.org/a/b/c?x=1#f').href
+url 23 'https://h.org?x' | new URL('https://h.org?x', 'https://h.org/a/b/c?x=1#f').href
+url 24 'https://h.org#y' | new URL('https://h.org#y', 'https://h.org/a/b/c?x=1#f').href
+url 25 'https://a.org/p?q=1 ' | new URL('https://a.org/p?q=1 2', 'https://h.org/a/b/c?x=1#f').href
+url 26 "?a='" | new URL('?a=\'', 'https://h.org/a/b/c?x=1#f').href
+url 27 'https://h.org/ä?ö#ü' | new URL('https://h.org/ä?ö#ü', 'https://h.org/a/b/c?x=1#f').href
+url 28 'https://H.ORG./x' | new URL('https://H.ORG./x', 'https://h.org/a/b/c?x=1#f').href
+url 29 '//x/../y' | new URL('//x/../y', 'https://h.org/a/b/c?x=1#f').href
+url 30 '../../../../z' | new URL('../../../../z', 'https://h.org/a/b/c?x=1#f').href
+url 31 'c/d/..' | new URL('c/d/..', 'https://h.org/a/b/c?x=1#f').href
+url 32 'https://h.org:0080/' | new URL('https://h.org:0080/', 'https://h.org/a/b/c?x=1#f').href
+url 33 'https://h.org:65536/' | new URL('https://h.org:65536/', 'https://h.org/a/b/c?x=1#f').href
+url 34 'tel:+1' | new URL('tel:+1', 'https://h.org/a/b/c?x=1#f').href
+url 35 'about:blank' | new URL('about:blank', 'https://h.org/a/b/c?x=1#f').href
+url 36 '  /trim  ' | new URL('  /trim  ', 'https://h.org/a/b/c?x=1#f').href
+url 37 'https://h.org/a b/c' | new URL('https://h.org/a b/c', 'https://h.org/a/b/c?x=1#f').href
+url 38 '/p?x=%zz' | new URL('/p?x=%zz', 'https://h.org/a/b/c?x=1#f').href
+url 39 'https://h.org/%7Efoo' | new URL('https://h.org/%7Efoo', 'https://h.org/a/b/c?x=1#f').href
+url 40 '/..' | new URL('/..', 'https://h.org/a/b/c?x=1#f').href
+url 41 '/.' | new URL('/.', 'https://h.org/a/b/c?x=1#f').href
+url 42 'https:' | new URL('https:', 'https://h.org/a/b/c?x=1#f').href
+url 43 'https://' | new URL('https://', 'https://h.org/a/b/c?x=1#f').href
+url 44 '//' | new URL('//', 'https://h.org/a/b/c?x=1#f').href
+url 45 'ftp://f.org/x' | new URL('ftp://f.org/x', 'https://h.org/a/b/c?x=1#f').href

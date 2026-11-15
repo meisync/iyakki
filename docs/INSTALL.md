@@ -65,6 +65,25 @@ at least 8 characters, twice. Then you sign in. `o` on the launcher signs out. C
 `WINIT_UNIX_BACKEND=x11 ./run.sh window` (standard winit variable; unverified here). The text size is set in
 Settings -> Account / Display.
 
+### Window mode on macOS (experimental)
+
+The same `./run.sh window` works on an Apple Silicon or Intel Mac (tested on macOS 27, arm64).
+
+* Prerequisites: Rust through rustup and the Xcode command line tools (`xcode-select --install`), nothing else. The sound
+  output uses the system's own AudioToolbox, the pictures and text are built in.
+* Data folder: `~/Library/Application Support/iyakki-dev` (override with `IYAKKI_DEV_DIR=/path`).
+* The window is always **desktop mode** (Settings, Cloud mode shows "Window mode is always desktop mode"), so RADIO, MEDIA,
+  TALES and VOICE are listed. Sound goes to the Mac's default output through the mixer (Settings, Sound shows one row,
+  "System default output").
+* BROWSER uses the built-in reader and says so on its start page: the full web engine (WebKitGTK or WPE) is Linux only.
+* Cmd works as the shortcut key (Cmd+C, Cmd+V, Cmd+A, ...); the help lines still print "Ctrl".
+* Not available on a Mac, and left out on purpose: Linux apps (containers), the VPN, the Wi-Fi hotspot and sharing, the
+  developer-mode patch tools, USB touch-screen recovery, cameras, Bluetooth and disk management (the window's disks are
+  virtual files anyway). Each says "not available on this platform" when used. The full list is KI-078 in
+  [`../KNOWN-ISSUES.md`](../KNOWN-ISSUES.md).
+* Dev aids for checking over SSH, where a screenshot of the screen is not allowed: `IYAKKI_WINDOW_SHOT=/path/shot.png`
+  writes one picture of the shell after about 8 seconds, `IYAKKI_WINDOW_QUIT_AFTER=30` closes the window by itself.
+
 ## 2. USB stick
 
 `iyakki-usb` writes an image to a stick safely, on **Linux and macOS**. On Windows use Rufus in DD Image mode or

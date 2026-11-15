@@ -1,0 +1,52 @@
+# Every C function the workspace exports (#[no_mangle] extern "C"): a promise to code written in another language.
+# Checked by crates/iyakki-core-api/tests/c_abi.rs (./run.sh compat-check); rules in docs/development/C-INTERFACE-RULES.md. Tab separated:
+#   crate  symbol  signature          a live export
+#   removed  crate  symbol  note      an export that was removed or changed (the name is never reused)
+#   exempt  crate  why                a crate that exports C functions but need not answer an interface version
+iyakki-client-engine	iy_alloc	pub extern "C" fn iy_alloc(len: usize) -> *mut u8
+iyakki-client-engine	iy_cmd	pub unsafe extern "C" fn iy_cmd(ptr: *const u8, len: usize) -> i32
+iyakki-client-engine	iy_fb_h	pub extern "C" fn iy_fb_h() -> usize
+iyakki-client-engine	iy_fb_ptr	pub extern "C" fn iy_fb_ptr() -> *const u8
+iyakki-client-engine	iy_fb_version	pub extern "C" fn iy_fb_version() -> f64
+iyakki-client-engine	iy_fb_w	pub extern "C" fn iy_fb_w() -> usize
+iyakki-client-engine	iy_free	pub unsafe extern "C" fn iy_free(ptr: *mut u8, len: usize)
+iyakki-client-engine	iy_init	pub unsafe extern "C" fn iy_init(ptr: *const u8, len: usize) -> i32
+iyakki-client-engine	iy_next_out	pub extern "C" fn iy_next_out() -> usize
+iyakki-client-engine	iy_on_binary	pub unsafe extern "C" fn iy_on_binary(ptr: *const u8, len: usize)
+iyakki-client-engine	iy_on_text	pub unsafe extern "C" fn iy_on_text(ptr: *const u8, len: usize)
+iyakki-client-engine	iy_reply_ptr	pub extern "C" fn iy_reply_ptr() -> *const u8
+iyakki-edit-wasm	ed_alloc	pub extern "C" fn ed_alloc(len: usize) -> *mut u8
+iyakki-edit-wasm	ed_backspace	pub extern "C" fn ed_backspace(h: u32) -> i32
+iyakki-edit-wasm	ed_cursor	pub extern "C" fn ed_cursor(h: u32, line: usize, col: usize) -> i32
+iyakki-edit-wasm	ed_dealloc	pub unsafe extern "C" fn ed_dealloc(ptr: *mut u8, len: usize)
+iyakki-edit-wasm	ed_delete	pub extern "C" fn ed_delete(h: u32) -> i32
+iyakki-edit-wasm	ed_diff	pub unsafe extern "C" fn ed_diff(a_ptr: *const u8, a_len: usize, b_ptr: *const u8, b_len: usize) -> u32
+iyakki-edit-wasm	ed_dirty	pub extern "C" fn ed_dirty(h: u32) -> i32
+iyakki-edit-wasm	ed_find_all	pub unsafe extern "C" fn ed_find_all(h: u32, ptr: *const u8, len: usize, case_sensitive: i32) -> u32
+iyakki-edit-wasm	ed_free	pub extern "C" fn ed_free(h: u32)
+iyakki-edit-wasm	ed_has	pub extern "C" fn ed_has(h: u32) -> i32
+iyakki-edit-wasm	ed_highlight	pub unsafe extern "C" fn ed_highlight(h: u32, lang_ptr: *const u8, lang_len: usize, line: usize) -> u32
+iyakki-edit-wasm	ed_insert	pub unsafe extern "C" fn ed_insert(h: u32, ptr: *const u8, len: usize) -> i32
+iyakki-edit-wasm	ed_new	pub unsafe extern "C" fn ed_new(ptr: *const u8, len: usize) -> u32
+iyakki-edit-wasm	ed_newline	pub extern "C" fn ed_newline(h: u32) -> i32
+iyakki-edit-wasm	ed_redo	pub extern "C" fn ed_redo(h: u32) -> i32
+iyakki-edit-wasm	ed_result	pub extern "C" fn ed_result() -> *const u8
+iyakki-edit-wasm	ed_text	pub extern "C" fn ed_text(h: u32) -> u32
+iyakki-edit-wasm	ed_undo	pub extern "C" fn ed_undo(h: u32) -> i32
+iyakki-tile-example	iyakki_alloc	pub extern "C" fn iyakki_alloc(size: i32) -> i32
+iyakki-tile-example	iyakki_tile_abi	pub extern "C" fn iyakki_tile_abi() -> i32
+iyakki-tile-example	iyakki_tile_event	pub extern "C" fn iyakki_tile_event(ptr: i32, len: i32) -> i32
+iyakki-tile-example	iyakki_tile_frame	pub extern "C" fn iyakki_tile_frame() -> i32
+iyakki-tile-example	iyakki_tile_init	pub extern "C" fn iyakki_tile_init(abi: i32, ptr: i32, len: i32) -> i32
+iyakki-tile-kit	iyakki_alloc	pub extern "C" fn iyakki_alloc(size: i32) -> i32
+iyakki-tile-kit	iyakki_tile_abi	pub extern "C" fn iyakki_tile_abi() -> i32
+iyakki-tile-kit	iyakki_tile_event	pub extern "C" fn iyakki_tile_event(ptr: i32, len: i32) -> i32
+iyakki-tile-kit	iyakki_tile_frame	pub extern "C" fn iyakki_tile_frame() -> i32
+iyakki-tile-kit	iyakki_tile_init	pub extern "C" fn iyakki_tile_init(abi: i32, ptr: i32, len: i32) -> i32
+iyakki-tile-runs	iyakki_alloc	pub extern "C" fn iyakki_alloc(size: i32) -> i32
+iyakki-tile-runs	iyakki_tile_abi	pub extern "C" fn iyakki_tile_abi() -> i32
+iyakki-tile-runs	iyakki_tile_event	pub extern "C" fn iyakki_tile_event(ptr: i32, len: i32) -> i32
+iyakki-tile-runs	iyakki_tile_frame	pub extern "C" fn iyakki_tile_frame() -> i32
+iyakki-tile-runs	iyakki_tile_init	pub extern "C" fn iyakki_tile_init(abi: i32, ptr: i32, len: i32) -> i32
+exempt	iyakki-client-engine	the WASM engine is built and served together with the page glue that calls it (one release, never mixed); the wire contract it speaks is versioned by the client protocol hello instead
+exempt	iyakki-edit-wasm	the in-browser editor module is built into the same release as the page glue that calls it (one release, never mixed); it is not a library other programs link against

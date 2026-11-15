@@ -583,3 +583,59 @@ fn stopping_gives_a_goodbye_for_the_extra_names_too() {
     let bye: Vec<Message> = r.stop().iter().map(decode_out).collect();
     assert!(bye.iter().flat_map(|m| &m.answers).any(|x| x.name == "store.local" && x.ttl == 0));
 }
+
+// ------------------------------------------------------------------------------------------------------------- the real thing
+
+/// Against the Mac's own mDNSResponder (the program the notes of F-NAME-01/02 name as "another mDNS program on the same machine").
+/// macOS only; it needs a private IPv4 address on an interface that is up.
+#[cfg(target_os = "macos")]
+mod with_mdnsresponder {
+    use super::*;
+
+    fn cmd(program: &str, args: &[&str]) -> String {
+        String::from_utf8_lossy(&std::process::Command::new(program).args(args).output().unwrap().stdout).trim().to_string()
+    }
+
+    #[test]
+    fn our_resolver_finds_this_macs_own_local_name_through_the_real_mdnsresponder_on_the_real_network() {
+        let (mine, _) = net::interfaces();
+        if mine.is_empty() {
+            eprintln!("skipped: no private IPv4 interface is up");
+            return;
+        }
+        let host = cmd("scutil", &["--get", "LocalHostName"]);
+        assert!(!host.is_empty(), "this Mac has a local host name");
+        let ips = net::resolve(&format!("{host}.local"), &Ask::new(Duration::from_secs(3)));
+        assert!(!ips.is_empty(), "mDNSResponder did not answer our legacy-unicast question for {host}.local");
+        assert!(ips.iter().all(|ip| match ip {
+            IpAddr::V4(v) => mine.iter().any(|i| i.v4 == *v),
+            IpAddr::V6(_) => true,
+        }), "the addresses are this Mac's own: {ips:?} vs {mine:?}");
+        assert!(ips.iter().any(|ip| ip.is_ipv4()), "an A record came back: {ips:?}");
+        // a name nobody has: nothing, after the time (no hang, no error)
+        let t = std::time::Instant::now();
+        assert!(net::resolve("iyakki-nobody-has-this-name.local", &Ask::new(Duration::from_millis(800))).is_empty() && t.elapsed() < Duration::from_secs(4));
+    }
+
+    #[test]
+    fn our_announcer_shares_port_5353_with_mdnsresponder_probes_without_a_conflict_and_stops() {
+        let (mine, _) = net::interfaces();
+        if mine.is_empty() {
+            eprintln!("skipped: no private IPv4 interface is up");
+            return;
+        }
+        let label = format!("iyakki-m7{:04x}", std::process::id() & 0xffff);
+        let mut an = net::Announcer::start(&label, vec![dev_svc()]).expect("binds 5353 beside mDNSResponder (SO_REUSEPORT)");
+        // three probes and the announcements take about two seconds
+        let t0 = std::time::Instant::now();
+        while an.status().probing && t0.elapsed() < Duration::from_secs(8) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let st = an.status();
+        assert!(st.running && !st.probing && st.host == format!("{label}.local"), "{st:?}");
+        assert!(!st.v4.is_empty() && st.v4.iter().all(|a| mine.iter().any(|i| i.v4 == *a)), "{st:?}");
+        // (not asserted: that mDNSResponder resolves the name. It drops packets that come from its own host's port 5353, so a same-machine check would say nothing; that needs a second computer.)
+        an.stop();
+        assert!(!an.status().running);
+    }
+}

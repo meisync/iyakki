@@ -40,6 +40,31 @@ pub fn keep_awake(controllers: &[PathBuf]) -> Vec<String> {
         .collect()
 }
 
+/// The report of the boot stage `usbawake` (dist/qemu/usb-awake-test.sh) on the machine under `root`: whether it has a Thunderbolt bus, every PCI USB controller with its power
+/// setting, the controllers put in `auto` first (the emulated ones start as `on`, the Mac mini's Thunderbolt-side controller was in `auto`), the ones [`sleeping_controllers`] finds, how many
+/// [`keep_awake`] switched, and each one's setting afterwards. The lines are plain text for the host script.
+pub fn selftest_lines(root: &Path) -> Vec<String> {
+    let mut out = vec![format!("thunderbolt-bus {}", root.join("sys/bus/thunderbolt").is_dir())];
+    let ctl = |d: &Path| std::fs::read_to_string(d.join("power/control")).unwrap_or_default().trim().to_string();
+    let name = |d: &Path| d.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut all: Vec<PathBuf> = std::fs::read_dir(root.join("sys/bus/pci/devices")).into_iter().flatten().flatten().map(|e| e.path()).filter(|d| std::fs::read_to_string(d.join("class")).is_ok_and(|c| c.trim().starts_with(USB_CLASS))).collect();
+    all.sort();
+    for d in &all {
+        out.push(format!("usb-controller {} control={}", name(d), ctl(d)));
+    }
+    for d in &all {
+        let _ = std::fs::write(d.join("power/control"), "auto");
+        out.push(format!("set-auto {} control={}", name(d), ctl(d)));
+    }
+    let sleeping = sleeping_controllers(root);
+    out.push(format!("sleeping {}", sleeping.len()));
+    out.push(format!("switched {}", keep_awake(&sleeping).len()));
+    for d in &sleeping {
+        out.push(format!("after {} control={}", name(d), ctl(d)));
+    }
+    out
+}
+
 /// Is the switch-off on the command line?
 pub fn switched_off(cmdline: &str) -> bool {
     cmdline.split_whitespace().any(|w| w == "iyakki.usbawake=off")

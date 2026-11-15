@@ -91,8 +91,23 @@ fn real_inventory(cx: &AppCx) -> Inventory {
     let screens = crate::display::outputs::hub().status().outputs.iter().map(|o| ScreenOut { name: o.name.clone(), connected: o.connected, current: o.current }).collect();
     let mut inv = Inventory::read(screens);
     inv.sound_chosen = cx.services.sound_settings().output;
+    inv.k3s_gpu = k3s_sees(&cx.services.k3sdev);
     inv.sound_chosen_present = inv.sound_chosen.is_empty() || iyakki_agent::audioout::choose(&iyakki_agent::doctor::sound_outputs(), &inv.sound_chosen).chosen;
     inv
+}
+
+/// What the managed dev cluster says about GPUs on its nodes (read-only `kubectl get nodes -o json`). A cluster that is not running is not asked.
+fn k3s_sees(k: &iyakki_agent::k3sdev::K3sDev) -> checkup::K3sSees {
+    let state = k.health().state;
+    if state != "running" {
+        return checkup::K3sSees::NoCluster(state);
+    }
+    let o = k.kubectl_cap(&["get", "nodes", "-o", "json"], 512 * 1024);
+    if !o.ok() {
+        return checkup::K3sSees::Unreadable(o.combined().lines().last().unwrap_or("no answer").trim().chars().take(120).collect());
+    }
+    let n: u32 = [iyakki_agent::gpu_workloads::GPU_RESOURCE, iyakki_agent::gpu_workloads::NVIDIA_RESOURCE, iyakki_agent::gpu_rocm::RESOURCE].iter().map(|r| iyakki_agent::gpu_workloads::node_resource_count(&o.stdout, r)).sum();
+    checkup::K3sSees::Count(n)
 }
 
 /// What the open step is doing right now.
@@ -129,6 +144,8 @@ pub struct CheckupApp {
     pub(super) request: Option<(String, String)>,
     pub(super) dirty: bool,
     pub(super) ticks: u64,
+    /// Where the signed result file goes (`checkup_result`), and the services that know the cluster state.
+    services: Arc<iyakki_agent::services::Services>,
 }
 
 impl CheckupApp {
@@ -153,6 +170,7 @@ impl CheckupApp {
             request: None,
             dirty: true,
             ticks: 0,
+            services: cx.services.clone(),
         };
         a.keep_report();
         a
@@ -162,9 +180,13 @@ impl CheckupApp {
         StepId::ALL[i.min(StepId::ALL.len() - 1)]
     }
 
-    fn keep_report(&self) {
+    pub(super) fn keep_report(&self) {
         let any = self.results.iter().any(|r| r.outcome != Outcome::Pending);
         checkup::set_last_report(if any { checkup::report_lines(&self.results) } else { Vec::new() });
+        // a finished check-up leaves a signed file that maps to the hardware matrix (F-CHECKUP-02); a failed write is not shown as a check-up failure
+        let extra = iyakki_agent::checkup_result::Extra { k3s_state: Some(self.services.k3sdev.health().state), gpu: self.results.iter().find(|r| r.id == StepId::Gpu).filter(|r| r.outcome != Outcome::Pending).map(|r| (r.note.clone(), r.outcome == Outcome::Pass)) };
+        let machine = iyakki_agent::doctor::hardware_text().lines().next().unwrap_or("").to_string();
+        let _ = iyakki_agent::checkup_result::save_if_complete(self.services.dir(), &self.results, &extra, &machine, env!("CARGO_PKG_VERSION"), iyakki_agent::clock::now_unix());
     }
 
     pub(super) fn ok(&mut self, m: impl Into<String>) {
@@ -260,6 +282,8 @@ impl CheckupApp {
             StepId::Wifi => self.finish(i, checkup::wifi(&self.inv)),
             StepId::Bluetooth => self.finish(i, checkup::bluetooth(&self.inv)),
             StepId::Power => self.finish(i, checkup::power(&self.inv)),
+            StepId::Gpu => self.finish(i, checkup::gpu(&self.inv)),
+            StepId::Usb => self.finish(i, checkup::usb(&self.inv)),
         }
         self.dirty = true;
     }

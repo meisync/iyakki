@@ -69,7 +69,9 @@ pub fn source_spec(src: &SourceInfo) -> Result<SourceSpec, String> {
             }
         }
     }
-    Ok(SourceSpec { path: src.path.clone(), boot_bytes: src.p1_sectors * 512, payload_bytes: payload, secure_boot: install::is_secure_boot_image(src) })
+    // the size of GRUB's core image for legacy BIOS boot of a shared disk (0: this image has none, it starts through UEFI only)
+    let core_bytes = crate::gpt_install::grub_bits_used(src, crate::biosshared::MBR_CORE_LBA).map_or(0, |g| g.core.len() as u64);
+    Ok(SourceSpec { path: src.path.clone(), boot_bytes: src.p1_sectors * 512, payload_bytes: payload, core_bytes, secure_boot: install::is_secure_boot_image(src) })
 }
 
 /// The first `linux` line's arguments of the image's boot menu (the plain "IYAKKI" entry), for an EFI-stub boot.
@@ -362,6 +364,11 @@ fn apply_partial(path: &Path, model: &DiskModel, plan: &Plan, src: &SourceInfo, 
                 flush_buf(&mut buf, &mut pos, &mut since, &mut done)?;
                 regions.push((off, st.bytes, h.finalize().iter().map(|b| format!("{b:02x}")).collect()));
             }
+            // the BIOS boot partition this install made for GRUB's core image: all zero, so nothing old in the free space is taken for a boot loader
+            Some(Role::Bios) if st.action == Action::Create && plan.bios.is_some() => {
+                put(&f, &st.part, off, &vec![0u8; st.bytes.min(MIB) as usize])?;
+                say(Phase::Writing, MIB, &mut done);
+            }
             _ => {}
         }
     }
@@ -485,12 +492,18 @@ fn apply_partial(path: &Path, model: &DiskModel, plan: &Plan, src: &SourceInfo, 
             }
         }
     }
+    // 3b. legacy BIOS boot of the shared disk (--bios), after the table and the partitions are final
+    let bios_note = match plan.bios {
+        Some(planned) => Some(write_bios(&f, path, model, plan, src, planned)?),
+        None => None,
+    };
     drop(f);
     drives::reread_partitions(&disp);
 
     // 4. the UEFI boot entry
     let mut notes = Vec::new();
     notes.extend(lean_note);
+    notes.extend(bios_note);
     let mut boot_entry = None;
     if let Some(dir) = &env.efivars {
         let st = plan.steps.iter().find(|s| s.role == Some(Role::Boot) && s.action != Action::Keep).ok_or("internal error: no boot step")?;
@@ -510,6 +523,48 @@ fn apply_partial(path: &Path, model: &DiskModel, plan: &Plan, src: &SourceInfo, 
         notes.push("no UEFI boot entry was added; pick the disk in the firmware's boot menu".into());
     }
     Ok(ApplyReport { written: done, verified: true, boot_entry, notes })
+}
+
+/// Legacy BIOS boot on a shared disk (F-INST-13). The disk is read again and checked again (it may have changed since the plan), the
+/// sectors that will change are saved to the file the person named (written, flushed and read back before anything else is touched),
+/// the core image goes in first and the boot code in sector 0 last, then everything is read back; if anything is not as written the
+/// saved sectors are put back at once and the install reports the failure.
+fn write_bios(f: &File, path: &Path, model: &DiskModel, plan: &Plan, src: &SourceInfo, planned: crate::biosshared::Method) -> Result<String, String> {
+    use crate::biosshared as bs;
+    if model.sector != 512 {
+        return Err("legacy BIOS boot needs 512-byte sectors".into());
+    }
+    let bits = crate::gpt_install::grub_bits_used(src, planned.core_lba())?;
+    let mut r = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let facts = bs::read_facts(&mut r, model.sector, model.size_bytes)?;
+    let check = bs::evaluate(&facts, bits.core.len() as u64, plan.request.bios_replace);
+    if check.method != Some(planned) {
+        return Err(format!("legacy BIOS boot was not set up: the disk is not as it was planned ({}). The rest of the install is done and IYAKKI starts through UEFI.", if check.refusals.is_empty() { "the free area moved".to_string() } else { check.refusals.join("; ") }));
+    }
+    let save = bs::Backup::take(&mut r, model.sector, model.size_bytes, &bs::regions_to_save(planned, bits.core.len() as u64))?;
+    let save_path = Path::new(&plan.request.bios_save);
+    {
+        use std::io::Write;
+        let mut out = std::fs::OpenOptions::new().write(true).create_new(true).open(save_path).map_err(|e| format!("the save file {}: {e}; legacy BIOS boot was not set up", save_path.display()))?;
+        out.write_all(&save.encode()).and_then(|_| out.sync_all()).map_err(|e| format!("the save file {}: {e}; legacy BIOS boot was not set up", save_path.display()))?;
+    }
+    let back = std::fs::read(save_path).ok().and_then(|b| bs::Backup::decode(&b).ok());
+    if back.as_ref() != Some(&save) {
+        return Err(format!("the save file {} does not read back; legacy BIOS boot was not set up", save_path.display()));
+    }
+    let s0 = bs::merged_sector0(&facts.sector0, &bits.boot_code, planned.core_lba())?;
+    put(f, "the GRUB core image", planned.core_lba() * 512, &bits.core)?;
+    f.sync_data().map_err(|e| format!("flushing {}: {e}", path.display()))?;
+    put(f, "sector 0", 0, &s0)?;
+    f.sync_data().map_err(|e| format!("flushing {}: {e}", path.display()))?;
+    let mut again = File::open(path).map_err(|e| e.to_string())?;
+    let problems = bs::verify_after(&mut again, &facts.sector0, planned, &bits.boot_code, &bits.core);
+    if !problems.is_empty() {
+        let mut w: &File = f;
+        let undone = save.restore(&mut w, model.sector, model.size_bytes).is_ok();
+        return Err(format!("legacy BIOS boot: verification FAILED ({}); {}", problems.join("; "), if undone { "the saved sectors were put back" } else { "putting the saved sectors back ALSO failed: restore them from the save file" }));
+    }
+    Ok(format!("legacy BIOS boot set up: GRUB at sector {}; the old sector 0 and that area are saved in {}", planned.core_lba(), save_path.display()))
 }
 
 fn sha_of(b: &[u8]) -> String {

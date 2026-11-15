@@ -101,7 +101,82 @@ const PRELUDE: &str = r#"(function (g) { 'use strict';
     if (r.speed !== undefined) need(typeof r.speed === 'number' && r.speed >= 0.7 && r.speed <= 1.5, 'speed is a number from 0.7 to 1.5');
     return r;
   };
+  // ---- SDK 1.1 and later: discovery, handles and the namespaces of 1.2 (docs/development/SDK-BRIDGE-V2.md). The host decides what each call needs;
+  // a name this host does not know rejects with Unsupported, never a crash.
+  const obj = (v, what) => { need(v === undefined || v === null || (typeof v === 'object' && !Array.isArray(v)), what + ' must be an object'); return v || {}; };
+  const merge = (first, o, what) => Object.assign({}, obj(o, what), first);
+  const mkHandle = (id, extra) => {
+    const on = {};
+    streams.set(id, on);
+    const h = Object.assign({
+      id,
+      on: (ev, fn) => { str(ev, 'an event name', 40); need(typeof fn === 'function', 'a handler must be a function'); (on[ev] = on[ev] || []).push(fn); return h; },
+      off: (ev, fn) => { on[ev] = (on[ev] || []).filter((f) => f !== fn); return h; },
+    }, extra || {});
+    return h;
+  };
+  const embedHandle = (id) => mkHandle(id, {
+    update: (o) => wait('embed.update', { id, options: obj(o, 'the options') }),
+    call: (method, args) => wait('embed.call', { id, method: str(method, 'the method', 32), args: obj(args, 'the arguments') }).then((r) => r.result),
+    unmount: () => wait('embed.unmount', { id }).then((r) => { streams.delete(id); return r; }),
+    focus: () => wait('embed.call', { id, method: 'focus', args: {} }).then((r) => r.result),
+    blur: () => wait('embed.call', { id, method: 'blur', args: {} }).then((r) => r.result),
+  });
+  const listenHandle = (id) => mkHandle(id, { cancel: () => wait('speech.cancel', { handle: id }) });
+  const idArg = (id) => { need(Number.isInteger(id) && id >= 0, 'an id is a whole number'); return id; };
   const api = {
+    has: (name) => call('sdk.has', { name: str(name, 'the name', 80) }),
+    capabilities: () => call('sdk.capabilities'),
+    call: (op, args) => wait('sdk.call', { op: str(op, 'the call name', 60), args: args === undefined ? {} : args }),
+    markdown: {
+      render: (text, o) => wait('markdown.render', merge({ text: str(text, 'the text', 1048576) }, o, 'the options')),
+      view: (text, o) => wait('markdown.view', merge({ text: str(text, 'the text', 1048576) }, o, 'the options')),
+      openFile: () => wait('markdown.openFile', {}),
+    },
+    embed: {
+      mount: (target, kind, options) => wait('embed.mount', { target, kind: str(kind, 'the kind', 16), options: obj(options, 'the options') }).then((r) => embedHandle(r.id)),
+      list: () => wait('embed.list', {}),
+    },
+    dash: {
+      sources: () => wait('dash.sources', {}),
+      query: (source, query, o) => wait('dash.query', merge({ source: str(source, 'the source', 64), query: str(query, 'the query', 8000) }, o, 'the options')),
+      panel: { add: (dashboard, panel) => wait('dash.panel.add', { dashboard: str(dashboard, 'the dashboard', 64), panel: obj(panel, 'the panel') }) },
+    },
+    flows: {
+      list: () => wait('flows.list', {}),
+      run: (flow, inputs, o) => wait('flows.run', merge({ flow: str(flow, 'the flow', 64), inputs: obj(inputs, 'the inputs') }, o, 'the options')),
+      status: (run) => wait('flows.status', { run: str(run, 'the run', 80) }),
+      cancel: (run) => wait('flows.cancel', { run: str(run, 'the run', 80) }),
+    },
+    k3s: {
+      status: () => wait('k3s.status', {}),
+      get: (kind, o) => wait('k3s.get', merge({ kind: str(kind, 'the kind', 40) }, o, 'the options')),
+      logs: (pod, o) => wait('k3s.logs', merge({ pod: str(pod, 'the pod', 253) }, o, 'the options')),
+      apply: (yaml) => wait('k3s.apply', { yaml: str(yaml, 'the YAML', 65536) }),
+      restart: (name) => wait('k3s.restart', { name: str(name, 'the name', 253) }),
+    },
+    media: {
+      library: (o) => wait('media.library', obj(o, 'the options')),
+      play: (src, o) => wait('media.play', merge(obj(src, 'the source'), o, 'the options')),
+      pause: (id) => wait('media.pause', { id: idArg(id) }),
+      resume: (id) => wait('media.resume', { id: idArg(id) }),
+      stop: (id) => wait('media.stop', { id: idArg(id) }),
+      state: (id) => wait('media.state', id === undefined ? {} : { id: idArg(id) }),
+      queue: { add: (id) => wait('media.queue.add', { id: str(id, 'the id', 120) }), list: () => wait('media.queue.list', {}) },
+    },
+    audio: {
+      play: (src, o) => wait('audio.play', merge(obj(src, 'the source'), o, 'the options')),
+      pause: (id) => wait('audio.pause', { id: idArg(id) }),
+      resume: (id) => wait('audio.resume', { id: idArg(id) }),
+      stop: (id) => wait('audio.stop', { id: idArg(id) }),
+      setVolume: (id, volume) => wait('audio.setVolume', { id: idArg(id), volume }),
+      outputs: () => wait('audio.outputs', {}),
+    },
+    money: {
+      limits: () => wait('money.limits', {}),
+      spend: (req) => wait('money.spend', obj(req, 'the request')),
+      requestLimit: (req) => wait('money.requestLimit', obj(req, 'the request')),
+    },
     app: { info: () => call('app.info') },
     llm: {
       chat: (a, o) => { const r = chatArgs(a, o); return r.stream ? openStream(r) : wait('llm.chat', r); },
@@ -112,6 +187,7 @@ const PRELUDE: &str = r#"(function (g) { 'use strict';
     speech: {
       say: (text, o) => wait('speech.say', say(text, o)),
       stop: (id) => wait('speech.stop', id === undefined ? {} : { id }),
+      listen: (o) => wait('speech.listen', obj(o, 'the options')).then((r) => listenHandle(r.handle)),
     },
     storage: {
       get: (k) => { key(k); return call('storage.get', { k }); },
@@ -134,7 +210,8 @@ const PRELUDE: &str = r#"(function (g) { 'use strict';
     notify: { show: (title, body) => { call('notify.show', { title: str(title, 'the title', 80), body: str(body === undefined ? '' : body, 'the text', 300) }); } },
     agent: { ask: (q) => wait('agent.ask', { q: str(q, 'the question', 2000) }) },
   };
-  const freeze = (o) => { for (const k of Object.keys(o)) if (o[k] && typeof o[k] === 'object') freeze(o[k]); return Object.freeze(o); };
+  Object.defineProperty(api, 'version', { get: () => call('sdk.capabilities').sdk, enumerable: true });
+  const freeze = (o) => { for (const k of Object.keys(o)) { const d = Object.getOwnPropertyDescriptor(o, k); if (d && 'value' in d && d.value && typeof d.value === 'object') freeze(d.value); } return Object.freeze(o); };
   Object.defineProperty(g, 'iyakki', { value: freeze(api), enumerable: true, writable: false, configurable: false });
   Object.defineProperty(g, '__iyakkiResolve', { value: (id, ok, v) => { const p = pending.get(id); if (!p) return false; pending.delete(id); (ok ? p[0] : p[1])(ok ? v : coded(v)); return true; }, enumerable: false, writable: false, configurable: false });
   // events of a stream: the host calls this on the page's next turn, one event at a time

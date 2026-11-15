@@ -210,3 +210,49 @@ fn a_hook_that_is_off_and_the_cloud_profile_answer_404() {
     assert_eq!(post(&cloud, &format!("/hooks/hk-loop/{TOKEN}"), body, &signed(body, now)).0, 404, "a tenant pod has no webhooks");
     assert_eq!(cloud.extras.started.lock().unwrap().len(), 0);
 }
+
+/// A real external sender: `curl` posts to the live TLS listener and `openssl` (a second implementation of HMAC-SHA256) makes the signature,
+/// the way a CI system or a git host would. Skips with a sentence when either tool is missing.
+#[test]
+fn curl_signed_with_openssl_starts_a_run_and_a_bad_signature_starts_nothing() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let have = |t: &str| Command::new(t).arg("version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok() || Command::new(t).arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok();
+    if !have("curl") || !have("openssl") {
+        crate::qeprintln!("curl or openssl is not installed here: the real sender test is skipped");
+        return;
+    }
+    let r = rig("agent-api", true);
+    let port = r.svc.local_addr().port();
+    let body = br#"{"event":"push","ref":"release"}"#;
+    // openssl signs "<timestamp>.<body>" with the shared secret (read from its standard input, hex key)
+    let sign_with_openssl = |ts: i64, body: &[u8]| -> String {
+        let mut msg = format!("{ts}.").into_bytes();
+        msg.extend_from_slice(body);
+        let key: String = SECRET.iter().map(|b| format!("{b:02x}")).collect();
+        let mut c = Command::new("openssl").args(["dgst", "-sha256", "-mac", "HMAC", "-macopt", &format!("hexkey:{key}"), "-r"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().expect("openssl");
+        c.stdin.take().unwrap().write_all(&msg).unwrap();
+        let out = c.wait_with_output().unwrap();
+        format!("sha256={}", String::from_utf8_lossy(&out.stdout).split_whitespace().next().unwrap_or(""))
+    };
+    let curl = |ts: i64, sig: &str, body: &[u8]| -> (String, String) {
+        let url = format!("https://127.0.0.1:{port}/hooks/hk-loop/{TOKEN}");
+        let mut c = Command::new("curl").args(["-sk", "-m", "10", "-o", "-", "-w", "\n%{http_code}", "-X", "POST", "-H", "Content-Type: application/json", "-H", &format!("X-Iyakki-Timestamp: {ts}"), "-H", &format!("X-Iyakki-Signature: {sig}"), "--data-binary", "@-", &url]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().expect("curl");
+        c.stdin.take().unwrap().write_all(body).unwrap();
+        let out = String::from_utf8_lossy(&c.wait_with_output().unwrap().stdout).to_string();
+        let (b, code) = out.rsplit_once('\n').unwrap_or((&out, ""));
+        (code.trim().to_string(), b.to_string())
+    };
+    let ts = crate::clock::now_unix();
+    let good = sign_with_openssl(ts, body);
+    assert_eq!(good, sign(SECRET, ts, body), "openssl and the in-house HMAC agree");
+    let (code, answer) = curl(ts, &good, body);
+    assert_eq!(code, "202", "{answer}");
+    assert_eq!(r.extras.started.lock().unwrap().len(), 1);
+    assert_eq!(r.extras.started.lock().unwrap()[0]["webhook"]["body"]["ref"], "release");
+    // the same call again is a replay; a signature over another body is refused; nothing more started
+    assert_eq!(curl(ts, &good, body).0, "409");
+    let (code, _) = curl(ts + 1, &sign_with_openssl(ts + 1, b"{}"), body);
+    assert_eq!(code, "401");
+    assert_eq!(r.extras.started.lock().unwrap().len(), 1);
+}

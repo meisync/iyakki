@@ -15,39 +15,10 @@ use iyakki_agent::quiet::Env;
 use iyakki_agent::soundhold::{self, Found, Registry};
 
 use super::AppCx;
-use crate::gfx::{Face, Gfx};
-use crate::ui::{Event, Key, MUTED, R, TEXT};
+use crate::gfx::Gfx;
+use crate::ui::{Event, R};
 
-/// Button ids (`Event::Tab`) in the browser; the radio uses keys.
-pub const TAB_STOP: usize = 14;
-pub const TAB_KEEP: usize = 15;
-pub const TAB_CANCEL: usize = 16;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Answer {
-    Stop,
-    Keep,
-    Cancel,
-}
-
-/// y or Enter stops it, n or k keeps it, Esc cancels.
-pub fn answer_for_key(k: &Key) -> Option<Answer> {
-    match k {
-        Key::Char('y') | Key::Enter => Some(Answer::Stop),
-        Key::Char('n') | Key::Char('k') => Some(Answer::Keep),
-        Key::Esc => Some(Answer::Cancel),
-        _ => None,
-    }
-}
-
-pub fn answer_for_tab(n: usize) -> Option<Answer> {
-    match n {
-        TAB_STOP => Some(Answer::Stop),
-        TAB_KEEP => Some(Answer::Keep),
-        TAB_CANCEL => Some(Answer::Cancel),
-        _ => None,
-    }
-}
+pub use iyakki_uikit::askdialog::{answer_for_key, answer_for_tab, render_question, Answer, TAB_CANCEL, TAB_KEEP, TAB_STOP};
 
 /// A question on the screen, and the stop while it runs.
 pub struct Ask {
@@ -120,27 +91,13 @@ pub fn audit(cx: &AppCx, action: &str, found: &Found, outcome: &str) {
 
 /// Draw the dialog over `area` with the three buttons sending `stop`, `keep` and `cancel`.
 pub fn render(g: &mut Gfx, area: R, s: f32, ask: &Ask, stop: Event, keep: Event, cancel: Event) {
-    let accent = crate::gfx::rgb(110, 190, 255);
-    let p = crate::fx::modal(g, area, s, 560.0 * s, 210.0 * s, accent, false);
-    let q = ask.question();
-    for (i, l) in g.wrap(18.0 * s, &q, Face::Bold, p.w - 48.0 * s).into_iter().take(3).enumerate() {
-        g.text(p.x + 24.0 * s, p.y + 24.0 * s + i as f32 * 26.0 * s, 18.0 * s, TEXT, &l, Face::Bold);
-    }
-    let hint = if ask.stopping() { "Stopping..." } else { "y or Enter stops it, n keeps it, Esc cancels." };
-    g.text(p.x + 24.0 * s, p.y + 104.0 * s, 14.0 * s, MUTED, hint, Face::Sans);
-    let y = p.y + p.h - 58.0 * s;
-    if ask.stopping() {
-        return;
-    }
-    let mut x = p.x + 24.0 * s;
-    x += g.button(x, y, 14.0 * s, "Stop it", accent, stop) + 10.0 * s;
-    x += g.button(x, y, 14.0 * s, "Keep it", crate::gfx::rgb(150, 160, 180), keep) + 10.0 * s;
-    g.button(x, y, 14.0 * s, "Cancel", crate::gfx::rgb(150, 160, 180), cancel);
+    render_question(g, area, s, &ask.question(), ask.stopping(), stop, keep, cancel)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::Key;
     use iyakki_agent::soundhold::Who;
 
     struct E;

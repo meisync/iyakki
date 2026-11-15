@@ -5,6 +5,8 @@
 pub mod adapt;
 pub mod adopt_server;
 pub mod api;
+pub mod clientpage;
+pub mod clientsession;
 pub mod codec;
 pub mod devconfig;
 pub mod devicekeys;

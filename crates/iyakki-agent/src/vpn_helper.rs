@@ -96,6 +96,18 @@ pub struct PeerCred {
 }
 
 /// The credentials the kernel recorded when the peer connected (`SO_PEERCRED`); they cannot be forged by the peer.
+#[cfg(not(target_os = "linux"))]
+pub fn peer_cred(s: &UnixStream) -> std::io::Result<PeerCred> {
+    let (mut uid, mut gid): (libc::uid_t, libc::gid_t) = (0, 0);
+    // SAFETY: the descriptor is open and both outputs are valid for the call.
+    if unsafe { libc::getpeereid(s.as_raw_fd(), &mut uid, &mut gid) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(PeerCred { pid: 0, uid, gid })
+}
+
+/// The credentials the kernel recorded when the peer connected (`SO_PEERCRED`); they cannot be forged by the peer.
+#[cfg(target_os = "linux")]
 pub fn peer_cred(s: &UnixStream) -> std::io::Result<PeerCred> {
     let mut c = libc::ucred { pid: 0, uid: 0, gid: 0 };
     let mut len = std::mem::size_of::<libc::ucred>() as u32;
@@ -462,11 +474,11 @@ pub fn serve(listener: UnixListener, path: PathBuf, policy: PeerPolicy, sys: Arc
                     let cred = peer_cred(&s);
                     let allowed = cred.as_ref().is_ok_and(|c| policy.allows(c));
                     if !allowed {
-                        lg.lock().unwrap().push("refused: peer not allowed".into());
+                        lg.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push("refused: peer not allowed".into());
                         continue; // dropping the stream closes it without a word
                     }
                     if active.load(Ordering::SeqCst) >= MAX_CONNS {
-                        lg.lock().unwrap().push("refused: too many connections".into());
+                        lg.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push("refused: too many connections".into());
                         continue;
                     }
                     active.fetch_add(1, Ordering::SeqCst);
@@ -513,11 +525,11 @@ fn conn(s: UnixStream, sys: &dyn Sys, log: &Mutex<Vec<String>>, stop: &AtomicBoo
         line.clear();
         let resp = match parsed {
             Ok(req) => {
-                log.lock().unwrap().push(req.name().to_string());
+                log.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(req.name().to_string());
                 dispatch(sys, req)
             }
             Err(_) => {
-                log.lock().unwrap().push("bad request".into());
+                log.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push("bad request".into());
                 Resp::err("not a request")
             }
         };
@@ -573,7 +585,7 @@ impl RemoteSys {
         if line.len() > MAX_LINE {
             return Err("request too large".into());
         }
-        let mut guard = self.conn.lock().unwrap();
+        let mut guard = self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         for attempt in 0..2 {
             if guard.is_none() {
                 *guard = Some(self.open()?);

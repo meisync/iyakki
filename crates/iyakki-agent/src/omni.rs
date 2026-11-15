@@ -45,7 +45,7 @@ impl Review {
 impl Services {
     /// The collection `collection` of the Lemonade provider `provider` (from the last list read), with its parts resolved.
     pub fn collection_review(&self, provider: &str, collection: &str) -> Result<Review, String> {
-        let cfg = self.settings.lock().unwrap().get().provider(provider).cloned().ok_or("unknown provider")?;
+        let cfg = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().provider(provider).cloned().ok_or("unknown provider")?;
         if cfg.kind != crate::providers::Kind::Lemonade {
             return Err(format!("{provider} is not a Lemonade server"));
         }
@@ -90,12 +90,12 @@ impl Services {
             return Err(format!("{collection} has no part for {}; nothing was changed", lacking.join(", ")));
         }
         let (chat, image, stt, tts) = (r.plan.chat.clone().unwrap(), r.plan.image.clone().unwrap(), r.plan.stt.clone().unwrap(), r.plan.tts.clone().unwrap());
-        let cfg = self.settings.lock().unwrap().get().provider(provider).cloned().ok_or("unknown provider")?;
+        let cfg = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().provider(provider).cloned().ok_or("unknown provider")?;
         let base = cfg.base()?;
         if !self.speech_server_allowed(&base) {
             return Err(format!("{provider} is {}: speech would be sent there. Say yes to that first; nothing was changed.", crate::speechtime::locality(&base).label()));
         }
-        let before = self.settings.lock().unwrap().get().clone();
+        let before = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().clone();
         let prefs = store.load_prefs();
         let undo = AllPartsUndo { provider: provider.into(), collection: collection.into(), chat: before.chat.clone(), default_model: cfg.default_model.clone(), stt: before.voice.stt.clone(), tts: before.voice.tts.clone(), picture: prefs.picture_model.clone() };
         let choice = |m: &str| ModelChoice { provider: provider.into(), model: m.into() };
@@ -105,7 +105,7 @@ impl Services {
                 format!("{what} ({}) could not be set: {e}. Nothing was changed.", match what { "chat" => &chat.id, "pictures" => &image.id, "speech in" => &stt.id, _ => &tts.id })
             })
         };
-        let upd = |f: &mut dyn FnMut(&mut crate::settings::Settings)| self.settings.lock().unwrap().update(|s| f(s)).map_err(|e| e.to_string());
+        let upd = |f: &mut dyn FnMut(&mut crate::settings::Settings)| self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| f(s)).map_err(|e| e.to_string());
         step("chat", &mut || {
             upd(&mut |s| {
                 s.chat = Some(choice(&chat.id));
@@ -121,14 +121,13 @@ impl Services {
             p.picture_model = Some(choice(&image.id));
             store.save_prefs(&p)
         })?;
-        *self.parts_undo.lock().unwrap() = Some(undo);
+        *self.parts_undo.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(undo);
         Ok(format!("{collection} on {provider}: chat {}, pictures {}, speech in {}, speech out {}.", chat.id, image.id, stt.id, tts.id))
     }
 
     fn restore(&self, u: &AllPartsUndo, store: &StoryStore) -> Result<(), String> {
         self.settings
-            .lock()
-            .unwrap()
+            .lock().unwrap_or_else(std::sync::PoisonError::into_inner)
             .update(|s| {
                 s.chat = u.chat.clone();
                 s.voice.stt = u.stt.clone();
@@ -145,14 +144,14 @@ impl Services {
 
     /// What the last "Use all parts" replaced, if Undo is still possible.
     pub fn parts_undo_available(&self) -> Option<(String, String)> {
-        self.parts_undo.lock().unwrap().as_ref().map(|u| (u.provider.clone(), u.collection.clone()))
+        self.parts_undo.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().map(|u| (u.provider.clone(), u.collection.clone()))
     }
 
     /// Put back the chat model, speech engines and picture model that "Use all parts" replaced.
     pub fn undo_all_parts(&self, store: &StoryStore) -> Result<String, String> {
-        let u = self.parts_undo.lock().unwrap().clone().ok_or("there is nothing to undo")?;
+        let u = self.parts_undo.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone().ok_or("there is nothing to undo")?;
         self.restore(&u, store)?;
-        *self.parts_undo.lock().unwrap() = None;
+        *self.parts_undo.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         Ok(format!("Put back the chat model, pictures, speech-to-text and reading voice that were set before {} was used.", u.collection))
     }
 }

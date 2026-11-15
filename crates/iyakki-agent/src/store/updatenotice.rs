@@ -86,6 +86,10 @@ pub fn summary(updates: &[Update]) -> (String, String, Link) {
         }
         lines.push(format!("In the store: {}.", names.join(", ")));
     }
+    let blocked = named.iter().filter(|u| u.needs_newer_iyakki().is_some()).count();
+    if blocked > 0 {
+        lines.push(format!("{blocked} of them need{} a newer IYAKKI first.", if blocked == 1 { "s" } else { "" }));
+    }
     if let Some(s) = system {
         lines.push(format!("IYAKKI {} is out (this is {}). Install it from Settings -> System update.{}", s.to, s.from, if s.note.is_empty() { String::new() } else { format!(" {}", s.note) }));
     }

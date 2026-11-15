@@ -120,7 +120,7 @@ impl SettingsApp {
                     return JobOut::Msg(Err(e.to_string()));
                 }
             }
-            if let Err(e) = svc.settings.lock().unwrap().upsert_provider(cfg) {
+            if let Err(e) = svc.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).upsert_provider(cfg) {
                 return JobOut::Msg(Err(e.to_string()));
             }
             let extra = if server.kind() == Kind::Lemonade {
@@ -285,7 +285,7 @@ impl SettingsApp {
                 let host = Self::lem_host(cx, &provider);
                 let r: Result<String, String> = match item {
                     USE_CHAT => {
-                        let set = Self::svc(cx).settings.lock().unwrap().update(|s| {
+                        let set = Self::svc(cx).settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| {
                             s.chat = Some(ModelChoice { provider: provider.clone(), model: model.clone() });
                             if let Some(pr) = s.providers.iter_mut().find(|x| x.id == provider) {
                                 pr.default_model = Some(model.clone());
@@ -298,7 +298,7 @@ impl SettingsApp {
                         .map_err(|e| e.to_string())
                     }
                     USE_EMBED => {
-                        let set = Self::svc(cx).settings.lock().unwrap().set_embedding(Some(ModelChoice { provider: provider.clone(), model: model.clone() }));
+                        let set = Self::svc(cx).settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).set_embedding(Some(ModelChoice { provider: provider.clone(), model: model.clone() }));
                         set.map(|_| {
                             cx.audit.record(&cx.session.user, "settings.embedding_model", &format!("{provider}/{model}"));
                             let extra = if Self::svc(cx).reindex_stale_in_background() { " Existing documents are being re-embedded in the background." } else { "" };
@@ -363,7 +363,7 @@ impl SettingsApp {
         match act {
             LemAct::Pull(provider, model) => {
                 cx.audit.record(&cx.session.user, "settings.lemonade.pull", &format!("{provider}/{model}"));
-                match Self::svc(cx).pull_model(&provider, &model) {
+                match Self::svc(cx).pull_model_for(&cx.session.user, &provider, &model) {
                     Ok(()) => self.ok(format!("Downloading {model} into {provider}; the progress shows below.")),
                     Err(e) => self.fail(e),
                 }

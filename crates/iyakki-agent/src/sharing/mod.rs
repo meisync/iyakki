@@ -38,6 +38,8 @@ use std::net::Ipv4Addr;
 
 /// The firewall table that holds everything sharing adds (and nothing else is ever removed by sharing).
 pub const TABLE: &str = "iyakki_share";
+/// The bridge-family table that keeps the ports of a bridged downstream from reaching each other ([`rules::bridge_table_spec`]).
+pub const BRIDGE_TABLE: &str = "iyakki_share_br";
 pub const DEFAULT_IDLE_HOURS: u8 = 2;
 pub const MAX_IDLE_HOURS: u8 = 72;
 pub const LEASE_SECS: u32 = 3600;

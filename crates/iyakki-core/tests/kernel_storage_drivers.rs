@@ -37,3 +37,18 @@ fn the_x86_kernel_builds_in_dm_crypt_with_xts_aes_ni_and_loop_for_encrypted_home
     }
     assert!(!t.lines().any(|l| l.starts_with("CONFIG_DM_CRYPT=m") || l.starts_with("CONFIG_CRYPTO_XTS=m")), "must be built in");
 }
+
+#[test]
+fn the_data_volume_is_ext4_and_the_evaluation_note_says_why() {
+    // F-STORE-07: ext4 stays; F2FS and Btrfs were evaluated on paper (docs/STORAGE-FILESYSTEM-EVALUATION.md). Adding either driver to the
+    // kernel is a decision that must update that note, so this test fails until both change together.
+    let t = fragment("dist/buildroot/board/iyakki/linux.fragment");
+    assert!(t.lines().any(|l| l == "CONFIG_EXT4_FS=y"), "the data volume is ext4: it must be built in");
+    let note = fragment("docs/STORAGE-FILESYSTEM-EVALUATION.md");
+    for want in ["## Decision", "stays **ext4**", "F2FS", "Btrfs", "## What would reopen it", "Nothing here\nwas run"] {
+        assert!(note.contains(want), "the evaluation note lacks `{want}`");
+    }
+    let other = |k: &str| t.lines().any(|l| l.starts_with(k) && (l.ends_with("=y") || l.ends_with("=m")));
+    let others = other("CONFIG_F2FS_FS") || other("CONFIG_BTRFS_FS");
+    assert!(!others || note.contains("kernel carries"), "F2FS or Btrfs is in the kernel but the note does not say how the decision changed");
+}

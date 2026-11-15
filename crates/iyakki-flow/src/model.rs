@@ -924,6 +924,10 @@ pub struct Run {
     /// Permissions the person gave THIS run only ("Allow this time"): `camera`, `camera_unattended`. They live on the run and never change the flow.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grants: Vec<String>,
+    /// The token the host issued for this run (a cloud tenant's service): presented with every secret the run asks for. Memory only: never
+    /// saved with the run, never shown in a log (the engine hands it to the redactor), gone with a restart.
+    #[serde(skip)]
+    pub run_token: String,
     pub id: String,
     pub flow_id: String,
     /// The flow as it was when the run began (the pinned version), with the node updates and patches applied since.

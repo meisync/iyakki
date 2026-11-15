@@ -556,13 +556,22 @@ impl Hub {
                 (c, L2Sock::connect(addr, PSM_HID_INTERRUPT, CONNECT_SECS)?)
             }
         };
+        let (mut vendor, mut product) = (known.vendor, known.product);
         let descriptor = match unhex(&known.descriptor).filter(|d| !d.is_empty()) {
             Some(d) => d,
             None => {
                 let mut sdp = L2Sock::connect(addr, PSM_SDP, CONNECT_SECS)?;
                 let rec = fetch_hid_record(&mut sdp, Duration::from_secs(SDP_SECS))?;
+                // the vendor and product numbers are nice to have, never needed: no answer or an error leaves them 0
+                if vendor == 0 {
+                    if let Ok(Some(p)) = crate::bthid::fetch_pnp_record(&mut sdp, Duration::from_secs(SDP_SECS)) {
+                        (vendor, product) = (p.vendor as u32, p.product as u32);
+                    }
+                }
                 let mut g = self.lock();
                 let mut k = known.clone();
+                k.vendor = vendor;
+                k.product = product;
                 k.descriptor = hex(&rec.descriptor);
                 if k.name.is_empty() {
                     k.name = rec.name.unwrap_or_default();
@@ -577,7 +586,7 @@ impl Hub {
         let name = if known.name.is_empty() { address.to_string() } else { known.name.clone() };
         let uf = UhidFile::open()?;
         let uhid_fd = uf.fd.as_raw_fd();
-        let mut sess = Session::open(uf, &name, address, known.vendor, known.product, &descriptor, &mut control)?;
+        let mut sess = Session::open(uf, &name, address, vendor, product, &descriptor, &mut control)?;
         self.set_state(address, LinkState::Connected);
         let mut mux = Mux { control: control.raw(), interrupt: interrupt.raw(), uhid: uhid_fd };
         let end = run_session(&mut sess, &mut interrupt, &mut mux, stop);

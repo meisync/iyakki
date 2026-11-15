@@ -113,7 +113,7 @@ fn non_pdf_and_encrypted_files_are_refused_with_clear_words() {
     let b = assemble(&[(1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()), (2, b"<< /Type /Pages /Kids [] /Count 0 >>".to_vec()), (3, b"<< /Filter /Standard /V 1 /R 2 >>".to_vec())], 1, "/Encrypt 3 0 R");
     let e = Document::open(b).err().unwrap();
     assert_eq!(e, PdfError::Encrypted);
-    assert_eq!(e.to_string(), "password-protected PDFs are not supported yet");
+    assert_eq!(e.to_string(), "the protection data of this PDF is damaged, so it cannot be opened");
     let empty = assemble(&[(1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()), (2, b"<< /Type /Pages /Kids [] /Count 0 >>".to_vec())], 1, "");
     assert_eq!(Document::open(empty).err(), Some(PdfError::NoPages));
 }
@@ -585,4 +585,165 @@ fn a_web_page_becomes_blocks() {
     assert!(blocks.iter().any(|b| matches!(b, Block::Bullet(_, _, t) if t == "two")));
     assert!(blocks.iter().any(|b| matches!(b, Block::Code(c) if c.contains("code  here"))));
     assert!(blocks.iter().any(|b| matches!(b, Block::Code(c) if c.contains("ccc") && c.contains("bb"))));
+}
+
+#[test]
+fn characters_have_boxes_and_a_selection_gives_text_and_one_box_per_line() {
+    let d = open(simple(&["BT /F1 10 Tf 1 0 0 1 10 80 Tm (Hello World) Tj ET BT /F1 10 Tf 1 0 0 1 10 60 Tm (Second line) Tj ET"]));
+    let b = d.page_chars(0).unwrap();
+    assert!(b.len() >= 20, "{}", b.len());
+    let texts: String = b.iter().map(|c| c.ch).collect();
+    assert!(texts.starts_with("Hello World"), "{texts}");
+    // a point on the "W" of World (user space, y up) is that letter
+    let w = b.iter().position(|c| c.ch == 'W').unwrap();
+    let r = b[w].rect;
+    assert_eq!(crate::text::char_at(&b, (r[0] + r[2]) / 2.0, (r[1] + r[3]) / 2.0), Some(w));
+    // far off to the right on the second line: its last character
+    let last2 = b.iter().rposition(|c| c.line == 1).unwrap();
+    assert_eq!(crate::text::char_at(&b, 500.0, 62.0), Some(last2));
+    assert_eq!(crate::text::word_range(&b, w), (w, w + 4));
+    assert_eq!(crate::text::selection_text(&b, w, w + 4), "World");
+    let across = crate::text::selection_text(&b, w, b.iter().position(|c| c.ch == 'S').unwrap() + 5);
+    assert_eq!(across, "World\nSecond", "{across}");
+    assert_eq!(crate::text::selection_rects(&b, w, b.iter().position(|c| c.ch == 'S').unwrap() + 5).len(), 2);
+    let (a, z) = crate::text::line_range(&b, w);
+    assert_eq!(crate::text::selection_text(&b, a, z), "Hello World");
+    assert!(crate::text::char_at(&[], 1.0, 1.0).is_none());
+}
+
+/// Rows of two columns written row by row (left, right, left, right ...), as many generators do.
+fn two_columns(rows: usize, title: bool) -> Vec<u8> {
+    let mut c = String::new();
+    if title {
+        c.push_str("BT /F1 10 Tf 10 95 Td (A heading that runs across both columns of this page) Tj ET\n");
+    }
+    for r in 0..rows {
+        let y = 80 - 10 * r as i32;
+        c.push_str(&format!("BT /F1 8 Tf 10 {y} Td (Left {r}) Tj ET BT /F1 8 Tf 120 {y} Td (Right {r}) Tj ET\n"));
+    }
+    simple(&[&c])
+}
+
+#[test]
+fn two_columns_are_read_one_after_the_other_and_a_heading_keeps_its_place() {
+    let d = open(two_columns(6, true));
+    let t = d.page_text(0).unwrap();
+    let want = "A heading that runs across both columns of this page\nLeft 0\nLeft 1\nLeft 2\nLeft 3\nLeft 4\nLeft 5\nRight 0\nRight 1\nRight 2\nRight 3\nRight 4\nRight 5";
+    assert_eq!(t.replace("\n\n", "\n"), want, "{t}");
+    // selection follows the same order
+    let b = d.page_chars(0).unwrap();
+    let s: String = b.iter().map(|c| c.ch).collect();
+    assert!(s.find("Left 5").unwrap() < s.find("Right 0").unwrap(), "{s}");
+}
+
+#[test]
+fn a_page_of_one_column_and_a_small_table_are_left_as_they_came() {
+    let d = open(simple(&[HELLO]));
+    assert_eq!(d.page_text(0).unwrap(), "Hello World\nSecond line");
+    // three rows of two cells: too few to be columns, so they stay rows
+    let d = open(two_columns(3, false));
+    assert_eq!(d.page_text(0).unwrap().replace("\n\n", "\n"), "Left 0 Right 0\nLeft 1 Right 1\nLeft 2 Right 2");
+}
+
+#[test]
+fn the_ordering_survives_hostile_geometry() {
+    use crate::order::reading_order;
+    use crate::text::{Cell, TextLine};
+    let weird = |x: f64, w: f64, y: f64| TextLine { cells: vec![Cell { text: "x".into(), x, w }], y, size: 0.0 };
+    let lines: Vec<TextLine> = (0..40).map(|i| weird(f64::NAN * i as f64, 1e300, f64::INFINITY)).chain((0..40).map(|i| weird(i as f64 * 7.0, -3.0, i as f64))).collect();
+    let n = lines.len();
+    assert_eq!(reading_order(lines).len(), n);
+    assert!(reading_order(Vec::new()).is_empty());
+    // sizes of zero and widths below zero among sane lines do not panic either
+    let mixed: Vec<TextLine> = (0..40).map(|i| weird((i % 3) as f64 * 100.0, -3.0, i as f64)).collect();
+    let _ = reading_order(mixed);
+}
+
+const AES_128: &[u8] = include_bytes!("../tests/data/aes-128.pdf");
+const RC4_40: &[u8] = include_bytes!("../tests/data/rc4-40.pdf");
+const OWNER_ONLY: &[u8] = include_bytes!("../tests/data/owner-only-aes-128.pdf");
+const SECRET: &str = "Secret words of the encrypted page";
+
+#[test]
+fn files_made_by_the_system_with_a_password_open_with_it_and_say_so_without_it() {
+    // made by CoreGraphics (tests/data/make-encrypted-fixtures.swift), not by this crate: AES-128 (V4) and RC4 40 bit (V1)
+    for (name, bytes) in [("aes-128", AES_128), ("rc4-40", RC4_40)] {
+        assert_eq!(Document::open(bytes.to_vec()).err(), Some(PdfError::PasswordNeeded), "{name}: no password");
+        assert_eq!(Document::open_with_password(bytes.to_vec(), "wrong").err(), Some(PdfError::WrongPassword), "{name}: a wrong password");
+        for pw in ["open-sesame", "owner-key"] {
+            let d = Document::open_with_password(bytes.to_vec(), pw).unwrap_or_else(|e| panic!("{name} with {pw}: {e}"));
+            assert_eq!(d.page_count(), 1);
+            let t = d.page_text(0).unwrap();
+            assert!(t.contains(SECRET), "{name} with {pw}: {t:?}");
+        }
+    }
+    assert_eq!(PdfError::PasswordNeeded.to_string(), "this PDF needs a password");
+    assert_eq!(PdfError::WrongPassword.to_string(), "that password does not open this PDF");
+}
+
+#[test]
+fn a_file_with_only_an_owner_password_opens_without_asking() {
+    let d = Document::open(OWNER_ONLY.to_vec()).expect("the empty user password opens it");
+    assert!(d.page_text(0).unwrap().contains(SECRET));
+    // the owner password opens it too; a password that fits neither is refused even though the empty one would open it
+    assert!(Document::open_with_password(OWNER_ONLY.to_vec(), "owner-key").unwrap().page_text(0).unwrap().contains(SECRET));
+    assert_eq!(Document::open_with_password(OWNER_ONLY.to_vec(), "anything").err(), Some(PdfError::WrongPassword));
+}
+
+#[test]
+fn a_decrypted_page_draws_and_the_file_is_not_changed_by_opening_it() {
+    let d = Document::open_with_password(AES_128.to_vec(), "open-sesame").unwrap();
+    let r = d.render(0, 1.0, &BoxGlyphs).expect("the page is drawn");
+    assert!(r.width >= 300 && r.rgba.chunks(4).any(|p| p[0] < 200), "some ink was drawn");
+}
+
+#[test]
+fn protection_this_crate_does_not_read_is_refused_in_words_and_damaged_data_never_panics() {
+    // AES-256 (V5) is named, not guessed at
+    let b = assemble(&[(1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()), (2, b"<< /Type /Pages /Kids [] /Count 0 >>".to_vec()), (3, b"<< /Filter /Standard /V 5 /R 6 /O (x) /U (y) >>".to_vec())], 1, "/Encrypt 3 0 R");
+    let e = Document::open(b).err().unwrap();
+    assert!(matches!(&e, PdfError::Unsupported(m) if m.contains("AES-256")), "{e:?}");
+    // flipped bytes in an encrypted file: an error or a page, never a panic
+    for i in (0..AES_128.len()).step_by(97) {
+        let mut v = AES_128.to_vec();
+        v[i] ^= 0xff;
+        let _ = Document::open_with_password(v, "open-sesame").map(|d| d.page_text(0));
+    }
+}
+
+fn type1_pdf(font_dict: &str, program_head: &str) -> Vec<u8> {
+    assemble(
+        &[
+            (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 100] >>".to_vec()),
+            (3, b"<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".to_vec()),
+            (4, stream("", b"BT /F1 12 Tf 20 50 Td (ab\\001\\002\\003) Tj ET")),
+            (5, font_dict.as_bytes().to_vec()),
+            (6, b"<< /Type /FontDescriptor /FontName /Foo /Flags 4 /FontFile 7 0 R >>".to_vec()),
+            (7, stream("/Length1 100", program_head.as_bytes())),
+        ],
+        1,
+        "",
+    )
+}
+
+const T1_HEAD: &str = "%!PS-AdobeFont-1.0: Foo 1.0\n/FontName /Foo def\n/Encoding 256 array\n0 1 255 {1 index exch /.notdef put} for\ndup 97 /a put\ndup 98 /b put\ndup 1 /Eacute put\ndup 2 /fi put\ndup 3 /alpha put\nreadonly def\ncurrentdict end\ncurrentfile eexec \u{1}\u{2}\u{3}/dup 4 /Z put readonly def";
+
+#[test]
+fn an_embedded_type1_font_without_an_encoding_is_read_through_the_encoding_of_its_program() {
+    let font = "<< /Type /Font /Subtype /Type1 /BaseFont /ABCDEF+Foo /FontDescriptor 6 0 R >>";
+    assert_eq!(open(type1_pdf(font, T1_HEAD)).page_text(0).unwrap(), "ab\u{c9}\u{fb01}\u{3b1}");
+    // differences on top of it win; the rest still comes from the program
+    let diff = "<< /Type /Font /Subtype /Type1 /BaseFont /Foo /FontDescriptor 6 0 R /Encoding << /Type /Encoding /Differences [3 /beta] >> >>";
+    assert_eq!(open(type1_pdf(diff, T1_HEAD)).page_text(0).unwrap(), "ab\u{c9}\u{fb01}\u{3b2}");
+    // a named base encoding is the PDF's own choice and the program is not asked
+    let win = "<< /Type /Font /Subtype /Type1 /BaseFont /Foo /FontDescriptor 6 0 R /Encoding /WinAnsiEncoding >>";
+    assert_eq!(open(type1_pdf(win, T1_HEAD)).page_text(0).unwrap(), "ab");
+    // a program that says StandardEncoding changes nothing
+    let std_head = "%!PS-AdobeFont-1.0: Foo\n/Encoding StandardEncoding def\ncurrentfile eexec";
+    assert_eq!(open(type1_pdf(font, std_head)).page_text(0).unwrap(), "ab");
+    // junk, a cut head and a font program that is not there never panic
+    for head in ["", "/Encoding 256 array dup 1", "/Encoding 256 array dup x /a put dup 300 /b put readonly def", "\u{0}\u{1}\u{2}"] {
+        let _ = open(type1_pdf(font, head)).page_text(0);
+    }
 }

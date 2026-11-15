@@ -51,7 +51,7 @@ impl Facts {
     }
 }
 
-fn uname_release() -> Option<String> {
+pub(crate) fn uname_release() -> Option<String> {
     // SAFETY: `utsname` is plain bytes; uname fills it and NUL-terminates each field.
     let mut u: libc::utsname = unsafe { std::mem::zeroed() };
     if unsafe { libc::uname(&mut u) } != 0 {

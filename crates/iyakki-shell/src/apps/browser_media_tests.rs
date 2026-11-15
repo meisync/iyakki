@@ -373,3 +373,63 @@ fn the_camera_question_fits_at_four_screen_sizes_without_overlap() {
     }
     let _ = std::fs::remove_dir_all(&proc);
 }
+
+#[test]
+fn the_chips_name_every_kind_together_the_stop_is_audited_and_the_sign_goes_away_when_the_browser_closes() {
+    let (_fake, cx, mut a, _g) = in_full("media_chips", "--static");
+    ask_for(&mut a, &cx, 7);
+    for _ in 0..3 {
+        key(&mut a, &cx, Key::Char('1')); // each kind, this time only
+    }
+    pump(&mut a, &cx, "all three captured", |a| a.full.as_ref().is_some_and(|f| f.capture == 7) && browser_media::capture_now() == 7);
+    // the chip in the bar names all three at once
+    let chip = browser_media::indicator(7).expect("a chip for three kinds");
+    assert!(chip.contains("Camera") && chip.contains("icrophone") && chip.contains("creen"), "{chip}");
+    let g = frame(&mut a, &cx, 1280, 720);
+    assert!(shown(&g).contains(&chip), "{chip} in {}", shown(&g));
+    // a click on the shell's sign stops it and the audit says what was stopped, by kind and never by address
+    browser_media::ask_stop();
+    pump(&mut a, &cx, "stopped", |a| a.full.as_ref().is_some_and(|f| f.capture == 0) && browser_media::capture_now() == 0);
+    let log = cx.audit.recent(60).join("\n");
+    assert!(log.contains("browser.media.stopped") && !log.contains("https://"), "{log}");
+    // capturing again, then the browser is closed: the sign is not left behind
+    a.full.as_mut().unwrap().navigate("fake://capture/2");
+    pump(&mut a, &cx, "capturing again", |a| a.full.as_ref().is_some_and(|f| f.capture == 2) && browser_media::capture_now() == 2);
+    drop(a);
+    // the sign is held 2 s after a page lets go (so a retry does not flicker); a browser that is gone leaves nothing after that
+    std::thread::sleep(std::time::Duration::from_millis(2100));
+    assert_eq!(browser_media::capture_now(), 0, "the sign goes away with the browser");
+}
+
+#[test]
+fn the_bar_names_every_combination_of_camera_microphone_and_screen() {
+    let (_fake, cx, mut a, _g) = in_full("media_chips", "--static");
+    for (bits, chip) in [(1u8, "Microphone on"), (2, "Camera on"), (4, "Screen on"), (3, "Camera + microphone on"), (5, "Microphone + screen on"), (6, "Camera + screen on"), (7, "Camera + microphone + screen on")] {
+        a.full.as_mut().unwrap().navigate(&format!("fake://capture/{bits}"));
+        // wait for what is drawn, not for the helper's state: the chip follows the state by one beat, and a draw made in between would be stale
+        pump(&mut a, &cx, &format!("the chip {chip}"), |a| a.full.as_ref().is_some_and(|f| f.capture == bits) && shown(&frame(a, &cx, 1280, 720)).contains(chip));
+    }
+    a.full.as_mut().unwrap().navigate("fake://capture/0");
+    pump(&mut a, &cx, "no chip once nothing is captured", |a| a.full.as_ref().is_some_and(|f| f.capture == 0) && !shown(&frame(a, &cx, 1280, 720)).contains(" on"));
+}
+
+#[test]
+fn a_click_on_the_sign_is_written_to_the_audit_log_with_what_was_stopped_and_closing_the_browser_takes_the_sign_away() {
+    let (_fake, cx, mut a, _g) = in_full("media_audit", "--static");
+    ask_for(&mut a, &cx, 3);
+    key(&mut a, &cx, Key::Char('1'));
+    key(&mut a, &cx, Key::Char('1'));
+    pump(&mut a, &cx, "capturing", |a| a.full.as_ref().is_some_and(|f| f.capture == 3) && browser_media::capture_now() == 3);
+    assert!(!cx.audit.recent(50).iter().any(|l| l.contains("browser.media.stopped")));
+    browser_media::ask_stop();
+    pump(&mut a, &cx, "stopped", |a| a.full.as_ref().is_some_and(|f| f.capture == 0));
+    let line = cx.audit.recent(50).into_iter().find(|l| l.contains("browser.media.stopped")).expect("the click is on the audit log");
+    assert!(line.contains(&browser_media::kinds_words(3)), "{line}");
+    // a page captures again, then the browser is closed: the sign's source is cleared at once and the two seconds of hold are the only thing left
+    a.full.as_mut().unwrap().navigate("fake://capture/2");
+    pump(&mut a, &cx, "capturing again", |a| a.full.as_ref().is_some_and(|f| f.capture == 2) && browser_media::capture_raw() == 2);
+    drop(a);
+    assert_eq!(browser_media::capture_raw(), 0, "closing the browser clears what the sign reads");
+    browser_media::expire_hold();
+    assert_eq!(browser_media::capture_now(), 0, "and the sign is gone");
+}

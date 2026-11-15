@@ -52,7 +52,7 @@ fn goto(a: &mut SettingsApp, cx: &AppCx, t: Tab) {
 }
 
 fn beacon() -> Beacon {
-    Beacon { host: "other-box".into(), version: "0.1.0-test".into(), role: "target".into(), dev_on: true, pairing_open: true, mac: "02:aa:bb:cc:dd:ee".into(), id: "ffeeddccbbaa99887766554433221100".into(), port: 7979 }
+    Beacon { host: "other-box".into(), version: "0.1.0-test".into(), role: "target".into(), dev_on: true, pairing_open: true, mac: "02:aa:bb:cc:dd:ee".into(), id: "ffeeddccbbaa99887766554433221100".into(), port: 7979, ip6: None }
 }
 
 /// A fake with a Thunderbolt cable to a computer that runs IYAKKI with developer mode on and a pairing code open.

@@ -24,6 +24,8 @@ pub fn route(cx: &Ctx, action: &str, path: &str, q: &dyn Fn(&str) -> String, bod
         "/v1/dev/click" => click_route(cx, action, body),
         "/v1/dev/inbox" => inbox_route(cx, action, q("bodies") == "1"),
         "/v1/dev/diag" => diag_route(cx, action),
+        "/v1/dev/doctor" => doctor_route(cx, action, q("detail") == "1"),
+        "/v1/dev/flows/assist" => flows_assist_route(cx, action, &q("flow")),
         _ => Out::err(404, "not found"),
     }
 }
@@ -75,6 +77,9 @@ fn click_route(cx: &Ctx, action: &str, body: &[u8]) -> Out {
     let label = v["label"].as_str().unwrap_or("");
     if label.trim().is_empty() || label.len() > 200 {
         return Out::err(422, "label: the name of a button (see `iyakki dev state`)");
+    }
+    if input::approval_card(cx.dm.data_dir()) {
+        return cx.refuse(action, input::APPROVAL_SENTENCE);
     }
     if input::secret_focus(cx.dm.data_dir()) && !(cx.key.has(Scope::InputPassword) && scopes::check(cx.key, cx.policy, Scope::InputPassword).is_ok()) {
         return cx.refuse(action, "a password field has focus on the device: input is refused unless the computer holds the input:password scope");
@@ -152,10 +157,81 @@ fn inbox_route(cx: &Ctx, action: &str, bodies: bool) -> Out {
     Out::json(200, &v)
 }
 
+/// The DOCTOR report of this device (F-DOCTOR-03), administrator accounts only, read-only: the same findings as the DOCTOR tile and
+/// `iyakki doctor`, and with the running system's own state (dev cluster, vault of the paired account, VPN light) when the device's
+/// services are here. The answer is text plus whether anything needs attention (`code` 1) and whether the live reads were included.
+fn doctor_route(cx: &Ctx, action: &str, detail: bool) -> Out {
+    use crate::doctor_gather as dg;
+    if !cx.policy.manage_settings {
+        return cx.refuse(action, "the DOCTOR report is for administrator accounts");
+    }
+    let tail: Vec<String> = (cx.audit_tail)(dg::AUDIT_LOOKBACK);
+    let n = tail.len();
+    // the audit tail comes oldest first; `recent(n)` of the real log is the newest n in the same order
+    let audit_recent: dg::AuditRecent = std::sync::Arc::new(move |k| tail[n.saturating_sub(k)..].to_vec());
+    let slow: dg::SlowProbe = std::sync::Arc::new(dg::slow_probe);
+    let (text, code, live) = match cx.svc {
+        Some(svc) => {
+            let (t, c) = dg::live_report(svc, &cx.key.account, detail, audit_recent, &slow);
+            (t, c, true)
+        }
+        None => {
+            let dir = cx.dm.data_dir();
+            match crate::settings::SettingsStore::open(&dir.join("settings.json")) {
+                Ok(s) => {
+                    let s = std::sync::Mutex::new(s);
+                    let (t, c) = dg::cli_report(&dg::Gather { dir, user: "", settings: &s, live: None }, audit_recent, detail, &slow);
+                    (t, c, false)
+                }
+                Err(e) => return cx.refuse(action, &format!("the settings could not be read: {e}")),
+            }
+        }
+    };
+    cx.log(action, if live { "live report" } else { "report without live state" }, true);
+    Out::json(200, &json!({ "text": text, "code": code, "live": live }))
+}
+
 fn diag_route(cx: &Ctx, action: &str) -> Out {
     // the screen is optional: a device with nobody signed in still gives the rest
     let snap = state::fetch(cx.dm.data_dir(), 800).ok();
     let text = diag::bundle(&diag::Input { paths: cx.paths, hostname: cx.hostname, data_dir: cx.dm.data_dir(), firewall_file: &cx.firewall_file, audit_tail: cx.audit_tail, kube: if scopes::check(cx.key, cx.policy, Scope::Kube).is_ok() { cx.kube } else { None }, screen: snap.as_ref(), admin: cx.policy.manage_settings });
     cx.log(action, &format!("{} bytes", text.len()), true);
     Out::json(200, &json!({ "text": text }))
+}
+
+/// What the flow-fixing agent did, for every flow of the account or one (`flow`: an id or a name): the account switches, and per flow the
+/// readout of `iyakki_flow::assist_activity` (suggestions waiting, the watched version, today's counters, the newest Activity lines).
+/// Reads only; no input value or secret is in the data it reads.
+pub fn flows_assist_report(dir: &std::path::Path, filter: &str, now_ms: i64) -> Value {
+    use std::sync::Arc;
+    let book = iyakki_flow::assist_store::AssistStore::from_fn(dir, move || now_ms);
+    let store = iyakki_flow::store::FlowStore::new(dir, Arc::new(move || now_ms));
+    let g = book.global();
+    let flows: Vec<Value> = store
+        .summaries()
+        .into_iter()
+        .filter(|f| filter.is_empty() || f.id == filter || f.name.eq_ignore_ascii_case(filter))
+        .map(|f| {
+            let mode = store.get_draft(&f.id).map_or("off".to_string(), |d| format!("{:?}", d.defaults.assist.mode).to_ascii_lowercase());
+            let mut r = iyakki_flow::assist_activity::readout(&book, &f.id, now_ms, 10);
+            r["name"] = json!(f.name);
+            r["mode"] = json!(mode);
+            r
+        })
+        .collect();
+    json!({
+        "enabled": g.enabled, "max_publish_per_day": g.max_publish_per_day, "publishes_today": book.publishes_today_all(),
+        "matrix": g.matrix, "profile": g.profile.summary(), "flows": flows,
+    })
+}
+
+fn flows_assist_route(cx: &Ctx, action: &str, filter: &str) -> Out {
+    let home = cx.home.clone().unwrap_or_else(|| crate::scope::home_root(&cx.key.account, cx.dm.data_dir()));
+    let dir = home.join("Flows");
+    if !dir.is_dir() {
+        return Out::err(404, "this account has no Flows folder yet");
+    }
+    let v = flows_assist_report(&dir, filter.trim(), crate::clock::now_unix() * 1000);
+    cx.log(action, &format!("{} flow(s)", v["flows"].as_array().map_or(0, Vec::len)), true);
+    Out::json(200, &v)
 }

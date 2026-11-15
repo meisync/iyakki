@@ -21,7 +21,7 @@ Settings -> Account -> Two-step sign-in. It is never mandatory by default, for a
 
 | Piece | Where | Fact |
 |---|---|---|
-| Accounts file | `crates/iyakki-shell/src/accounts.rs` (`UserStore`, `UserRecord`) | `users.json`, mode 0600, atomic write. A record is `{name, hash, role, overrides}`; `hash` is Argon2id PHC. |
+| Accounts file | `crates/iyakki-accounts/src/lib.rs` (`UserStore`, `UserRecord`) | `users.json`, mode 0600, atomic write. A record is `{name, hash, role, overrides}`; `hash` is Argon2id PHC. |
 | Sign-in | `UserStore::authenticate(name, pw)` | One Argon2 verify always runs (unknown names cost the same). Returns a `Session {user, role, policy}`. Password only; there is no second step. |
 | Throttle | `throttle_left` | In memory, per account name: from the 3rd failure wait 1, 2, 4 ... capped at 60 s. Lost at restart. |
 | Roles | `iyakki_sec::policy::Role` (Admin, Operator, User, Guest); `Policy.manage_users` | The last admin cannot be removed or demoted. |

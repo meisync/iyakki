@@ -228,23 +228,23 @@ impl FakeRunner {
         FakeRunner { rules: Mutex::new(vec![]), calls: Mutex::new(vec![]), programs: Mutex::new(programs.iter().map(|s| s.to_string()).collect()) }
     }
     pub fn answer(&self, contains: &str, stdout: &str) -> &Self {
-        self.rules.lock().unwrap().push((contains.into(), Out { code: Some(0), stdout: stdout.into(), ..Default::default() }));
+        self.rules.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((contains.into(), Out { code: Some(0), stdout: stdout.into(), ..Default::default() }));
         self
     }
     pub fn fail(&self, contains: &str, code: i32, stderr: &str) -> &Self {
-        self.rules.lock().unwrap().push((contains.into(), Out { code: Some(code), stderr: stderr.into(), ..Default::default() }));
+        self.rules.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((contains.into(), Out { code: Some(code), stderr: stderr.into(), ..Default::default() }));
         self
     }
     /// Makes a program count as installed.
     pub fn programs_add(&self, p: &str) {
-        self.programs.lock().unwrap().push(p.to_string());
+        self.programs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(p.to_string());
     }
     /// Forgets every scripted answer (a test changes what the world says).
     pub fn forget(&self) {
-        self.rules.lock().unwrap().clear();
+        self.rules.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
     }
     pub fn calls(&self) -> Vec<Call> {
-        self.calls.lock().unwrap().clone()
+        self.calls.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
     pub fn lines(&self) -> Vec<String> {
         self.calls().iter().map(Call::line).collect()
@@ -253,17 +253,17 @@ impl FakeRunner {
 
 impl Runner for FakeRunner {
     fn run(&self, cwd: &Path, argv: &[String], env: &[(String, String)], _t: Duration, _cap: usize, sink: Option<Sink>) -> Out {
-        self.calls.lock().unwrap().push(Call { argv: argv.to_vec(), env: env.to_vec(), cwd: cwd.display().to_string() });
+        self.calls.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(Call { argv: argv.to_vec(), env: env.to_vec(), cwd: cwd.display().to_string() });
         let line = argv.join(" ");
-        let out = self.rules.lock().unwrap().iter().find(|(k, _)| line.contains(k.as_str())).map(|(_, o)| o.clone());
+        let out = self.rules.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().find(|(k, _)| line.contains(k.as_str())).map(|(_, o)| o.clone());
         let out = out.unwrap_or_else(|| Out { code: Some(1), stderr: format!("fake runner: no answer for `{line}`"), ..Default::default() });
         if let Some(sk) = sink {
-            sk.lock().unwrap().push_str(&out.combined());
+            sk.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push_str(&out.combined());
         }
         out
     }
     fn has(&self, program: &str) -> bool {
-        self.programs.lock().unwrap().iter().any(|p| p == program)
+        self.programs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().any(|p| p == program)
     }
 }
 

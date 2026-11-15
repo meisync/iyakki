@@ -120,6 +120,11 @@ fn ready(app: &mut IdeApp) -> bool {
 #[test]
 fn git_is_the_last_main_tab_after_k8s_with_a_branch_glyph_and_ctrl_shift_l() {
     assert_eq!(*MainTab::ALL.last().unwrap(), MainTab::Git);
+    {
+        use crate::apps::App as _;
+        let (_w, app0, _r, _d0) = git_world("gtab-f1");
+        assert!(app0.help().join("\n").contains("Ctrl+Shift+L  Git"), "the key is listed in F1");
+    }
     assert_eq!(MainTab::ALL[MainTab::ALL.len() - 2], MainTab::K8s);
     assert_eq!(super::super::ide_ui::main_glyph(MainTab::Git), crate::fx::Glyph::Git);
     let (w, mut app, run, d) = git_world("gtab");

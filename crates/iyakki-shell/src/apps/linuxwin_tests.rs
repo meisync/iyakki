@@ -171,7 +171,16 @@ impl Proc for FakeProc {
     }
 }
 
+/// What one spawn made: its slot, the server of its display, and the flags for it being killed and still alive.
+struct Made {
+    slot: u32,
+    srv: Arc<Server>,
+    killed: Arc<AtomicBool>,
+    alive: Arc<AtomicBool>,
+}
+
 struct FakeSpawn {
+    made: Mutex<Vec<Made>>,
     srv: Arc<Server>,
     killed: Arc<AtomicBool>,
     argv: Mutex<Vec<String>>,
@@ -182,12 +191,16 @@ impl Spawn for FakeSpawn {
         *self.argv.lock().unwrap() = argv.to_vec();
         std::fs::write(log, "").unwrap();
         let i = argv.iter().position(|a| a == "--bind-rw").ok_or("no run folder")?;
-        let sock = Path::new(&argv[i + 1]).join("display.sock");
+        let d = argv.iter().position(|a| a == "--").ok_or("no command")?;
+        let slot: u32 = if argv.get(d + 2).map(String::as_str) == Some("--slot") { argv[d + 3].parse().map_err(|_| "bad slot")? } else { 0 };
+        let sock = Path::new(&argv[i + 1]).join(lw::socket_name(slot));
         let _ = std::fs::remove_file(&sock);
         let l = UnixListener::bind(&sock).map_err(|e| e.to_string())?;
         let alive = Arc::new(AtomicBool::new(true));
-        serve(l, self.srv.clone(), self.size.0, self.size.1, alive.clone());
-        Ok(Box::new(FakeProc { alive, killed: self.killed.clone() }))
+        let (srv, killed) = if slot == 0 { (self.srv.clone(), self.killed.clone()) } else { (Arc::new(Server::default()), Arc::new(AtomicBool::new(false))) };
+        serve(l, srv.clone(), self.size.0, self.size.1, alive.clone());
+        self.made.lock().unwrap().push(Made { slot, srv, killed: killed.clone(), alive: alive.clone() });
+        Ok(Box::new(FakeProc { alive, killed }))
     }
 }
 
@@ -219,7 +232,7 @@ fn rig(tag: &str, network: bool, size: (u16, u16)) -> Rigged {
     fake_proc_tree(&proc_root);
     let srv = Arc::new(Server::default());
     let killed = Arc::new(AtomicBool::new(false));
-    let spawn = Arc::new(FakeSpawn { srv: srv.clone(), killed: killed.clone(), argv: Mutex::new(vec![]), size });
+    let spawn = Arc::new(FakeSpawn { made: Mutex::new(vec![]), srv: srv.clone(), killed: killed.clone(), argv: Mutex::new(vec![]), size });
     let d2 = dir.clone();
     let rig = Rig {
         la: Arc::new(move || {
@@ -573,4 +586,162 @@ fn the_tile_is_on_the_grid_for_operators_and_admins_only() {
     assert!(!Role::Guest.template().apps.contains(&PApp::LinuxWin));
     assert_eq!(PApp::LinuxWin.label(), "LINUX WINDOW");
     assert!(crate::shell::tiles_for_test().iter().any(|(a, l)| *a == PApp::LinuxWin && *l == "LINUX WINDOW"));
+}
+
+#[test]
+fn command_c_is_a_copy_in_a_terminal_window_and_never_an_interrupt_while_control_c_stays_the_interrupt() {
+    for p in ["xterm", "GNOME Terminal", "Konsole", "alacritty", "st", "foot"] {
+        assert!(terminal_like(p), "{p}");
+    }
+    for p in ["gedit", "Firefox", "Code - OSS", "test", "Stereo player"] {
+        assert!(!terminal_like(p), "{p}");
+    }
+    assert_eq!(key_for_program(&Key::Ctrl('c'), "xterm", true), Key::Ctrl('C'), "Command+C: Ctrl+Shift+C, the terminal's copy");
+    assert_eq!(key_for_program(&Key::Ctrl('v'), "xterm", true), Key::Ctrl('V'));
+    assert_eq!(key_for_program(&Key::Ctrl('c'), "xterm", false), Key::Ctrl('c'), "Control+C is the interrupt");
+    assert_eq!(key_for_program(&Key::Ctrl('c'), "gedit", true), Key::Ctrl('c'), "an editor copies with Ctrl+C");
+    assert_eq!(key_for_program(&Key::Ctrl('x'), "xterm", true), Key::Ctrl('x'));
+    // the symbols sent are Ctrl+Shift+C
+    assert_eq!(key_syms(&Key::Ctrl('C')).iter().filter(|(d, _)| *d).count(), 3);
+}
+
+fn key_count(srv: &Server) -> Vec<u32> {
+    srv.msgs.lock().unwrap().iter().filter(|m| m.0 == 4 && m.1[0] == 1).map(|m| u32::from_be_bytes([m.1[3], m.1[4], m.1[5], m.1[6]])).collect()
+}
+
+fn start_another(r: &mut Rigged, area: R) {
+    r.app.handle(&Event::Tab(7), &r.cx);
+    assert_eq!(r.app.phase, Phase::Pick, "the list is shown to choose the next program");
+    let _ = draw(&mut r.app, &r.cx, area.w as u32, area.h as u32, area);
+    r.app.handle(&Event::Tab(1), &r.cx);
+    assert_eq!(r.app.phase, Phase::Starting);
+    wait_for("the next window runs", || {
+        r.app.handle(&Event::Tick, &r.cx);
+        r.app.running()
+    });
+    wait_for("its picture", || {
+        r.app.handle(&Event::Tick, &r.cx);
+        r.app.frame_size() != (0, 0)
+    });
+}
+
+#[test]
+fn several_windows_run_side_by_side_each_with_its_own_slot_and_the_keys_go_to_the_one_on_screen() {
+    let mut r = rig("lw-many", false, (320, 200));
+    let area = R::new(0.0, 0.0, 800.0, 480.0);
+    let g1 = start_running(&mut r, area);
+    assert_eq!((r.app.windows(), r.app.parked_names().len()), (1, 0));
+    assert!(!g1.hits.iter().any(|h| h.label.starts_with("1: ")), "one window: no tabs");
+    let (_, view1) = layout(area, 1.0);
+    start_another(&mut r, area);
+    assert_eq!(r.app.windows(), 2);
+    assert_eq!(r.app.parked_names(), ["XTerm"]);
+    // the second window got slot 1: its own display argument and its own socket, beside the first's
+    let argv = r.spawn.argv.lock().unwrap().clone();
+    let dd = argv.iter().position(|a| a == "--").unwrap();
+    assert_eq!(&argv[dd + 2..dd + 4], ["--slot", "1"]);
+    assert!(r.dir.join("linuxapps/root/gui/run/display-1.sock").exists());
+    assert_eq!(r.spawn.made.lock().unwrap().iter().map(|m| m.slot).collect::<Vec<_>>(), [0, 1]);
+    // the tab row: the other window is a button, the one on screen is marked; the picture area is lower by the row
+    let g = draw(&mut r.app, &r.cx, 800, 480, area);
+    assert!(g.hits.iter().any(|h| h.label == "1: XTerm" && h.ev == Event::Tab(30)), "{:?}", g.hits.iter().map(|h| &h.label).collect::<Vec<_>>());
+    assert!(r.app.view.y > view1.y, "the tab row takes room above the picture");
+    // keys go to the window on screen only
+    let (m0, m1) = {
+        let made = r.spawn.made.lock().unwrap();
+        (made[0].srv.clone(), made[1].srv.clone())
+    };
+    r.app.handle(&Event::Key(Key::Char('b')), &r.cx);
+    wait_for("the second display gets the key", || key_count(&m1).contains(&0x62));
+    assert!(!key_count(&m0).contains(&0x62), "the first display got nothing");
+    // switching brings the first forward; the second keeps running aside
+    r.app.handle(&Event::Tab(30), &r.cx);
+    assert_eq!((r.app.phase.clone(), r.app.windows(), r.app.frame_size()), (Phase::Running, 2, (320, 200)));
+    r.app.handle(&Event::Key(Key::Char('a')), &r.cx);
+    wait_for("the first display gets the key", || key_count(&m0).contains(&0x61));
+    assert!(!key_count(&m1).contains(&0x61));
+    assert!(!r.spawn.made.lock().unwrap()[1].killed.load(Ordering::SeqCst), "the other window was only put aside");
+    // a third window; the tabs are in slot order
+    start_another(&mut r, area);
+    assert_eq!(r.app.windows(), 3);
+    assert_eq!(r.spawn.made.lock().unwrap().iter().map(|m| m.slot).collect::<Vec<_>>(), [0, 1, 2]);
+    let g = draw(&mut r.app, &r.cx, 800, 480, area);
+    let labels: Vec<&String> = g.hits.iter().map(|h| &h.label).filter(|l| l.contains(": XTerm")).collect();
+    assert_eq!(labels.len(), 2, "two buttons for the others: {labels:?}");
+    // Stop closes only the window on screen and brings another forward
+    r.app.handle(&Event::Tab(3), &r.cx);
+    assert!(r.spawn.made.lock().unwrap()[2].killed.load(Ordering::SeqCst));
+    assert!(!r.spawn.made.lock().unwrap()[1].killed.load(Ordering::SeqCst) && !r.killed.load(Ordering::SeqCst));
+    assert_eq!((r.app.phase.clone(), r.app.windows()), (Phase::Running, 2));
+    assert!(!r.dir.join("linuxapps/root/gui/run/display-2.sock").exists(), "its socket is gone");
+    // a window aside whose program ends is dropped from the list and said so
+    let victim = r.app.parked_names().len();
+    assert_eq!(victim, 1);
+    {
+        let made = r.spawn.made.lock().unwrap();
+        let aside = made.iter().find(|m| !m.killed.load(Ordering::SeqCst) && m.slot != 2 && m.slot != r.app.slot()).unwrap();
+        aside.alive.store(false, Ordering::SeqCst);
+    }
+    wait_for("the ended window is dropped", || {
+        r.app.handle(&Event::Tick, &r.cx);
+        r.app.windows() == 1
+    });
+    assert!(r.app.note.as_ref().is_some_and(|(t, good)| t.contains("ended") && !*good), "{:?}", r.app.note);
+    assert!(r.app.running(), "the one on screen is unaffected");
+    // closing the tile stops what is left
+    drop(r.app);
+    assert!(r.killed.load(Ordering::SeqCst) || r.spawn.made.lock().unwrap().iter().all(|m| m.killed.load(Ordering::SeqCst) || !m.alive.load(Ordering::SeqCst)));
+}
+
+#[test]
+fn no_more_windows_than_slots_and_the_ended_one_in_front_hands_over_to_another() {
+    let mut r = rig("lw-max", false, (160, 100));
+    let area = R::new(0.0, 0.0, 700.0, 400.0);
+    let _ = start_running(&mut r, area);
+    for _ in 1..lw::MAX_SLOTS {
+        start_another(&mut r, area);
+    }
+    assert_eq!(r.app.windows(), lw::MAX_SLOTS as usize);
+    r.app.handle(&Event::Tab(7), &r.cx);
+    assert!(r.app.running() && r.app.note.as_ref().is_some_and(|(t, good)| t.contains("At most") && !*good), "{:?}", r.app.note);
+    assert_eq!(r.spawn.made.lock().unwrap().len(), lw::MAX_SLOTS as usize, "no fifth sandbox process");
+    // the window on screen ends by itself: another one comes forward instead of an empty page
+    let slot_on_screen = r.spawn.made.lock().unwrap().last().unwrap().slot;
+    r.spawn.made.lock().unwrap().last().unwrap().alive.store(false, Ordering::SeqCst);
+    wait_for("another window comes forward", || {
+        r.app.handle(&Event::Tick, &r.cx);
+        r.app.windows() == lw::MAX_SLOTS as usize - 1
+    });
+    assert!(r.app.running(), "slot {slot_on_screen} ended, the tile still shows a window");
+    // its slot is free again for the next one
+    start_another(&mut r, area);
+    assert_eq!(r.spawn.made.lock().unwrap().last().unwrap().slot, slot_on_screen);
+}
+
+#[test]
+fn the_alt_key_reaches_the_program_as_alt_and_only_a_running_window_asks_for_it() {
+    use crate::input::alt_key;
+    assert_eq!(key_syms(&Key::Alt('f')), vec![(true, ks::ALT_L), (true, 0x66), (false, 0x66), (false, ks::ALT_L)]);
+    assert_eq!(key_syms(&Key::Alt('F')), vec![(true, ks::ALT_L), (true, ks::SHIFT_L), (true, 0x66), (false, 0x66), (false, ks::SHIFT_L), (false, ks::ALT_L)]);
+    assert_eq!(key_syms(&Key::Alt('4')), vec![(true, ks::ALT_L), (true, 0x34), (false, 0x34), (false, ks::ALT_L)]);
+    // the shell side: only a typed character with Alt alone, and only when a tile asked
+    assert_eq!(alt_key(Key::Char('x'), false, true, false, true), Key::Alt('x'));
+    assert_eq!(alt_key(Key::Char('x'), false, true, false, false), Key::Char('x'), "not asked: as before");
+    assert_eq!(alt_key(Key::Char('x'), false, false, false, true), Key::Char('x'), "no Alt held");
+    assert_eq!(alt_key(Key::Char('x'), true, true, false, true), Key::Char('x'), "Ctrl+Alt stays the shell's chord");
+    assert_eq!(alt_key(Key::Char('x'), false, true, true, true), Key::Char('x'), "Super+Alt stays the shell's chord");
+    assert_eq!(alt_key(Key::Char(' '), false, true, false, true), Key::Char(' '));
+    assert_eq!(alt_key(Key::Left, false, true, false, true), Key::Left);
+    // the tile asks only while a window runs
+    let mut r = rig("lw-alt", false, (320, 200));
+    assert!(!r.app.wants_alt(), "the list asks for nothing");
+    let area = R::new(0.0, 0.0, 800.0, 480.0);
+    let _ = start_running(&mut r, area);
+    assert!(r.app.wants_alt());
+    r.app.handle(&Event::Key(Key::Alt('f')), &r.cx);
+    wait_for("alt arrives", || key_count(&r.srv).contains(&ks::ALT_L));
+    let keys: Vec<(bool, u32)> = r.srv.msgs.lock().unwrap().iter().filter(|m| m.0 == 4).map(|m| (m.1[0] == 1, u32::from_be_bytes([m.1[3], m.1[4], m.1[5], m.1[6]]))).collect();
+    assert_eq!(keys, vec![(true, ks::ALT_L), (true, 0x66), (false, 0x66), (false, ks::ALT_L)]);
+    r.app.handle(&Event::Tab(3), &r.cx);
+    assert!(!r.app.wants_alt());
 }

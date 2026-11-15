@@ -12,7 +12,7 @@ use serde_json::Value;
 use crate::assist::*;
 use crate::assist_store::*;
 use crate::heal;
-use crate::host::{Host, HealRequest, Notice, Redactor};
+use crate::host::{ChannelNotice, Host, HealRequest, Notice, Redactor};
 use crate::kinds::Registry;
 use crate::model::*;
 use crate::store::{compatible, diff, FlowStore, PublishReq};
@@ -53,6 +53,70 @@ impl Trial for EngineTrial<'_> {
             }
         }
         TrialState::Passed(format!("{} step(s) tried read-only with the recorded input", changed.len()))
+    }
+}
+
+/// What a whole-flow trial did: which steps were tried read-only with the recorded inputs, which were refused because they have effects
+/// (a message, a write, a camera, a browser, a remote call, a model), and which failed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WholeTrial {
+    pub tried: Vec<String>,
+    /// (step, why it was not run)
+    pub refused: Vec<(String, String)>,
+    /// (step, error)
+    pub failed: Vec<(String, String)>,
+}
+
+impl WholeTrial {
+    /// One line for the screen, the chat and the audit log.
+    pub fn summary(&self) -> String {
+        let mut s = format!("{} step(s) tried read-only", self.tried.len());
+        if !self.refused.is_empty() {
+            s.push_str(&format!(", {} with effects not run ({})", self.refused.len(), self.refused.iter().map(|r| r.0.as_str()).collect::<Vec<_>>().join(", ")));
+        }
+        if !self.failed.is_empty() {
+            s.push_str(&format!(", {} failed ({})", self.failed.len(), self.failed.iter().map(|r| format!("{}: {}", r.0, r.1)).collect::<Vec<_>>().join("; ")));
+        }
+        s
+    }
+
+    pub fn state(&self) -> TrialState {
+        if !self.failed.is_empty() {
+            TrialState::Failed(self.summary())
+        } else if self.tried.is_empty() {
+            TrialState::NotRun(self.summary())
+        } else {
+            TrialState::Passed(self.summary())
+        }
+    }
+}
+
+impl EngineTrial<'_> {
+    /// Try every step of the flow that is safe to try (read-only), once each with the input the run recorded for it, and refuse every step
+    /// with effects. Nothing is sent, written, photographed or published; the person's draft and the flow's versions are not touched.
+    pub fn whole(&self, flow: &Flow, run: &Run) -> WholeTrial {
+        let mut out = WholeTrial::default();
+        for node in &flow.nodes {
+            if never_in_trial(&node.kind) {
+                out.refused.push((node.id.clone(), format!("{} is never run in a trial", node.kind)));
+                continue;
+            }
+            let Some(kind) = self.reg.get(&node.kind) else {
+                out.refused.push((node.id.clone(), format!("`{}` is not a step kind", node.kind)));
+                continue;
+            };
+            if !kind.idempotent(node) {
+                out.refused.push((node.id.clone(), format!("{} has effects", node.kind)));
+                continue;
+            }
+            let input = run.nodes.get(&node.id).map(|n| n.input.clone()).unwrap_or(Value::Null);
+            match self.engine.test_node(flow, &node.id, run.inputs.clone(), input) {
+                Ok(t) if t.ok => out.tried.push(node.id.clone()),
+                Ok(t) => out.failed.push((node.id.clone(), t.error)),
+                Err(e) => out.failed.push((node.id.clone(), e.to_string())),
+            }
+        }
+        out
     }
 }
 
@@ -116,7 +180,16 @@ impl Assistant<'_> {
     }
 
     fn notice(&self, flow_id: &str, run_id: &str, title: &str, body: &str, level: &str, needs_you: bool) {
-        let _ = self.host.notify(&Notice { title: clip(title, 120), body: body.chars().take(500).collect(), level: level.into(), flow_id: flow_id.into(), run_id: run_id.into(), needs_you });
+        let n = Notice { title: clip(title, 120), body: body.chars().take(500).collect(), level: level.into(), flow_id: flow_id.into(), run_id: run_id.into(), needs_you };
+        let _ = self.host.notify(&n);
+        // the INBOX note above is always made; a Matrix message follows when the person switched it on (refusals are the host's to say)
+        let g = self.book.global();
+        if g.matrix {
+            let c = ChannelNotice { channels: vec!["matrix".into()], room: g.matrix_room, dedupe_key: format!("assist-{flow_id}-{run_id}-{}", clip(title, 60)), ..Default::default() };
+            if let Err(e) = self.host.notify_channels(&n, &c) {
+                self.host.audit("flow.assist.matrix", &format!("{flow_id}: not sent ({})", clip(&e, 120)));
+            }
+        }
     }
 
     fn base_current(&self, flow_id: &str, base_version: u32) -> Result<(), String> {
@@ -197,9 +270,9 @@ impl Assistant<'_> {
             if cli.is_empty() { vec![] } else { vec![(cli.clone(), self.host.cli_info(&cli).map(|i| i.version).unwrap_or_default())] }
         };
         let ctx = red.text(&heal::failure_context(run, &node_id, &clis));
-        let req = HealRequest { run_id: run.id.clone(), flow_id: flow_id.to_string(), node_id: node_id.clone(), context: format!("{}\n\n{ctx}", heal::HEAL_INSTRUCTIONS), agent: String::new(), max_cents: policy.max_cents_per_fix };
+        let req = HealRequest { run_id: run.id.clone(), flow_id: flow_id.to_string(), node_id: node_id.clone(), context: format!("{}\n\n{ctx}", heal::HEAL_INSTRUCTIONS), agent: String::new(), model: String::new(), timeout_secs: 0, max_cents: policy.max_cents_per_fix };
         self.book.record(flow_id, "draft", 0, &format!("{} asked about run {}", if on_demand { "person" } else { "failure" }, run.id))?;
-        let proposal = self.host.propose_patch(&req, &crate::Cancel::new());
+        let proposal = crate::assist_profile::propose_with_profile(self.host, &self.book.global().profile, &req, &crate::Cancel::new());
         let proposal = match proposal {
             Ok(p) => p,
             Err(e) => {

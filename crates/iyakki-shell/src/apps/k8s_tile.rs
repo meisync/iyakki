@@ -38,7 +38,7 @@ pub(super) const T_BACK: usize = 6;
 pub(super) const T_START: usize = 7;
 pub(super) const T_SETTINGS: usize = 8;
 pub(super) const T_CLOSE: usize = 9;
-pub(super) const T_TAB: usize = 10; // 10..15: Summary, YAML, Events, Related, Logs
+pub(super) const T_TAB: usize = 10; // 10..16: Summary, YAML, Events, Related, Logs, Instances
 pub(super) const T_COPY: usize = 20;
 pub(super) const T_REVEAL: usize = 21;
 pub(super) const T_EXEC: usize = 22;
@@ -342,10 +342,12 @@ pub enum DTab {
     Events,
     Related,
     Logs,
+    /// The instances of a custom resource definition (F-K8S-26): only for a definition.
+    Instances,
 }
 
 impl DTab {
-    pub const ALL: [DTab; 5] = [DTab::Summary, DTab::Yaml, DTab::Events, DTab::Related, DTab::Logs];
+    pub const ALL: [DTab; 6] = [DTab::Summary, DTab::Yaml, DTab::Events, DTab::Related, DTab::Logs, DTab::Instances];
     pub fn label(self) -> &'static str {
         match self {
             DTab::Summary => "Summary",
@@ -353,6 +355,7 @@ impl DTab {
             DTab::Events => "Events",
             DTab::Related => "Related",
             DTab::Logs => "Logs",
+            DTab::Instances => "Instances",
         }
     }
 }
@@ -422,6 +425,9 @@ pub(super) struct Detail {
     pub obj: DState<Value>,
     pub events: DState<Vec<EventRow>>,
     pub related: DState<Vec<Rel>>,
+    /// The instances of the selected custom resource definition.
+    pub instances: DState<iyakki_agent::k8scr::CrList>,
+    pub inst_job: Option<Job<Result<iyakki_agent::k8scr::CrList, String>>>,
     pub reveal: bool,
     pub view: TextView,
     pub logs: LogState,
@@ -440,7 +446,7 @@ pub(super) struct Detail {
 
 impl Detail {
     fn new() -> Detail {
-        Detail { key: None, tab: DTab::Summary, obj: DState::None, events: DState::None, related: DState::None, reveal: false, view: TextView::default(), logs: LogState::new(), containers: vec![], gen: 0, obj_job: None, ev_job: None, rel_job: None, due: None, owned: false, cordoned: false }
+        Detail { key: None, tab: DTab::Summary, obj: DState::None, events: DState::None, related: DState::None, instances: DState::None, inst_job: None, reveal: false, view: TextView::default(), logs: LogState::new(), containers: vec![], gen: 0, obj_job: None, ev_job: None, rel_job: None, due: None, owned: false, cordoned: false }
     }
 }
 
@@ -867,6 +873,8 @@ impl K8sApp {
         self.det.obj = DState::None;
         self.det.events = DState::None;
         self.det.related = DState::None;
+        self.det.instances = DState::None;
+        self.det.inst_job = None;
         self.det.reveal = false;
         self.det.obj_job = None;
         self.det.ev_job = None;
@@ -933,6 +941,17 @@ impl K8sApp {
                     self.det.rel_job = Some(Job::spawn(move || kx::related(&*kube, &t, kind, &ns, &obj)));
                 }
             }
+            DTab::Instances if matches!(self.det.instances, DState::None) && kind == Kind::Crds => {
+                if let Some(obj) = self.det.obj.ready().cloned() {
+                    let Some(crd) = iyakki_agent::k8scr::CrdInfo::from_object(&obj) else {
+                        self.det.instances = DState::Failed("this definition does not say its group and plural name, so its instances cannot be listed".into());
+                        return;
+                    };
+                    self.det.instances = DState::Loading;
+                    let now = clock();
+                    self.det.inst_job = Some(Job::spawn(move || iyakki_agent::k8scr::list_instances(&*kube, &t, &crd, &iyakki_agent::k8sexp::Scope::All, now)));
+                }
+            }
             DTab::Logs => self.start_logs(true),
             _ => {}
         }
@@ -941,6 +960,10 @@ impl K8sApp {
     pub(super) fn set_tab(&mut self, tab: DTab) {
         if tab == DTab::Logs && self.kind != Kind::Pods {
             self.say("Logs are for pods: select a pod.", false);
+            return;
+        }
+        if tab == DTab::Instances && self.kind != Kind::Crds {
+            self.say("Instances are for custom resource definitions: select one in the Custom resources list.", false);
             return;
         }
         self.det.tab = tab;
@@ -973,7 +996,7 @@ impl K8sApp {
                     self.det.owned = v["metadata"]["ownerReferences"].as_array().is_some_and(|a| !a.is_empty());
                     self.det.cordoned = v["spec"]["unschedulable"].as_bool() == Some(true);
                     self.det.obj = DState::Ready(v);
-                    if self.det.tab == DTab::Related && matches!(self.det.related, DState::None) {
+                    if (self.det.tab == DTab::Related && matches!(self.det.related, DState::None)) || (self.det.tab == DTab::Instances && matches!(self.det.instances, DState::None)) {
                         self.load_tab_data();
                     }
                 }
@@ -984,6 +1007,14 @@ impl K8sApp {
         if let Some(r) = self.det.ev_job.as_ref().and_then(|j| j.take()) {
             self.det.ev_job = None;
             self.det.events = match r {
+                Ok(v) => DState::Ready(v),
+                Err(e) => DState::Failed(e),
+            };
+            changed = true;
+        }
+        if let Some(r) = self.det.inst_job.as_ref().and_then(|j| j.take()) {
+            self.det.inst_job = None;
+            self.det.instances = match r {
                 Ok(v) => DState::Ready(v),
                 Err(e) => DState::Failed(e),
             };
@@ -1066,6 +1097,19 @@ impl K8sApp {
                     for r in v {
                         let note = if r.note.is_empty() { String::new() } else { format!(" ({})", r.note) };
                         lines.push(Line { text: format!("{}: {} {}{}", r.relation, r.kind.api_kind(), r.name, note), color: TEXT, key_len: r.relation.chars().count() + 1 });
+                    }
+                }
+            },
+            DTab::Instances => match &self.det.instances {
+                DState::None | DState::Loading => lines.push(Line::plain("Listing the instances\u{2026}", DIM)),
+                DState::Failed(e) => lines.push(Line::plain(format!("Could not list the instances: {e}"), ERR)),
+                DState::Ready(l) if l.rows.is_empty() => lines.push(Line::plain("This definition has no instances.", DIM)),
+                DState::Ready(l) => {
+                    lines.push(Line::plain(format!("{} instance{} of {}{}", l.total, if l.total == 1 { "" } else { "s" }, l.crd, if l.total > l.rows.len() { format!(" (the first {} are shown)", l.rows.len()) } else { String::new() }), MUTED));
+                    for r in &l.rows {
+                        let place = if r.namespace.is_empty() { String::new() } else { format!(" in {}", r.namespace) };
+                        let st = if r.status.is_empty() { String::new() } else { format!(" \u{b7} {}", r.status) };
+                        lines.push(Line { text: format!("{}{place} \u{b7} {} old{st}", r.name, r.age), color: if r.status.starts_with("Not ready") { AMBER } else { TEXT }, key_len: r.name.chars().count() });
                     }
                 }
             },
@@ -1168,9 +1212,10 @@ impl K8sApp {
         self.panel = Some(Panel { title: action.title(), action: action.clone(), cluster: key, phrase: phrase.clone(), lines: lines.clone(), done: done.clone(), finished_at: None });
         let (kube, t) = (self.kube(), self.entry().target.clone());
         let a2 = action.clone();
+        let ledger = iyakki_agent::pending::Ledger::open(&self.dir.join("pending"), &self.user);
         std::thread::spawn(move || {
             let l2 = lines.clone();
-            let r = kx::run_action(&*kube, &t, &a2, &mut |l: &str| l2.lock().unwrap_or_else(|e| e.into_inner()).push(l.to_string()));
+            let r = kx::run_action_reported(&*kube, &t, &a2, &mut |l: &str| l2.lock().unwrap_or_else(|e| e.into_inner()).push(l.to_string()), Some(&ledger));
             *done.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
         });
     }
@@ -1653,7 +1698,7 @@ impl K8sApp {
                 self.filter.clear();
                 self.res.reset();
             }
-            n if (T_TAB..T_TAB + 5).contains(&n) => self.set_tab(DTab::ALL[n - T_TAB]),
+            n if (T_TAB..T_TAB + 6).contains(&n) => self.set_tab(DTab::ALL[n - T_TAB]),
             n if (T_ACT..T_ACT + 6).contains(&n) => self.begin_action(n - T_ACT),
             n if (T_CONT..T_CONT + 100).contains(&n) => {
                 let c = self.det.containers.get(n - T_CONT).cloned().unwrap_or_default();
@@ -1772,6 +1817,7 @@ impl K8sApp {
             Key::Char('s') => self.set_tab(DTab::Summary),
             Key::Char('e') => self.set_tab(DTab::Events),
             Key::Char('o') => self.set_tab(DTab::Related),
+            Key::Char('i') => self.set_tab(DTab::Instances),
             Key::Char('L') => self.show_log = !self.show_log,
             Key::Char('c') if self.show_log => self.copy_cluster_log(),
             Key::Char('c') => self.copy_view(),

@@ -91,6 +91,12 @@ impl BtAudioTools {
 }
 
 impl Tools for BtAudioTools {
+
+    fn inner_tools(&self) -> Option<&dyn Tools> {
+
+        Some(&*self.inner)
+
+    }
     fn defs(&self) -> Vec<ToolDef> {
         let mut v = self.inner.defs();
         v.retain(|d| !is_audio_tool(&d.spec.name));
@@ -208,6 +214,55 @@ impl iyakki_devctl::a2dp::OutputFactory for SpeakerFactory {
 /// Registers the speaker for Bluetooth audio (the program calls this once, with the play command of Settings -> Voice).
 pub fn install(play_cmd: impl Fn() -> String + Send + Sync + 'static) {
     iyakki_devctl::a2dp_sys::set_output_factory(move || Box::new(SpeakerFactory { play_cmd: play_cmd() }));
+}
+
+// ------------------------------------------------------------------------------------------------ the phone's remote control
+
+/// What a volume or play key of a phone or headset does here: the master volume, or IYAKKI's own player (the radio and the music it plays).
+/// Returns a short note for the audit line, empty when nothing was taken.
+pub fn do_remote(svc: &crate::services::Services, act: iyakki_devctl::avrcp::Act) -> String {
+    do_remote_with(svc, &crate::media::shared(), act)
+}
+
+/// [`do_remote`] with the music player named (the shell's shared one, or a fake in a test).
+pub fn do_remote_with(svc: &crate::services::Services, player: &crate::media::MediaPlayer, act: iyakki_devctl::avrcp::Act) -> String {
+    use iyakki_devctl::avrcp::{Act, MediaKey};
+    match act {
+        Act::SetPercent(p) => svc.master_set(u32::from(p)).map(|m| format!("volume {}", m.percent)).unwrap_or_default(),
+        Act::Step(d) => svc.master_nudge(i32::from(d)).map(|m| format!("volume {}", m.percent)).unwrap_or_default(),
+        Act::ToggleMute => svc.master_toggle_mute().map(|m| if m.muted { "muted".to_string() } else { format!("volume {}", m.percent) }).unwrap_or_default(),
+        Act::Media(MediaKey::Play) => if svc.radio.resume() { "play".into() } else { String::new() },
+        Act::Media(MediaKey::Pause) => if svc.radio.pause() { "pause".into() } else { String::new() },
+        Act::Media(MediaKey::Next) => player.skip(1).map(|l| format!("next {l}")).unwrap_or_default(),
+        Act::Media(MediaKey::Previous) => player.skip(-1).map(|l| format!("previous {l}")).unwrap_or_default(),
+        Act::Media(MediaKey::Stop) => {
+            if svc.radio.is_active() {
+                svc.radio.stop();
+                "stop".into()
+            } else {
+                String::new()
+            }
+        }
+    }
+}
+
+/// While somebody is signed in, the keys of a connected phone or headset act on the player and the volume (the phone's remote channel is
+/// answered at all times; without a session nothing is changed). `audit` gets one line per key that did something.
+pub fn install_remote(svc: &std::sync::Arc<crate::services::Services>, user: &str, audit: impl Fn(&str, &str) + Send + Sync + 'static) {
+    let (weak, user) = (std::sync::Arc::downgrade(svc), user.to_string());
+    iyakki_devctl::a2dp_sys::set_remote_handler(move |act| {
+        if let Some(s) = weak.upgrade() {
+            let did = do_remote(&s, act);
+            if !did.is_empty() {
+                audit(&user, &format!("bluetooth.remote {did}"));
+            }
+        }
+    });
+}
+
+/// Sign-out: the keys change nothing until somebody signs in again.
+pub fn clear_remote() {
+    iyakki_devctl::a2dp_sys::clear_remote_handler();
 }
 
 #[cfg(test)]

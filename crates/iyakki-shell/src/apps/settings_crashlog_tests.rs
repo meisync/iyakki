@@ -5,8 +5,39 @@ use super::*;
 use crate::apps::tests::{cx_with_admin_store, temp_dir};
 use iyakki_storage::crashlog as cl;
 
+/// A machine whose kept logs are the real folder of the test (the rest is the fake).
+struct RealLogs(Arc<iyakki_core_fake::FakeOs>);
+
+impl iyakki_core_api::Os for RealLogs {
+    fn sysinfo(&self) -> &dyn iyakki_core_api::Sysinfo {
+        self.0.sysinfo()
+    }
+    fn audio(&self) -> &dyn iyakki_core_api::Audio {
+        self.0.audio()
+    }
+    fn disks(&self) -> &dyn iyakki_core_api::Disks {
+        self.0.disks()
+    }
+    fn net(&self) -> &dyn iyakki_core_api::Net {
+        self.0.net()
+    }
+    fn memory(&self) -> Arc<dyn iyakki_core_api::memory::Memory> {
+        self.0.memory()
+    }
+    fn hardware(&self) -> Arc<dyn iyakki_core_api::hardware::Hardware> {
+        self.0.hardware()
+    }
+    fn crashlog(&self) -> Arc<dyn iyakki_core_api::crashlog::CrashLog> {
+        Arc::new(iyakki_core_local::LocalCrashLog)
+    }
+    fn netscan(&self) -> Arc<dyn iyakki_core_api::netscan::NetScan> {
+        self.0.netscan()
+    }
+}
+
 fn app(tag: &str) -> (AppCx, SettingsApp, std::path::PathBuf) {
-    let cx = cx_with_admin_store(tag);
+    let mut cx = cx_with_admin_store(tag);
+    cx.os = Arc::new(RealLogs(Arc::new(iyakki_core_fake::FakeOs::new())));
     let dir = temp_dir(&format!("{tag}-log"));
     let a = SettingsApp::new(&cx).with_crash_dir(dir.clone());
     (cx, a, dir)
@@ -111,4 +142,66 @@ fn the_page_fits_from_a_phone_to_4k_and_in_a_narrow_pane() {
             assert!(buttons[i + 1..].iter().all(|n| !o(b.rect, n.rect)), "{w}x{h}: {} overlaps another button", b.label);
         }
     }
+}
+
+#[test]
+fn copy_to_my_home_puts_the_shown_log_in_a_new_private_file_and_says_where_and_is_audited() {
+    use std::os::unix::fs::PermissionsExt;
+    let (cx, mut a, dir) = app("crash-copy");
+    crash(&dir, 30);
+    let home0 = iyakki_agent::scope::home_root_for_writes(&cx.session.user, cx.services.dir());
+    for e in std::fs::read_dir(&home0).into_iter().flatten().flatten() {
+        if e.file_name().to_string_lossy().starts_with("iyakki-session-log-") {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+    a.go_to(Tab::SessionLog);
+    assert!(a.crash_buttons().iter().any(|b| b.2 == 'c' && b.0 == "Copy to my home"));
+    a.handle(&Event::Key(Key::Char('c')), &cx);
+    let home = iyakki_agent::scope::home_root_for_writes(&cx.session.user, cx.services.dir());
+    let copies: Vec<_> = std::fs::read_dir(&home).unwrap().flatten().map(|e| e.path()).filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("iyakki-session-log-")).collect();
+    assert_eq!(copies.len(), 1, "{copies:?}");
+    let text = std::fs::read_to_string(&copies[0]).unwrap();
+    assert!(text.contains("kernel line 0") && text.contains("kernel line 29"), "the whole kept log, as the viewer shows it");
+    assert_eq!(std::fs::metadata(&copies[0]).unwrap().permissions().mode() & 0o777, 0o600);
+    assert!(cx.audit.recent(20).iter().any(|l| l.contains("unclean-shutdown.copy")));
+    // pressing it again makes a second file; the first stays
+    a.handle(&Event::Key(Key::Char('c')), &cx);
+    let n = std::fs::read_dir(&home).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("iyakki-session-log-")).count();
+    assert_eq!(n, 2);
+    let _ = std::fs::remove_file(&copies[0]);
+}
+
+#[test]
+fn copy_to_my_home_with_no_kept_log_says_so_and_writes_nothing() {
+    let (cx, mut a, _dir) = app("crash-copy-none");
+    a.go_to(Tab::SessionLog);
+    a.handle(&Event::Key(Key::Char('c')), &cx);
+    assert!(!cx.audit.recent(20).iter().any(|l| l.contains("unclean-shutdown.copy")), "nothing was copied, so nothing is audited as copied");
+}
+
+#[test]
+fn the_note_the_lines_the_seen_button_and_the_copy_all_go_through_the_core_on_a_fake_machine() {
+    use iyakki_core_fake::FakeOs;
+    let (mut cx, mut a, dir) = app("crash-core");
+    let os = Arc::new(FakeOs::new());
+    cx.os = os.clone();
+    let log = os.crashlog_fake();
+    let u = cl::Unclean { boot_id: "ffff".into(), started: 1_792_771_000, last_line: "last words".into(), uptime_s: 42, file: "kmsg-crash-ffff.log".into(), audited: true, seen: false, marker: true };
+    log.set(|s| {
+        s.unclean = Some(u);
+        s.files.insert("kmsg-crash-ffff.log".into(), (0..300).map(|i| format!("fake kernel line {i}")).collect());
+    });
+    assert!(dir.read_dir().unwrap().next().is_none(), "the folder on this computer is empty: everything below is the fake's");
+    assert!(a.attention(&cx).iter().any(|x| x.tab == Tab::SessionLog), "the note is the fake's");
+    go(&mut a, &cx, Tab::SessionLog);
+    let _ = draw(&mut a, &cx, 1280, 720);
+    assert_eq!(a.crash.name, "kmsg-crash-ffff.log");
+    assert_eq!(a.crash.lines.len(), VIEW_LINES_FOR_TEST);
+    assert!(a.crash.lines.last().unwrap().contains("fake kernel line 299"));
+    a.handle(&Event::Key(Key::Char('c')), &cx);
+    assert_eq!(log.calls(), vec!["copy_to_folder(kmsg-crash-ffff.log)".to_string()]);
+    a.handle(&Event::Key(Key::Char('y')), &cx);
+    assert_eq!(log.calls().last().map(String::as_str), Some("mark_seen"));
+    assert!(!a.attention(&cx).iter().any(|x| x.tab == Tab::SessionLog), "seen: the note is gone");
 }

@@ -11,7 +11,7 @@
 
 use crate::cloudkeys::MemberKeys;
 use crate::cloudstorage::plain_name;
-use crate::cloudvaultd::{Client, Principal};
+use crate::cloudvaultd::{Client, Principal, Scope};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -52,6 +52,29 @@ impl VaultTarget {
             return Err("not a plain user name".into());
         }
         Ok(Client { host: self.host.clone(), port: self.port, fingerprint: self.fingerprint.clone(), who: Principal::Member { tenant, user: user.into() }, keys })
+    }
+
+    /// The member's client for traffic that carries a secret: refused unless the vault's certificate is pinned. The status probe may run
+    /// without a pin (it sends nothing secret); a secret is never sent to a certificate that was not checked.
+    pub fn secret_client(&self, user: &str, keys: MemberKeys) -> Result<Client, String> {
+        if self.fingerprint.is_none() {
+            return Err("secrets are only sent to a pinned vault: set IYAKKI_VAULT_FINGERPRINT".into());
+        }
+        self.client(user, keys)
+    }
+
+    /// Read one secret of `scope` for `user` (the pod's own use). The value is returned to the caller and never logged here.
+    pub fn read_secret(&self, user: &str, keys: MemberKeys, scope: &Scope, name: &str) -> Result<Vec<u8>, String> {
+        self.secret_client(user, keys)?.get(scope, name)
+    }
+
+    /// Write one secret of `scope` for `user`; with `make_scope` a missing scope is made first (the member becomes its first holder).
+    pub fn write_secret(&self, user: &str, keys: MemberKeys, scope: &Scope, name: &str, value: &[u8], make_scope: bool) -> Result<(), String> {
+        let c = self.secret_client(user, keys)?;
+        if make_scope && c.scope_key(scope).is_err() {
+            c.create_scope(scope)?;
+        }
+        c.put(scope, name, value)
     }
 
     /// `ok` when something that speaks TLS and HTTP answers (and the pinned certificate, if one is named, is the one it shows).
@@ -169,6 +192,38 @@ mod tests {
         assert_eq!(status(&Link::from_values(Some(&url), Some(&run.fingerprint), None)), "ok");
         // the wrong pinned certificate is not "ok"
         assert_eq!(status(&Link::from_values(Some(&url), Some("00:11"), None)), "unreachable");
+        run.stop();
+    }
+
+    #[test]
+    fn a_pod_reads_and_writes_its_secrets_only_over_a_pinned_vault() {
+        let d = crate::testdir::unique("vaultlink", "secrets");
+        {
+            let tdir = d.join("tenants").join("acme");
+            let r = crate::cloudroles::Roles::new("alice").unwrap();
+            crate::cloudroles::save(&crate::cloudroles::path(&tdir), &r).unwrap();
+            let st = crate::cloudvaultd::Store::open(&d).unwrap();
+            st.enroll(&Principal::Member { tenant: "acme".into(), user: "alice".into() }, &MemberKeys::from_seed([1; 32]).public()).unwrap();
+        }
+        let run = crate::cloudvaultd::start("127.0.0.1:0".parse().unwrap(), &d, None).unwrap();
+        let url = format!("https://127.0.0.1:{}", run.local_addr().port());
+        let keys = || MemberKeys::from_seed([1; 32]);
+        // no pin: refused before anything is sent
+        let unpinned = VaultTarget::parse(&url, None, Some("acme")).unwrap();
+        let e = unpinned.write_secret("alice", keys(), &Scope::Tenant, "token", b"v", true).unwrap_err();
+        assert!(e.contains("pinned"), "{e}");
+        assert!(unpinned.read_secret("alice", keys(), &Scope::Tenant, "token").unwrap_err().contains("pinned"));
+        // pinned: written, read back, and a wrong pin is refused
+        let pinned = VaultTarget::parse(&url, Some(&run.fingerprint), Some("acme")).unwrap();
+        pinned.write_secret("alice", keys(), &Scope::Tenant, "token", b"value-one", true).unwrap();
+        assert_eq!(pinned.read_secret("alice", keys(), &Scope::Tenant, "token").unwrap(), b"value-one");
+        pinned.write_secret("alice", keys(), &Scope::Tenant, "token", b"value-two", true).unwrap();
+        assert_eq!(pinned.read_secret("alice", keys(), &Scope::Tenant, "token").unwrap(), b"value-two");
+        let wrong = VaultTarget::parse(&url, Some("00:11"), Some("acme")).unwrap();
+        assert!(wrong.read_secret("alice", keys(), &Scope::Tenant, "token").is_err());
+        // a tenant name is needed, and a stranger holds nothing
+        assert!(VaultTarget::parse(&url, Some(&run.fingerprint), None).unwrap().read_secret("alice", keys(), &Scope::Tenant, "token").is_err());
+        assert!(pinned.read_secret("mallory", MemberKeys::from_seed([9; 32]), &Scope::Tenant, "token").is_err());
         run.stop();
     }
 }

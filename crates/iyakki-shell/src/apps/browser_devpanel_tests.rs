@@ -454,3 +454,20 @@ fn the_wheel_over_the_panel_scrolls_its_list_and_not_the_page() {
     a.handle(&Event::Scroll(-1), &cx);
     pump(&mut a, &cx, "the wheel on the page", |a| a.full.as_ref().is_some_and(|f| f.log.iter().any(|l| l.contains("Wheel"))));
 }
+
+#[test]
+fn the_report_site_button_saves_a_local_report_for_a_page_the_full_engine_shows_and_for_a_reader_page() {
+    let (_fake, cx, mut a, _g) = in_full("dev_report", "--static");
+    key(&mut a, &cx, Key::F(12));
+    dev_page(&mut a, &cx);
+    let file = crate::apps::browser_report::file_for(cx.services.dir(), &cx.session.user);
+    assert!(!file.exists());
+    a.handle(&Event::Tab(browser_devpanel::TAB_REPORT), &cx);
+    let text = std::fs::read_to_string(&file).unwrap_or_else(|e| panic!("no report: {e}; status {:?}; full url {:?}", a.status, a.full.as_ref().map(|f| f.url.clone())));
+    assert!(text.contains("\"engine\":\"full\"") && text.contains("\"host\":\"") && !text.contains("token="), "{text}");
+    assert!(a.status.as_ref().is_some_and(|s| s.1 && s.0.contains("nothing was sent")), "{:?}", a.status);
+    assert!(cx.audit.recent(20).iter().any(|l| l.contains("browser.report")));
+    // the button is drawn in the panel with its name for the keyboard walk and the screen reader
+    let g = frame(&mut a, &cx, 1280, 720);
+    assert!(g.hits.iter().any(|h| h.label == "Report site"), "the button is a hit region");
+}

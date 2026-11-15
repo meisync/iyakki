@@ -10,6 +10,9 @@
 //! * Mutual TLS: `--client-ca HOST=NAME` (repeatable) for an https route; the CA is read from the same source. A name that is not an
 //!   https route of the table is an error (it would silently do nothing).
 //! * Pods: `--service-dialer port-forward|cluster-dns` with `--namespace`.
+//! * Mutual TLS to the pod: `--pod-tls HOST=NAME` (repeatable): the listener reaches that route's target over TLS with its client
+//!   certificate, and trusts only the pod link's CA (`podtls.rs`); the material comes from the same certificate source and a
+//!   failure is a 502, never plain HTTP.
 //! * Firewall: the real gate is the default. A listener that is not bound to a loopback address and has no working firewall does not
 //!   start. `--no-firewall` is accepted only with a loopback `--bind`. `--reach local|anywhere` (default local network only).
 //! * Tenants: `--route-tenant HOST=TENANT` (repeatable) and `--tenant-limit N` (default 64 open requests per tenant).
@@ -35,6 +38,8 @@ pub const USAGE: &str = "iyakki cloud listen --routes FILE [--bind ADDR] [--redi
         (vault source: certificates NAME-chain and NAME-key are read into memory, no key touches the disk; the URL, fingerprint and tenant\n    \
         also come from IYAKKI_VAULT_URL, IYAKKI_VAULT_FINGERPRINT, IYAKKI_TENANT)\n    \
     [--client-ca HOST=NAME]...   (mutual TLS for the https route HOST: only clients with a certificate of the CA NAME are served)\n    \
+    [--pod-tls HOST=NAME]...     (TLS with a client certificate to the pod behind the route HOST; the pod link NAME is in the same source:\n    \
+        vault secrets NAME-pod-ca, NAME-pod-client-chain, NAME-pod-client-key; files NAME.pod-ca, NAME.pod-client.crt, NAME.pod-client.key)\n    \
     [--service-dialer none|port-forward|cluster-dns] [--namespace NS] [--cluster-domain DOMAIN] [--kubeconfig FILE] [--context NAME]\n    \
         (routes whose target is a Kubernetes Service; without a dialer they answer 502)\n    \
     [--reach local|anywhere]   (who the firewall lets reach the ports: the local network (default) or every address)\n    \
@@ -99,6 +104,44 @@ fn is_loopback(ip: IpAddr) -> bool {
     ip.is_loopback()
 }
 
+/// The vault client and scope from the flags (and the environment): `--vault`, `--vault-fingerprint`, `--tenant`, `--vault-user`,
+/// `--vault-key`, `--vault-scope`. The member's key is read from the file and never written.
+pub fn vault_client(a: &[String], deps: &Deps, notes: &mut Vec<String>) -> Result<(Client, Scope), String> {
+    let url = opt(a, "--vault").or_else(|| (deps.env)(ENV_URL));
+    let fp = opt(a, "--vault-fingerprint").or_else(|| (deps.env)(ENV_FINGERPRINT));
+    let tenant = opt(a, "--tenant").or_else(|| (deps.env)(ENV_TENANT));
+    let target = match Link::from_values(url.as_deref(), fp.as_deref(), tenant.as_deref()) {
+        Link::Target(t) => t,
+        Link::NotConfigured => return Err("the vault needs --vault URL (or IYAKKI_VAULT_URL)".into()),
+        Link::Invalid(e) => return Err(format!("the vault address is not usable: {e}")),
+    };
+    if target.fingerprint.is_none() {
+        notes.push("the vault's certificate is not pinned (no --vault-fingerprint): the connection is not protected against a fake vault".into());
+    }
+    let user = opt(a, "--vault-user").ok_or("--vault-user NAME is needed with the vault")?;
+    let keyfile = opt(a, "--vault-key").ok_or("--vault-key FILE is needed with the vault (the member's secret; never written by this command)")?;
+    let keys = MemberKeys::from_hex(&(deps.read_file)(&keyfile)?).map_err(|e| format!("{keyfile}: {e}"))?;
+    let scope_text = opt(a, "--vault-scope").unwrap_or_else(|| "tenant".into());
+    let scope = Scope::parse(&scope_text).ok_or_else(|| format!("--vault-scope \"{scope_text}\" is not tenant, common or namespace:NAME"))?;
+    Ok((target.client(&user, keys)?, scope))
+}
+
+/// The certificate source of the flags: files (`--cert-dir`, the default) or the vault (`--cert-source vault`).
+pub fn source(a: &[String], deps: &Deps, notes: &mut Vec<String>) -> Result<Arc<dyn CertSource>, String> {
+    Ok(match opt(a, "--cert-source").as_deref().unwrap_or("file") {
+        "file" => Arc::new(FileCerts::new(opt(a, "--cert-dir").unwrap_or_else(|| ".".into()))),
+        "vault" => {
+            if opt(a, "--cert-dir").is_some() {
+                return Err("--cert-dir and --cert-source vault together: certificates come from one place only".into());
+            }
+            let (client, scope) = vault_client(a, deps, notes)?;
+            notes.push("certificates and keys come from the vault, in memory only".into());
+            Arc::new(VaultCerts::new((deps.vault)(client, scope)))
+        }
+        other => return Err(format!("--cert-source \"{other}\" is not file or vault")),
+    })
+}
+
 pub fn build(a: &[String], table: &RouteTable, deps: &Deps) -> Result<Setup, String> {
     let mut o = Options::default();
     let mut notes = Vec::new();
@@ -110,34 +153,7 @@ pub fn build(a: &[String], table: &RouteTable, deps: &Deps) -> Result<Setup, Str
     }
 
     // (a) certificates
-    let source: Arc<dyn CertSource> = match opt(a, "--cert-source").as_deref().unwrap_or("file") {
-        "file" => Arc::new(FileCerts::new(opt(a, "--cert-dir").unwrap_or_else(|| ".".into()))),
-        "vault" => {
-            if opt(a, "--cert-dir").is_some() {
-                return Err("--cert-dir and --cert-source vault together: certificates come from one place only".into());
-            }
-            let url = opt(a, "--vault").or_else(|| (deps.env)(ENV_URL));
-            let fp = opt(a, "--vault-fingerprint").or_else(|| (deps.env)(ENV_FINGERPRINT));
-            let tenant = opt(a, "--tenant").or_else(|| (deps.env)(ENV_TENANT));
-            let target = match Link::from_values(url.as_deref(), fp.as_deref(), tenant.as_deref()) {
-                Link::Target(t) => t,
-                Link::NotConfigured => return Err("--cert-source vault needs --vault URL (or IYAKKI_VAULT_URL)".into()),
-                Link::Invalid(e) => return Err(format!("the vault address is not usable: {e}")),
-            };
-            if target.fingerprint.is_none() {
-                notes.push("the vault's certificate is not pinned (no --vault-fingerprint): the connection is not protected against a fake vault".into());
-            }
-            let user = opt(a, "--vault-user").ok_or("--vault-user NAME is needed with the vault source")?;
-            let keyfile = opt(a, "--vault-key").ok_or("--vault-key FILE is needed with the vault source (the member's secret; never written by this command)")?;
-            let keys = MemberKeys::from_hex(&(deps.read_file)(&keyfile)?).map_err(|e| format!("{keyfile}: {e}"))?;
-            let scope_text = opt(a, "--vault-scope").unwrap_or_else(|| "tenant".into());
-            let scope = Scope::parse(&scope_text).ok_or_else(|| format!("--vault-scope \"{scope_text}\" is not tenant, common or namespace:NAME"))?;
-            let client = target.client(&user, keys)?;
-            notes.push("certificates and keys come from the vault, in memory only".into());
-            Arc::new(VaultCerts::new((deps.vault)(client, scope)))
-        }
-        other => return Err(format!("--cert-source \"{other}\" is not file or vault")),
-    };
+    let source = source(a, deps, &mut notes)?;
 
     // (b) mutual TLS
     for v in all(a, "--client-ca") {
@@ -148,6 +164,20 @@ pub fn build(a: &[String], table: &RouteTable, deps: &Deps) -> Result<Setup, Str
         if o.client_ca.insert(host.clone(), name).is_some() {
             return Err(format!("--client-ca {host} is given twice"));
         }
+    }
+
+    // (b2) TLS to the pod
+    for v in all(a, "--pod-tls") {
+        let (host, name) = pair("--pod-tls", &v)?;
+        if !table.routes.iter().any(|r| r.scheme != Scheme::Passthrough && r.host.eq_ignore_ascii_case(&host)) {
+            return Err(format!("--pod-tls {host}: no http or https route has this host (a passthrough route is not opened, so there is nothing to wrap)"));
+        }
+        if o.pod_tls.insert(host.clone(), name).is_some() {
+            return Err(format!("--pod-tls {host} is given twice"));
+        }
+    }
+    if !o.pod_tls.is_empty() {
+        notes.push("the pods of the --pod-tls routes are reached over mutual TLS and never in plain; a pod that does not serve it answers 502".into());
     }
 
     // (c) pods

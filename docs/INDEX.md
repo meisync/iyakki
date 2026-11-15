@@ -68,7 +68,7 @@
 | `PROJECT-TEAM.md` | The idea and requirements team, sponsors and hardware testers |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | One-page overview, crate map, boot flow, security model, where to extend |
 | [`../BOUNDARY.md`](../BOUNDARY.md) | Every place our code touches the base OS; the rules |
-| [`../FEATURES.md`](../FEATURES.md) | The feature matrix: status, progress and tests per feature |
+| [`../FEATURES.md`](../FEATURES.md) | The feature matrix: status, Impl/Test, Manual and tests per feature (see development/IMPL-TEST-COLUMNS.md) |
 | [`development/SDK-API.md`](development/SDK-API.md) | The developer SDK API (design): bridge, local HTTP, MCP, embedding, usage budgets, the remote debug loop |
 | [`development/BROWSER-MEDIA-DEVICES.md`](development/BROWSER-MEDIA-DEVICES.md) | Why the full browser has no camera or microphone (engine built without media-stream, helper setting off, no capture plugins), the permission prompt and store that now exist, what a Buildroot rebuild must change, steps and owner decisions |
 | [`development/TOKEN-BUDGET.md`](development/TOKEN-BUDGET.md) | Where the tokens of a chat request go (system, tools, history, outputs), the per-run log line and footer, measured numbers for plain, Flows and Browser chats before and after tool routing, how routing and `more_tools` work, the Settings switch |
@@ -91,7 +91,7 @@ hardware) · [`../Agent OS Architecture Specification.md`](<../Agent OS Architec
 
 | Document | Read it for |
 |---|---|
-| [`../CHANGELOG.md`](../CHANGELOG.md) · [`../RELEASE-NOTES-0.1.0-alpha.1.md`](../RELEASE-NOTES-0.1.0-alpha.1.md) | What is in this release |
+| [`../CHANGELOG.md`](../CHANGELOG.md) · [`../RELEASE-NOTES-0.1.0-alpha.3.md`](../RELEASE-NOTES-0.1.0-alpha.3.md) · [`alpha.2`](../RELEASE-NOTES-0.1.0-alpha.2.md) · [`alpha.1`](../RELEASE-NOTES-0.1.0-alpha.1.md) | What is in each release, and what was tried where |
 | [`BUILD-INCREMENTAL.md`](BUILD-INCREMENTAL.md) | Build only what changed: change detection, repack, layered macweb, shared caches |
 | [`LINUX-APPS.md`](LINUX-APPS.md) · [`BUILD-YOUR-OWN-IMAGE-APP.md`](BUILD-YOUR-OWN-IMAGE-APP.md) | Linux apps: a Debian or Ubuntu sandbox (downloaded, checked, namespaced; apt, folders, network switch, terminal, AI IDE), image apps, building your own; phase 2 (graphical) design |
 | [`GPU-K3S.md`](GPU-K3S.md) | GPU for local models in k3s: Vulkan on any GPU, the NVIDIA driver, the PC image, the RTX 4090 checklist |

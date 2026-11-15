@@ -34,6 +34,13 @@ pub struct RoomRef {
     pub account: String,
     pub name: String,
     pub room_id: String,
+    /// Is this room copied into the INBOX while the account's copy is on? Yes unless the person left it out (F-MSG-07).
+    #[serde(default = "yes")]
+    pub mirror: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -46,6 +53,9 @@ struct File {
 #[derive(Default, Serialize, Deserialize)]
 struct State {
     since: std::collections::BTreeMap<String, String>,
+    /// Accounts whose saved rooms are copied into the INBOX (off unless the person switched it on).
+    #[serde(default)]
+    mirror: std::collections::BTreeSet<String>,
 }
 
 pub fn vault_name(id: &str) -> String {
@@ -210,6 +220,7 @@ impl Accounts {
         self.save(&f)?;
         let mut s = self.read_state();
         s.since.remove(id);
+        s.mirror.remove(id);
         let _ = self.write(&self.state_path(), serde_json::to_vec(&s).unwrap_or_default());
         self.store.delete(&vault_name(id))
     }
@@ -229,14 +240,27 @@ impl Accounts {
         if !f.accounts.iter().any(|a| a.id == account) {
             return Err("no such account".into());
         }
+        let keep = f.rooms.iter().find(|r| r.account == account && r.name.eq_ignore_ascii_case(name.trim())).map(|r| r.mirror).unwrap_or(true);
         f.rooms.retain(|r| !(r.account == account && r.name.eq_ignore_ascii_case(name.trim())));
         if f.rooms.iter().filter(|r| r.account == account).count() >= 50 {
             return Err("at most 50 rooms per account".into());
         }
-        let r = RoomRef { account: account.into(), name: name.trim().into(), room_id: room_id.trim().into() };
+        let r = RoomRef { account: account.into(), name: name.trim().into(), room_id: room_id.trim().into(), mirror: keep };
         f.rooms.push(r.clone());
         self.save(&f)?;
         Ok(r)
+    }
+
+    /// Choose whether one saved room is copied into the INBOX (while the account's copy is on). The room stays saved either way.
+    pub fn set_room_mirror(&self, account: &str, name: &str, on: bool) -> Result<RoomRef, String> {
+        let mut f = self.load();
+        let Some(r) = f.rooms.iter_mut().find(|r| r.account == account && r.name.eq_ignore_ascii_case(name.trim())) else {
+            return Err(format!("there is no saved room called `{}`", name.trim()));
+        };
+        r.mirror = on;
+        let out = r.clone();
+        self.save(&f)?;
+        Ok(out)
     }
 
     pub fn remove_room(&self, account: &str, name: &str) -> Result<(), String> {
@@ -260,6 +284,24 @@ impl Accounts {
     pub fn set_since(&self, account: &str, since: &str) -> Result<(), String> {
         let mut s = self.read_state();
         s.since.insert(account.into(), since.into());
+        self.write(&self.state_path(), serde_json::to_vec(&s).map_err(|e| e.to_string())?)
+    }
+
+    /// Does this account copy new messages of its saved rooms into the INBOX? Off until the person says so.
+    pub fn mirror_on(&self, account: &str) -> bool {
+        self.read_state().mirror.contains(account)
+    }
+
+    pub fn set_mirror(&self, account: &str, on: bool) -> Result<(), String> {
+        if self.get(account).is_none() {
+            return Err("no such account".into());
+        }
+        let mut s = self.read_state();
+        if on {
+            s.mirror.insert(account.into());
+        } else {
+            s.mirror.remove(account);
+        }
         self.write(&self.state_path(), serde_json::to_vec(&s).map_err(|e| e.to_string())?)
     }
 }

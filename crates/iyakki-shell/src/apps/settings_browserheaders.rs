@@ -13,6 +13,11 @@ use super::*;
 pub(super) struct BhPanel {
     /// The list is showing instead of the Browser page.
     pub(super) open: bool,
+    /// How far the Browser page is scrolled (pixels) and the furthest it can go.
+    pub(super) scroll: f32,
+    pub(super) max: f32,
+    /// The height of the window the page was last drawn in.
+    pub(super) page_h: f32,
 }
 
 /// The forms of this page: a new rule, or the rule with this id.
@@ -149,7 +154,7 @@ impl SettingsApp {
     pub(super) fn render_browser_headers(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
         let rules = store_of::store(cx).list();
         let mut y = a.y;
-        super::sshtun_page::intro(g, a, s, &mut y, &["Send a header with requests to chosen sites: a token for an internal page, a test header for a staging site. It goes only to addresses that match the filter, over https (plain http only to this computer or a private address), and never follows a redirect to another site.", "The value is kept in your vault and shown as asterisks. The full web engine does not send these headers yet; the reader and the built-in engine do."], "Send a header to chosen sites, over https. The value stays in your vault.", if rules.is_empty() { 40.0 * s } else { 74.0 * s + 60.0 * s + 16.0 * s });
+        super::sshtun_page::intro(g, a, s, &mut y, &["Send a header with requests to chosen sites: a token for an internal page, a test header for a staging site. It goes only to addresses that match the filter, over https (plain http only to this computer or a private address), and never follows a redirect to another site.", "The value is kept in your vault and shown as asterisks. The reader and the built-in engine send them. The full web engine is sent the same rules too (experimental, not yet proven on a real device); a rule with a path pattern or an address range is used by the built-in engine only."], "Send a header to chosen sites, over https. The value stays in your vault.", if rules.is_empty() { 40.0 * s } else { 74.0 * s + 60.0 * s + 16.0 * s });
         if rules.is_empty() {
             y += 6.0 * s;
             for w in g.wrap(14.0 * s, "No rules yet. Press a to add one.", Face::Sans, a.w) {

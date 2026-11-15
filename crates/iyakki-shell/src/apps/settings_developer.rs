@@ -23,6 +23,10 @@ pub(super) struct DevPanel {
     on: bool,
     /// The scope the switches act on (index into `Scope::ALL`).
     scope: usize,
+    /// The web-service family the web API switch acts on (index into the grantable families).
+    api: usize,
+    /// The core contract scope the switch acts on (index into the grantable contract scopes).
+    core: usize,
     /// The "Connect over USB-C" page (key `u`) is showing instead of the computers list.
     pub(super) usb_open: bool,
     pub(super) usb: super::usbc_page::UsbPanel,
@@ -179,6 +183,34 @@ impl SettingsApp {
                 }
             }
             Key::Char('s') => self.devel.scope = (self.devel.scope + 1) % Scope::ALL.len(),
+            // the web service's api:* scopes of the selected computer: i chooses the family, m cycles nothing -> reading only -> all
+            Key::Char('i') => self.devel.api = (self.devel.api + 1) % api_families().len(),
+            Key::Char('m') => {
+                let rows = Self::devmode_keys(cx);
+                let sel = self.sel[self.tab].min(rows.len().saturating_sub(1));
+                let Some(row) = rows.get(sel) else {
+                    self.fail("Pair a computer first.".to_string());
+                    return;
+                };
+                let fam = api_families()[self.devel.api % api_families().len()];
+                let held = d.api_scopes(&row.name);
+                let next = match api_state(&held, fam) {
+                    0 => Some(format!("{fam}:read")),
+                    1 => Some(fam.to_string()),
+                    _ => None,
+                };
+                let r = match &next {
+                    Some(sc) => d.set_api_scope(p, &user, &row.name, sc, true),
+                    None => d.set_api_scope(p, &user, &row.name, fam, false),
+                };
+                match r {
+                    Ok(now) => {
+                        cx.audit.record(&user, "devmode.api.set", &format!("{} {}", row.name, next.as_deref().unwrap_or(fam)));
+                        self.ok(format!("{} may now call in the web service: {}.", row.name, if now.is_empty() { "nothing".to_string() } else { now.join(", ") }));
+                    }
+                    Err(e) => self.fail(e),
+                }
+            }
             Key::Char(' ') | Key::Char('g') => {
                 let sc = Scope::ALL[self.devel.scope % Scope::ALL.len()];
                 if matches!(k, Key::Char('g')) {
@@ -228,6 +260,33 @@ impl SettingsApp {
                     Err(e) => self.fail(e),
                 }
             }
+            // the box "Allow restarts from this computer without asking" for the selected computer: lasts as long as the developer
+            // connection (no time of its own), restart and switch-off only
+            Key::Char('r') => {
+                let rows = Self::devmode_keys(cx);
+                let sel = self.sel[self.tab].min(rows.len().saturating_sub(1));
+                let Some(row) = rows.get(sel) else {
+                    self.fail("Pair a computer first.".to_string());
+                    return;
+                };
+                if d.restart_grant_active(&row.name) {
+                    match d.restart_grant_off(p, &user, &row.name) {
+                        Ok(()) => {
+                            cx.audit.record(&user, "devmode.restart.grant_off", &row.name);
+                            self.ok(format!("{} must ask for approval to restart this device again.", row.name));
+                        }
+                        Err(e) => self.fail(e),
+                    }
+                } else {
+                    match d.restart_grant_on(p, &user, &row.name) {
+                        Ok(v) => {
+                            cx.audit.record(&user, "devmode.restart.grant_on", &row.name);
+                            self.ok(format!("{} may restart or switch off this device without asking until {}. Nothing else.", row.name, if v.until > 0 { dm::stamp(v.until) } else { "developer mode is switched off".to_string() }));
+                        }
+                        Err(e) => self.fail(e),
+                    }
+                }
+            }
             Key::Char('w') => {
                 let trusted = d.shell_auto_list();
                 if trusted.is_empty() {
@@ -244,6 +303,48 @@ impl SettingsApp {
                 }
                 cx.audit.record(&user, "devmode.shell.auto_off", &m);
                 self.ok(format!("{m} must ask for approval again."));
+            }
+            Key::Char('W') => {
+                // the experimental WASM tile switch (off by default; the chat tool wasm_tiles_set does the same)
+                let on = !iyakki_agent::store::tilehub::wasm_enabled(Self::svc(cx));
+                let r = Self::svc(cx).settings.lock().map_err(|_| "the settings are busy".to_string()).and_then(|mut st| st.update(|x| x.wasm_tiles = on).map_err(|e| e.to_string()));
+                match r {
+                    Ok(_) => {
+                        cx.audit.record(&user, "settings.wasm_tiles", if on { "on" } else { "off" });
+                        self.ok(if on { "WASM tiles (experimental) are on: tile apps with a .wasm module run in the sandboxed tile host." } else { "WASM tiles are off." });
+                    }
+                    Err(e) => self.fail(e),
+                }
+            }
+            // the typed core contract over the developer channel (off by default; the chat tools core_contract_switch and
+            // core_contract_scope_set do the same): K switches the channel, j chooses a contract scope, z grants or takes it back
+            Key::Char('K') => {
+                let on = !d.core_enabled();
+                match d.set_core_enabled(p, &user, on) {
+                    Ok(()) => {
+                        cx.audit.record(&user, "settings.developer", &format!("core contract {}", if on { "on" } else { "off" }));
+                        self.ok(if on { "The core contract channel is on. A computer holds no contract scope until you grant one below." } else { "The core contract channel is off." });
+                    }
+                    Err(e) => self.fail(e),
+                }
+            }
+            Key::Char('j') => self.devel.core = (self.devel.core + 1) % core_scopes().len(),
+            Key::Char('z') => {
+                let rows = Self::devmode_keys(cx);
+                let sel = self.sel[self.tab].min(rows.len().saturating_sub(1));
+                let Some(row) = rows.get(sel) else {
+                    self.fail("Pair a computer first.".to_string());
+                    return;
+                };
+                let sc = core_scopes()[self.devel.core % core_scopes().len()];
+                let on = !d.core_scopes(&row.name).iter().any(|x| x == sc);
+                match d.set_core_scope(p, &user, &row.name, sc, on) {
+                    Ok(now) => {
+                        cx.audit.record(&user, "settings.developer", &format!("core scope {sc} {} for {}", if on { "granted" } else { "taken back" }, row.name));
+                        self.ok(format!("{} may now use in the core contract: {}.", row.name, if now.is_empty() { "nothing".to_string() } else { now.join(", ") }));
+                    }
+                    Err(e) => self.fail(e),
+                }
             }
             Key::Char('k') => {
                 // end the selected computer's shell access and disconnect all its sessions
@@ -265,7 +366,14 @@ impl SettingsApp {
         if self.devel.usb_open {
             return;
         }
-        self.devel.scope = row as usize % Scope::ALL.len();
+        // lines 100 and up are the web API families (key m cycles the family under the finger)
+        if row >= 120 {
+            self.devel.core = (row - 120) as usize;
+        } else if row >= 100 {
+            self.devel.api = (row - 100) as usize;
+        } else {
+            self.devel.scope = row as usize % Scope::ALL.len();
+        }
         self.handle_developer(k, cx);
     }
 
@@ -305,6 +413,8 @@ impl SettingsApp {
         if self.devel.auto_shown {
             v.push(("Ask each time again", TEXT, 'w'));
         }
+        v.push(("Core contract on/off", TEXT, 'K'));
+        v.push(("Contract scope on/off", TEXT, 'z'));
         v.push(("Grant all diagnostic scopes", ACCENT, 'G'));
         v.push(("Next scope", TEXT, 's'));
         v.push(("Scope on/off", TEXT, ' '));
@@ -315,6 +425,9 @@ impl SettingsApp {
             v.push(("Approve 12 h", ERR, '1'));
             v.push(("Shell once", ERR, 'o'));
             v.push(("Deny shell", TEXT, 'd'));
+        }
+        if on {
+            v.push(("Restarts without asking on/off", TEXT, 'r'));
         }
         v.push(("Disconnect", ERR, 'k'));
         v.push(("Revoke", ERR, 'x'));
@@ -376,7 +489,7 @@ impl SettingsApp {
                     y += 18.0 * s;
                 }
             }
-            let addrs: Vec<String> = iyakki_devctl::ipv4_addresses().into_iter().filter(|(_, ip)| !ip.starts_with("127.")).map(|(_, ip)| format!("{ip}:{}", st.port())).collect();
+            let addrs: Vec<String> = cx.os.net().ipv4_addresses().unwrap_or_default().into_iter().filter(|(_, ip)| !ip.starts_with("127.")).map(|(_, ip)| format!("{ip}:{}", st.port())).collect();
             let line = format!("On the computer: iyakki dev pair {} — then type this code. The fingerprint above must match what it prints. The computer will act as {} ({} left).", addrs.first().cloned().unwrap_or_else(|| format!("<this device's address>:{}", st.port())), p.account, {
                 let left = (p.expires - d.now()).max(0);
                 format!("{}:{:02}", left / 60, left % 60)
@@ -459,6 +572,10 @@ impl SettingsApp {
             }
             return y;
         }
+        let wasm_on = iyakki_agent::store::tilehub::wasm_enabled(Self::svc(cx));
+        tap_line(g, a, &mut y, s, 13.0, if wasm_on { rgb(255, 196, 94) } else { MUTED }, Face::Sans, &format!("WASM tiles (experimental): {} · tap here or press W to turn {}", if wasm_on { "on" } else { "off (default)" }, if wasm_on { "off" } else { "on" }), Some(Event::Key(Key::Char('W'))));
+        let core_on = d.core_enabled();
+        tap_line(g, a, &mut y, s, 13.0, if core_on { rgb(255, 196, 94) } else { MUTED }, Face::Sans, &format!("Core contract channel: {} · tap here or press K to turn {}. A computer holds no contract scope until you grant one below.", if core_on { "on" } else { "off (default)" }, if core_on { "off" } else { "on" }), Some(Event::Key(Key::Char('K'))));
         y += controls::section_title(g, a.x, y, s, "Paired computers (tap one to choose it)");
         let rows = Self::devmode_keys(cx);
         if rows.is_empty() {
@@ -489,8 +606,65 @@ impl SettingsApp {
                 g.hit(R::new(a.x, y, a.w, SCOPE_PITCH * s), Event::Sub(i as u8, Key::Char(' ')), &format!("{}: {}", k.name, sc.id()));
                 y += SCOPE_PITCH * s;
             }
+            // the web service's api:* scopes: a program of this computer that signs in with its key may call only these families
+            y += 6.0 * s;
+            y += controls::section_title(g, a.x, y, s, &format!("What programs of {} may call in the web service (tap a line: none, reading only, all; i: next, m: change)", k.name));
+            let held = d.api_scopes(&k.name);
+            for (i, fam) in api_families().into_iter().enumerate() {
+                let st = api_state(&held, fam);
+                let cursor = if i == self.devel.api % api_families().len() { "▶" } else { " " };
+                let col = if st == 2 { rgb(255, 196, 94) } else if st == 1 { rgb(200, 210, 120) } else { DIM };
+                let t = g.fit(13.0 * s, &format!("{cursor} [{}] {:<14} {}", ["  ", "r ", "x "][st as usize], fam, iyakki_agent::devmode::apiscopes::FAMILIES.iter().find(|(f, _)| *f == fam).map_or("", |(_, w)| *w)), Face::Mono, a.w);
+                g.text(a.x, y + 5.0 * s, 13.0 * s, col, &t, Face::Mono);
+                g.hit(R::new(a.x, y, a.w, SCOPE_PITCH * s), Event::Sub(100 + i as u8, Key::Char('m')), &format!("{}: {fam}", k.name));
+                y += SCOPE_PITCH * s;
+            }
+            // the typed core contract: what a client of this computer may do over the contract channel (the local marker never)
+            y += 6.0 * s;
+            y += controls::section_title(g, a.x, y, s, &format!("What {} may do in the core contract (tap a line to turn it on or off; j: next, z: on/off)", k.name));
+            let held = d.core_scopes(&k.name);
+            for (i, sc) in core_scopes().into_iter().enumerate() {
+                let on_sc = held.iter().any(|x| x == sc);
+                let cursor = if i == self.devel.core % core_scopes().len() { "▶" } else { " " };
+                let t = g.fit(13.0 * s, &format!("{cursor} [{}] {:<16}", if on_sc { "x" } else { " " }, sc), Face::Mono, a.w);
+                g.text(a.x, y + 5.0 * s, 13.0 * s, if on_sc { rgb(255, 196, 94) } else { DIM }, &t, Face::Mono);
+                g.hit(R::new(a.x, y, a.w, SCOPE_PITCH * s), Event::Sub(120 + i as u8, Key::Char('z')), &format!("{}: {sc}", k.name));
+                y += SCOPE_PITCH * s;
+            }
+            // the standing restart grant: no time of its own, it ends with the developer connection
+            if on && k.has(Scope::Power) {
+                y += 6.0 * s;
+                let granted = d.restart_grant_list().into_iter().find(|v| v.computer == k.name);
+                let ends = |u: i64| if u > 0 { format!("until {}", dm::stamp(u)) } else { "until developer mode is switched off".to_string() };
+                let line = match &granted {
+                    Some(v) => format!("[x] Allow restarts from this computer without asking ({}, the same time as this developer connection; restart and switch-off only, every use is logged{}). Tap to stop (r)", ends(v.until), if v.awaiting_start { "; waiting for the device to report a successful start" } else { "" }),
+                    None => "[ ] Allow restarts from this computer without asking (lasts as long as this developer connection; restart and switch-off only, every use is logged). Tap to allow (r)".to_string(),
+                };
+                tap_line(g, a, &mut y, s, 13.0, if granted.is_some() { rgb(255, 196, 94) } else { MUTED }, Face::Sans, &line, Some(Event::Key(Key::Char('r'))));
+            }
         }
         y
+    }
+}
+
+/// The scopes of the core contract an administrator can grant (`local` never).
+fn core_scopes() -> Vec<&'static str> {
+    iyakki_agent::devmode::contract::GRANTABLE.to_vec()
+}
+
+/// The families of the web service an administrator can grant (`api:admin` never).
+fn api_families() -> Vec<&'static str> {
+    iyakki_agent::devmode::apiscopes::FAMILIES.iter().map(|(f, _)| *f).filter(|f| *f != "api:admin").collect()
+}
+
+/// 0 nothing, 1 reading only, 2 everything of the family.
+fn api_state(held: &[String], fam: &str) -> u8 {
+    if held.iter().any(|s| s == fam) {
+        2
+    } else if held.iter().any(|s| s.strip_suffix(":read") == Some(fam)) {
+        1
+    } else {
+        0
     }
 }
 

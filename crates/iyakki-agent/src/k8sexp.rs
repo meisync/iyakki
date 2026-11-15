@@ -1729,6 +1729,23 @@ pub fn run_action(kube: &dyn Kube, tg: &Target, a: &Action, emit: &mut dyn FnMut
     Ok(result)
 }
 
+/// [`run_action`], and a restart (a rollout) is reported to the ledger of waiting work while it goes on: it is waiting work until the
+/// workload is rolled out, and `stopped` when this thread ends without a result (F-AI-16).
+pub fn run_action_reported(kube: &dyn Kube, tg: &Target, a: &Action, emit: &mut dyn FnMut(&str), ledger: Option<&crate::pending::Ledger>) -> Result<String, String> {
+    let guard = match (a, ledger) {
+        (Action::Restart { kind, ns, name }, Some(l)) => Some(crate::pendingplus::WorkGuard::start(l, crate::pending::Source::Rollout, &format!("{ns}/{}/{name}", kind.singular()), &format!("rollout of {} {name}", kind.api_kind().to_lowercase()), "")),
+        _ => None,
+    };
+    let r = run_action(kube, tg, a, emit);
+    if let Some(g) = guard {
+        match &r {
+            Ok(m) => g.finish(true, m),
+            Err(e) => g.finish(false, e),
+        }
+    }
+    r
+}
+
 /// The arguments for the panel: the kubeconfig path (it may name a vault entry) and context are left out.
 fn shown_args(args: &[String]) -> String {
     let mut out = Vec::new();

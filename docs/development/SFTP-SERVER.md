@@ -30,7 +30,7 @@ are pure and tested with hostile input, and the real OpenSSH client is used as t
 | SFTP v3 codec (pure) | `crates/iyakki-agent/src/sftp_proto.rs` | INIT/VERSION, OPEN, CLOSE, READ, WRITE, LSTAT, FSTAT, SETSTAT, FSETSTAT, OPENDIR, READDIR, REMOVE, MKDIR, RMDIR, REALPATH, STAT, RENAME; STATUS, HANDLE, DATA, NAME, ATTRS. READLINK, SYMLINK and extensions answer "unsupported". |
 | Scope-confined files | `sftp_fs.rs` | The `Jail`: virtual tree, path walk, read and write rules as closures. |
 | Session | `sftp_session.rs` | Handles, listing pages, audit lines, ends on a broken stream. |
-| SSH 2 server | `ssh_server.rs` | `curve25519-sha256`, `ssh-ed25519`, `aes256-ctr` with `hmac-sha2-256-etm@openssh.com` or `hmac-sha2-256`, no compression, strict key exchange, re-keying, public-key and password login, one `session` channel, subsystem `sftp` only. |
+| SSH 2 server | `ssh_server.rs` | `curve25519-sha256`, `ssh-ed25519`, `chacha20-poly1305@openssh.com`, `aes256-gcm@openssh.com`, or `aes256-ctr` with `hmac-sha2-256-etm@openssh.com` or `hmac-sha2-256` (the client's first choice that we have wins), no compression, strict key exchange, re-keying (by the client, and by the server after 1 GB),  public-key and password login, one `session` channel, subsystem `sftp` only. |
 | Manager | `sftp.rs` | Settings, authorised keys, host key, listener, rate limit, firewall rules, expiry. |
 | Chat tools | `sftptools.rs` | `sftp_status` (safe), `sftp_set` (asks every time). |
 | Tests | `sftp_tests.rs` and the module tests in `ssh_server.rs` | |
@@ -75,7 +75,7 @@ nine bits; the owner is never changed.
 ### What the transport refuses
 
 No shell, no command (`exec`), no pseudo-terminal, no port, agent or X11 forwarding, no second channel, no compression, no other ciphers or
-key types. Clients need an Ed25519 host key, AES-256-CTR and HMAC-SHA-256 (every current OpenSSH, Dropbear 2020+, PuTTY 0.75+, WinSCP, FileZilla
+key types (login keys: Ed25519, RSA of 2048 to 8192 bits with SHA-2 signatures, ECDSA P-256; host keys: Ed25519 and ECDSA P-256, no RSA host key, F-FILE-14). Clients need an Ed25519 or ECDSA P-256 host key and ChaCha20-Poly1305, AES-256-GCM or AES-256-CTR with HMAC-SHA-256 (every current OpenSSH, Dropbear 2020+, PuTTY 0.75+, WinSCP, FileZilla
 and libssh2). Old scp over `exec` does not work; OpenSSH 9 `scp` uses SFTP and does. Packets above 35 000 bytes are refused before they are
 read; the MAC is checked before decryption in the encrypt-then-MAC form; sequence numbers wrap; strict key exchange (the Terrapin fix) is on
 when the client offers it; a client re-key is handled.
@@ -120,3 +120,7 @@ folder for a link between the check and the open) is not closed; that is a limit
 * ECDSA / RSA client keys, more ciphers (ChaCha20-Poly1305, AES-GCM) for older or stricter clients, `posix-rename@openssh.com`, `statvfs`, `fsync`.
 * A per-account quota and a transfer log with sizes.
 * Restart after reboot, if the owner wants it (today deliberately not).
+
+## In Settings (F-FILE-06)
+
+Settings, Remote access shows the SFTP server's state, port, login way, time limit, the addresses to use while it runs, each allowed account with the fingerprints of its keys, and the host key fingerprint. Administrators only; the keys are capital letters (the Connect a client part of the page uses the small ones): **F** starts or stops (a card first with the port, the accounts, how they log in, until when and that it is the local network only; **y** starts, **n** cancels; stopping needs no card), **U** sets the accounts, **K** adds a public key line, **R** removes a key by its fingerprint, **W** turns account-password login on (a card first) or off, **T** steps through the time limits, **C** copies the host key fingerprint. Every change is audited with the person's name and no key text. The assistant's `sftp_status` and `sftp_set` tools call the same `iyakki_agent::sftp` code.

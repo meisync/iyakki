@@ -10,3 +10,4 @@ license.workspace = true
 
 [dependencies]
 iyakki-uikit = { path = "../iyakki-uikit" }
+serde = { version = "1", features = ["derive"] }

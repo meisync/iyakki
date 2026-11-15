@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 pub const LABEL: &str = "IYAKKI-DATA";
 
+pub mod bootcfg;
 pub mod crashlog;
 pub mod dm;
 pub mod gpt;

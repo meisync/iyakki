@@ -23,6 +23,7 @@ fn status(a: &SettingsApp) -> String {
 }
 
 #[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "cloud-mode detection reads the machine (Linux hardware folders); a Mac looks like a cloud pod, which turns the default off")]
 fn it_is_on_by_default_switches_off_and_on_with_a_reason_shown_and_is_audited() {
     let cx = admin("announce");
     assert_eq!(cx.services.announce_name_setting(), None);

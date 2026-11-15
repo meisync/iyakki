@@ -235,3 +235,41 @@ fn nothing_is_connected_at_the_start_and_disconnecting_says_so() {
     assert_eq!(t.view().state, TetherState::Idle);
     assert_eq!(t.disconnect().unwrap_err(), "No phone is connected.");
 }
+
+#[test]
+fn a_phone_that_was_connected_and_went_away_is_tried_again_with_growing_pauses_then_given_up() {
+    let lost: Result<End, String> = Ok(End::Lost);
+    let secs = |a: After| match a {
+        After::Retry(d) => d.as_secs(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!((0..5).map(|n| secs(after_session(&lost, true, false, n))).collect::<Vec<_>>(), [3, 10, 30, 60, 60]);
+    // a failed try after the link was up is tried again as well (the phone may be out of range for a while)
+    assert_eq!(secs(after_session(&Err("The connection to the phone failed.".into()), true, false, 1)), 10);
+    assert_eq!(secs(after_session(&Ok(End::NoAnswer), true, false, 0)), 3);
+    // after the last pause the person is told and the state is a failure, never an endless loop
+    match after_session(&lost, true, false, 5) {
+        After::Finish(TetherState::Failed(t)) => assert!(t.contains("did not come back") && t.contains("Connect"), "{t}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn nothing_is_retried_when_the_person_disconnects_the_phone_refuses_or_the_link_never_came_up() {
+    let idle = After::Finish(TetherState::Idle);
+    assert_eq!(after_session(&Ok(End::Lost), true, true, 0), idle, "Disconnect wins over a lost link");
+    assert_eq!(after_session(&Ok(End::Stopped), true, false, 0), idle);
+    assert_eq!(after_session(&Err("x".into()), false, true, 0), idle);
+    // the phone said no: tethering is off or it does not allow this computer; asking again every few seconds would not help
+    match after_session(&Ok(End::Refused(4)), true, false, 0) {
+        After::Finish(TetherState::Failed(t)) => assert_eq!(t, refusal_text(4)),
+        other => panic!("{other:?}"),
+    }
+    // the first try failed: the reason as before, and the person presses Connect again
+    assert_eq!(after_session(&Ok(End::NoAnswer), false, false, 0), After::Finish(TetherState::Failed(NO_ANSWER.into())));
+    assert_eq!(after_session(&Err("The phone is out of range.".into()), false, false, 0), After::Finish(TetherState::Failed("The phone is out of range.".into())));
+    match after_session(&Ok(End::Lost), false, false, 0) {
+        After::Finish(TetherState::Failed(t)) => assert!(t.contains("went away")),
+        other => panic!("{other:?}"),
+    }
+}

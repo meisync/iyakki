@@ -167,7 +167,7 @@ impl RemoteFilesApp {
 
     fn with<T>(cx: &AppCx, f: impl FnOnce(&TileCx) -> T) -> T {
         let src = ShellRemote(manager_for(cx));
-        f(&TileCx { user: cx.session.user.as_str(), manage_settings: cx.session.policy.manage_settings, usage: &super::usage::ShellUsage(&cx.services), calendar: &iyakki_tile_api::calendar::NoCalendar, audit: &iyakki_tile_api::NoAudit, remote: &src, cameras: &iyakki_tile_api::cameras::NoCameras })
+        f(&TileCx { user: cx.session.user.as_str(), manage_settings: cx.session.policy.manage_settings, usage: &super::usage::ShellUsage(&cx.services), calendar: &iyakki_tile_api::calendar::NoCalendar, audit: &iyakki_tile_api::NoAudit, remote: &src, cameras: &iyakki_tile_api::cameras::NoCameras, radio: &iyakki_tile_api::radio::NoRadio })
     }
 }
 

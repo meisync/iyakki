@@ -126,6 +126,11 @@ pub trait Gate: Send + Sync {
         None
     }
 
+    /// The experimental session endpoint for clients (`/client/ws`, `/connect`). The default has none: both routes are 404.
+    fn client_endpoint(&self) -> Option<&crate::clientsession::ClientEndpoint> {
+        None
+    }
+
     /// The web service's API (`/api/v1/...`) for the page at `/ui/`, answered on this same server. The default has none (404).
     fn api(&self) -> Option<&iyakki_agent::webservice::embed::Embedded> {
         None
@@ -136,12 +141,28 @@ pub struct ShellGate {
     env: ShellEnv,
     keys: Option<Arc<crate::devicekeys::DeviceKeys>>,
     api: Option<iyakki_agent::webservice::embed::Embedded>,
+    client: Option<crate::clientsession::ClientEndpoint>,
+}
+
+/// What a client's calls do in the shell: the person must still be an account of this machine (the role rules grow with the catalogue),
+/// and an allowed call returns nothing yet (the capabilities are served by their own services as they join the broker).
+struct ShellCalls(ShellEnv);
+
+impl crate::clientsession::CallHandler for ShellCalls {
+    fn role_allows(&self, person: &str, _capability: &str) -> bool {
+        let mut store = self.0.store.lock().unwrap_or_else(|e| e.into_inner());
+        store.refresh();
+        store.get(person).is_some()
+    }
+    fn perform(&self, _person: &str, _capability: &str, _unit: Option<&str>) -> Result<String, String> {
+        Ok(String::new())
+    }
 }
 
 impl ShellGate {
     pub fn new(env: ShellEnv) -> ShellGate {
         let api = crate::api::embedded(&env);
-        ShellGate { env, keys: None, api }
+        ShellGate { env, keys: None, api, client: None }
     }
 
     /// Turn on device-key sign-in with these enrolled keys (a session opened by a key has no password, so the vault stays locked).
@@ -149,7 +170,8 @@ impl ShellGate {
     /// the web front end signs in with a key from the first start.
     pub fn with_key_store(env: ShellEnv, dir: &std::path::Path) -> ShellGate {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        let gate = ShellGate::new(env);
+        let mut gate = ShellGate::new(env);
+        gate.client = Some(gate.client_endpoint_for(dir));
         match crate::devicekeys::DeviceKeys::open_or_aside(dir.join("device-keys"), now) {
             Ok((keys, aside)) => {
                 if let Some(a) = aside {
@@ -162,6 +184,18 @@ impl ShellGate {
                 gate
             }
         }
+    }
+
+    /// The session endpoint for clients, kept in `<dir>/client`. It answers only while Settings has switched it on.
+    fn client_endpoint_for(&self, dir: &std::path::Path) -> crate::clientsession::ClientEndpoint {
+        // the media half (sound, clipboard, the client's own devices), EXPERIMENTAL: a hard ask opens the shell's approval card for the person the
+        // device is signed in as (`DeviceCard`; no answer in time is a refusal), the machine's cameras come from the shell's hub, and the sound goes
+        // to a client only for the person the machine's sound belongs to (`iyakki_shell::soundowner`, set when someone signs in)
+        let card: Arc<dyn iyakki_agent::accessbroker::broker::CardAsk> = Arc::new(iyakki_agent::clientmedia::DeviceCard::new(self.env.services.clone()));
+        let media = Arc::new(iyakki_agent::clientmedia::MediaHost::shared(Some(card)).with_cameras(iyakki_shell::apps::cameras::client_feed(&self.env)));
+        let (broker, _log) = iyakki_agent::accessbroker::local(dir, Some(media.card()));
+        let audit = self.env.audit.clone();
+        crate::clientsession::ClientEndpoint::new(dir, broker, Arc::new(ShellCalls(self.env.share())), Arc::new(move |user: &str, action: &str, detail: &str| audit.record(user, action, detail))).with_media(media)
     }
 
     pub fn with_device_keys(mut self, keys: Arc<crate::devicekeys::DeviceKeys>) -> ShellGate {
@@ -177,6 +211,10 @@ impl Gate for ShellGate {
 
     fn api(&self) -> Option<&iyakki_agent::webservice::embed::Embedded> {
         self.api.as_ref()
+    }
+
+    fn client_endpoint(&self) -> Option<&crate::clientsession::ClientEndpoint> {
+        self.client.as_ref()
     }
 
     fn device_keys(&self, user: &str) -> Vec<[u8; 32]> {
@@ -286,12 +324,9 @@ impl ShellScreen {
         // the browser's clipboard, sound, microphone and camera for this person; the shell and the tiles find it by name
         let audit = env.audit.clone();
         let who = user.clone();
-        // the tenant switch (`IYAKKI_BROWSER_MEDIA=allow|deny`; unset on a desktop that serves its own owner means allow, in a pod the
-        // manifest always sets it) and the person's role decide (`iyakki-sec` media policy, default deny)
-        let tenant = match std::env::var("IYAKKI_BROWSER_MEDIA").ok().as_deref().map(str::trim) {
-            None => iyakki_sec::media::MediaPolicy::tenant(true),
-            Some(v) => iyakki_sec::media::MediaPolicy::from_setting(Some(v)),
-        };
+        // the tenant switch (`IYAKKI_BROWSER_MEDIA=allow|deny`; unset or anything else is deny, on a desktop as in a pod: the owner
+        // decision of 2026-11-06) and the person's role decide (`iyakki-sec` media policy, default deny)
+        let tenant = tenant_media_policy(std::env::var("IYAKKI_BROWSER_MEDIA").ok().as_deref());
         let policy = iyakki_agent::browsermedia::Policy::for_tenant(iyakki_agent::browsermedia::Policy::from_sec(&tenant, &user, session.role), &user, session.role);
         let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
         let media = iyakki_agent::browsermedia::BrowserMedia::new(policy, Arc::new(move |a, d| audit.record(&who, a, d)), Some(iyakki_agent::browsermedia::session_dir(&runtime, &user)));
@@ -315,6 +350,11 @@ impl ShellScreen {
         })?;
         Ok(ShellScreen { tx, rx, user, done, copied: None, cursor: None, read_clip: false, pixels: None, speech, media, rich: None })
     }
+}
+
+/// The tenant switch for browser media: only an explicit `allow` turns it on; unset, empty or unknown text is deny.
+fn tenant_media_policy(setting: Option<&str>) -> iyakki_sec::media::MediaPolicy {
+    iyakki_sec::media::MediaPolicy::from_setting(setting)
 }
 
 /// The CSS cursor name for a pointer shape.
@@ -632,6 +672,19 @@ impl Screen for ShellScreen {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_media_is_denied_unless_the_setting_says_allow() {
+        use iyakki_sec::media::Device;
+        use iyakki_sec::policy::Role;
+        for setting in [None, Some(""), Some("deny"), Some("yes"), Some("ALLOW?")] {
+            let p = tenant_media_policy(setting);
+            for d in Device::ALL {
+                assert!(!p.allows("alice", Role::Admin, d), "{setting:?} must deny {d:?}");
+            }
+        }
+        assert!(tenant_media_policy(Some(" allow ")).allows("alice", Role::Admin, Device::Mic));
+    }
 
     #[test]
     fn only_the_changed_part_of_the_picture_is_found() {

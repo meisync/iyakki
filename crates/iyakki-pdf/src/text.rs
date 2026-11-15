@@ -98,6 +98,118 @@ pub struct Hit {
     pub context: String,
 }
 
+/// One character of a page with its box (user space x0, y0, x1, y1) and the line it is on: what text selection works on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CharBox {
+    pub ch: char,
+    pub rect: [f64; 4],
+    pub line: usize,
+}
+
+/// The characters of a page in reading order. A cell of several characters shares its width between them.
+pub fn char_boxes(lines: &[TextLine]) -> Vec<CharBox> {
+    let mut out = Vec::new();
+    for (li, l) in lines.iter().enumerate() {
+        for c in &l.cells {
+            let n = c.text.chars().count().max(1);
+            let w = c.w / n as f64;
+            for (k, ch) in c.text.chars().enumerate() {
+                let x0 = c.x + w * k as f64;
+                out.push(CharBox { ch, rect: [x0, l.y - 0.22 * l.size, x0 + w, l.y + 0.82 * l.size], line: li });
+                if out.len() >= 200_000 {
+                    return out;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The character nearest to a point (user space): the closest line vertically, then the closest box along it. `None` for an empty page.
+pub fn char_at(boxes: &[CharBox], x: f64, y: f64) -> Option<usize> {
+    let dist = |r: &[f64; 4]| {
+        let dy = if y < r[1] { r[1] - y } else if y > r[3] { y - r[3] } else { 0.0 };
+        let dx = if x < r[0] { r[0] - x } else if x > r[2] { x - r[2] } else { 0.0 };
+        (dy, dx)
+    };
+    let mut best: Option<(usize, f64, f64)> = None;
+    for (i, b) in boxes.iter().enumerate() {
+        let (dy, dx) = dist(&b.rect);
+        if best.is_none_or(|(_, by, bx)| dy < by - 1e-9 || ((dy - by).abs() <= 1e-9 && dx < bx)) {
+            best = Some((i, dy, dx));
+        }
+    }
+    best.map(|b| b.0)
+}
+
+/// The word around character `i` (letters and digits), as an inclusive range.
+pub fn word_range(boxes: &[CharBox], i: usize) -> (usize, usize) {
+    let w = |k: usize| boxes[k].ch.is_alphanumeric();
+    if i >= boxes.len() || !w(i) {
+        return (i, i);
+    }
+    let (mut a, mut b) = (i, i);
+    while a > 0 && w(a - 1) && boxes[a - 1].line == boxes[i].line {
+        a -= 1;
+    }
+    while b + 1 < boxes.len() && w(b + 1) && boxes[b + 1].line == boxes[i].line {
+        b += 1;
+    }
+    (a, b)
+}
+
+/// The whole line character `i` is on, as an inclusive range.
+pub fn line_range(boxes: &[CharBox], i: usize) -> (usize, usize) {
+    if i >= boxes.len() {
+        return (i, i);
+    }
+    let l = boxes[i].line;
+    let a = boxes.iter().position(|b| b.line == l).unwrap_or(i);
+    let b = boxes.iter().rposition(|b| b.line == l).unwrap_or(i);
+    (a, b)
+}
+
+/// The text between two characters (either order, both included); a new line where the line changes.
+pub fn selection_text(boxes: &[CharBox], a: usize, b: usize) -> String {
+    if boxes.is_empty() {
+        return String::new();
+    }
+    let (a, b) = (a.min(b), a.max(b).min(boxes.len() - 1));
+    let mut out = String::new();
+    for k in a..=b {
+        if k > a && boxes[k].line != boxes[k - 1].line {
+            out.push('\n');
+        }
+        out.push(boxes[k].ch);
+    }
+    out.trim_end().to_string()
+}
+
+/// One box per line the selection touches.
+pub fn selection_rects(boxes: &[CharBox], a: usize, b: usize) -> Vec<[f64; 4]> {
+    if boxes.is_empty() {
+        return Vec::new();
+    }
+    let (a, b) = (a.min(b), a.max(b).min(boxes.len() - 1));
+    let mut out: Vec<[f64; 4]> = Vec::new();
+    let mut line = usize::MAX;
+    for k in a..=b {
+        let r = boxes[k].rect;
+        if boxes[k].line == line {
+            if let Some(last) = out.last_mut() {
+                last[0] = last[0].min(r[0]);
+                last[1] = last[1].min(r[1]);
+                last[2] = last[2].max(r[2]);
+                last[3] = last[3].max(r[3]);
+            }
+        } else {
+            line = boxes[k].line;
+            out.push(r);
+        }
+    }
+    out
+}
+
 fn fold(c: char, case_sensitive: bool) -> char {
     if case_sensitive {
         c

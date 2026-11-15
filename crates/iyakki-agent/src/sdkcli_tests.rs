@@ -187,3 +187,32 @@ fn the_emulator_commands_go_to_the_emulator_program() {
     }
     assert!(USAGE.contains("check|test|shot|emulate TILE"));
 }
+
+#[test]
+fn the_typings_cover_every_namespace_call_and_capability_of_the_bridge_manifest() {
+    use iyakki_core_api::sdkbridge as bridge;
+    let t = D_TS;
+    assert!(t.contains(&format!("SDK version {}", bridge::SDK_VERSION)), "the header names the SDK version");
+    for n in bridge::NAMESPACES {
+        // the discovery calls are members of Bridge itself; every other namespace has a block and a member
+        if matches!(n.name, "sdk") {
+            for w in ["has(name: string)", "capabilities()", "call(op: string"] {
+                assert!(t.contains(w), "{w}");
+            }
+            continue;
+        }
+        assert!(t.contains(&format!("readonly {}: ", n.name)) && t.contains(&format!("// ---- {} ----", n.name)), "namespace {}", n.name);
+        for o in n.ops {
+            // `panel.add` and `queue.add` are members of a nested object: the last part is the member name
+            let member = o.name.rsplit('.').next().unwrap();
+            let seen = t.contains(&format!("{member}(")) || t.contains(&format!("{member}<"));
+            assert!(seen, "{}.{} has no declaration", n.name, o.name);
+        }
+    }
+    for c in bridge::CAPABILITIES {
+        assert!(t.contains(&format!("{}?:", c.key)) || t.contains(&format!("\"{}\"", c.key)), "capability {} is not in the typings", c.key);
+    }
+    for code in ["Unsupported", "BudgetStop"] {
+        assert!(t.contains(&format!("\"{code}\"")), "{code}");
+    }
+}

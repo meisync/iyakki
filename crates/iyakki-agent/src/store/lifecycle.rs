@@ -17,6 +17,7 @@
 //! only through the platform engine, whose plan names the cluster and which always asks.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use iyakki_sec::policy::Policy;
@@ -497,6 +498,7 @@ impl Store {
         let key = rec.key();
         st.pins.remove(&key);
         st.history.remove(&key);
+        super::approvals::FileBook(self).remove_with_members(&key);
         let prev = st.prev.remove(&key);
         for sha in [Some(rec.sha256.clone()), prev.map(|p| p.sha256)].into_iter().flatten() {
             if !self.copy_needed(&sha, &st) {
@@ -734,7 +736,7 @@ impl Store {
 
     // ---------------------------------------------------------------------------------------- update
 
-    fn scope_ok(actor: &Actor, e: &IEntry) -> Result<(), String> {
+    pub(super) fn scope_ok(actor: &Actor, e: &IEntry) -> Result<(), String> {
         if !actor.allowed {
             return Err("Your account may not use the STORE.".into());
         }
@@ -794,7 +796,13 @@ impl Store {
             Some(b) => self.review(svc, actor, b, None, &source, source == "builtin", e.scope.clone(), false, &[]).permissions.into_iter().map(|p| p.canonical).collect(),
             None => canonical_set(&e.permissions.iter().filter_map(|w| Permission::parse(w).ok().map(|p| p.canonical())).collect::<Vec<_>>()),
         };
-        let added: Vec<Perm> = review.permissions.iter().filter(|p| !old_perms.contains(&p.canonical)).cloned().collect();
+        let mut added: Vec<Perm> = review.permissions.iter().filter(|p| !old_perms.contains(&p.canonical)).cloned().collect();
+        // core capabilities the installed version was not approved for count like new permissions
+        added.extend(review.core_lines.iter().filter(|l| l.is_new).map(|l| Perm { canonical: format!("core:{}", l.name), words: l.words.clone(), sensitive: l.hard_ask }));
+        // the same for each bundle member's own capabilities
+        for mc in &review.members {
+            added.extend(mc.lines.iter().filter(|l| l.is_new).map(|l| Perm { canonical: format!("core:{}/{}", mc.id, l.name), words: format!("{}: {}", mc.name(), l.words), sensitive: l.hard_ask }));
+        }
         let removed: Vec<String> = old_perms.iter().filter(|o| !review.permissions.iter().any(|p| &p.canonical == *o)).filter_map(|o| Permission::parse(o).ok().map(|p| p.words(&actor.user))).collect();
         let changelog = first_line(&review.meta.changelog);
         Ok(UpdatePlan { key: e.key.clone(), title: e.title.clone(), ty: e.ty, from: e.version.clone(), to: review.version.clone(), warnings: review.warnings.clone(), added, removed, changelog, from_other: life.from_other.clone(), cli: false, review: Some(review) })
@@ -946,10 +954,69 @@ impl Store {
         if (review.needs_warning_ack() || plan.from_other.is_some()) && !confirm.warnings {
             return Err(LifeError::NeedsConfirm(format!("Read the warnings first: {}", review.warnings.iter().cloned().chain(plan.from_other.iter().map(|o| format!("this version comes from {o}, not the store that installed it"))).collect::<Vec<_>>().join(" / "))));
         }
-        let c = Confirm { permissions: !review.permissions.is_empty(), warnings: true };
+        let c = Confirm { permissions: !review.permissions.is_empty() || review.asks_core(), warnings: true };
+        // the app's own data is copied first, so an update that goes wrong for the data can be put back (F-CORE-25)
+        let snap = self.snapshot_before_update(&plan.key, &plan.from, &actor.user, audit);
         let new = self.transact(svc, actor, &plan.key, &review.sha256, "update", &|| self.install(svc, actor, review, c))?;
+        if let Some(a) = self.approval(&new.key()).filter(|a| a.app_version == new.version && !a.grants.is_empty()) {
+            audit("store.approve", &a.audit_detail());
+        }
         self.life_log(audit, &actor.user, "update", &format!("{} {} -> {}", plan.title, plan.from, new.version));
-        Ok(format!("{} is now {} (was {}). The old version is kept for one rollback.", plan.title, new.version, plan.from))
+        Ok(format!("{} is now {} (was {}). The old version is kept for one rollback.{snap}", plan.title, new.version, plan.from))
+    }
+
+    /// The most a snapshot taken before an update may hold; a bigger data folder is not copied and the update says so.
+    pub const SNAPSHOT_MAX_BYTES: u64 = 256 << 20;
+    /// How many snapshots an app keeps (older ones are moved aside, not deleted).
+    pub const SNAPSHOTS_KEPT: usize = 3;
+
+    /// Where the snapshots of one installed thing are kept.
+    pub fn snapshot_root(&self, key: &str) -> PathBuf {
+        self.dir().join("snapshots").join(key.replace('/', "_"))
+    }
+
+    /// The data folder of an installed thing, when it has one.
+    pub fn app_data_dir(&self, key: &str) -> Option<PathBuf> {
+        let r = self.records().get(key).cloned()?;
+        let d = self.dir().join("appdata").join(&r.kind).join(r.scope.replace('/', "_")).join(&r.name);
+        d.is_dir().then_some(d)
+    }
+
+    /// The snapshots of an installed thing's data, oldest first.
+    pub fn data_snapshots(&self, key: &str) -> Vec<crate::bundlesnap::Snapshot> {
+        crate::bundlesnap::list(&self.snapshot_root(key))
+    }
+
+    /// Put the data of `key` back as it was in snapshot `id`. What is there now is kept next to it. Returns where that went.
+    pub fn restore_data(&self, key: &str, id: &str) -> Result<PathBuf, String> {
+        let dst = self.app_data_dir(key).ok_or_else(|| "this item keeps no data folder".to_string())?;
+        crate::bundlesnap::restore(&self.snapshot_root(key), id, &dst)
+    }
+
+    /// Copy the data of `key` before it is updated. Returns the words to add to the update's answer (empty when the thing keeps no data).
+    /// A data folder over the size limit is not copied: the update goes on and says so, because refusing it would strand the person on an old version.
+    fn snapshot_before_update(&self, key: &str, from: &str, user: &str, audit: &dyn Fn(&str, &str)) -> String {
+        let Some(data) = self.app_data_dir(key) else { return String::new() };
+        let root = self.snapshot_root(key);
+        let clean: String = from.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-').take(24).collect();
+        let base = format!("pre-update-{clean}-{}", self.now());
+        let mut id = base.clone();
+        let mut n = 1;
+        while root.join(&id).exists() {
+            id = format!("{base}-{n}");
+            n += 1;
+        }
+        match crate::bundlesnap::snapshot(&data, &root, &id, self.now(), Self::SNAPSHOT_MAX_BYTES) {
+            Ok(s) => {
+                let moved = crate::bundlesnap::prune(&root, Self::SNAPSHOTS_KEPT);
+                self.life_log(audit, user, "snapshot", &format!("{key} {id}: {} files, {} bytes{}", s.files.len(), s.bytes, if moved.is_empty() { String::new() } else { format!("; {} older moved aside", moved.len()) }));
+                format!(" Its data was copied first (snapshot {id}, {} files).", s.files.len())
+            }
+            Err(e) => {
+                self.life_log(audit, user, "snapshot-skipped", &format!("{key}: {e}"));
+                format!(" Its data was NOT copied first: {e}.")
+            }
+        }
     }
 
     // ---------------------------------------------------------------------------------------- rollback

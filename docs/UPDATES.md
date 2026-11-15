@@ -10,7 +10,8 @@ in front of it, so a person does not need a developer computer. Status of each p
    has to unpack anything: the folder is what `iyakki dev update-pack IMAGE.img -o DIR` makes.
 2. Settings -> System update. The page shows **Installed** (the version whose files are on the boot partition), **Running now** when that differs
    (an update waits for a restart), and **Kept before it** (the previous version).
-3. The page lists the updates it finds on mounted drives (`/media`, `/run/media`, `/mnt`); **Choose folder** (key `f`, with Browse) adds
+3. A signed update file (`iyakki-X.tgz` with `iyakki-X.tgz.sig` next to it) is opened with **Open update file** (key `b`) or by asking the assistant (`updates_bundle_open`, it asks first): the signature is checked with the IYAKKI release key before anything is unpacked, an update for another edition, too old a base or not newer is refused with the reason, and a good one is unpacked under the data folder and listed like any update below. Nothing is installed by opening. The owner makes the file with `iyakki_agent::sysupdate::pack` and signs it with `sysupdate::sign`.
+   The page lists the updates it finds on mounted drives (`/media`, `/run/media`, `/mnt`); **Choose folder** (key `f`, with Browse) adds
    a folder, **Look again** (`s`) reads the drives again. Up/Down chooses one.
 4. Under the list the page says in plain words what will change: the version, how many boot files and megabytes are replaced, that the
    person's files, accounts and settings are not touched, and that the current version is kept. Lines that begin **Needs your yes** are the
@@ -131,6 +132,18 @@ A private store the person added with its key confirmed can offer separate syste
 Not proven: any of this on a real boot partition, a real 400 MB base image, the real mount, a real store, or a restart into the result (see
 docs/development/COMPONENT-UPDATES-PLAN.md, "Built so far").
 
+## Layered update packs (format 2, alpha.3)
+
+A lean install built with layers (`lean-image.sh --layers`, [`development/LAYERED-ROOT-DESIGN.md`](development/LAYERED-ROOT-DESIGN.md)) can take a **format 2** pack: `update.json` says
+`format: 2` and carries a `layers` section, and the pack holds only the layers that changed, whole or as a delta against the layer the device has
+(`iyakki dev update-pack IMAGE -o DIR --against PREVIOUS_LAYERS_FOLDER`; `quick-push.sh --layers` and `nightly-push.sh --layers` do it and record the last build under
+`~/iyakki-work/pushed-layers`). Both ways in (`iyakki dev update` and Settings -> System update) use the same device code. Before any byte is staged the device checks the manifest, that the
+layers it must keep or build a difference against are the ones it has, that the resulting set's `requires` ranges are met, and the room on the data volume; a refusal names the layer
+("the core layer in this update is a difference against X but this device has Y"). It then writes each changed layer as a `.new` file, checks its SHA-256, renames it, writes
+`iyakki/layers/previous.json` (the set being replaced) and **last** `iyakki/layers/current.json`. A power cut before that last step leaves the old set starting, after it the
+new one, whole; the repeated update finishes. The boot menu's "IYAKKI (previous version)" starts the replaced set. A device that reads only format 1 refuses a format 2 pack with
+"update format 2 is not understood" before anything is staged; format 1 packs apply as before, and a single-root (`root.sfs`) update after a layered one retires the layer pointers so the newer root starts.
+
 ## What is not built or not proven
 
 * **No download from the internet.** There is no update index yet (open decision D6 in docs/development/IMPROVEMENTS-PLAN.md: where it is
@@ -165,3 +178,14 @@ On a test stick or the Mac mini with the disk install, not the only copy of anyt
 6. Press `r`, `y`, restart: the old version should run. Also try the boot menu entry "IYAKKI (previous version)" once.
 7. Optional: try an older or other-variant pack to see the "Needs your yes" lines, and cut the power during step 3 on a spare stick to see the
    unfinished-update sentence.
+
+## Updating a stick from another computer (`iyakki-usb --update`)
+
+`iyakki-usb --update DRIVE --from FOLDER [--yes]` replaces the boot files of an installed IYAKKI stick or disk without booting or mounting it
+(FOLDER is what `iyakki dev update-pack IMAGE.img -o FOLDER` writes). It first shows the plan (which files are replaced or added, which
+files of the folder are skipped because they are not under `boot/` or `EFI/`) and writes only with `--yes`. Only files that already exist on
+the stick are replaced; a new file is added only when its name is an upper-case 8.3 name and its folder exists, and any other new file
+refuses the whole plan before anything is written. The `boot/` files go first (the biggest first), the `EFI/` loaders last, each file is
+written to fresh clusters before its directory entry is rewritten (a cut leaves the old file or the new one), and every file is read back
+and compared with the folder's. Nothing is deleted; the other system's files and the person's data are not touched. The signature of
+`update.json` is NOT checked by this command (the on-device update centre does that); use it for a stick you made yourself.

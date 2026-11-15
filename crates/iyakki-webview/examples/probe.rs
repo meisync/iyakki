@@ -88,6 +88,7 @@ fn pump(v: &mut WebView, d: Duration, frames: &mut u64) {
                 Event::MediaUnsupported(w) => println!("  media without a decoder: {w}"),
                 Event::PermissionRequest { id, kinds, origin } => println!("  permission request {id}: kinds {kinds} from {origin}"),
                 Event::CaptureState(k) => println!("  capturing: {k}"),
+                Event::ResponseHeaders { url, status, headers } => println!("  response headers of {url}: {status}, {} lines", headers.lines().count()),
                 Event::DevEvent(l) => println!("  developer event: {}", l.replace('\u{1f}', " | ")),
                 Event::ScriptResult { id, ok, json } => println!("  script {id} ok={ok}: {json}"),
                 Event::Cursor(_) => {}

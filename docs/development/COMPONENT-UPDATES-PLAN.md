@@ -17,6 +17,8 @@ Status: plan written 2026-11-07 from the owner's direction ("nightly build kerne
 
 Order of work above: step 4 (manifest and kind) is done in this slice, as a separate streamed blob kind and a signed `components.json` rather than a `system-component` package kind (see the findings); step 5 (device side) is done up to the plan and the staged hand-over, and its apply side (above) is built with fakes.
 
+> **Layered root (2026-11-11):** the base / core / ui split of the root image and format 2 update packs that carry only changed layers are built (first slice, QEMU and fakes): [`LAYERED-ROOT-DESIGN.md`](LAYERED-ROOT-DESIGN.md). They do not replace the store-based component flow below; a store could serve the layer files.
+
 ## What is separate, and why
 
 Today a system update replaces the boot files as one unit (a 420 MB pack: kernel, small start RAM disk, the root image holding the OS and the 80 MB `iyakki` binary). Most changes touch one part. Parts, from slowest-changing to fastest:

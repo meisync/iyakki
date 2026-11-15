@@ -120,10 +120,21 @@ impl Write for Stream {
 }
 
 impl Stream {
+    /// Ends a data connection: the TLS close_notify goes out and EVERY queued byte is written first. The socket has a short write timeout, so a slow server (vsftpd reading
+    /// a large upload) leaves TLS records queued in rustls; one `flush` that gives up on the first time-out dropped them and the server saw a cut transfer (`426 Failure reading
+    /// network stream`, found 2026-11-14 against a real vsftpd). It now keeps writing until the queue is empty or 60 s pass.
     fn finish(&mut self) {
         if let Stream::Tls(s) = self {
             s.conn.send_close_notify();
-            let _ = s.flush();
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while s.conn.wants_write() && Instant::now() < deadline {
+                match s.conn.write_tls(&mut s.sock) {
+                    Ok(_) => {}
+                    Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted) => std::thread::sleep(Duration::from_millis(5)),
+                    Err(_) => break,
+                }
+            }
+            let _ = s.sock.flush();
         }
     }
 }
@@ -141,7 +152,10 @@ pub struct FtpFs {
 fn tls_config(seen: Arc<Mutex<Option<Vec<u8>>>>) -> Result<Arc<rustls::ClientConfig>, String> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let cfg = rustls::ClientConfig::builder_with_provider(provider.clone())
-        .with_safe_default_protocol_versions()
+        // TLS 1.2 only: against a real vsftpd (OpenSSL) a TLS 1.3 upload was cut after exactly 512 KiB with `426 Failure reading network stream` (the server does not follow
+        // the client's TLS 1.3 key update on a data connection it only reads from; found 2026-11-14), while TLS 1.2 moved 3 MiB both ways with resumes. Explicit FTPS
+        // servers all speak TLS 1.2; a server that insists on TLS 1.3 is refused with the usual "does not offer FTPS" words.
+        .with_protocol_versions(&[&rustls::version::TLS12])
         .map_err(|e| format!("TLS is not available: {e}"))?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(Recorder { seen, provider }))

@@ -199,11 +199,11 @@ impl SettingsApp {
         let mounts = self.inst.env.mounts.clone();
         let prog = self.inst.progress.clone();
         let path = plan.target.drive.path.clone();
-        *prog.lock().unwrap() = ("Starting".into(), 0, 1);
+        *prog.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = ("Starting".into(), 0, 1);
         self.start("Installing", move || {
             let mounts_text = std::fs::read_to_string(&mounts).unwrap_or_default();
             let r = install::execute(&plan, false, &mounts_text, &mut |p| {
-                *prog.lock().unwrap() = (p.phase.label().to_string(), p.done, p.total);
+                *prog.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = (p.phase.label().to_string(), p.done, p.total);
             });
             match r {
                 Ok(_) => JobOut::Msg(Ok(format!("IYAKKI is installed on {path}. Remove the USB stick and restart; the first start asks you to create the first account."))),

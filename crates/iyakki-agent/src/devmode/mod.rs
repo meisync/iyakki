@@ -19,6 +19,8 @@ use iyakki_sec::policy::Policy;
 use serde::{Deserialize, Serialize};
 
 pub mod api;
+pub mod apiscopes;
+pub mod webclient;
 pub mod api_diag;
 pub mod diag;
 pub mod kube;
@@ -36,14 +38,19 @@ pub mod cli_adb;
 pub mod debug;
 pub mod files;
 pub mod grants;
+pub mod restartgrant;
+pub mod restarttools;
 pub mod input;
 pub mod client;
 pub mod ops;
 pub mod scopes;
 pub mod shellexec;
+pub mod ttyclient;
 pub mod tunnel;
 pub mod sessions;
 pub mod update;
+pub mod update_layers;
+pub mod pack_layers;
 pub mod patch;
 pub mod cli_patch;
 
@@ -52,11 +59,19 @@ mod tests;
 #[cfg(test)]
 mod tests_adb;
 #[cfg(test)]
+mod tty_tests;
+#[cfg(test)]
+mod tests_restart;
+#[cfg(test)]
 mod tests_update;
+#[cfg(test)]
+mod tests_update_layers;
 #[cfg(test)]
 mod tests_centre;
 #[cfg(test)]
 mod tests_bootcount;
+#[cfg(all(test, target_os = "linux"))]
+mod tests_realfat;
 #[cfg(test)]
 mod tests_update_safety;
 #[cfg(test)]

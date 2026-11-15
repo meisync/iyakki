@@ -416,21 +416,21 @@ impl Secrets {
     }
 
     pub fn set_providers(&self, p: HashMap<String, ProviderConfig>) {
-        *self.providers.lock().unwrap() = p;
-        self.cache.lock().unwrap().clear();
+        *self.providers.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = p;
+        self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
     }
 
     /// The common vault (already unlocked), or none. References `cvault:NAME` read from it; nothing in this crate writes to it.
     pub fn set_common(&self, v: Option<LocalVault>) {
-        *self.common.lock().unwrap() = v;
+        *self.common.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = v;
     }
 
     pub fn common_unlocked(&self) -> bool {
-        self.common.lock().unwrap().as_ref().is_some_and(|v| v.is_unlocked())
+        self.common.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().is_some_and(|v| v.is_unlocked())
     }
 
     pub fn system_unlocked(&self) -> bool {
-        self.system.lock().unwrap().as_ref().is_some_and(|v| v.is_unlocked())
+        self.system.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().is_some_and(|v| v.is_unlocked())
     }
 
     /// Resolve a reference. `user_vault` is consulted for `uvault:` references.
@@ -438,12 +438,12 @@ impl Secrets {
         let (scheme, rest) = reference.split_once(':').ok_or_else(|| SecretError::BadRef("expected scheme:name".into()))?;
         match scheme {
             "vault" => {
-                let g = self.system.lock().unwrap();
+                let g = self.system.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 Ok(g.as_ref().ok_or(SecretError::Locked)?.get(rest)?)
             }
             "uvault" => Ok(user_vault.ok_or(SecretError::Locked)?.get(rest)?),
             "cvault" => {
-                let g = self.common.lock().unwrap();
+                let g = self.common.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 Ok(g.as_ref().ok_or(SecretError::Locked)?.get(rest)?)
             }
             "env" => std::env::var(rest).map(Zeroizing::new).map_err(|_| SecretError::NotFound(format!("environment variable {rest}"))),
@@ -465,12 +465,12 @@ impl Secrets {
             None => (tail, None),
         };
         let key = format!("{alias}/{tail}");
-        if let Some((t, v)) = self.cache.lock().unwrap().get(&key) {
+        if let Some((t, v)) = self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key) {
             if t.elapsed() < self.cache_ttl {
                 return Ok(v.clone());
             }
         }
-        let cfg = self.providers.lock().unwrap().get(alias).cloned().ok_or_else(|| SecretError::BadRef(format!("unknown provider `{alias}`")))?;
+        let cfg = self.providers.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(alias).cloned().ok_or_else(|| SecretError::BadRef(format!("unknown provider `{alias}`")))?;
         let token_ref = match &cfg {
             ProviderConfig::Hashicorp { token_ref, .. } | ProviderConfig::Onepassword { token_ref, .. } => token_ref.clone(),
         };
@@ -479,13 +479,13 @@ impl Secrets {
         }
         let token = self.resolve(&token_ref, None)?;
         let v = Zeroizing::new(fetch_external(&cfg, &token, path, field, self.upstream.as_ref())?);
-        self.cache.lock().unwrap().insert(key, (Instant::now(), v.clone()));
+        self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, (Instant::now(), v.clone()));
         Ok(v)
     }
 
     /// Check a provider is reachable and the token works, without reading a user secret.
     pub fn test_provider(&self, alias: &str) -> Result<(), SecretError> {
-        let cfg = self.providers.lock().unwrap().get(alias).cloned().ok_or_else(|| SecretError::BadRef(format!("unknown provider `{alias}`")))?;
+        let cfg = self.providers.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(alias).cloned().ok_or_else(|| SecretError::BadRef(format!("unknown provider `{alias}`")))?;
         let (addr, token_ref, url, header) = match &cfg {
             ProviderConfig::Hashicorp { addr, token_ref, namespace, .. } => (addr, token_ref, format!("{}/v1/auth/token/lookup-self", addr.trim_end_matches('/')), {
                 let mut h = vec![];

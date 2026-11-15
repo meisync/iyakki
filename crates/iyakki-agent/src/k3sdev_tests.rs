@@ -1646,3 +1646,74 @@ fn an_unexpected_lan_service_is_audited_and_warned_once_per_change_and_nothing_i
     // nothing but reading was run
     assert!(w.run.lines().iter().all(|l| !l.contains("patch") && !l.contains("delete") && !l.contains("apply")), "{:?}", w.run.lines());
 }
+
+fn podman_running_world(tag: &str) -> (World, Arc<FakeClock>) {
+    let st = routes(b"unused", &"0".repeat(64));
+    let w = world_with(tag, &["podman"]);
+    let p = w.plan(&st, Backend::Podman);
+    w.run.answer("image inspect", "sha256:abc123\n");
+    w.run.answer("podman pull", "pulled");
+    w.run.answer("podman rm", "");
+    w.run.answer("podman create", "container-id");
+    w.d.install(&p, &*st, "root").unwrap();
+    w.run.answer("podman inspect --format", "running 0");
+    w.run.answer("podman inspect iyakki-k3s", "[{}]");
+    w.run.answer("podman start", "iyakki-k3s");
+    w.run.answer("podman stop", "iyakki-k3s");
+    w.run.answer("podman exec iyakki-k3s kubectl --request-timeout=10s get nodes -o jsonpath={.items[*].status.conditions", "True");
+    w.run.answer("podman exec", "v1.31.1+k3s1");
+    w.run.answer("podman logs", "k3s log line from the container");
+    let clock = FakeClock::new(false, true);
+    w.d.assume_clock(clock.clone());
+    w.d.start("root").unwrap();
+    std::fs::write(w.d.layout.kubeconfig(), "x").unwrap();
+    assert!(wait_for(10, || w.d.state() == Svc::Running), "{:?}", w.d.state());
+    (w, clock)
+}
+
+#[test]
+fn a_clock_step_while_the_podman_container_runs_stops_and_starts_it_once_without_a_failure() {
+    let (w, clock) = podman_running_world("k3sdev-podman-clockstep");
+    let starts = |w: &World| w.run.lines().iter().filter(|l| *l == "podman start iyakki-k3s").count();
+    assert_eq!(starts(&w), 1);
+    clock.advance(30);
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(starts(&w), 1, "time passing normally changes nothing");
+    clock.jump(88_692_568);
+    assert!(wait_for(10, || w.actions().iter().any(|a| a == "devcluster.restart-clock-step")), "{:?}", w.actions());
+    assert!(wait_for(10, || starts(&w) == 2), "{:?}", w.run.lines());
+    assert!(w.run.lines().iter().any(|l| l == "podman stop -t 30 iyakki-k3s"), "the container is stopped properly first");
+    std::fs::write(w.d.layout.kubeconfig(), "x").unwrap();
+    assert!(wait_for(10, || w.d.state() == Svc::Running), "{:?}", w.d.state());
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(w.actions().iter().filter(|a| *a == "devcluster.restart-clock-step").count(), 1, "one restart per step");
+    assert_eq!(w.d.installed().unwrap().restarts, 0, "not counted as a failure");
+    assert!(!w.actions().iter().any(|a| a == "devcluster.exited") && w.d.take_alerts().is_empty());
+    w.d.stop("root").unwrap();
+}
+
+#[test]
+fn certificate_trouble_in_the_podman_container_log_restarts_it_once() {
+    let st = routes(b"unused", &"0".repeat(64));
+    let w = world_with("k3sdev-podman-cert", &["podman"]);
+    let p = w.plan(&st, Backend::Podman);
+    w.run.answer("image inspect", "sha256:abc123\n");
+    w.run.answer("podman pull", "pulled");
+    w.run.answer("podman rm", "");
+    w.run.answer("podman create", "container-id");
+    w.d.install(&p, &*st, "root").unwrap();
+    w.run.answer("podman inspect --format", "running 0");
+    w.run.answer("podman inspect iyakki-k3s", "[{}]");
+    w.run.answer("podman start", "iyakki-k3s");
+    w.run.answer("podman stop", "iyakki-k3s");
+    w.run.answer("podman exec iyakki-k3s kubectl --request-timeout=10s get nodes -o jsonpath={.items[*].status.conditions", "True");
+    w.run.answer("podman exec", "v1.31.1+k3s1");
+    w.run.answer("podman logs", "level=error msg=\"x509: certificate has expired or is not yet valid\"");
+    w.d.assume_clock(FakeClock::new(false, true));
+    w.d.start("root").unwrap();
+    std::fs::write(w.d.layout.kubeconfig(), "x").unwrap();
+    assert!(wait_for(10, || w.actions().iter().any(|a| a == "devcluster.restart-clock-cert")), "{:?}", w.actions());
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(w.actions().iter().filter(|a| *a == "devcluster.restart-clock-cert").count(), 1, "only once, even when the complaint repeats");
+    w.d.stop("root").unwrap();
+}

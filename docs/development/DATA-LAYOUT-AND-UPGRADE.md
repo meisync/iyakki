@@ -7,7 +7,7 @@ never touch what they were not asked to touch.
 
 Written 2026-10-27 from the code in the working tree (the loaders were read, not guessed). Fixtures: `tests/fixtures/upgrade/alpha1`
 (the layout alpha.1 wrote, derived from `git show v0.1.0-alpha.1:...`) and `tests/fixtures/upgrade/current` (what this release writes);
-all synthetic, no real tokens, passwords or keys. A `beta` folder is added when the beta is tagged. The alpha.1 folder also holds `users.json`, `vault/` (made with the code's own functions, synthetic password), `radio-amy.json`, `browser-amy.json` and `browser-data-amy.json`. `browser-groups-*`, `browser-headers-*`, `browser-block-*`, `browser-media-*`, `browser-av-*` and `browser-open-*` did not exist in alpha.1, so there is no alpha.1 file to test.
+all synthetic, no real tokens, passwords or keys. Since 2026-11-11 the golden fixtures of each release (every versioned store, the wire transcripts, the extension snapshot) are kept under `tests/compat/<release>/` with forward tests (unknown fields kept, newer schema read-only); see [CORE-COMPATIBILITY-DESIGN.md](CORE-COMPATIBILITY-DESIGN.md) and `tests/compat/README.md`. A `beta` folder is added when the beta is tagged. The alpha.1 folder also holds `users.json`, `vault/` (made with the code's own functions, synthetic password), `radio-amy.json`, `browser-amy.json` and `browser-data-amy.json`. `browser-groups-*`, `browser-headers-*`, `browser-block-*`, `browser-media-*`, `browser-av-*` and `browser-open-*` did not exist in alpha.1, so there is no alpha.1 file to test.
 
 ## Where things live
 

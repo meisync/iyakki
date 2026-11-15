@@ -25,7 +25,7 @@ fn fresh(tag: &str) -> PathBuf {
 }
 
 /// A made-up /sys with one battery (`cap` percent, `status`) and an adapter (`ac`).
-fn laptop(tag: &str, cap: u32, status: &str, ac: bool) -> PathBuf {
+pub(super) fn laptop(tag: &str, cap: u32, status: &str, ac: bool) -> PathBuf {
     let d = fresh(tag);
     set(&d, cap, status, ac);
     d
@@ -39,7 +39,7 @@ fn set(d: &Path, cap: u32, status: &str, ac: bool) {
     put(d, "class/power_supply/ADP1/online", if ac { "1" } else { "0" });
 }
 
-fn signed(tag: &str, sys: Option<&Path>) -> (Shell, Arc<MockHost>) {
+pub(super) fn signed(tag: &str, sys: Option<&Path>) -> (Shell, Arc<MockHost>) {
     let (mut sh, host) = shell_with_users(tag);
     login(&mut sh, "root", "rootpass12");
     sh.devprobe = Some(crate::devpop::Probe::real(crate::apps::devices::DeviceEnv::real(), None, sh.env.services.dir().to_path_buf(), "t".into(), false));

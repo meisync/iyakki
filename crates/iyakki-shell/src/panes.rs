@@ -24,6 +24,9 @@ pub fn chord_from_name(code: &str, shift: bool) -> Option<LayoutKey> {
         "Tab" => Some(LayoutKey::Cycle { back: shift }),
         "KeyM" => Some(LayoutKey::NextDisplay),
         "Digit0" => Some(LayoutKey::Picker),
+        // desktop views, browser-style: Ctrl+Alt+PageUp / PageDown (the jump keys need Super and come from the local keyboard only)
+        "PageUp" => Some(LayoutKey::ViewStep { back: true, mac: false }),
+        "PageDown" => Some(LayoutKey::ViewStep { back: false, mac: false }),
         c => {
             let d = c.strip_prefix("Digit")?.parse::<u8>().ok()?;
             (1..=9).contains(&d).then_some(LayoutKey::Apply(d))
@@ -38,6 +41,8 @@ pub fn chord_from_evdev(code: u16, shift: bool) -> Option<LayoutKey> {
         11 => "Digit0",
         15 => "Tab",
         50 => "KeyM",
+        104 => "PageUp",
+        109 => "PageDown",
         105 => "ArrowLeft",
         106 => "ArrowRight",
         103 => "ArrowUp",

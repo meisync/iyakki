@@ -224,6 +224,7 @@ pub fn key_input(k: &Key) -> Option<Input> {
         Key::Char(c) if c.is_control() => None,
         Key::Char(c) => Some(Input::Text(c.to_string())),
         Key::Ctrl(c) => named(&c.to_ascii_lowercase().to_string(), true, c.is_ascii_uppercase()),
+        Key::Alt(c) => Some(Input::Key { name: c.to_ascii_lowercase().to_string(), ctrl: false, shift: c.is_ascii_uppercase(), alt: true }),
         Key::Enter => named("Enter", false, false),
         Key::Backspace => named("Backspace", false, false),
         Key::Delete => named("Delete", false, false),

@@ -5,11 +5,13 @@
 //! Details: `docs/ZRAM-AND-INSTALL.md`.
 
 pub mod apply;
+pub mod bootspeed;
+pub mod compressed;
 pub mod config;
 pub mod mkswap;
 pub mod stats;
 
-pub use apply::{apply, preview, reconfigure, Env, KernelSwap, Swapper};
+pub use apply::{apply, preview, reconfigure, zswap_enabled, Env, KernelSwap, Swapper};
 pub use config::{Config, Resolved, Size, ZramMode};
 pub use stats::{MemStats, ZramStats};
 

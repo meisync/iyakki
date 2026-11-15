@@ -27,7 +27,7 @@ and fragment list, `apple-bce` and the firmware packages). Nothing else in a reb
 * **Downloads: already shared.** `BR2_DL_DIR` is `$(TOPDIR)/dl`, and every variant uses the same Buildroot tree
   (`target/buildroot-src/`), so `target/buildroot-src/buildroot-*/dl` (1.4 GB) serves all of them. Deleting that tree loses the cache;
   to keep it elsewhere export `BR2_DL_DIR=$HOME/.cache/iyakki-dl` before building (Buildroot honours the variable).
-* **Compiler output: not shared** (no ccache yet). Each `target/buildroot-<variant>/` has its own toolchain, host tools (host-llvm,
+* **Compiler output: shared through ccache** (see "Shared compiler cache" below; `build.sh` turns it on for a new output directory). Each `target/buildroot-<variant>/` has its own toolchain, host tools (host-llvm,
   host-python ...) and per-package objects, 13 to 26 GB each.
 * **Toolchain: not worth sharing.** libre/mac and web/macweb already have different toolchains (the web fragment adds
   `BR2_TOOLCHAIN_BUILDROOT_CXX` and `WCHAR`). An external toolchain (`BR2_TOOLCHAIN_EXTERNAL_CUSTOM` pointing at another output's
@@ -144,7 +144,7 @@ miss); host-llvm and llvm (25 min together) are cached the same way. The first b
 The cache needs an estimated 20-30 GB for web-class builds (check `target/.../host/bin/ccache -s`; Buildroot's ccache is
 `host/bin/ccache`, `BR_CACHE_DIR` is the cache path).
 
-Proposed settings, added by the `build.sh` patch below only for a NEW output directory (turning ccache on in a finished tree
+Settings, added by `build.sh` only for a NEW output directory (turning ccache on in a finished tree
 would make Buildroot rebuild the compiler wrapper; `changed.sh` ignores the ccache options on purpose):
 
 ```
@@ -157,61 +157,16 @@ BR2_CCACHE_USE_BASEDIR=y
 Limits: the cache only helps compiles of identical sources/flags/toolchain config; a WebKit version bump misses everything. Per-package
 directories (`BR2_PER_PACKAGE_DIRECTORIES`) do not help across output directories and are not proposed.
 
-## Patch to apply to build.sh after the running build ends
+## How build.sh and run.sh use it (applied)
 
-Do not edit `build.sh` while a build runs (the shell reads it as it goes). Afterwards:
-
-```diff
---- a/dist/buildroot/build.sh
-+++ b/dist/buildroot/build.sh
-@@
- if [ "${WITH_FFMPEG:-0}" = 1 ]; then cat "$HERE/configs/iyakki_media.fragment" >> "$OUT/defconfig"; fi
-+# Shared compiler cache (docs/BUILD-INCREMENTAL.md): only for an output directory that has no build yet, or when asked for
-+# (IYAKKI_CCACHE=1); IYAKKI_CCACHE=0 switches it off. A finished tree is not changed behind its back.
-+if [ "${IYAKKI_CCACHE:-auto}" = 1 ] || { [ "${IYAKKI_CCACHE:-auto}" = auto ] && [ ! -d "$OUT/build" ]; }; then
-+  cat >> "$OUT/defconfig" <<EOF_CC
-+BR2_CCACHE=y
-+BR2_CCACHE_DIR="${IYAKKI_CCACHE_DIR:-$HOME/.cache/iyakki-ccache}"
-+BR2_CCACHE_INITIAL_SETUP="--max-size=${IYAKKI_CCACHE_SIZE:-30G}"
-+BR2_CCACHE_USE_BASEDIR=y
-+EOF_CC
-+elif [ -f "$OUT/.config" ] && grep -q '^BR2_CCACHE=y' "$OUT/.config"; then
-+  # keep it on for a tree that already has it (the defconfig is composed again every run)
-+  grep '^BR2_CCACHE' "$OUT/.config" | grep -v '^# ' >> "$OUT/defconfig"
-+fi
-```
-
-`BR2_DL_DIR` needs no patch (export it if you want it outside the Buildroot tree). To also make `build.sh` itself skip work when
-asked: call it through `smart-build.sh`, or add at its very top
-`[ "${IYAKKI_SKIP_UNCHANGED:-0}" = 1 ] && [ "$("$(dirname "$0")/changed.sh" "$VARIANT" | head -n1)" = NOTHING ] && exit 0`
-(after `VARIANT=` is set). Do not call `changed.sh --record` from inside `build.sh`; `smart-build.sh` records after a good build.
-
-## Patch to run.sh
-
-```diff
--  build) exec dist/buildroot/build.sh libre ;;
--  build-mac) exec dist/buildroot/build.sh mac ;;
-+  build) shift; exec dist/buildroot/smart-build.sh libre "$@" ;;
-+  build-mac) shift; exec dist/buildroot/smart-build.sh mac "$@" ;;
-   build-macweb)
-     shift
--    for a in "$@"; do case "$a" in --h264) export WEB_H264=1 ;; --iris) export WEB_IRIS=1 ;; --crocus) export WEB_CROCUS=1 ;; *) echo "build-macweb: unknown option $a" >&2; exit 2 ;; esac; done
--    exec dist/buildroot/build.sh macweb ;;
-+    SB=()
-+    for a in "$@"; do case "$a" in --h264) export WEB_H264=1 ;; --iris) export WEB_IRIS=1 ;; --crocus) export WEB_CROCUS=1 ;; --force-full|--clean|--dry-run) SB+=("$a") ;; *) echo "build-macweb: unknown option $a" >&2; exit 2 ;; esac; done
-+    exec dist/buildroot/smart-build.sh macweb "${SB[@]}" ;;
-   build-web)
-     shift
--    [ "${1:-}" = "--h264" ] && export WEB_H264=1
--    exec dist/buildroot/build.sh web ;;
-+    SB=(); for a in "$@"; do case "$a" in --h264) export WEB_H264=1 ;; *) SB+=("$a") ;; esac; done
-+    exec dist/buildroot/smart-build.sh web "${SB[@]}" ;;
-+  build-macweb-layered) shift; exec dist/buildroot/repack.sh macweb --base target/buildroot-web --kernel-from target/buildroot-mac "$@" ;;
-+  build-changed) shift; exec dist/buildroot/changed.sh "$@" ;;
-```
-
-(`${SB[@]}` on an empty array needs bash 4.4+ with `set -u`; run.sh's shebang and options decide, adjust with `${SB[@]+"${SB[@]}"}` if needed.)
-`build-arm` stays on `build.sh` (the ARM image is not repackable).
+* `build.sh` switches ccache on with the settings above only for an output directory that has no `build/` yet, or when
+  `IYAKKI_CCACHE=1`; `IYAKKI_CCACHE=0` switches it off; a tree that already has `BR2_CCACHE=y` keeps it. The cache folder and size are
+  `IYAKKI_CCACHE_DIR` and `IYAKKI_CCACHE_SIZE`. `BR2_DL_DIR` needs nothing (export it to keep downloads outside the Buildroot tree).
+* `./run.sh build`, `build-mac`, `build-macweb` and `build-web` go through `smart-build.sh` (it reuses the images when `changed.sh` says
+  `NOTHING`, repacks on `IYAKKI-ONLY` and builds only what changed otherwise; `--force-full`, `--clean` and `--dry-run` are passed on).
+  `build-macweb-layered`, `build-pc-layered` and `build-changed` call `repack.sh` and `changed.sh`. `build-arm` stays on `build.sh`
+  (the ARM image is not repackable).
+* `smart-build.sh` records the state after a good build; do not call `changed.sh --record` from inside `build.sh`.
 
 ## Rules of thumb
 

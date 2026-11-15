@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 
 pub mod bnep;
+pub mod bnep_nap;
 mod oscompat;
 pub mod bt_pan;
 pub mod sbc;
@@ -18,14 +19,18 @@ pub mod a2dp;
 pub mod a2dp_sys;
 pub mod att;
 pub mod avdtp;
+pub mod avdtp_src;
+pub mod avrcp;
 pub mod bthid;
 pub mod bthid_sys;
 pub mod btmgmt;
 pub mod btstate;
 pub mod btview;
 pub mod direct;
+pub mod drmmodes;
 pub mod mac;
 pub mod wifi;
+pub mod wifi_ext;
 
 /// Where the kernel's views live. Real paths in production.
 #[derive(Clone, Debug)]
@@ -128,6 +133,21 @@ pub fn iface_info(r: &Roots, name: &str) -> (String, bool) {
 /// The text of the IPv4 routing table; empty when it cannot be read.
 pub fn route_table(r: &Roots) -> String {
     std::fs::read_to_string(r.proc_.join("net/route")).unwrap_or_default()
+}
+
+/// Broadcom 802.11ac PCIe cards of the 2013 to 2015 Macs (BCM4360 family). No open driver drives them (`b43` finds them and refuses,
+/// `brcmfmac` does not know the chip) and the closed `wl` cannot be shipped.
+pub const BROADCOM_NO_DRIVER_IDS: [&str; 6] = ["43a0", "43a1", "43a2", "4360", "4352", "43b1"];
+
+/// What to tell the person when such a card is in the machine.
+pub const BROADCOM_NO_DRIVER_TEXT: &str = "This computer's Wi-Fi card (Broadcom BCM43xx, 2013 to 2015 Macs) has no driver that IYAKKI can include. Use the network cable, a USB Wi-Fi adapter, or your phone's tether (USB or Bluetooth).";
+
+/// Is a Broadcom 4360-family card on the PCI bus (read from sysfs only)? Whether it has a driver is for the caller to judge by the
+/// presence of a Wi-Fi link.
+pub fn broadcom_wifi_without_driver(r: &Roots) -> bool {
+    dirs(&r.sys.join("bus/pci/devices")).iter().any(|d| {
+        read(d.join("vendor")).is_some_and(|v| v.trim_start_matches("0x").eq_ignore_ascii_case("14e4")) && read(d.join("device")).is_some_and(|v| BROADCOM_NO_DRIVER_IDS.contains(&v.trim_start_matches("0x").to_ascii_lowercase().as_str()))
+    })
 }
 
 /// Real network adapters (not loopback, bridges, tunnels or other software devices).
@@ -941,6 +961,23 @@ mod tests {
     fn fake(tag: &str) -> Roots {
         let d = tmp(tag);
         Roots { sys: d.join("sys"), proc_: d.join("proc") }
+    }
+
+    #[test]
+    fn a_broadcom_4360_family_card_is_found_from_sysfs() {
+        for id in BROADCOM_NO_DRIVER_IDS {
+            let r = fake(&format!("bcm{id}"));
+            put(&r.sys, "bus/pci/devices/0000:03:00.0/vendor", "0x14e4\n");
+            put(&r.sys, "bus/pci/devices/0000:03:00.0/device", &format!("0x{id}\n"));
+            assert!(broadcom_wifi_without_driver(&r), "{id}");
+        }
+        let r = fake("bcm-other");
+        put(&r.sys, "bus/pci/devices/0000:03:00.0/vendor", "0x14e4\n");
+        put(&r.sys, "bus/pci/devices/0000:03:00.0/device", "0x43a3\n");
+        put(&r.sys, "bus/pci/devices/0000:04:00.0/vendor", "0x8086\n");
+        put(&r.sys, "bus/pci/devices/0000:04:00.0/device", "0x43a0\n");
+        assert!(!broadcom_wifi_without_driver(&r), "another id, and another vendor with the same id");
+        assert!(!broadcom_wifi_without_driver(&fake("bcm-none")));
     }
 
     #[test]

@@ -159,6 +159,27 @@ pub fn status(dir: &Path) -> CheckStatus {
     s
 }
 
+/// The state of the signed download list in plain words, for the assistant's `cli_download_list` and the CLIs tab: the list in use
+/// (its number, its date, how many items a fetched list changed), whether a newer one can be accepted at all (the owner's key built
+/// in), how many tools follow it for their version, and the last check. Names no address and no key.
+pub fn summary(dir: &Path) -> String {
+    let st = super::Store::new(dir);
+    let (bundled, active) = (super::bundled(), st.active());
+    let changed = super::changed(&bundled, &active);
+    let key = if super::builtin_key().is_some() { "A newer list is accepted only when it is signed with the owner's key." } else { "No owner key is built in yet, so no newer list is accepted: the list that came with the program is used." };
+    format!(
+        "Download list number {} dated {} ({} items). {} item(s) differ from the list that came with the program{}. {} tools take their version from it when it names one. {} {}",
+        active.sequence,
+        active.issued,
+        active.items.len(),
+        changed.len(),
+        if changed.is_empty() { String::new() } else { format!(" ({})", changed.iter().map(|c| c.trim_start_matches("cli:")).take(8).collect::<Vec<_>>().join(", ")) },
+        super::WIRED.len(),
+        key,
+        status_line(&status(dir), now_s())
+    )
+}
+
 /// Is a check on its own due (never checked, 24 h passed, or an hour after "no connection")?
 pub fn due(dir: &Path, now: u64) -> bool {
     match read_state(dir) {

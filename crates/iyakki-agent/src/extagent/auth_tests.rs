@@ -204,7 +204,7 @@ fn the_log_line_says_why_and_never_holds_a_token_or_an_address() {
 fn copilot_with_no_home_yet_cannot_say_instead_of_signed_out() {
     let c = copilot::Copilot::new(AgentCfg { env: vec![], ..Default::default() });
     // the process's own home is `/` on the system: no answer, not "sign in" (checked through the same path the cache uses)
-    if std::env::var("HOME").map_or(true, |h| h == "/" || h.is_empty()) {
+    if std::env::var("HOME").map_or(true, |h| h == "/" || h.is_empty()) { // home-ok: read only
         assert_eq!(c.auth_offline(), Auth::Unknown);
     }
     let dir = tmp("copilot");

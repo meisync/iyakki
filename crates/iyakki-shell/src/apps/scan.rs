@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use iyakki_agent::providers::{valid_provider_id, Kind as ProviderKind, ProviderCfg};
 use iyakki_agent::settings::ModelChoice;
-use iyakki_netscan::{net, Event as ScanEvent, HostInfo, Kind, Options, Service};
+use iyakki_core_api::netscan::{net, Event as ScanEvent, HostInfo, Kind, Options, Service};
 
 use super::widgets::{Form, FormEvent};
 use super::{blink, App, AppCx, Flow};
@@ -90,8 +90,8 @@ pub struct ScanApp {
 }
 
 impl ScanApp {
-    pub fn new(_cx: &AppCx) -> ScanApp {
-        let mut nets: Vec<Network> = net::local_subnets().into_iter().map(|s| Network { label: format!("{}  {}  ({} addresses)", s.iface, s.cidr(), net::hosts_of(&s).len()), targets: net::hosts_of(&s) }).collect();
+    pub fn new(cx: &AppCx) -> ScanApp {
+        let mut nets: Vec<Network> = cx.os.netscan().subnets().into_iter().map(|s| Network { label: format!("{}  {}  ({} addresses)", s.iface, s.cidr(), net::hosts_of(&s).len()), targets: net::hosts_of(&s) }).collect();
         nets.push(Network { label: "This machine (127.0.0.1)".into(), targets: vec![Ipv4Addr::LOCALHOST] });
         ScanApp { nets, net_sel: 0, hosts: BTreeMap::new(), filter: 0, sel: 0, svc_sel: 0, running: false, cancel: Arc::new(AtomicBool::new(false)), rx: None, progress: (0, 0), summary: None, mode: Mode::Browse, status: None, ports: None, devices: false, dev_sel: 0, tip: Tooltip::new() }
     }
@@ -127,7 +127,7 @@ impl ScanApp {
             self.status = Some((format!("Your account may not scan {ip}."), false));
             return;
         }
-        cx.audit.record(&cx.session.user, "netscan.start", &net.label);
+        let label = net.label.clone();
         let (tx, rx) = channel();
         let (targets, cancel) = (net.targets.clone(), Arc::new(AtomicBool::new(false)));
         let mut opts = Options::default();
@@ -136,7 +136,11 @@ impl ScanApp {
             opts.announce_wait = None;
         }
         self.cancel = cancel.clone();
-        std::thread::Builder::new().name("iyakki-netscan".into()).spawn(move || iyakki_netscan::scan(targets, opts, cancel, tx)).ok();
+        if let Err(e) = cx.os.netscan().start(targets, opts, cancel, tx) {
+            self.status = Some((format!("The scan did not start: {e}"), false));
+            return;
+        }
+        cx.audit.record(&cx.session.user, "netscan.start", &label);
         self.rx = Some(rx);
         self.running = true;
         self.hosts.clear();
@@ -351,12 +355,12 @@ fn add_lemonade(cx: &AppCx, ip: Ipv4Addr, mut cfg: ProviderCfg, model: &str, key
         cx.services.system_set(&key_name, key).map_err(|e| e.to_string())?;
         cx.audit.record(&cx.session.user, "vault.system.set", &key_name);
     }
-    cx.services.settings.lock().unwrap().upsert_provider(cfg).map_err(|e| e.to_string())?;
+    cx.services.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).upsert_provider(cfg).map_err(|e| e.to_string())?;
     cx.audit.record(&cx.session.user, "settings.provider.save", &format!("{id} (Lemonade) from net scan {ip}"));
     let list = cx.services.refresh_lemonade(&id).unwrap_or_default();
     let chats: Vec<String> = list.iter().filter(|m| m.downloaded && m.kind.chats()).map(|m| m.id.clone()).collect();
     let mut note = String::new();
-    let mut st = cx.services.settings.lock().unwrap();
+    let mut st = cx.services.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let pick = if chats.iter().any(|m| m == model) { Some(model.to_string()) } else { chats.first().cloned() };
     if let (None, Some(m)) = (st.get().chat.clone(), pick) {
         st.set_chat(Some(ModelChoice { provider: id.clone(), model: m.clone() })).map_err(|e| e.to_string())?;
@@ -413,7 +417,7 @@ pub fn add_model_server(cx: &AppCx, ip: Ipv4Addr, svc: &Service, id: &str, addre
         cx.audit.record(&cx.session.user, "vault.system.set", &key_name);
     }
     let chosen = cfg.default_model.clone();
-    let mut settings = cx.services.settings.lock().unwrap();
+    let mut settings = cx.services.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     settings.upsert_provider(cfg).map_err(|e| e.to_string())?;
     let mut note = String::new();
     if settings.get().chat.is_none() {
@@ -620,8 +624,12 @@ impl App for ScanApp {
             g.text(x, y, 14.0 * s, if cancelled { WARN } else { OK }, &format!("{} {hosts} machine(s) answered, {services} service(s) found", if cancelled { "stopped:" } else { "done:" }), Face::Sans);
             y += 26.0 * s;
         } else {
-            g.text(x, y, 14.0 * s, MUTED, "Press s to scan. Only the local network is touched, and only public questions are asked.", Face::Sans);
-            y += 26.0 * s;
+            // the hint wraps in a narrow window instead of running past its edge
+            let hint = g.wrap(14.0 * s, "Press s to scan. Only the local network is touched, and only public questions are asked.", Face::Sans, w);
+            for (i, l) in hint.iter().take(3).enumerate() {
+                g.text(x, y + i as f32 * 19.0 * s, 14.0 * s, MUTED, l, Face::Sans);
+            }
+            y += 7.0 * s + hint.len().clamp(1, 3) as f32 * 19.0 * s;
         }
         if let Some((m, ok)) = &self.status {
             let m = g.fit(14.0 * s, m, Face::Sans, w);
@@ -642,6 +650,11 @@ impl App for ScanApp {
             let count = self.hosts.values().filter(|h| matches(i, h)).count();
             let text = format!("{name} {count}");
             let fw = g.text_width(13.0 * s, &text, Face::Bold) + 26.0 * s;
+            // the filters that do not fit one row continue on the next
+            if fx > x && fx + fw > x + w {
+                fx = x;
+                y += 34.0 * s;
+            }
             let r = R::new(fx, y, fw, 28.0 * s);
             let on = i == self.filter;
             let hot = g.hovered(r);
@@ -783,11 +796,19 @@ mod tests {
         port
     }
 
+    /// A machine whose scanner is the real one (the tests scan their own listener on this computer); the rest is the fake.
+    fn real_scan() -> Arc<dyn iyakki_core_api::Os> {
+        let os = iyakki_core_fake::FakeOs::new();
+        os.netscan_fake().behind(Arc::new(iyakki_core_local::LocalNetScan));
+        Arc::new(os)
+    }
+
     fn admin_cx(tag: &str) -> AppCx {
         let mut cx = cx_with_admin_store(tag);
         let d = temp_dir(&format!("{tag}-svc"));
         cx.services = services_in(&d, Arc::new(Offline));
         cx.services.on_login("root", "rootpass12", true);
+        cx.os = real_scan();
         cx
     }
 
@@ -832,6 +853,23 @@ mod tests {
         assert!(a.is_running());
         finish(&mut a, cx);
         (a, port)
+    }
+
+    #[test]
+    fn the_networks_and_the_found_machines_are_the_cores_so_a_fake_machine_decides_them() {
+        let mut cx = admin_cx("scan-core");
+        let os = Arc::new(iyakki_core_fake::FakeOs::new());
+        os.netscan_fake().set_subnets(vec![net::Subnet { iface: "fake0".into(), addr: Ipv4Addr::new(10, 9, 8, 7), prefix: 30 }]);
+        cx.os = os.clone();
+        let mut a = ScanApp::new(&cx);
+        assert!(a.nets.iter().any(|n| n.label.contains("fake0") && n.label.contains("10.9.8.")), "{:?}", a.nets.iter().map(|n| n.label.clone()).collect::<Vec<_>>());
+        a.handle(&Event::Key(Key::Char('s')), &cx);
+        assert!(a.is_running());
+        assert_eq!(os.netscan_fake().calls().len(), 1, "the scan was started through the core");
+        finish(&mut a, &cx);
+        assert!(!a.is_running());
+        let log = std::fs::read_to_string(cx.audit.path()).unwrap();
+        assert!(log.contains("netscan.start"), "{log}");
     }
 
     #[test]
@@ -882,6 +920,7 @@ mod tests {
         let d = temp_dir("scanlem-svc");
         cx.services = services_in(&d, Arc::new(iyakki_agent::iyakki_proxy::https::UreqUpstream::with_timeout(std::time::Duration::from_secs(10))));
         cx.services.on_login("root", "rootpass12", true);
+        cx.os = real_scan();
         let mut a = ScanApp::new(&cx);
         a.ports = Some(vec![fake.port]);
         a.net_sel = a.nets.len() - 1;

@@ -60,20 +60,32 @@ impl AgentCamera {
         if self.follow_browser { iyakki_agent::browsersource::browser_camera_for_desktop() } else { None }
     }
 
-    fn first_camera(&self) -> Result<CamDevice, String> {
-        if self.browser().is_some() {
-            return Presence::browser().cameras().into_iter().next().ok_or_else(|| "no camera".to_string());
+    /// The camera whose listed name (`video0: HD 4MP WEBCAM`) contains `device` (any case); empty: the first one.
+    fn camera_named(&self, device: &str) -> Result<CamDevice, String> {
+        let list = if self.browser().is_some() {
+            Presence::browser().cameras()
+        } else {
+            let mut p = self.presence.lock().unwrap_or_else(|e| e.into_inner());
+            p.scan();
+            p.cameras()
+        };
+        let want = device.trim().to_lowercase();
+        if want.is_empty() {
+            return list.into_iter().next().ok_or_else(|| "no camera is connected (plug in a USB camera)".to_string());
         }
-        let mut p = self.presence.lock().unwrap_or_else(|e| e.into_inner());
-        p.scan();
-        p.cameras().into_iter().next().ok_or_else(|| "no camera is connected (plug in a USB camera)".to_string())
+        let shown = list.iter().map(|c| format!("{}: {}", c.node, c.name)).collect::<Vec<_>>().join("; ");
+        list.into_iter().find(|c| format!("{}: {}", c.node, c.name).to_lowercase().contains(&want)).ok_or_else(|| format!("there is no camera called \"{}\" (connected: {shown})", device.chars().take(60).collect::<String>()))
     }
 
     fn open(&self) -> Result<Live, String> {
+        self.open_named("")
+    }
+
+    fn open_named(&self, device: &str) -> Result<Live, String> {
         if self.rec.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
             return Err("the camera is recording; stop the recording first".into());
         }
-        let dev = self.first_camera()?;
+        let dev = self.camera_named(device)?;
         let browser = self.browser().map(|m| Arc::new(super::browsercam::BrowserOpener::new(m)) as Arc<dyn Opener>);
         let o = browser.as_ref().unwrap_or(&self.opener).open(&dev, None).map_err(|e| if e.contains("busy") || e.contains("EBUSY") || e.contains("Device or resource busy") { "the camera is in use (is the CAMERA app open? close it and try again)".to_string() } else { e })?;
         Ok(Live::start(o.cap))
@@ -81,7 +93,11 @@ impl AgentCamera {
 
     /// One settled frame from a freshly opened camera.
     fn grab(&self) -> Result<Arc<RawFrame>, String> {
-        let live = self.open()?;
+        self.grab_named("")
+    }
+
+    fn grab_named(&self, device: &str) -> Result<Arc<RawFrame>, String> {
+        let live = self.open_named(device)?;
         let t = Instant::now();
         loop {
             if let Some(e) = live.error() {
@@ -111,7 +127,11 @@ impl CameraBackend for AgentCamera {
     }
 
     fn photo(&self, dir: &Path) -> Result<PathBuf, String> {
-        let f = self.grab()?;
+        self.photo_from(dir, "")
+    }
+
+    fn photo_from(&self, dir: &Path, device: &str) -> Result<PathBuf, String> {
+        let f = self.grab_named(device)?;
         let jpeg = f.to_jpeg()?;
         let path = super::unique(dir, &format!("photo-{}", super::stamp()), "jpg");
         let written = std::fs::write(&path, jpeg).map_err(|e| format!("could not save the photo: {e}"));
@@ -248,6 +268,27 @@ mod tests {
         assert!(cam.passport(&d, "atlantis", "none").is_err());
         assert!(cam.countries().iter().any(|c| c.id == "in-passport" && c.verified));
         assert!(!cam.countries().iter().any(|c| c.id == "custom"));
+    }
+
+    #[test]
+    fn a_photo_from_a_named_camera_opens_that_camera_and_an_unknown_name_opens_nothing() {
+        let m = FakeMachine::new("agentcam-named");
+        let d = m.dir().join("out");
+        std::fs::create_dir_all(&d).unwrap();
+        m.plug_webcam(0, "HD 4MP WEBCAM");
+        m.plug_webcam(2, "Desk Camera");
+        let opener = FakeOpener::default();
+        let opened = opener.opened.clone();
+        let cam = AgentCamera::with(m.presence(), Arc::new(opener)).without_settling();
+        assert_eq!(cam.cameras().len(), 2);
+        cam.photo_from(&d, "desk").unwrap();
+        cam.photo_from(&d, "").unwrap();
+        cam.photo(&d).unwrap();
+        let nodes: Vec<String> = opened.lock().unwrap().iter().map(|o| o.0.clone()).collect();
+        assert_eq!(nodes, vec!["video2", "video0", "video0"], "{nodes:?}");
+        let e = cam.photo_from(&d, "nonesuch").unwrap_err();
+        assert!(e.contains("no camera called") && e.contains("Desk Camera"), "{e}");
+        assert_eq!(opened.lock().unwrap().len(), 3, "nothing was opened for the unknown name");
     }
 
     #[test]

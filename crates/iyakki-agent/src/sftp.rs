@@ -63,23 +63,22 @@ pub fn valid_port(p: u16) -> Result<u16, String> {
 
 // ------------------------------------------------------------------ authorised keys
 
-/// A public key line (`ssh-ed25519 AAAA… comment`) as the blob and the comment. Only Ed25519 is accepted.
+/// A public key line (`ssh-ed25519 AAAA… comment`, `ssh-rsa` of 2048 to 8192 bits, `ecdsa-sha2-nistp256` or `ecdsa-sha2-nistp384`) as the blob and the comment.
 pub fn parse_key_line(line: &str) -> Result<(Vec<u8>, String), String> {
     let line = line.trim();
-    if line.len() > 600 || line.contains('\n') || line.contains('\0') || line.contains("PRIVATE") {
+    if line.len() > 1500 || line.contains('\n') || line.contains('\0') || line.contains("PRIVATE") {
         return Err("that is not a single public key line (never paste a private key)".into());
     }
     let mut it = line.splitn(3, char::is_whitespace);
     let ty = it.next().unwrap_or("");
     let b64 = it.next().unwrap_or("");
     let comment = it.next().unwrap_or("").trim().chars().filter(|c| !c.is_control()).take(80).collect::<String>();
-    if ty != "ssh-ed25519" {
-        return Err("only ssh-ed25519 public keys are accepted (make one with: ssh-keygen -t ed25519)".into());
+    if !matches!(ty, "ssh-ed25519" | "ssh-rsa" | "ecdsa-sha2-nistp256" | "ecdsa-sha2-nistp384") {
+        return Err("only ssh-ed25519, ssh-rsa (2048 bits or more), ecdsa-sha2-nistp256 and ecdsa-sha2-nistp384 public keys are accepted (make one with: ssh-keygen -t ed25519)".into());
     }
     let blob = crate::sshkey::unb64(b64).ok_or("the key text does not decode")?;
-    let mut r = crate::sshkey::Reader { b: &blob };
-    if r.string() != Some(b"ssh-ed25519") || r.string().map(<[u8]>::len) != Some(32) || !r.b.is_empty() {
-        return Err("the key text is not an Ed25519 public key".into());
+    if crate::sshalg::blob_type(&blob).as_deref() != Some(ty) || !crate::sshalg::valid_user_blob(&blob) {
+        return Err(format!("the key text is not a usable {ty} public key (RSA keys need 2048 to 8192 bits)"));
     }
     Ok((blob, comment))
 }
@@ -114,6 +113,10 @@ fn write_private(path: &Path, text: &str) -> Result<(), String> {
     std::fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
 
+fn key_text(blob: &[u8], comment: &str) -> String {
+    format!("{} {} {}\n", crate::sshalg::blob_type(blob).unwrap_or_default(), crate::sshkey::b64(blob), comment)
+}
+
 pub fn add_key(dir: &Path, user: &str, line: &str) -> Result<String, String> {
     let (blob, comment) = parse_key_line(line)?;
     let keys = user_keys(dir, user);
@@ -124,8 +127,8 @@ pub fn add_key(dir: &Path, user: &str, line: &str) -> Result<String, String> {
     if keys.len() >= MAX_KEYS_PER_USER {
         return Err(format!("at most {MAX_KEYS_PER_USER} keys per account"));
     }
-    let mut text: String = keys.iter().map(|(b, c)| format!("ssh-ed25519 {} {}\n", crate::sshkey::b64(b), c)).collect();
-    text.push_str(&format!("ssh-ed25519 {} {}\n", crate::sshkey::b64(&blob), comment));
+    let mut text: String = keys.iter().map(|(b, c)| key_text(b, c)).collect();
+    text.push_str(&key_text(&blob, &comment));
     write_private(&key_file(dir, user)?, &text)?;
     Ok(fp)
 }
@@ -137,7 +140,7 @@ pub fn remove_key(dir: &Path, user: &str, fingerprint: &str) -> Result<usize, St
     if removed == 0 {
         return Err("no key with that fingerprint (sftp_status lists them)".into());
     }
-    let text: String = keep.iter().map(|(b, c)| format!("ssh-ed25519 {} {}\n", crate::sshkey::b64(b), c)).collect();
+    let text: String = keep.iter().map(|(b, c)| key_text(b, c)).collect();
     write_private(&key_file(dir, user)?, &text)?;
     Ok(removed)
 }
@@ -150,6 +153,17 @@ pub fn host_key(dir: &Path) -> Result<KeyPair, String> {
     }
     let k = KeyPair::generate("iyakki-sftp-host")?;
     write_private(&path, &k.to_openssh())?;
+    Ok(k)
+}
+
+/// The ECDSA P-256 host key for clients without an Ed25519 host key: made on first use, kept as PKCS#8 (base64) in `<data>/sftp/host_key_ecdsa`.
+pub fn host_key_ec(dir: &Path) -> Result<crate::sshalg::EcHostKey, String> {
+    let path = dir.join("sftp").join("host_key_ecdsa");
+    if let Some(bytes) = std::fs::read_to_string(&path).ok().and_then(|t| crate::sshkey::unb64(&t)) {
+        return crate::sshalg::EcHostKey::from_pkcs8(&bytes);
+    }
+    let k = crate::sshalg::EcHostKey::generate()?;
+    write_private(&path, &crate::sshkey::b64(k.to_pkcs8()))?;
     Ok(k)
 }
 
@@ -350,6 +364,8 @@ pub struct Status {
     pub by: String,
     pub config: Config,
     pub host_fingerprint: String,
+    /// The ECDSA P-256 host key some clients ask for (made on first use, like the Ed25519 one).
+    pub host_fingerprint_ec: String,
     pub keys: Vec<(String, Vec<String>)>,
     pub addresses: Vec<String>,
 }
@@ -425,10 +441,11 @@ impl Sftp {
         let cfg = self.config();
         let run = self.running.lock().unwrap_or_else(|e| e.into_inner());
         let fp = host_key(&self.dir).map(|k| k.fingerprint()).unwrap_or_default();
+        let fp_ec = host_key_ec(&self.dir).map(|k| k.fingerprint()).unwrap_or_default();
         let keys = cfg.users.iter().map(|u| (u.clone(), user_keys(&self.dir, u).iter().map(|(b, _)| fingerprint_of_blob(b)).collect())).collect();
         let port = run.as_ref().map_or(cfg.port, |r| r.port);
         let addresses = if run.is_some() { crate::sharedfolder::lan_addresses() } else { Vec::new() };
-        Status { running: run.is_some(), port, until: run.as_ref().map_or(0, |r| r.until), by: run.as_ref().map(|r| r.by.clone()).unwrap_or_default(), config: cfg, host_fingerprint: fp, keys, addresses }
+        Status { running: run.is_some(), port, until: run.as_ref().map_or(0, |r| r.until), by: run.as_ref().map(|r| r.by.clone()).unwrap_or_default(), config: cfg, host_fingerprint: fp, host_fingerprint_ec: fp_ec, keys, addresses }
     }
 
     /// Change the settings (not the running state). Account names must be valid; the port must be allowed.
@@ -467,6 +484,7 @@ impl Sftp {
         }
         let cfg = self.config();
         let key = host_key(&self.dir)?;
+        let ec = Arc::new(host_key_ec(&self.dir)?);
         let listener = TcpListener::bind(("0.0.0.0", cfg.port)).map_err(|e| format!("cannot listen on port {}: {e}", cfg.port))?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
@@ -478,7 +496,7 @@ impl Sftp {
         let stop = Arc::new(AtomicBool::new(false));
         let gate = Arc::new(RealGate { dir: self.dir.clone(), cfg: cfg.clone(), auth: self.auth.clone(), audit: self.audit.clone(), limiter: self.limiter.clone(), home: self.home.clone() });
         let (stop2, limiter) = (stop.clone(), self.limiter.clone());
-        let thread = std::thread::spawn(move || accept_loop(listener, key, gate, stop2, limiter, until));
+        let thread = std::thread::spawn(move || accept_loop(listener, key, ec, gate, stop2, limiter, until));
         LISTENING.store(port as u32, Ordering::Relaxed);
         *self.running.lock().unwrap_or_else(|e| e.into_inner()) = Some(Running { stop, thread: Some(thread), port, until, by: by.to_string() });
         self.log("sftp.enable", &format!("by {by}, port {port}, {}", if until == 0 { "until stopped".to_string() } else { format!("until {until}") }));
@@ -511,7 +529,7 @@ impl Sftp {
     }
 }
 
-fn accept_loop(listener: TcpListener, key: KeyPair, gate: Arc<RealGate>, stop: Arc<AtomicBool>, limiter: Arc<Mutex<Limiter>>, until: i64) {
+fn accept_loop(listener: TcpListener, key: KeyPair, ec: Arc<crate::sshalg::EcHostKey>, gate: Arc<RealGate>, stop: Arc<AtomicBool>, limiter: Arc<Mutex<Limiter>>, until: i64) {
     let live = Arc::new(AtomicUsize::new(0));
     while !stop.load(Ordering::Relaxed) {
         if until != 0 && crate::clock::now_unix() >= until {
@@ -534,9 +552,9 @@ fn accept_loop(listener: TcpListener, key: KeyPair, gate: Arc<RealGate>, stop: A
                     continue;
                 }
                 live.fetch_add(1, Ordering::Relaxed);
-                let (key, gate, stop, live) = (key.clone(), gate.clone(), stop.clone(), live.clone());
+                let (key, ec, gate, stop, live) = (key.clone(), ec.clone(), gate.clone(), stop.clone(), live.clone());
                 std::thread::spawn(move || {
-                    let srv = Server { host_key: &key, gate: &*gate, peer: peer.ip() };
+                    let srv = Server { host_key: &key, ec_host: Some(&*ec), gate: &*gate, peer: peer.ip() };
                     let _ = ssh_server::serve(s, &srv, stop);
                     live.fetch_sub(1, Ordering::Relaxed);
                 });

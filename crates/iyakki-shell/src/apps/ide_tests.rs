@@ -481,6 +481,26 @@ fn ide_quick_open_and_project_search_open_files_at_the_line() {
 }
 
 #[test]
+fn ctrl_shift_u_runs_the_tests_and_ctrl_shift_i_says_why_deploy_is_off_without_a_cluster() {
+    let w = world("tbkeys");
+    let d = project(&w, "alpha", &[]);
+    let mut app = IdeApp::new(&w.cx);
+    open(&mut app, &w.cx, "Alpha", &d);
+    let mut cfg = cur(&app).cfg.clone();
+    cfg.commands.test = "sh -c \"echo '--> src/main.rs:1:4'; exit 1\"".into();
+    cfg.save(&d).unwrap();
+    cur_mut(&mut app).cfg = cfg;
+    key(&mut app, &w.cx, Key::Ctrl('U'));
+    until(&mut app, &w.cx, "the tests", |a| a.ws[0].problems.summary.is_some());
+    assert_eq!(cur(&app).bottom_tab, BTab::Problems);
+    key(&mut app, &w.cx, Key::Ctrl('I'));
+    let msg = cur(&app).status.as_ref().unwrap().0.clone();
+    assert!(msg.starts_with("Deploy is off: ") && msg.contains("no cluster is connected"), "{msg}");
+    assert!(app.modal.is_none(), "no form opens while the reason stands");
+    assert!(app.help().iter().any(|l| l.contains("Ctrl+Shift+U") && l.contains("Ctrl+Shift+I")), "the help lists both keys");
+}
+
+#[test]
 fn ide_problems_run_the_test_command_and_a_click_jumps_to_file_and_line() {
     let w = world("problems");
     let d = project(&w, "alpha", &[]);
@@ -1459,7 +1479,8 @@ fn ide_the_deploy_form_runs_build_load_apply_verify_with_each_step_approved_and_
     key(&mut app, &w.cx, Key::Char('d'));
     ticks(&mut app, &w.cx, 3);
     let Some(Modal::Form(FormKind::Deploy, f)) = &app.modal else { panic!("the deploy form") };
-    assert_eq!((f.value(0).as_str(), f.value(1).as_str(), f.value(4).as_str()), ("alpha", "app", "shop-dev"), "image, the folder with the Dockerfile, the workspace namespace");
+    assert!((f.value(0).as_str(), f.value(4).as_str()) == ("alpha", "shop-dev") && f.value(1).ends_with("/app") && std::path::Path::new(&f.value(1)).is_absolute(), "image, the folder with the Dockerfile (shown whole so Browse and the check work), the workspace namespace");
+    assert!(f.path_check(1).is_some() && f.path_check(2).is_some() && f.path_check(0).is_none(), "the build folder and the manifest are path fields with Browse");
     // a bad image name and another namespace are refused in the form
     let mut bad = f.clone();
     bad.set_value(4, "kube-system");
@@ -2894,6 +2915,9 @@ mod notes_tests;
 
 #[path = "ide_tile_tests.rs"]
 mod tile_tests;
+#[cfg(test)]
+#[path = "ide_preview_tests.rs"]
+mod preview_tests;
 
 #[test]
 fn ide_new_app_entry_scaffolds_a_project_opens_the_chat_and_stays_inside_the_workspace() {
@@ -2980,3 +3004,85 @@ fn ide_chat_approval_chip_and_indicator_fit_at_every_size() {
 
 #[path = "ide_chatbox_tests.rs"]
 mod chatbox;
+
+#[test]
+fn workspace_paths_are_shown_whole_for_browse_and_come_back_relative() {
+    let root = std::path::Path::new("/w/shop");
+    assert_eq!(crate::apps::ide::abs_in(root, "."), "/w/shop");
+    assert_eq!(crate::apps::ide::abs_in(root, "app"), "/w/shop/app");
+    assert_eq!(crate::apps::ide::abs_in(root, ""), "");
+    assert_eq!(crate::apps::ide::abs_in(root, "/elsewhere/x"), "/elsewhere/x");
+    assert_eq!(crate::apps::ide::rel_in(root, "/w/shop"), ".");
+    assert_eq!(crate::apps::ide::rel_in(root, "/w/shop/app/Dockerfile"), "app/Dockerfile");
+    assert_eq!(crate::apps::ide::rel_in(root, "deploy/app.yaml"), "deploy/app.yaml");
+    assert_eq!(crate::apps::ide::rel_in(root, "/etc/passwd"), "/etc/passwd", "outside the workspace stays as typed, for the checks to refuse");
+    assert_eq!(crate::apps::ide::rel_in(root, "  "), "");
+}
+
+#[test]
+fn ide_the_project_settings_offer_to_forget_the_assistants_memory_of_the_workspace_or_one_chat() {
+    use iyakki_agent::history::History;
+    let w = world("forgetmem");
+    let d = project(&w, "alpha", &[("go.mod", "module x")]);
+    let mut app = IdeApp::new(&w.cx);
+    open(&mut app, &w.cx, "Alpha", &d);
+    let user = w.cx.session.user.clone();
+    // no history: no such field
+    app.open_settings_form_with_history(&w.cx);
+    let Some(Modal::Form(_, f)) = &app.modal else { panic!("form") };
+    assert_eq!(f.fields.len(), 11, "nothing to forget, nothing to ask");
+    key(&mut app, &w.cx, Key::Esc);
+    for (chat, n) in [("s_one", 3), ("s_two", 2)] {
+        let h = History::new(w.cx.services.kb.clone(), &user, "Alpha", Some(chat));
+        for i in 0..n {
+            h.record("turn", "", &format!("{chat} step {i}"));
+        }
+    }
+    let left = |chat: Option<&str>| match chat {
+        None => History::workspaces_of(&w.cx.services.kb, &user).iter().map(|x| x.entries).sum::<usize>(),
+        Some(c) => History::sessions_of(&w.cx.services.kb, &user, "Alpha").into_iter().find(|s| s.0 == c).map_or(0, |s| s.1),
+    };
+    assert_eq!(left(None), 5);
+    // saving with "keep it" forgets nothing
+    app.open_settings_form_with_history(&w.cx);
+    let Some(Modal::Form(_, f)) = &app.modal else { panic!("form") };
+    assert_eq!(f.fields.len(), 12);
+    key(&mut app, &w.cx, Key::Ctrl('s'));
+    assert!(app.modal.is_none());
+    assert_eq!(left(None), 5);
+    // one chat: options are keep, all, then the chats in order
+    app.open_settings_form_with_history(&w.cx);
+    let Some(Modal::Form(_, f)) = &mut app.modal else { panic!("form") };
+    f.set_choice(11, 2);
+    key(&mut app, &w.cx, Key::Ctrl('s'));
+    assert!(app.modal.is_none());
+    assert_eq!(left(Some("s-one")), 0);
+    assert_eq!(left(None), 2, "the other chat is kept");
+    // all of it
+    app.open_settings_form_with_history(&w.cx);
+    let Some(Modal::Form(_, f)) = &mut app.modal else { panic!("form") };
+    f.set_choice(11, 1);
+    key(&mut app, &w.cx, Key::Ctrl('s'));
+    assert_eq!(left(None), 0);
+    assert!(w.cx.audit.recent(10).iter().any(|l| l.contains("settings.assistant.forget") && l.contains("IDE")));
+}
+
+#[test]
+fn a_form_a_question_a_list_and_a_lock_over_the_ide_are_announced_by_their_own_words() {
+    let w = world("a11y-dialogs");
+    let mut app = IdeApp::new(&w.cx);
+    app.modal = None;
+    assert_eq!(app.dialog_title(), None, "no dialog on the page itself");
+    app.modal = Some(Modal::Switcher { sel: 0 });
+    assert_eq!(app.dialog_title().as_deref(), Some("Switch workspace"));
+    app.modal = Some(Modal::Confirm(Confirm::DeleteFile("a.py".into())));
+    assert_eq!(app.dialog_title().as_deref(), Some("Delete a.py?"));
+    app.modal = Some(Modal::Confirm(Confirm::CloseIde("Two tasks are still working.".into())));
+    assert_eq!(app.dialog_title().as_deref(), Some("Close the IDE?"));
+    app.modal = Some(Modal::Lock(0));
+    assert_eq!(app.dialog_title().as_deref(), Some("This workspace is open elsewhere"));
+    app.open_new_workspace_form(&w.cx);
+    assert!(app.dialog_title().is_some_and(|t| !t.is_empty()), "a form says its own title: {:?}", app.dialog_title());
+    app.modal = None;
+    assert_eq!(app.dialog_title(), None);
+}

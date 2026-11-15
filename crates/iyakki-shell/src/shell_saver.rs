@@ -10,6 +10,7 @@
 //! * The backend asks [`Shell::redraw_interval_ms`] how often it must redraw and [`Shell::take_blank_requests`] for the framebuffer's
 //!   blank call; the backlight is switched here, with the previous value kept for a restart after a crash.
 
+use crate::stale_stats::mark_stale;
 use super::*;
 use crate::panel::{self, Panel};
 use crate::saver::{self, IdleMachine, Painter, Stage, Token};
@@ -178,6 +179,8 @@ impl Shell {
             Stage::Awake | Stage::Dim => match &self.screen {
                 // nothing moves and nothing is drawn over the app: it says how rarely the safety redraw has to come
                 Screen::App(app, _) if self.live_clear() => app.idle_redraw_ms(),
+                // an idle Home: nothing moves, a change asks for its own frame (KI-092; the clock text is read at each draw)
+                _ if self.home_is_calm() && matches!(self.saver.m.stage(), Stage::Awake) => 500,
                 _ => 100,
             },
             Stage::Saver => 1000,
@@ -297,6 +300,8 @@ impl Shell {
         }
         if self.tick % 15 == 0 {
             self.saver.on_battery = self.saver_on_battery();
+            self.views_poll();
+            self.backup_schedule_poll();
             if let Some(u) = &user {
                 if iyakki_agent::screensaver::take_request(self.env.services.dir(), u) == Some(Request::Preview) {
                     self.saver.m.force_saver(now, Some(5));
@@ -347,7 +352,7 @@ impl Shell {
                 self.saver.black_done = false;
                 self.saver.frame_due = false;
                 self.hits.clear();
-                self.stale = true;
+                mark_stale!(self);
             }
             Stage::Dim => {
                 if let Some(p) = self.saver.panel.as_mut() {
@@ -365,7 +370,7 @@ impl Shell {
                 self.saver.black_done = false;
                 self.saver.frame_due = true;
                 self.hits.clear();
-                self.stale = true;
+                mark_stale!(self);
             }
             Stage::Off => {
                 self.saver.swallow_up = false;
@@ -378,7 +383,7 @@ impl Shell {
                     self.saver.blanked = true;
                 }
                 self.hits.clear();
-                self.stale = true;
+                mark_stale!(self);
             }
         }
     }
@@ -391,6 +396,10 @@ impl Shell {
         }
         log::info!("screen: {:?} -> Awake (input)", from);
         self.saver_apply(Stage::Awake);
+        // the saver or the black screen ends: the person who asked for it goes back to the first view (as after the lock)
+        if matches!(from, Stage::Saver | Stage::Off) {
+            self.views_after_saver();
+        }
         true
     }
 
@@ -445,6 +454,11 @@ impl Shell {
     }
 
     /// Called after every event: while the saver or the black screen is up, only its own frames make the picture stale.
+    /// Whether the screen shows no desktop (the saver or the black screen is up).
+    pub(super) fn saver_covers_desktop(&self) -> bool {
+        matches!(self.saver.m.stage(), Stage::Saver | Stage::Off)
+    }
+
     pub(super) fn saver_after(&mut self) {
         match self.saver.m.stage() {
             Stage::Saver => {
@@ -491,6 +505,10 @@ impl Shell {
                 let style = self.saver.cfg.style;
                 let (w, h) = (g.width(), g.height());
                 let s = scale_for(w, h);
+                if style == iyakki_agent::screensaver::Style::Slideshow {
+                    let dir = self.session.as_ref().map(|se| std::path::PathBuf::from(format!("/home/{}/Pictures", se.user)));
+                    self.saver.painter.set_photos(dir);
+                }
                 let text = (style == iyakki_agent::screensaver::Style::LogoClock).then(|| self.saver_clock_text(now));
                 self.saver.painter.draw(g, style, now as f64 / 1000.0, text.as_deref(), s);
                 self.saver.last_frame_ms = now;

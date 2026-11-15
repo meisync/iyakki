@@ -27,6 +27,7 @@ downloaded until you press a button in Settings -> Browser -> Ads and trackers:
 | button | what it does |
 |---|---|
 | Download lists (l) | fetches EasyList and EasyPrivacy from easylist.to over HTTPS |
+| uBlock filters (v) | fetches the uBlock filters list from raw.githubusercontent.com over HTTPS (GPL-3.0, see below) and adds it to the lists in use |
 | Update (n) | fetches again every list that has an address |
 | Add address (u) | a list at an address you type (any `https://` address) |
 | Add file (o) | a list file on this computer (the file picker) |
@@ -38,7 +39,7 @@ Known lists, with the licence as their authors publish it (check their sites; th
 |---|---|---|
 | EasyList | GPL-3.0 or CC BY-SA 3.0 (dual licence) | advertisements on English-language sites |
 | EasyPrivacy | GPL-3.0 or CC BY-SA 3.0 (dual licence) | trackers and analytics |
-| uBlock filters | GPL-3.0 | ads, trackers and annoyances (only the rules this blocker understands are used; add it by address) |
+| uBlock filters | GPL-3.0 | ads, trackers and annoyances (only the rules this blocker understands are used; the **uBlock filters (v)** button or the chat tool `browser_block_download` with `ublock-filters` adds it) |
 
 For every list the settings page shows its name, how many rules were usable, when it was fetched, the first characters of the
 SHA-256 of what was downloaded, the licence and the site it came from. Lists with an address are refreshed by the same code once

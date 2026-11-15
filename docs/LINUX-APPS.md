@@ -84,8 +84,15 @@ What the sandbox cannot do, and how:
 * **Network "on" shares the host's network namespace.** The sandbox can reach what the machine can reach, **including services that
   listen on the machine's loopback** (IYAKKI's web front end, the dev cluster's API). A sandbox with its network on is therefore treated as
   able to reach "any server": only an account allowed every host may turn it on, run in it or make one. Keep the network **off** for
-  programs you do not trust and turn it on only to install packages. Planned: an outbound-only network (a virtual interface with
-  address translation, or a user-space network stack), which would also allow a host allow-list.
+  programs you do not trust and turn it on only to install packages. **Outbound-only mode** (F-LINAPP-13): the page's Network button now cycles
+  off, outbound only, shared with the computer. Outbound only gives the sandbox its own network namespace joined to the computer by a virtual pair
+  of interfaces, address translation out, and rules (loaded through IYAKKI's own firewall writer; the images have no `nft`) that never let it reach
+  the computer itself (loopback, the computer's own addresses, link-local) and by default not private networks (your own network, the dev
+  cluster) either. An allow-list (`linux net <name> outbound example.org:443 203.0.113.0/24 dns=9.9.9.9`, or the chat tool `linux_network_set`)
+  narrows it to the listed hosts; names are looked up each time the sandbox starts, and a name that does not resolve allows nothing. An account
+  that may not reach every host can use it only with a list of hosts it is allowed. If the rules or the pair cannot be made the program does not start
+  (it never falls back to the computer's network); it needs the program to run as root. Masquerading needs the computer's IPv4 forwarding on: it is switched on when the first outbound-only sandbox starts and put back when the last one ends (internet sharing keeps its own copy of that switch, so running both at once can switch one off early; a start that fails half way can leave it on). Written but **not run on a Linux machine yet**: the namespace
+  set-up (`linuxapps_init.rs`, type-checked for Linux, exercised by no test).
 * When IYAKKI runs as root (the normal case on a device) each sandbox gets its own range of 65,536 ids and `apt` can change owners inside. A copy of IYAKKI
   that does **not** run as root maps one id only: the sandbox works, but a package that must `chown` to another user or group fails to unpack there.
 * Memory, cpu and process limits need root and cgroup v2 (a non-root run, such as a development PC, has no limits; the time limit of each run still applies).
@@ -173,9 +180,14 @@ The "runner" is one trait (`wsexec::Runner`), so tests use a fake that records t
 
 **Runtime choice.** (a) namespaced `pivot_root` as described (implemented). (b) A pod in the dev cluster from a rootfs imported as an image is the
 documented fallback when the kernel lacks namespaces: the pod manifest (no service account, no privilege, capabilities dropped,
-default seccomp) and the exec command are built and tested; **converting a rootfs into an image the cluster can import is not
-built** (a layer tar, a config and a manifest in the docker-archive format, then `k3s ctr images import`). On the IYAKKI kernels (section 10) the
-fallback is not needed.
+default seccomp) and the exec command are built and tested. **Built 2026-11-13, tested on fakes only:** `linuxpod.rs` unpacks an archived
+sandbox root (a tar, or a tar.gz up to 256 MB), turns it into one OCI layer with `ocipush_root.rs` (devices and special files left out, set-user-id bits
+cleared, user 10001), writes the OCI layout, imports it with `k3s ctr images import` (the layout file is removed afterwards), applies the pod
+(`imagePullPolicy: Never`, non-root, no service-account token, no privilege, all capabilities dropped) and waits for it to run. If it does not run in
+time it is deleted again and the waiting reason is told. In chat: `linuxapp_pods` lists your pods, `linuxapp_pod_start` and `linuxapp_pod_stop` ask
+every time and only an administrator may use them, with the dev cluster running. The pod's command is `sleep infinity`, so the root needs a `sleep`
+program; you use it with `kubectl exec -n iyakki-apps <pod> -- /bin/sh`. A dev cluster that runs in Podman cannot import an image this way and says
+so. It has never run against a real cluster. On the IYAKKI kernels (section 10) the fallback is not needed.
 
 **Import a tarball you assembled** (the "build your own" route): `linux import <name> <file.tar.gz|.tar.xz|.tar.zst|.tar>` unpacks it with the same
 strict reader. Nothing is compared with a vendor list (the page says "none: imported from your file", with the SHA-256 computed).

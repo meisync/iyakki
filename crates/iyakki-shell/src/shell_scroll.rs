@@ -6,6 +6,7 @@
 //! * everything else (a popover, a menu, panes, a tile with only whole-line scrolling) gets the classic [`Event::Scroll`], one
 //!   per [`NOTCH_PX`] of movement, the part of a notch left over kept for the next step. Nothing is lost and no tile had to change.
 
+use crate::stale_stats::mark_stale;
 use super::*;
 use crate::scrolleng::NOTCH_PX;
 
@@ -31,7 +32,7 @@ impl Shell {
                 _ => false,
             };
             if taken {
-                self.stale = true;
+                mark_stale!(self);
                 self.saver_after();
                 return;
             }
@@ -66,6 +67,10 @@ impl Shell {
     }
 
     /// The open tile wants F12 for itself (the browser's Developer tools): the screenshot key then waits for Print Screen.
+    pub(super) fn app_wants_alt(&self) -> bool {
+        matches!(&self.screen, Screen::App(app, _) if app.wants_alt())
+    }
+
     pub(super) fn app_claims_f12(&self) -> bool {
         matches!(&self.screen, Screen::App(app, _) if app.claims_f12())
     }

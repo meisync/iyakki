@@ -85,7 +85,7 @@ fn the_files_have_no_outside_address_no_inline_script_and_no_unsafe_calls() {
         assert!(!html.contains(h), "{h}");
     }
     // the stylesheet and the scripts named by the page are the ones served
-    for name in ["/ui/app.css", "/ui/app.js", "/ui/common.js", "/ui/files.js", "/ui/git.js", "/ui/flows.js", "/ui/runs.js", "/ui/cloud.js", "/ui/remote.js", "/ui/tenant.js", "/ui/tenantcfg.js"] {
+    for name in ["/ui/app.css", "/ui/app.js", "/ui/common.js", "/ui/files.js", "/ui/git.js", "/ui/flows.js", "/ui/runs.js", "/ui/chat.js", "/ui/cloud.js", "/ui/remote.js", "/ui/tenant.js", "/ui/tenantcfg.js"] {
         assert!(html.contains(&format!("\"{name}\"")), "{name}");
         assert!(ui::ASSETS.iter().any(|a| a.0 == name));
     }
@@ -254,4 +254,35 @@ fn the_files_git_and_flows_pages_use_the_new_routes_and_carry_no_planned_notice(
     for (n, b) in [("files", f), ("git", g), ("flows", l)] {
         assert!(!b.contains("/approvals"), "{n}.js must not answer questions");
     }
+}
+
+// What the first real-browser run (dist/browsertest, Chrome, 2026-11-12) found. The browser run is the proof; these keep the three causes from coming back
+// without Chrome.
+#[test]
+fn the_skip_link_the_icon_and_the_empty_ids_that_a_real_browser_found_stay_fixed() {
+    let get = |p: &str| ui::ASSETS.iter().find(|a| a.0 == p).unwrap().2;
+    // 1. an icon is named, so the browser does not ask for /favicon.ico (a 404 in every console)
+    assert!(get("/ui/").contains("rel=\"icon\" href=\"data:,\""));
+    // 2. the skip link (`#main`) is not a page address: it must not make the router fall back to the first page
+    let app = get("/ui/app.js");
+    assert!(app.contains("h.startsWith(\"#/\")") && app.contains(".skip"), "the router ignores hashes that are not page addresses");
+    // 3. no element gets an empty id attribute (`id=""` repeated is a duplicate id): the role select takes an id only when it has one
+    assert!(get("/ui/cloud.js").contains("id: id || false"));
+}
+
+// Found by the second real-browser pass (keyboard, right-to-left, zoom, request counts); Chrome proves them, these keep the causes from returning.
+#[test]
+fn the_keyboard_polling_and_layout_fixes_of_the_second_browser_pass_stay() {
+    let get = |p: &str| ui::ASSETS.iter().find(|a| a.0 == p).unwrap().2;
+    // the skip link is hidden above the page: off the left edge it makes a right-to-left page scroll sideways
+    assert!(get("/ui/app.css").contains(".skip { position: absolute; left: 8px; top: -999px;"));
+    // Tab on the tile canvas must not move the focus to the text box (Shift+Tab then bounced between the two)
+    assert!(get("/ui/tiles.js").contains("if (e.key !== \"Tab\") input.focus"));
+    // the confirm step of Remote access takes the focus and Esc cancels it
+    let r = get("/ui/remote.js");
+    assert!(r.contains("focusId = \"remote-cancel\"") && r.contains("ev.key === \"Escape\""));
+    // the Runs page does not poll every 2 s (60 requests a minute is the whole allowance of a person)
+    assert!(get("/ui/runs.js").contains("tick % 8 === 0"));
+    // controls are 44 px high
+    assert!(get("/ui/app.css").contains(".crumbs button { min-height: 44px; }"));
 }

@@ -587,7 +587,7 @@ fn a_page_gets_errors_with_codes_promises_for_slow_calls_and_events_for_streams(
     rt.pump();
     assert_eq!(rt.page.eval("t", "s.join()").unwrap(), "Busy:true");
     // the API cannot be reached around: no way to set limits or answer cards from the page
-    assert_eq!(rt.page.eval("t", "typeof iyakki.llm.setLimit + typeof iyakki.llm.approve + typeof iyakki.speech.listen").unwrap(), "undefinedundefinedundefined");
+    assert_eq!(rt.page.eval("t", "typeof iyakki.llm.setLimit + typeof iyakki.llm.approve + typeof iyakki.money.setLimit + typeof iyakki.money.approve + typeof iyakki.money.raise").unwrap(), "undefinedundefinedundefinedundefinedundefined");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -207,3 +207,45 @@ fn what_each_extra_display_and_pane_costs_matches_the_formula() {
     let ext = layout_cost(HD, 1, &[], &[UHD]);
     assert_eq!(ext, 3840 * 2160 * 4 * 2 + SURFACE_OVERHEAD);
 }
+
+#[test]
+fn compressed_memory_counts_only_when_the_experiment_is_on() {
+    use iyakki_zram::compressed::Experiment;
+    let m = mem(8.0, 2.0);
+    assert_eq!(m.with_compressed_credit(Experiment::Off, gib(3.0), gib(1.0)), m);
+    let on = m.with_compressed_credit(Experiment::On, gib(3.0), gib(1.0));
+    assert_eq!((on.total, on.available), (gib(8.0), gib(3.0)));
+    assert_eq!(m.with_compressed_credit(Experiment::On, gib(100.0), 0).available, gib(8.0), "never past MemTotal");
+}
+
+#[test]
+fn the_gate_reads_the_real_zram_and_zswap_figures_and_counts_half_the_saving_only_while_the_experiment_is_on() {
+    let root = std::env::temp_dir().join(format!("iyakki-memgate-credit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let put = |rel: &str, text: &str| {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    };
+    // 8 GiB, 2 GiB available; zswap holds 1 GiB of pages in 256 MiB; a zram device holds 2 GiB in 512 MiB of RAM
+    put("proc/meminfo", "MemTotal: 8388608 kB\nMemFree: 1048576 kB\nMemAvailable: 2097152 kB\nZswap: 262144 kB\nZswapped: 1048576 kB\n");
+    put("sys/block/zram0/mm_stat", &format!("{} {} {} 0 0 0 0 0\n", 2u64 << 30, 400u64 << 20, 512u64 << 20));
+    put("sys/block/zram0/disksize", "4294967296\n");
+    put("sys/block/zram0/comp_algorithm", "lzo [zstd]\n");
+    assert_eq!(compressed_figures(&root), ((1u64 << 30) + (2u64 << 30), (256u64 << 20) + (512u64 << 20)));
+    // off (the default) and nothing set: what MemAvailable says
+    assert_eq!(read_mem_credited(&root, "", "").available, gib(2.0));
+    assert_eq!(read_mem_credited(&root, "quiet", "compressed-memory=off\n").available, gib(2.0));
+    // on in system.conf: half of (3 GiB - 768 MiB) = 1.125 GiB more
+    let on = read_mem_credited(&root, "", "compressed-memory=on\n");
+    assert_eq!((on.total, on.available), (gib(8.0), gib(2.0) + (gib(3.0) - (768u64 << 20)) / 2), "{on:?}");
+    // on from the command line, which wins over the file
+    assert_eq!(read_mem_credited(&root, "iyakki.zram=exp", "compressed-memory=off\n").available, on.available);
+    // a machine with nothing compressed gets no credit even when it is on
+    put("proc/meminfo", "MemTotal: 8388608 kB\nMemFree: 1048576 kB\nMemAvailable: 2097152 kB\n");
+    std::fs::remove_dir_all(root.join("sys")).unwrap();
+    assert_eq!(compressed_figures(&root), (0, 0));
+    assert_eq!(read_mem_credited(&root, "", "compressed-memory=on\n").available, gib(2.0));
+    // unknown memory stays unknown
+    assert!(!read_mem_credited(&root.join("nowhere"), "", "compressed-memory=on\n").known());
+}

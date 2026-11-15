@@ -326,6 +326,23 @@ nothing has run on a real network, a real vault service, a real cluster or the r
 * **Mutual TLS:** `--client-ca HOST=NAME` per https route; the CA comes from the same source (a vault secret). A certificate of another
   tenant's CA, none, an expired one or an unknown CA is refused (403, or the handshake), and the target is not contacted. A CA the source
   cannot give turns every client away (503). A name that is not an https route is a configuration error.
+* **Mutual TLS to the pod (F-CLOUD-49):** `--pod-tls HOST=NAME` per http or https route. `iyakki cloud pod-tls create --name NAME` (vault flags as
+  for `listen`) makes a CA for the route and two certificates from it, 90 days by default, and writes the vault secrets `NAME-pod-ca`,
+  `NAME-pod-client-chain`/`-key` (read by the listener), `NAME-pod-server-chain`/`-key` (read by the pod) and `NAME-pod-ca-key` (read only by
+  `pod-tls rotate`, never by the listener or a pod). The pod runs `iyakki cloud pod-tls serve --name NAME --listen ADDR:PORT --backend-port P`
+  beside the application: TLS only, a client certificate of the route's CA required, then the application's plain port on 127.0.0.1. The
+  listener dials only with TLS; the pod's certificate must be the CA's and for `NAME.pod.iyakki.internal`; a failed handshake, a missing or
+  expired certificate is a 502 before any byte of the request is sent, never a fallback to plain HTTP. `pod-tls rotate --what leaves` gives new
+  certificates, `--what ca` a new CA with the old one still trusted, `--what drop-old` stops trusting the old one; both ends reload every 60 s
+  and keep the last good certificate. The sidecar is added to the route's Deployment with `iyakki cloud pod-tls spec --name NAME --routes FILE
+  --host HOST --image REF` (a strategic-merge patch for the Deployment and one for the Service, applied with `kubectl patch ... --patch-file`)
+  and its Secret with `pod-tls secret --name NAME --namespace NS --apply` (read from the vault and sent only into kubectl, never printed). The
+  chat tools are `pod_tls_status` (free), `pod_tls_create` and `pod_tls_rotate` (hard asks, administrators).
+  **Revocation is rotation.** There is no CRL or OCSP and none is planned: a certificate is trusted until it expires or its CA is dropped. To
+  cut off one end whose key may be known, run `pod-tls rotate --what ca` (new CA and certificates, the old CA still trusted), let both ends
+  reload (60 s), then `--what drop-old`; the old certificate is refused from then on. Leaf certificates last 90 days (`--leaf-days`, 1 to 825),
+  so a lost key stops working at most that long after the last rotation even if nobody acts. Proved with real TLS over loopback and the real
+  vault service in-process; not tried on a real cluster.
 * **Pods:** `--service-dialer port-forward|cluster-dns --namespace NS` hands `Options::dialer` the `cloudlisten_pod` dialers. Without one,
   Service routes answer 502 and the start-up says so.
 * **Firewall gate (fail closed):** the default gate is the real `FirewallGate` (`iyakki_fw::gaterule::sync` through the engine and its netlink

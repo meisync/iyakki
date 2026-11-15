@@ -30,7 +30,7 @@ pub const CONTROL_BASE: usize = 7000;
 const BAR_BUTTONS: usize = 7200;
 
 /// Titles live as long as the program (the `App` trait wants `&'static str`); one copy of each distinct text, at most this many.
-fn intern(s: &str) -> &'static str {
+pub(super) fn intern(s: &str) -> &'static str {
     static POOL: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
     let mut p = POOL.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(x) = p.iter().find(|x| **x == s) {
@@ -236,6 +236,16 @@ impl TileApp {
                 };
                 Dialog::Sdk(r, card.action(Action::new("Allow", Key::Char('y'), OK)).action(Action::new("Don't allow", Key::Esc, MUTED)))
             }
+            // SDK 1.2 (docs/development/SDK-BRIDGE-V2.md): the host wrote the words of the card; this only draws them. It asks every time or once, as the host decided,
+            // and only a person's key answers it.
+            "sdk.card" => {
+                let mut card = Card::new(r.args["title"].as_str().unwrap_or("An app asks"), AMBER);
+                for l in r.args["lines"].as_array().into_iter().flatten().filter_map(|l| l.as_str()) {
+                    card = card.line(l, Tone::Normal);
+                }
+                card = card.line(if r.args["everyTime"] == true { "You are asked every time." } else { "You are asked once; you can take this back later." }, Tone::Dim);
+                Dialog::Sdk(r, card.action(Action::new("Allow", Key::Char('y'), OK)).action(Action::new("Don't allow", Key::Esc, MUTED)))
+            }
             "host.saveFile" => {
                 let name = r.args["name"].as_str().unwrap_or("file.txt").to_string();
                 let size = r.args["text"].as_str().map_or(0, str::len);
@@ -394,7 +404,7 @@ impl TileApp {
         let Some(c) = doc.controls.get(i) else { return };
         self.focus = Some(i);
         match c.kind {
-            ControlKind::Text | ControlKind::Password | ControlKind::Textarea => {
+            ControlKind::Text | ControlKind::Password | ControlKind::File | ControlKind::Textarea => {
                 self.edit.set(&c.value);
                 self.edit.mask = c.kind == ControlKind::Password;
             }
@@ -425,7 +435,7 @@ impl TileApp {
         let Some(i) = self.focus else { return false };
         let Some(doc) = self.doc.clone() else { return false };
         let Some(c) = doc.controls.get(i) else { return false };
-        if !matches!(c.kind, ControlKind::Text | ControlKind::Password | ControlKind::Textarea) {
+        if !matches!(c.kind, ControlKind::Text | ControlKind::Password | ControlKind::File | ControlKind::Textarea) {
             return false;
         }
         if matches!(k, Key::Enter) && c.kind != ControlKind::Textarea {
@@ -914,7 +924,7 @@ fn draw_control(g: &mut Gfx, c: &Control, r: R, s: f32, focused: bool, edit: &Te
     let col = if c.disabled { dim } else { text_c };
     let id = CONTROL_BASE + idx;
     match c.kind {
-        ControlKind::Text | ControlKind::Password => {
+        ControlKind::Text | ControlKind::Password | ControlKind::File => {
             if focused {
                 edit.render(g, r, true, s, blink(tick), Face::Sans, id);
                 return;
@@ -984,5 +994,8 @@ fn draw_control(g: &mut Gfx, c: &Control, r: R, s: f32, focused: bool, edit: &Te
 
 /// The launcher's tile and the Open button of the store make an app the same way.
 pub fn open_entry(entry: TileEntry, cx: &AppCx) -> Box<dyn App> {
+    if entry.wasm {
+        return Box::new(super::tile_wasm::WasmTileApp::new(entry, cx));
+    }
     Box::new(TileApp::new(entry, cx))
 }

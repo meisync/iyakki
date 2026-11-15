@@ -297,7 +297,160 @@ pub fn download(streamer: &dyn Streamer, policy: &Policy, user: &str, url: &str,
 /// Fetch `url` into the folder `target` names. With [`Target::Auto`] the folder follows the kind of file.
 #[allow(clippy::too_many_arguments)]
 pub fn download_to(streamer: &dyn Streamer, policy: &Policy, user: &str, url: &str, target: Target, max_bytes: u64, progress: &Progress) -> Result<Fetched, String> {
+    download_impl(streamer, policy, user, url, target, max_bytes, progress, true)
+}
+
+/// What is left of an earlier download of the same address that broke off: the `.part` file and a note next to it
+/// (`<name>.part.src`: the address, the server's validator and the full size) so the next try asks only for the rest.
+struct Resume {
+    dir: PathBuf,
+    name: String,
+    part: PathBuf,
+    offset: u64,
+    validator: String,
+}
+
+impl Resume {
+    fn note_path(part: &Path) -> PathBuf {
+        PathBuf::from(format!("{}.src", part.display()))
+    }
+    fn discard(&self) {
+        let _ = std::fs::remove_file(&self.part);
+        let _ = std::fs::remove_file(Resume::note_path(&self.part));
+    }
+}
+
+/// Look in `dirs` for a broken download of exactly this address that can be continued.
+fn find_resume(dirs: &[PathBuf], url: &str) -> Option<Resume> {
+    for dir in dirs {
+        let Ok(rd) = std::fs::read_dir(dir) else { continue };
+        for e in rd.flatten() {
+            let fname = e.file_name().to_string_lossy().into_owned();
+            let Some(name) = fname.strip_suffix(".part.src") else { continue };
+            let Ok(note) = std::fs::read_to_string(e.path()) else { continue };
+            let mut lines = note.lines();
+            if lines.next() != Some("iyakki-resume 1") || lines.next() != Some(url) {
+                continue;
+            }
+            let validator = lines.next().unwrap_or("").to_string();
+            let part = dir.join(format!("{name}.part"));
+            let offset = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
+            if validator.is_empty() || offset == 0 {
+                continue;
+            }
+            // the validator goes into a request header as it is: a note that holds anything but plain visible text (a bare carriage return
+            // could start another header line) or a name that is not a plain file name is not ours (found by the fuzz test)
+            if validator.len() > 200 || !validator.bytes().all(|b| (0x20..0x7f).contains(&b)) || name.is_empty() || name == "." || name == ".." {
+                continue;
+            }
+            return Some(Resume { dir: dir.clone(), name: name.to_string(), part, offset, validator });
+        }
+    }
+    None
+}
+
+/// A broken download that nobody continued is forgotten after this long.
+const STALE_PART_AGE: std::time::Duration = std::time::Duration::from_secs(14 * 24 * 3600);
+
+/// Remove the `.part` file and its `.part.src` note when the note is older than `max_age` at `now` (a note with no `.part` beside it goes
+/// too). Only files with those two endings are touched. Returns how many notes were removed.
+fn clean_stale_parts(dirs: &[PathBuf], max_age: std::time::Duration, now: std::time::SystemTime) -> usize {
+    let mut removed = 0;
+    for dir in dirs {
+        let Ok(rd) = std::fs::read_dir(dir) else { continue };
+        for e in rd.flatten() {
+            let fname = e.file_name().to_string_lossy().into_owned();
+            let Some(name) = fname.strip_suffix(".part.src") else { continue };
+            let old = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| now.duration_since(t).ok()).is_some_and(|age| age > max_age);
+            let part = dir.join(format!("{name}.part"));
+            if old || !part.exists() {
+                let _ = std::fs::remove_file(&part);
+                if std::fs::remove_file(e.path()).is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+    }
+    removed
+}
+
+/// The validator a server gives for `If-Range`: a strong entity tag, else the modification date.
+fn validator_of(h: &iyakki_proxy::StreamHead) -> Option<String> {
+    h.header("etag").filter(|t| !t.starts_with("W/")).or_else(|| h.header("last-modified")).map(str::to_string).filter(|v| !v.is_empty() && !v.contains('\n'))
+}
+
+/// `Content-Range: bytes 100-999/1000` gives (100, Some(1000)).
+fn content_range(v: &str) -> Option<(u64, Option<u64>)> {
+    let rest = v.trim().strip_prefix("bytes ")?;
+    let (range, total) = rest.split_once('/')?;
+    let (a, _) = range.split_once('-')?;
+    Some((a.trim().parse().ok()?, total.trim().parse().ok()))
+}
+
+enum Stop {
+    Cancelled,
+    Net(String),
+    TooBig,
+    Disk(String),
+}
+
+/// Copy the body (after `pending`, bytes already read) into `f`; `start` bytes were written by an earlier try.
+fn pump(body: &mut dyn Read, pending: &[u8], f: &mut std::fs::File, start: u64, max_bytes: u64, progress: &Progress) -> Result<u64, Stop> {
+    let mut total = start;
+    let mut chunk = vec![0u8; 64 * 1024];
+    let mut pending: &[u8] = pending;
+    loop {
+        if progress.cancel.load(Ordering::SeqCst) {
+            return Err(Stop::Cancelled);
+        }
+        let n = if !pending.is_empty() {
+            let n = pending.len();
+            chunk[..n].copy_from_slice(pending);
+            pending = &[];
+            n
+        } else {
+            match body.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) => return Err(Stop::Net(e.to_string())),
+            }
+        };
+        total += n as u64;
+        if total > max_bytes {
+            return Err(Stop::TooBig);
+        }
+        if let Err(e) = f.write_all(&chunk[..n]) {
+            return Err(Stop::Disk(e.to_string()));
+        }
+        progress.bytes.store(total, Ordering::Relaxed);
+    }
+    Ok(total)
+}
+
+/// The words for a stop, and the part file's fate: only a broken connection with a validator keeps what arrived.
+fn settle(stop: Stop, part: &Path, keep: Option<(&str, &str)>, max_bytes: u64) -> String {
+    let (msg, resumable) = match stop {
+        Stop::Cancelled => ("cancelled".to_string(), false),
+        Stop::Net(e) => (format!("the download failed: {e}"), true),
+        Stop::TooBig => (format!("the file is larger than the {} MB limit; stopped", max_bytes >> 20), false),
+        Stop::Disk(e) => (format!("cannot write the file: {e}"), false),
+    };
+    match keep {
+        Some((url, validator)) if resumable && std::fs::metadata(part).map(|m| m.len() > 0).unwrap_or(false) => {
+            let _ = std::fs::write(Resume::note_path(part), format!("iyakki-resume 1\n{url}\n{validator}\n"));
+        }
+        _ => {
+            let _ = std::fs::remove_file(part);
+            let _ = std::fs::remove_file(Resume::note_path(part));
+        }
+    }
+    msg
+}
+
+#[allow(clippy::too_many_arguments)]
+fn download_impl(streamer: &dyn Streamer, policy: &Policy, user: &str, url: &str, target: Target, max_bytes: u64, progress: &Progress, resume_ok: bool) -> Result<Fetched, String> {
     let mut url = url.trim().to_string();
+    let asked_url = url.clone();
     check_url(policy, &url)?;
     // write scope first: nothing is fetched for a folder the account may not write (an automatic choice is made when the
     // address already says what kind of file it is, otherwise once the first bytes arrive)
@@ -311,7 +464,23 @@ pub fn download_to(streamer: &dyn Streamer, policy: &Policy, user: &str, url: &s
     if let Some(d) = &dir {
         *progress.folder.lock().unwrap_or_else(|e| e.into_inner()) = d.to_string_lossy().into_owned();
     }
-    let headers = vec![("Accept".to_string(), "audio/*,video/*,image/*,application/octet-stream;q=0.8,*/*;q=0.5".to_string())];
+    let mut headers = vec![("Accept".to_string(), "audio/*,video/*,image/*,application/octet-stream;q=0.8,*/*;q=0.5".to_string())];
+    // a broken download of this very address is continued from where it stopped (only the rest is asked for)
+    let resume = if resume_ok {
+        let dirs: Vec<PathBuf> = match (&dir, target) {
+            (Some(d), _) => vec![d.clone()],
+            (None, Target::Auto(f)) => f.iter().filter(|p| Path::new(p).is_dir()).filter_map(|p| folder_ready(policy, user, Path::new(p)).ok()).collect(),
+            (None, Target::Dir(_)) => vec![],
+        };
+        clean_stale_parts(&dirs, STALE_PART_AGE, std::time::SystemTime::now());
+        find_resume(&dirs, &asked_url)
+    } else {
+        None
+    };
+    if let Some(r) = &resume {
+        headers.push(("Range".to_string(), format!("bytes={}-", r.offset)));
+        headers.push(("If-Range".to_string(), r.validator.clone()));
+    }
     let mut head = None;
     for _ in 0..=MAX_REDIRECTS {
         let h = streamer.open(&url, &headers)?;
@@ -325,6 +494,50 @@ pub fn download_to(streamer: &dyn Streamer, policy: &Policy, user: &str, url: &s
         break;
     }
     let mut h = head.ok_or("too many redirects")?;
+    if let Some(r) = resume {
+        let range = if h.status == 206 { h.header("content-range").and_then(content_range) } else { None };
+        match range {
+            Some((start, total)) if start == r.offset => {
+                if let Some(t) = total {
+                    if t > max_bytes {
+                        r.discard();
+                        return Err(format!("the file is {} MB, more than the {} MB limit", t >> 20, max_bytes >> 20));
+                    }
+                    progress.total.store(t, Ordering::Relaxed);
+                }
+                *progress.folder.lock().unwrap_or_else(|e| e.into_inner()) = r.dir.to_string_lossy().into_owned();
+                progress.bytes.store(r.offset, Ordering::Relaxed);
+                let mut f = std::fs::OpenOptions::new().append(true).open(&r.part).map_err(|e| format!("cannot write in {}: {e}", r.dir.display()))?;
+                let keep = validator_of(&h).unwrap_or_else(|| r.validator.clone());
+                let end = match pump(&mut h.body, &[], &mut f, r.offset, max_bytes, progress) {
+                    Ok(n) => n,
+                    Err(stop) => {
+                        drop(f);
+                        return Err(settle(stop, &r.part, Some((&asked_url, &keep)), max_bytes));
+                    }
+                };
+                drop(f);
+                if total.is_some_and(|t| t != end) {
+                    return Err(settle(Stop::Net("the connection ended early".into()), &r.part, Some((&asked_url, &keep)), max_bytes));
+                }
+                let dest = r.dir.join(&r.name);
+                if let Err(e) = std::fs::hard_link(&r.part, &dest) {
+                    r.discard();
+                    return Err(format!("cannot keep the file: {e}"));
+                }
+                r.discard();
+                return Ok(Fetched::File { path: dest, bytes: end });
+            }
+            _ => {
+                // the file changed, the server ignores ranges or the range is wrong: what was kept is no use; ask for the whole file
+                r.discard();
+                if h.status == 206 || h.status == 416 {
+                    drop(h);
+                    return download_impl(streamer, policy, user, &asked_url, target, max_bytes, progress, false);
+                }
+            }
+        }
+    }
     if h.status != 200 {
         return Err(format!("the server answered {}", h.status));
     }
@@ -389,45 +602,23 @@ pub fn download_to(streamer: &dyn Streamer, policy: &Policy, user: &str, url: &s
     *progress.folder.lock().unwrap_or_else(|e| e.into_inner()) = dir.to_string_lossy().into_owned();
     let name = unique_name(&dir, &file_name_for(&url, &ext));
     let part = dir.join(format!("{name}.part"));
-    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&part).map_err(|e| format!("cannot write in {}: {e}", dir.display()))?;
+    let mut f = { use std::os::unix::fs::OpenOptionsExt; std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&part) }.map_err(|e| format!("cannot write in {}: {e}", dir.display()))?;
     let fail = |part: &Path, msg: String| -> Result<Fetched, String> {
         let _ = std::fs::remove_file(part);
         Err(msg)
     };
-    let mut total = 0u64;
-    let mut chunk = vec![0u8; 64 * 1024];
-    let mut pending: &[u8] = &first;
-    loop {
-        if progress.cancel.load(Ordering::SeqCst) {
+    let keep = validator_of(&h);
+    let total = match pump(&mut h.body, &first, &mut f, 0, max_bytes, progress) {
+        Ok(n) if declared > 0 && n != declared => {
             drop(f);
-            return fail(&part, "cancelled".into());
+            return Err(settle(Stop::Net("the connection ended early".into()), &part, keep.as_deref().map(|v| (asked_url.as_str(), v)), max_bytes));
         }
-        let n = if !pending.is_empty() {
-            let n = pending.len();
-            chunk[..n].copy_from_slice(pending);
-            pending = &[];
-            n
-        } else {
-            match h.body.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => n,
-                Err(e) => {
-                    drop(f);
-                    return fail(&part, format!("the download failed: {e}"));
-                }
-            }
-        };
-        total += n as u64;
-        if total > max_bytes {
+        Ok(n) => n,
+        Err(stop) => {
             drop(f);
-            return fail(&part, format!("the file is larger than the {} MB limit; stopped", max_bytes >> 20));
+            return Err(settle(stop, &part, keep.as_deref().map(|v| (asked_url.as_str(), v)), max_bytes));
         }
-        if let Err(e) = f.write_all(&chunk[..n]) {
-            drop(f);
-            return fail(&part, format!("cannot write the file: {e}"));
-        }
-        progress.bytes.store(total, Ordering::Relaxed);
-    }
+    };
     let _ = f.flush();
     drop(f);
     let dest = dir.join(&name);
@@ -529,6 +720,7 @@ pub mod tests {
     use super::*;
     use iyakki_sec::policy::Role;
     use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
 
     /// A tiny HTTP server: path → (content type, body), plus redirects. Returns its base address.
     pub fn serve(routes: Vec<(&'static str, &'static str, Vec<u8>)>) -> String {
@@ -716,4 +908,141 @@ pub mod tests {
         assert!(default_folder(&f, &p, "alice", Image).unwrap().ends_with("/Pictures"));
         assert_eq!(default_folder(&["/elsewhere/Music".to_string()], &p, "alice", Song), None);
     }
+
+    #[derive(Clone, Copy, PartialEq)]
+    pub enum RangeMode {
+        Honour,
+        Ignore,
+        Reject416,
+    }
+
+    /// A server that cuts the first answer after `cut` bytes, then answers `Range` requests the way `mode` says. Returns the base
+    /// address and the `Range` header of each request (empty text when there was none).
+    pub fn serve_ranged(body: Vec<u8>, cut: usize, mode: RangeMode) -> (String, Arc<Mutex<Vec<String>>>) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen2 = seen.clone();
+        std::thread::spawn(move || {
+            for s in l.incoming().flatten() {
+                let mut s = s;
+                let mut buf = [0u8; 4096];
+                let n = s.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let range = req.lines().find(|l| l.to_ascii_lowercase().starts_with("range:")).map(|l| l[6..].trim().to_string()).unwrap_or_default();
+                let first = { let mut g = seen2.lock().unwrap(); g.push(range.clone()); g.len() == 1 };
+                let total = body.len();
+                let start: usize = range.strip_prefix("bytes=").and_then(|r| r.trim_end_matches('-').parse().ok()).unwrap_or(0);
+                let head = |code: &str, extra: &str, len: usize| format!("HTTP/1.1 {code}\r\nContent-Type: audio/mpeg\r\nETag: \"v1\"\r\n{extra}Content-Length: {len}\r\nConnection: close\r\n\r\n").into_bytes();
+                if !range.is_empty() && mode == RangeMode::Reject416 {
+                    let _ = s.write_all(b"HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                } else if !range.is_empty() && mode == RangeMode::Honour {
+                    let rest = &body[start..];
+                    let _ = s.write_all(&head("206 Partial Content", &format!("Content-Range: bytes {start}-{}/{total}\r\n", total - 1), rest.len()));
+                    let _ = s.write_all(rest);
+                } else if first {
+                    let _ = s.write_all(&head("200 OK", "", total));
+                    let _ = s.write_all(&body[..cut]);
+                    let _ = s.flush();
+                    // closing early: the client has been promised more than it gets
+                } else {
+                    let _ = s.write_all(&head("200 OK", "", total));
+                    let _ = s.write_all(&body);
+                }
+            }
+        });
+        (format!("http://{addr}"), seen)
+    }
+
+    fn leftovers(d: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(d).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn a_broken_download_is_continued_from_where_it_stopped() {
+        let body = [tiny_mp3(), (0..150_000u32).map(|i| (i % 251) as u8).collect::<Vec<u8>>()].concat();
+        let (base, seen) = serve_ranged(body.clone(), 70_000, RangeMode::Honour);
+        let d = tmp("resume");
+        let p = policy_for(&d);
+        let url = format!("{base}/song.mp3");
+        let e = download(&streamer(), &p, "alice", &url, &d, DEFAULT_MAX_BYTES, &Progress::default()).unwrap_err();
+        assert!(e.contains("failed") || e.contains("ended early"), "{e}");
+        let names = leftovers(&d);
+        assert_eq!(names.len(), 2, "{names:?}");
+        assert!(names.iter().any(|n| n.ends_with(".part")) && names.iter().any(|n| n.ends_with(".part.src")));
+        // the second try asks only for the rest
+        let prog = Progress::default();
+        let Fetched::File { path, bytes } = download(&streamer(), &p, "alice", &url, &d, DEFAULT_MAX_BYTES, &prog).unwrap() else { panic!() };
+        assert_eq!(bytes as usize, body.len());
+        assert_eq!(std::fs::read(&path).unwrap(), body, "the joined file is identical");
+        assert_eq!(prog.bytes.load(Ordering::Relaxed) as usize, body.len());
+        let ranges = seen.lock().unwrap().clone();
+        assert_eq!(ranges.len(), 2);
+        assert!(ranges[0].is_empty() && ranges[1].starts_with("bytes=") && ranges[1] != "bytes=0-", "{ranges:?}");
+        assert_eq!(leftovers(&d), vec![path.file_name().unwrap().to_string_lossy().into_owned()], "no part file or note is left");
+    }
+
+    #[test]
+    fn a_server_that_ignores_ranges_or_refuses_them_gets_a_fresh_download() {
+        let body = [tiny_mp3(), vec![7u8; 120_000]].concat();
+        for mode in [RangeMode::Ignore, RangeMode::Reject416] {
+            let (base, seen) = serve_ranged(body.clone(), 50_000, mode);
+            let d = tmp(if mode == RangeMode::Ignore { "ignore" } else { "reject" });
+            let p = policy_for(&d);
+            let url = format!("{base}/a.mp3");
+            assert!(download(&streamer(), &p, "alice", &url, &d, DEFAULT_MAX_BYTES, &Progress::default()).is_err());
+            let Fetched::File { path, .. } = download(&streamer(), &p, "alice", &url, &d, DEFAULT_MAX_BYTES, &Progress::default()).unwrap() else { panic!() };
+            assert_eq!(std::fs::read(&path).unwrap(), body);
+            assert_eq!(leftovers(&d).len(), 1, "{:?} {}", leftovers(&d), seen.lock().unwrap().len());
+        }
+    }
+
+    #[test]
+    fn a_kept_part_is_used_only_for_the_same_address_and_never_after_cancel_or_a_size_stop() {
+        let body = [tiny_mp3(), vec![9u8; 100_000]].concat();
+        let (base, _) = serve_ranged(body.clone(), 40_000, RangeMode::Honour);
+        let d = tmp("other");
+        let p = policy_for(&d);
+        assert!(download(&streamer(), &p, "alice", &format!("{base}/one.mp3"), &d, DEFAULT_MAX_BYTES, &Progress::default()).is_err());
+        // another address does not touch it
+        assert!(find_resume(&[d.clone()], &format!("{base}/two.mp3")).is_none());
+        assert!(find_resume(&[d.clone()], &format!("{base}/one.mp3")).is_some_and(|r| r.offset > 0));
+        // a note with no validator is not used
+        let note = std::fs::read_dir(&d).unwrap().flatten().find(|e| e.file_name().to_string_lossy().ends_with(".part.src")).unwrap().path();
+        std::fs::write(&note, format!("iyakki-resume 1\n{base}/one.mp3\n\n")).unwrap();
+        assert!(find_resume(&[d.clone()], &format!("{base}/one.mp3")).is_none());
+        // a size stop and a cancel leave nothing to resume
+        let d2 = tmp("nokeep");
+        let (base2, _) = serve_ranged(body.clone(), 90_000, RangeMode::Honour);
+        let e = download(&streamer(), &policy_for(&d2), "alice", &format!("{base2}/x.mp3"), &d2, 30_000, &Progress::default()).unwrap_err();
+        assert!(e.contains("limit"), "{e}");
+        assert!(leftovers(&d2).is_empty(), "{:?}", leftovers(&d2));
+    }
+
+    #[test]
+    fn old_part_notes_are_cleaned_with_their_part_and_young_ones_and_other_files_stay() {
+        let d = tmp("stale");
+        let mk = |n: &str| std::fs::write(d.join(n), b"x").unwrap();
+        mk("old.mp3.part");
+        mk("old.mp3.part.src");
+        mk("young.mp3.part");
+        mk("young.mp3.part.src");
+        mk("orphan.mp3.part.src");
+        mk("song.mp3");
+        mk("notes.part.txt");
+        let day = std::time::Duration::from_secs(24 * 3600);
+        // "now" is 20 days ahead of the files for the old check, then the files are 1 day old for the young one
+        let none = clean_stale_parts(&[d.clone()], 14 * day, std::time::SystemTime::now());
+        assert_eq!(none, 1, "only the orphan note goes while everything is fresh");
+        let later = std::time::SystemTime::now() + 20 * day;
+        let n = clean_stale_parts(&[d.clone()], 14 * day, later);
+        assert_eq!(n, 2, "both remaining notes are older than 14 days at that time");
+        assert_eq!(leftovers(&d), vec!["notes.part.txt".to_string(), "song.mp3".to_string()]);
+    }
 }
+
+#[cfg(test)]
+#[path = "mediadl_fuzz_tests.rs"]
+mod fuzz;

@@ -1089,3 +1089,26 @@ fn repair_from_the_store_page_asks_without_typing_and_applies_only_the_missing_a
     assert!(applied.contains("kind: Service") && !applied.contains("kind: Deployment") && !applied.contains("PersistentVolumeClaim"), "{applied}");
     assert!(installed::find(&r.dir, "alice", INSTANCE).is_some());
 }
+
+#[test]
+fn the_path_page_has_browse_inside_the_window_and_the_picker_opens_and_closes_over_it() {
+    let mut r = store_rig("choose-browse", NODES, None);
+    store_to_card(&mut r);
+    click(&mut r.p, 1280, 720, "Choose a binary file");
+    assert_eq!(r.p.page(), &Page::Choose);
+    for (w, h) in SIZES {
+        let g = draw(&mut r.p, w, h);
+        inside(&g, w, h, "choose with browse");
+        assert!(g.hits.iter().any(|x| x.label.starts_with("Browse")), "{w}x{h}: Browse");
+    }
+    click(&mut r.p, 1280, 720, "Browse");
+    assert!(r.p.choose_pick.is_open());
+    for (w, h) in SIZES {
+        let g = draw(&mut r.p, w, h);
+        inside(&g, w, h, "the picker over the choose page");
+    }
+    r.p.handle(&Event::Key(Key::Esc));
+    assert!(!r.p.choose_pick.is_open() && r.p.page() == &Page::Choose, "Esc closes the picker, not the page");
+    r.p.handle(&Event::Key(Key::Ctrl('o')));
+    assert!(r.p.choose_pick.is_open(), "Ctrl+O browses too");
+}

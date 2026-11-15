@@ -3,12 +3,18 @@
 //! * [`TILE_WAT`] is the verified build: hand-written WAT (`src/tile.wat`), loadable by the host
 //!   runner as is. No wasm32 toolchain is needed.
 //! * [`Counter`] is the same app in Rust on top of `iyakki-tile-abi`; it is tested natively and
-//!   must draw the same list as the WAT. The
-//!   wasm32 build of this Rust version (four exports over a static `Counter`) is NOT written or
-//!   verified here: the target was not installed and nothing may be downloaded.
+//!   must draw the same list as the WAT.
+//! * `guest` (wasm32 only) exports the six functions of the ABI over a `Counter`: `cargo build --release --lib --target
+//!   wasm32-unknown-unknown -p iyakki-tile-example` gives a tile the host runner loads (tests/wasm32_guest.rs does exactly that).
 use iyakki_tile_abi::{measure_text, Color, DisplayList, Event, Op, Rect};
 
+#[cfg(target_arch = "wasm32")]
+mod guest;
+
 pub const TILE_WAT: &str = include_str!("tile.wat");
+/// `tile.wat` assembled to the binary `.wasm` form (the file a tile app carries in its bundle; `wasm_tile_bundle_file_runs_like_the_wat`
+/// in `tests/through_runner.rs` keeps the two the same). Regenerate it with any WAT assembler when `tile.wat` changes.
+pub const TILE_WASM: &[u8] = include_bytes!("../tile.wasm");
 
 /// The app state and its two functions: events in, display list out.
 #[derive(Default)]

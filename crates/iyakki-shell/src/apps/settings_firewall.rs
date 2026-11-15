@@ -27,6 +27,10 @@ pub(super) struct FwPanel {
     pub(super) advanced: bool,
     pub(super) counters: (u64, u64),
     pub(super) counters_at: Option<Instant>,
+    /// What each counted rule has let in (read with the blocked total, at most every 3 seconds).
+    pub(super) rule_counts: Vec<iyakki_fw::ruleset::RuleCount>,
+    /// The VPN guard line and when it was read (the page asks the VPN manager at most every 2 seconds, not on every frame).
+    pub(super) vpn_line: Option<(Instant, Option<String>)>,
 }
 
 impl FwPanel {
@@ -37,7 +41,7 @@ impl FwPanel {
 
 impl Default for FwPanel {
     fn default() -> FwPanel {
-        FwPanel { handle: Handle::Global, log: iyakki_fw::service::block_log(), draft: None, writable: !hf_on(), advanced: false, counters: (0, 0), counters_at: None }
+        FwPanel { handle: Handle::Global, log: iyakki_fw::service::block_log(), draft: None, writable: !hf_on(), advanced: false, counters: (0, 0), counters_at: None, rule_counts: Vec::new(), vpn_line: None }
     }
 }
 
@@ -121,6 +125,7 @@ pub(super) fn presets_form(c: &Config) -> Form {
         Ping::Anyone => 2,
     });
     f = f.choice("Cluster and container networks on this machine", &["blocked like the rest", "trusted (recommended with k3s or podman)"], usize::from(c.trust_containers));
+    f = f.choice("Networks of a connected VPN", &["not the local network", "count as the local network (the presets, ping and remote diagnostics reach VPN peers)"], usize::from(c.vpn_local));
     f = f.text("Look up host names again every (minutes)", &c.refresh_minutes.to_string(), "1 to 1440; also when the network changes");
     for (i, p) in Preset::ALL.iter().enumerate() {
         f.fields[i].hint = p.explain().to_string();
@@ -139,7 +144,8 @@ pub(super) fn apply_presets_form(f: &Form, c: &mut Config) -> Result<(), String>
         _ => Ping::Local,
     };
     c.trust_containers = f.choice_idx(n + 1) == 1;
-    c.refresh_minutes = f.value(n + 2).parse::<u32>().ok().filter(|m| (1..=1440).contains(m)).ok_or("Look-up interval: a whole number of minutes from 1 to 1440.")?;
+    c.vpn_local = f.choice_idx(n + 2) == 1;
+    c.refresh_minutes = f.value(n + 3).parse::<u32>().ok().filter(|m| (1..=1440).contains(m)).ok_or("Look-up interval: a whole number of minutes from 1 to 1440.")?;
     Ok(())
 }
 
@@ -231,6 +237,13 @@ pub(super) fn presets_line(c: &Config) -> String {
     format!("Presets on: {}. Ping: {}. p changes them.", if on.is_empty() { "none".to_string() } else { on.join(", ") }, c.ping.label())
 }
 
+/// "12 let in" for the rule with this id, from the counts of the kernel (the rule's notes are `rule <id>: ...`); nothing when the rule
+/// is not counted yet or nothing is known.
+pub(super) fn let_in_text(counts: &[iyakki_fw::ruleset::RuleCount], id: u32) -> Option<String> {
+    let n: u64 = counts.iter().filter(|c| iyakki_fw::ruleset::rule_id_of_note(&c.note) == Some(id)).map(|c| c.packets).sum();
+    counts.iter().any(|c| iyakki_fw::ruleset::rule_id_of_note(&c.note) == Some(id)).then(|| format!("{n} let in"))
+}
+
 pub(super) fn blocked_line(b: &Blocked, now: i64) -> String {
     let ago = (now - b.at).max(0);
     let when = if ago < 60 { format!("{ago} s ago") } else if ago < 3600 { format!("{} min ago", ago / 60) } else { format!("{} h ago", ago / 3600) };
@@ -243,7 +256,7 @@ pub(super) fn change_count(draft: &Config, base: &Config) -> usize {
     n += draft.rules.iter().filter(|r| !base.rules.contains(r)).count();
     n += base.rules.iter().filter(|r| !draft.rules.contains(r)).count();
     n += Preset::ALL.iter().filter(|p| draft.has(**p) != base.has(**p)).count();
-    n += usize::from(draft.ping != base.ping) + usize::from(draft.enabled != base.enabled) + usize::from(draft.trust_containers != base.trust_containers) + usize::from(draft.refresh_minutes != base.refresh_minutes);
+    n += usize::from(draft.ping != base.ping) + usize::from(draft.enabled != base.enabled) + usize::from(draft.trust_containers != base.trust_containers) + usize::from(draft.vpn_local != base.vpn_local) + usize::from(draft.refresh_minutes != base.refresh_minutes);
     n
 }
 
@@ -545,6 +558,15 @@ impl SettingsApp {
         }
     }
 
+    /// "VPN kill switch is active ..." while the VPN guard is in place (see `Manager::guard_line`), read at most every 2 seconds.
+    pub(super) fn fw_vpn_line(&mut self, cx: &AppCx) -> Option<String> {
+        if self.fw.vpn_line.as_ref().is_none_or(|(t, _)| t.elapsed().as_secs() >= 2) {
+            let line = self.vpn_mgr(cx).guard_line();
+            self.fw.vpn_line = Some((Instant::now(), line));
+        }
+        self.fw.vpn_line.as_ref().and_then(|(_, l)| l.clone())
+    }
+
     pub(super) fn render_firewall(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
         if !self.fw.advanced {
             return self.render_firewall_simple(g, a, s, cx);
@@ -579,6 +601,9 @@ impl SettingsApp {
         for (t, c) in status_lines(&v, changes, self.fw.writable) {
             line(g, &mut y, &t, c, 13.0 * s, Face::Sans);
         }
+        if let Some(t) = self.fw_vpn_line(cx) {
+            line(g, &mut y, &t, AMBER, 13.0 * s, Face::Sans);
+        }
         line(g, &mut y, &presets_line(&cfg), MUTED, 13.0 * s, Face::Sans);
         if cfg.rules.iter().any(|r| r.kind == FwKind::Host) {
             line(g, &mut y, &format!("Host names are looked up every {} min and when the network changes; the addresses found are shown on each rule. A name is only as trustworthy as the DNS server that answers for it. Wildcard names are not supported.", cfg.refresh_minutes), MUTED, 12.0 * s, Face::Sans);
@@ -588,8 +613,12 @@ impl SettingsApp {
         }
         // blocked attempts
         if self.fw.counters_at.is_none_or(|t| t.elapsed().as_secs() >= 3) {
-            if let Some(c) = self.fw.handle.lock().counters() {
-                self.fw.counters = c;
+            {
+                let mut eng = self.fw.handle.lock();
+                if let Some(c) = eng.counters() {
+                    self.fw.counters = c;
+                }
+                self.fw.rule_counts = eng.rule_counts();
             }
             self.fw.counters_at = Some(Instant::now());
         }
@@ -621,7 +650,10 @@ impl SettingsApp {
             }
             let st = if self.fw.draft.is_some() && !base.rules.contains(r) { RuleState::Active } else { v.rule_states.iter().find(|x| x.0 == r.id).map(|x| x.1.clone()).unwrap_or(RuleState::Active) };
             let st = if !r.enabled { RuleState::Disabled } else { st };
-            let (title, sub) = rule_lines(r, &v, now);
+            let (title, mut sub) = rule_lines(r, &v, now);
+            if let Some(n) = let_in_text(&self.fw.rule_counts, r.id) {
+                sub = format!("{sub} · {n}");
+            }
             let (chip, col) = state_chip(&st);
             let mut chips = vec![(chip, col)];
             if self.fw.draft.is_some() && !base.rules.contains(r) {

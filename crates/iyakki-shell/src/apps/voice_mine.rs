@@ -38,13 +38,15 @@ const WARN: [u8; 4] = rgb(255, 196, 94);
 /// The state of the Assistant tab.
 pub(super) struct Mine {
     worker: Option<Worker>,
+    /// Watches the pending-work ledger while the assistant runs: finished work is spoken about later (F-VOICE-37).
+    waker: Option<iyakki_agent::pending::Waker>,
     pub st: Option<Status>,
     pub note: String,
 }
 
 impl Mine {
     pub fn new() -> Mine {
-        Mine { worker: None, st: None, note: String::new() }
+        Mine { worker: None, waker: None, st: None, note: String::new() }
     }
 }
 
@@ -84,7 +86,7 @@ impl VoiceApp {
             let s2 = cx.services.clone();
             let live = Box::new(move || {
                 let v = s2.voice_settings();
-                Live { muted: v.my_muted, follow_ms: v.my_follow_ms as u64, pause_ms: v.pause_ms as u64 }
+                Live { muted: v.my_muted, follow_ms: v.my_follow_ms as u64, pause_ms: v.pause_ms as u64, spoken_approvals: v.spoken_approvals }
             });
             self.mine.worker = Some(vp::spawn(ports, Config::default(), live, 50));
         }
@@ -106,6 +108,25 @@ impl VoiceApp {
                 self.dirty = true;
             }
             return;
+        }
+        // work the person waited for has ended: the waker's text goes to the assistant, which says the answer when it is free (F-VOICE-37)
+        if let Some(w) = &self.mine.worker {
+            if self.mine.waker.is_none() {
+                let ledger = iyakki_agent::pending::Ledger::open(&cx.services.dir().join("pending"), &cx.session.user);
+                let mut feed = iyakki_agent::pending::Feed::new(&cx.session.user, "");
+                feed.jobs = Some(cx.services.jobs.clone());
+                self.mine.waker = Some(iyakki_agent::pending::Waker::start(ledger, feed));
+            }
+            if let Some(k) = &self.mine.waker {
+                if k.ready() {
+                    if let Some(iyakki_agent::pending::Wake::Turn { text, ids }) = k.take() {
+                        cx.audit.record(&cx.session.user, "pending.wake.voice", &ids.join(","));
+                        w.wake(&text);
+                    }
+                }
+            }
+        } else {
+            self.mine.waker = None;
         }
         if let Some(w) = &self.mine.worker {
             let st = w.status();
@@ -258,7 +279,13 @@ impl VoiceApp {
             let text = format!("IYAKKI wants to: {}", a.summary);
             let lines = g.wrap(size, &text, Face::Sans, w - 28.0 * s);
             let lh = g.line_height(size, Face::Sans) * 1.2;
-            let note = if a.hard { "This one can only be approved by a tap or key (Y), never by voice. Saying no works." } else { "Say yes, do it, or no; or tap." };
+            let note = if a.hard {
+                "This one can only be approved by a tap or key (Y), never by voice. Saying no works."
+            } else if !a.voice_ok {
+                "Tap Allow or press Y. Spoken approvals are off (Settings -> Voice). Saying no works."
+            } else {
+                "Say yes, do it, or no; or tap."
+            };
             let ch = lines.len().min(4) as f32 * lh + bh + 40.0 * s;
             fx::panel(g, R::new(x, y, w, ch), s, WARN);
             for (i, l) in lines.iter().take(4).enumerate() {

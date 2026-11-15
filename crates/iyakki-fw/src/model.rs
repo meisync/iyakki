@@ -166,6 +166,10 @@ pub struct Config {
     /// Minutes between looking up the host names again.
     pub refresh_minutes: u32,
     pub next_id: u32,
+    /// The networks of a connected VPN tunnel count as "the local network" for the presets, ping and remote diagnostics
+    /// (off by default: a VPN peer is not trusted just for being on the VPN).
+    #[serde(default)]
+    pub vpn_local: bool,
 }
 
 pub const CONFIG_VERSION: u32 = 1;
@@ -173,7 +177,7 @@ pub const MAX_RULES: usize = 200;
 
 impl Default for Config {
     fn default() -> Config {
-        Config { version: CONFIG_VERSION, enabled: true, rules: Vec::new(), presets: vec![Preset::RemoteDesktop], ping: Ping::Local, trust_containers: true, refresh_minutes: 5, next_id: 1 }
+        Config { version: CONFIG_VERSION, enabled: true, rules: Vec::new(), presets: vec![Preset::RemoteDesktop], ping: Ping::Local, trust_containers: true, refresh_minutes: 5, next_id: 1, vpn_local: false }
     }
 }
 
@@ -187,7 +191,7 @@ impl Config {
             Ping::Local => 1,
             Ping::Anyone => 2,
         };
-        if !(old.enabled && self.enabled) || ping_rank(self.ping) < ping_rank(old.ping) || (old.trust_containers && !self.trust_containers) {
+        if !(old.enabled && self.enabled) || ping_rank(self.ping) < ping_rank(old.ping) || (old.trust_containers && !self.trust_containers) || (old.vpn_local && !self.vpn_local) {
             return false;
         }
         if !old.presets.iter().all(|p| self.presets.contains(p)) {

@@ -116,7 +116,7 @@ pub fn render_conf(m: &BTreeMap<String, String>) -> String {
     s
 }
 
-fn flag(v: &str) -> Option<bool> {
+pub(crate) fn flag(v: &str) -> Option<bool> {
     match v.to_ascii_lowercase().as_str() {
         "on" | "1" | "yes" | "true" | "y" => Some(true),
         "off" | "0" | "no" | "false" | "n" => Some(false),
@@ -124,7 +124,7 @@ fn flag(v: &str) -> Option<bool> {
     }
 }
 
-fn cmdline_param<'a>(cmdline: &'a str, key: &str) -> Option<&'a str> {
+pub(crate) fn cmdline_param<'a>(cmdline: &'a str, key: &str) -> Option<&'a str> {
     cmdline.split_whitespace().find_map(|t| t.split_once('=').filter(|(k, _)| *k == key).map(|(_, v)| v))
 }
 

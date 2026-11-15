@@ -7,6 +7,7 @@
 pub mod blit;
 pub mod childstate;
 pub mod client;
+pub mod ext;
 pub mod keys;
 pub mod proto;
 

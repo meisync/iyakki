@@ -7,8 +7,8 @@
 //! In a desktop window the page shows the host's state and changes nothing. Logic: the `iyakki-zram` crate.
 
 use super::*;
-use iyakki_zram::config::{self, human, Config, Resolved, ZramMode};
-use iyakki_zram::{Env, MemStats};
+use iyakki_core_api::memory::config::{self, human, Config, Resolved, ZramMode};
+use iyakki_core_api::memory::{bootspeed::{self, BootSpeed}, compressed::{self, Experiment}, Memory, MemStats};
 
 /// Which setting a form edits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,14 +20,20 @@ pub(super) enum MemField {
 }
 
 pub(super) struct MemPanel {
-    pub(super) env: Env,
-    pub(super) swapper: std::sync::Arc<dyn iyakki_zram::Swapper + Send + Sync>,
-    pub(super) conf: std::path::PathBuf,
+    /// The machine's compressed memory, swap and `system.conf`: `cx.os.memory()`.
+    pub(super) memory: std::sync::Arc<dyn Memory>,
     pub(super) cmdline: String,
     /// What the kernel command line and `system.conf` say now.
     pub(super) resolved: Resolved,
     /// What the page is editing.
     pub(super) draft: Config,
+    /// The experimental compressed-memory switch as edited / as saved, and whether a boot option fixes it.
+    pub(super) exp: Experiment,
+    pub(super) exp_saved: Experiment,
+    pub(super) exp_locked: bool,
+    /// The boot-order record and prefetch switches (F-BOOT-30) as edited / as saved (with what a boot option fixes).
+    pub(super) bs: BootSpeed,
+    pub(super) bs_saved: BootSpeed,
     pub(super) stats: MemStats,
     pub(super) preview: Vec<String>,
     pub(super) report: crate::apps::ScrollLog,
@@ -37,10 +43,10 @@ pub(super) struct MemPanel {
     loaded: bool,
 }
 
-impl Default for MemPanel {
-    fn default() -> MemPanel {
+impl MemPanel {
+    pub(super) fn new(memory: std::sync::Arc<dyn Memory>) -> MemPanel {
         let cmdline = iyakki_agent::sysinfo::cmdline(iyakki_agent::sysinfo::proc_root());
-        MemPanel { env: Env::real(), swapper: std::sync::Arc::new(iyakki_zram::KernelSwap), conf: iyakki_zram::CONF_PATH.into(), cmdline, resolved: config::resolve("", ""), draft: Config::default(), stats: MemStats::default(), preview: Vec::new(), report: Default::default(), writable: !hf_on(), ram: 0, loaded: false }
+        MemPanel { memory, cmdline, resolved: config::resolve("", ""), draft: Config::default(), exp: Experiment::Off, exp_saved: Experiment::Off, exp_locked: false, bs: BootSpeed::default(), bs_saved: BootSpeed::default(), stats: MemStats::default(), preview: Vec::new(), report: Default::default(), writable: !hf_on(), ram: 0, loaded: false }
     }
 }
 
@@ -71,8 +77,8 @@ pub(super) fn report_lines(m: &MemStats) -> Vec<String> {
 
 impl SettingsApp {
     /// Use another machine's files and `system.conf` (tests, and the window when it points at a fake root).
-    pub fn with_memory(mut self, env: Env, swapper: std::sync::Arc<dyn iyakki_zram::Swapper + Send + Sync>, conf: std::path::PathBuf, cmdline: &str, writable: bool) -> SettingsApp {
-        self.mem = MemPanel { env, swapper, conf, cmdline: cmdline.into(), writable, ..Default::default() };
+    pub fn with_memory(mut self, memory: std::sync::Arc<dyn Memory>, cmdline: &str, writable: bool) -> SettingsApp {
+        self.mem = MemPanel { cmdline: cmdline.into(), writable, ..MemPanel::new(memory) };
         self.mem.ram = 0;
         self.mem_load(true);
         self
@@ -85,20 +91,36 @@ impl SettingsApp {
     /// Read `system.conf`, the command line and the kernel's figures. `reset_draft`: discard unsaved edits.
     pub(super) fn mem_load(&mut self, reset_draft: bool) {
         let m = &mut self.mem;
-        let conf = std::fs::read_to_string(&m.conf).unwrap_or_default();
+        let conf = m.memory.read_conf();
         m.resolved = config::resolve(&m.cmdline, &conf);
+        let (exp, locked) = compressed::resolve_experiment(&m.cmdline, &conf);
+        (m.exp_saved, m.exp_locked) = (exp, locked);
+        m.bs_saved = bootspeed::resolve(&m.cmdline, &conf);
         if reset_draft || !m.loaded {
+            m.bs = m.bs_saved;
+            m.exp = exp;
             m.draft = m.resolved.config.clone();
             m.preview.clear();
         }
         m.loaded = true;
-        m.stats = MemStats::read(&m.env);
+        m.stats = m.memory.stats();
         m.report.lines = report_lines(&m.stats).into_iter().map(|l| (l, TEXT)).collect();
         m.report.nowrap = true;
     }
 
+    fn mem_on_disk(&self) -> bool {
+        self.mem.memory.data_on_disk(&self.storage.data_dir)
+    }
+
     pub(super) fn mem_dirty(&self) -> bool {
-        self.mem.draft != self.mem.resolved.config
+        self.mem.draft != self.mem.resolved.config || self.mem.exp != self.mem.exp_saved || (self.mem.bs.record, self.mem.bs.prefetch) != (self.mem.bs_saved.record, self.mem.bs_saved.prefetch)
+    }
+
+    /// What applying would set up: the person's own choices, or, with the experiment on, the plan made for this machine (zswap and a small
+    /// swap file when the data disk has room, zram otherwise).
+    pub(super) fn mem_effective(&self) -> compressed::Plan {
+        let free = if self.mem_on_disk() { self.mem.memory.data_free(&self.storage.data_dir) } else { None };
+        compressed::plan(&self.mem.draft, self.mem.exp, free, self.mem_ram())
     }
 
     fn mem_locked(&self, f: MemField) -> Option<&'static str> {
@@ -144,27 +166,52 @@ impl SettingsApp {
                 self.mem.preview.clear();
                 self.ok(format!("zswap {} (not applied yet).", if self.mem.draft.zswap { "on" } else { "off" }));
             }
+            Key::Char('e') => {
+                if self.mem.exp_locked {
+                    return self.fail("Locked by the boot option iyakki.zram=exp or iyakki.compressed.");
+                }
+                self.mem.exp = if self.mem.exp == Experiment::On { Experiment::Off } else { Experiment::On };
+                self.mem.preview.clear();
+                self.ok(format!("Experimental compressed memory {} (not applied yet). {}", self.mem.exp.id(), self.mem_effective().reason));
+            }
+            Key::Char('o') | Key::Char('b') => {
+                let record = matches!(k, Key::Char('o'));
+                let (locked, opt, what) = if record { (self.mem.bs_saved.record_locked, "iyakki.bootrecord", "Recording the boot order") } else { (self.mem.bs_saved.prefetch_locked, "iyakki.prefetch", "Reading the boot files ahead") };
+                if locked {
+                    return self.fail(format!("Locked by the boot option {opt}."));
+                }
+                let on = if record { &mut self.mem.bs.record } else { &mut self.mem.bs.prefetch };
+                *on = !*on;
+                let now = *on;
+                self.ok(format!("{what} {} (not saved yet). Developer option, used from the next start; it is not measured to make a start faster.", if now { "on" } else { "off" }));
+            }
             Key::Char('p') => {
-                self.mem.stats = MemStats::read(&self.mem.env);
-                self.mem.preview = iyakki_zram::preview(&self.mem.stats, &self.mem.draft, self.mem_ram());
+                self.mem.stats = self.mem.memory.stats();
+                self.mem.preview = iyakki_core_api::memory::preview(&self.mem.stats, &self.mem_effective().config, self.mem_ram());
                 self.ok(if self.mem_dirty() { "Preview below. Nothing has changed yet." } else { "No changes to apply; the preview shows the current setup." });
             }
             Key::Char('y') => {
-                self.mem.stats = MemStats::read(&self.mem.env);
+                self.mem.stats = self.mem.memory.stats();
                 if self.mem.stats.has_zram_swap() {
-                    if let Err(why) = iyakki_zram::apply::swapoff_safe(&self.mem.stats) {
+                    if let Err(why) = iyakki_core_api::memory::swapoff_safe(&self.mem.stats) {
                         return self.fail(why);
                     }
                 }
-                let lines = iyakki_zram::preview(&self.mem.stats, &self.mem.draft, self.mem_ram());
+                let lines = iyakki_core_api::memory::preview(&self.mem.stats, &self.mem_effective().config, self.mem_ram());
                 self.mem.preview = lines.clone();
                 self.modal = Some(Modal::Confirm(ConfirmKind::MemApply, format!("Apply to the running system now?\n\n{}\n\nThis does not change what happens at the next boot; use Save for that.", lines.join("\n"))));
             }
             Key::Char('v') => {
                 let d = self.mem.draft.clone();
-                match iyakki_zram::save_conf(&self.mem.conf, &d) {
+                let exp = self.mem.exp;
+                let bs = self.mem.bs;
+                let saved = self.mem.memory.save_conf(&d)
+                    .and_then(|_| if self.mem.exp_locked { Ok(()) } else { self.mem.memory.set_conf_key("compressed-memory", Some(compressed::conf_value(exp))) })
+                    .and_then(|_| if self.mem.bs_saved.record_locked { Ok(()) } else { self.mem.memory.set_conf_key(bootspeed::KEY_RECORD, Some(bootspeed::conf_value(bs.record))) })
+                    .and_then(|_| if self.mem.bs_saved.prefetch_locked { Ok(()) } else { self.mem.memory.set_conf_key(bootspeed::KEY_PREFETCH, Some(bootspeed::conf_value(bs.prefetch))) });
+                match saved {
                     Ok(()) => {
-                        cx.audit.record(&cx.session.user, "memory.save", &format!("zram={} swappiness={} swapfile={:?} zswap={}", d.zram_value(), d.swappiness, d.swapfile, d.zswap));
+                        cx.audit.record(&cx.session.user, "memory.save", &format!("zram={} swappiness={} swapfile={:?} zswap={} compressed-memory={} boot-record={} boot-prefetch={}", d.zram_value(), d.swappiness, d.swapfile, d.zswap, exp.id(), bs.record, bs.prefetch));
                         self.mem_load(true);
                         let locked: Vec<&str> = [MemField::Zram, MemField::Swappiness, MemField::Swapfile].iter().filter_map(|f| self.mem_locked(*f)).collect();
                         self.ok(if locked.is_empty() { "Saved. These settings are used from the next boot.".to_string() } else { format!("Saved, but the boot option{} {} still override{} at boot.", if locked.len() > 1 { "s" } else { "" }, locked.join(", "), if locked.len() > 1 { "" } else { "s" }) });
@@ -218,19 +265,24 @@ impl SettingsApp {
     }
 
     pub(super) fn mem_apply(&mut self, cx: &AppCx) {
-        let (env, cfg, ram, sw) = (self.mem.env.clone(), self.mem.draft.clone(), self.mem_ram(), self.mem.swapper.clone());
+        let (memory, cfg, ram) = (self.mem.memory.clone(), self.mem_effective().config, self.mem_ram());
         cx.audit.record(&cx.session.user, "memory.apply", &format!("zram={} swappiness={} swapfile={:?}", cfg.zram_value(), cfg.swappiness, cfg.swapfile));
-        let on_disk = matches!(iyakki_storage::data_location(&self.storage.roots, &self.storage.data_dir), iyakki_storage::DataLocation::Disk(_));
+        let on_disk = self.mem_on_disk();
+        // the press that confirmed the change goes with the job: the job thread is not inside the dispatch
+        let press = iyakki_core_api::guarded::gesture_ticket();
         self.start("Applying", move || {
-            let sw = sw.as_ref();
-            match iyakki_zram::reconfigure(&env, sw, &cfg, ram) {
+            let work = move || match memory.reconfigure(&cfg, ram) {
                 Err(e) => JobOut::Msg(Err(e)),
                 Ok(mut steps) => {
-                    steps.extend(iyakki_zram::apply::apply_swapfile(sw, &env, std::path::Path::new(iyakki_zram::SWAPFILE_PATH), cfg.swapfile, on_disk));
+                    steps.extend(memory.apply_swapfile(cfg.swapfile, on_disk));
                     let bad = steps.iter().filter(|s| !s.ok).count();
                     let text = steps.iter().map(|s| s.msg.clone()).collect::<Vec<_>>().join("; ");
                     if bad == 0 { JobOut::Msg(Ok(format!("Applied: {text}"))) } else { JobOut::Msg(Err(format!("Applied with problems: {text}"))) }
                 }
+            };
+            match press {
+                Some(p) => p.redeem(work),
+                None => work(),
             }
         });
     }
@@ -250,6 +302,9 @@ impl SettingsApp {
             ("Swappiness", self.mem.draft.swappiness.to_string(), self.mem_locked(MemField::Swappiness)),
             ("Swap file", self.mem.draft.swapfile.map_or("off".to_string(), |b| format!("{} on the data disk", human(b))), self.mem_locked(MemField::Swapfile)),
             ("zswap", if self.mem.draft.zswap { "on" } else { "off" }.to_string(), if self.mem.resolved.zswap_locked { Some("iyakki.zswap") } else { None }),
+            ("Compressed memory, experimental", format!("{}   ({})", self.mem.exp.id(), self.mem_effective().reason), if self.mem.exp_locked { Some("iyakki.zram=exp") } else { None }),
+            ("Record the boot order", if self.mem.bs.record { "on   (developer option: notes the files the first 90 seconds open)" } else { "off" }.to_string(), if self.mem.bs_saved.record_locked { Some("iyakki.bootrecord") } else { None }),
+            ("Read boot files ahead", if self.mem.bs.prefetch { "on   (developer option: reads the recorded files into memory after the start; not measured)" } else { "off" }.to_string(), if self.mem.bs_saved.prefetch_locked { Some("iyakki.prefetch") } else { None }),
         ]
     }
 
@@ -268,6 +323,7 @@ impl SettingsApp {
             }
             y += 4.0 * s;
         }
+        // Values sit in a column right of the labels; when a label is wider than its column, or the value would be cut short, the value goes under the label instead.
         let label_w = (170.0 * s).min(a.w * 0.4);
         for (label, value, lock) in &rows {
             g.text(a.x, y, 14.0 * s, MUTED, label, Face::Sans);
@@ -275,8 +331,18 @@ impl SettingsApp {
             if let Some(opt) = lock {
                 v.push_str(&format!("   locked by boot option {opt}"));
             }
-            let t = g.fit(14.0 * s, &v, Face::Bold, a.w - label_w);
-            g.text(a.x + label_w, y, 14.0 * s, if lock.is_some() { rgb(255, 196, 94) } else { TEXT }, &t, Face::Bold);
+            let colour = if lock.is_some() { rgb(255, 196, 94) } else { TEXT };
+            let label_fits = g.text_width(14.0 * s, label, Face::Sans) + 12.0 * s <= label_w;
+            let value_fits = g.text_width(14.0 * s, &v, Face::Bold) <= a.w - label_w;
+            if label_fits && value_fits {
+                let t = g.fit(14.0 * s, &v, Face::Bold, a.w - label_w);
+                g.text(a.x + label_w, y, 14.0 * s, colour, &t, Face::Bold);
+            } else {
+                y += 20.0 * s;
+                let ind = 16.0 * s;
+                let t = g.fit(14.0 * s, &v, Face::Bold, a.w - ind);
+                g.text(a.x + ind, y, 14.0 * s, colour, &t, Face::Bold);
+            }
             y += 24.0 * s;
         }
         if self.mem_dirty() {
@@ -301,6 +367,6 @@ impl SettingsApp {
 
     pub(super) fn memory_buttons(&self) -> Vec<Btn> {
         let (acc, mut_) = (ACCENT, TEXT);
-        vec![("Zram", mut_, 'z'), ("Algorithm", mut_, 'c'), ("Swappiness", mut_, 'w'), ("Swap file", mut_, 'f'), ("zswap", mut_, 'x'), ("Preview", acc, 'p'), ("Apply now", acc, 'y'), ("Save for next boots", acc, 'v'), ("Read again", mut_, 'r')]
+        vec![("Zram", mut_, 'z'), ("Algorithm", mut_, 'c'), ("Swappiness", mut_, 'w'), ("Swap file", mut_, 'f'), ("zswap", mut_, 'x'), ("Experimental", mut_, 'e'), ("Record boot order", mut_, 'o'), ("Read ahead", mut_, 'b'), ("Preview", acc, 'p'), ("Apply now", acc, 'y'), ("Save for next boots", acc, 'v'), ("Read again", mut_, 'r')]
     }
 }

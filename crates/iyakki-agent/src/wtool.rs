@@ -378,7 +378,7 @@ pub fn run(tool: &ToolPackage, user: &str, policy: &Policy, args: &Value, upstre
     let mut text = String::from_utf8_lossy(&bytes).to_string();
 
     // files the guest wrote under a `write:` scope are copied out, each path checked again
-    let after = vfs.lock().unwrap().clone();
+    let after = vfs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
     let mut written = BTreeSet::new();
     for (path, kind) in after.diff(&base) {
         if kind == DiffKind::Removed || !write_scopes.iter().any(|s| Capability::FsWrite(s.clone()).permits(&iyakki_sec::Access::FsWrite(&path))) {

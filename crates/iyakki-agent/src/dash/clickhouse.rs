@@ -205,7 +205,7 @@ mod tests {
         assert_eq!(f.meta.took_ms, 12);
         assert!(f.meta.truncated && f.meta.notices[0].contains("2 of at least 50"), "{:?}", f.meta);
         let url = up.urls().remove(0);
-        for want in ["default_format=JSON", "readonly=2", "max_execution_time=30", "max_result_rows=100", "result_overflow_mode=break", "quote_64bit_integers=0"] {
+        for want in ["default_format=JSON", "readonly=2", "max_execution_time=30", "max_result_rows=100", "max_result_bytes=", "result_overflow_mode=break", "quote_64bit_integers=0"] {
             assert!(url.contains(want), "{want} in {url}");
         }
         assert!(up.bodies()[0].starts_with("SELECT * FROM system.query_log"));

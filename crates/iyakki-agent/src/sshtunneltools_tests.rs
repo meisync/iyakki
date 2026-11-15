@@ -87,7 +87,7 @@ fn only_the_list_is_free_and_every_change_is_on_the_hard_ask_list() {
         assert!(!r.tools.pre_approved(t), "{t}");
     }
     assert!(r.tools.grant_blocker(READ_TOOL, &json!({})).is_none());
-    assert_eq!(crate::toolblock::group_of("ssh_tunnel_add"), crate::toolblock::Group::System);
+    assert_eq!(crate::toolblock::group_of("ssh_tunnel_add"), crate::toolblock::Group::Network);
 }
 
 #[test]

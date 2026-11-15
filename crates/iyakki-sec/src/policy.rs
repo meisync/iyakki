@@ -345,6 +345,9 @@ pub struct PolicyOverride {
     pub browser_agent: Option<BrowserAgent>,
     pub browser_max_actions: Option<u32>,
     pub browser_max_minutes: Option<u32>,
+    /// Settings a newer release wrote for this account: kept, and written back on the next save.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 fn set(a: &[App]) -> BTreeSet<App> {

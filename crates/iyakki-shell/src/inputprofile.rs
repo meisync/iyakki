@@ -20,11 +20,13 @@ struct State {
     last_key: String,
     /// (delta of the last scroll step, natural, trackpad)
     last_scroll: Option<(i32, bool, bool)>,
+    /// The last key press was a Command chord that the Mac profile turned into a Ctrl key (Command+C is Ctrl+C for the tile): a tile may tell the two apart.
+    from_command: bool,
 }
 
 impl State {
     const fn new() -> State {
-        State { resolved: Resolved::Pc, swap: false, found: Found { keyboard: false, trackpad: false }, choice: String::new(), last_key: String::new(), last_scroll: None }
+        State { resolved: Resolved::Pc, swap: false, found: Found { keyboard: false, trackpad: false }, choice: String::new(), last_key: String::new(), last_scroll: None, from_command: false }
     }
 }
 
@@ -78,6 +80,12 @@ pub fn swap_in_effect() -> bool {
 }
 pub fn found() -> Found {
     with(|s| s.found)
+}
+
+/// Was the key that just arrived a Command chord of the Mac profile (Command+C reaches a tile as Ctrl+C)? Control+C is false. A tile uses it to
+/// make Command+C a copy only: it never interrupts (docs: F-KBD-19).
+pub fn last_press_was_command() -> bool {
+    with(|s| s.from_command)
 }
 
 pub fn note_key(text: String) {
@@ -162,6 +170,9 @@ pub fn on_press(code: u16, held: Held, first: bool) -> Option<Vec<Event>> {
             _ => format!("{} -> {}", ip::physical_name(profile, held, &key_name(code)), key_name(code)),
         });
     }
+    if first {
+        with(|s| s.from_command = held.command && matches!(mapped, Mapped::Keys(_)));
+    }
     match mapped {
         Mapped::Pass => None,
         Mapped::Ignore => Some(Vec::new()),
@@ -206,6 +217,20 @@ mod tests {
     }
     fn cmd() -> Held {
         Held { command: true, ..Default::default() }
+    }
+
+    #[test]
+    fn the_tile_can_tell_a_command_copy_from_control_c() {
+        mac_setup();
+        on_press(46, cmd(), true);
+        assert!(last_press_was_command(), "Command+C");
+        on_press(46, Held { control: true, ..Default::default() }, true);
+        assert!(!last_press_was_command(), "Control+C is not a Command chord");
+        on_press(46, cmd(), true);
+        on_press(46, cmd(), false);
+        assert!(last_press_was_command(), "a held key repeats the same answer");
+        on_press(30, Held::default(), true);
+        assert!(!last_press_was_command(), "a plain key clears it");
     }
 
     #[test]

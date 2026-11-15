@@ -63,6 +63,13 @@ impl MotionEnv {
 /// carry a picture (the inbox cannot: its notice says the picture is in CAMERAS).
 pub trait AlertSink: Send + Sync {
     fn notify(&self, user: &str, camera: &str, notice: &Notice, thumb: Option<&[u8]>);
+
+    /// Like [`AlertSink::notify`], also handing over the picture that belongs to the event even when the person did not allow it to
+    /// travel with the notice (`thumb` is only the allowed one). A sink that sends it anywhere needs its own opt-in
+    /// (`camvision`); the default ignores it.
+    fn notify_with_frame(&self, user: &str, camera: &str, notice: &Notice, thumb: Option<&[u8]>, _frame: Option<&[u8]>) {
+        self.notify(user, camera, notice, thumb);
+    }
 }
 
 pub struct InboxSink(pub Arc<crate::services::Services>);
@@ -654,7 +661,7 @@ impl MotionService {
         for n in notices {
             log_event(&self.data, cam, "system", "motion.alert", &format!("{} ({} event{})", n.title, n.count, if n.count == 1 { "" } else { "s" }), sink.is_some());
             if let Some(s) = &sink {
-                s.notify(&rt.owner, cam, n, if n.thumbnail { thumb } else { None });
+                s.notify_with_frame(&rt.owner, cam, n, if n.thumbnail { thumb } else { None }, thumb);
             }
         }
     }

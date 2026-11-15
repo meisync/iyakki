@@ -21,6 +21,7 @@ pub const ASSETS: &[(&str, &str, &str)] = &[
     ("/ui/git.js", "text/javascript; charset=utf-8", include_str!("ui/git.js")),
     ("/ui/flows.js", "text/javascript; charset=utf-8", include_str!("ui/flows.js")),
     ("/ui/runs.js", "text/javascript; charset=utf-8", include_str!("ui/runs.js")),
+    ("/ui/chat.js", "text/javascript; charset=utf-8", include_str!("ui/chat.js")),
     ("/ui/schedules.js", "text/javascript; charset=utf-8", include_str!("ui/schedules.js")),
     ("/ui/tenant.js", "text/javascript; charset=utf-8", include_str!("ui/tenant.js")),
     ("/ui/cloud.js", "text/javascript; charset=utf-8", include_str!("ui/cloud.js")),

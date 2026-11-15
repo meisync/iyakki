@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::linuxapps_dist::{self as dist, Release};
 use crate::linuxapps_init::{self as init, Bind, IdMap};
+use crate::linuxapps_net as net;
 use crate::rootfs;
 use crate::wsexec::{Out, Runner, Sink};
 
@@ -584,12 +585,59 @@ impl LinuxApps {
         Ok(freed)
     }
 
+    /// The old two-way switch: on is the computer's own network (shared), off is none. Outbound-only is [`LinuxApps::set_net_policy`].
     pub fn set_network(&self, name: &str, on: bool) -> Result<(), String> {
         let mut s = self.get(name)?;
         s.network = on;
         self.save(&s)?;
+        let mode = if on { net::Mode::HostShared } else { net::Mode::Off };
+        net::NetPolicy { mode, ..Default::default() }.save(&self.net_policy_file(name))?;
         self.audit("sandbox.network", &format!("{name} {}", if on { "on" } else { "off" }));
         Ok(())
+    }
+
+    fn net_policy_file(&self, name: &str) -> PathBuf {
+        self.dir_of(name).join("netpolicy.json")
+    }
+
+    /// How the sandbox reaches the network. A sandbox from before the policy file existed follows its old on/off switch; a damaged
+    /// policy file reads as off.
+    pub fn net_policy(&self, name: &str) -> Result<net::NetPolicy, String> {
+        let s = self.get(name)?;
+        let f = self.net_policy_file(name);
+        Ok(if f.is_file() { net::NetPolicy::load(&f) } else { net::NetPolicy { mode: if s.network { net::Mode::HostShared } else { net::Mode::Off }, ..Default::default() } })
+    }
+
+    /// Choose the network mode and, for outbound only, the allow-list (`host:port`, `address/prefix`) and name servers. The caller has
+    /// already checked the person may reach those hosts ([`net::host_gate`]).
+    pub fn set_net_policy(&self, name: &str, mode: net::Mode, allow: &[String], dns: &[String]) -> Result<net::NetPolicy, String> {
+        let mut s = self.get(name)?;
+        let allow = if mode == net::Mode::OutboundOnly { net::NetPolicy::parse_allow(allow)? } else { vec![] };
+        let dns = dns.iter().map(|d| d.trim().parse::<std::net::IpAddr>().map_err(|_| format!("`{d}` is not a name server address"))).collect::<Result<Vec<_>, _>>()?;
+        let mut p = net::NetPolicy { mode, allow, dns: if mode == net::Mode::OutboundOnly { dns } else { vec![] }, slot: 0 };
+        if mode == net::Mode::OutboundOnly {
+            let used: Vec<u16> = self.list().iter().filter(|o| o.name != name).filter_map(|o| self.net_policy(&o.name).ok()).filter(|o| o.mode == net::Mode::OutboundOnly).map(|o| o.slot).collect();
+            let mine = self.net_policy(name)?;
+            p.slot = if mine.mode == net::Mode::OutboundOnly && !used.contains(&mine.slot) { mine.slot } else { net::pick_slot(name, &used).ok_or("no free network slot")? };
+        }
+        p.save(&self.net_policy_file(name))?;
+        s.network = mode != net::Mode::Off;
+        self.save(&s)?;
+        self.audit("sandbox.network", &format!("{name} {}", net::describe(&p).join("; ")));
+        Ok(p)
+    }
+
+    /// Write the rules and the resolver file of an outbound-only run into the sandbox's own folder (outside its root), and name the slot.
+    fn prepare_outbound(&self, name: &str, p: &net::NetPolicy) -> Result<(u16, String, String), String> {
+        let veth = net::Veth::for_slot(p.slot);
+        let (resolv, nameservers) = net::resolv_for(&std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default(), p)?;
+        let resolved = net::resolve_names(p, &net::system_lookup);
+        let table = net::table_spec(p, &veth, &net::local_addresses(), &resolved, &nameservers)?;
+        let dir = self.dir_of(name);
+        let (spec_path, resolv_path) = (dir.join("netspec.json"), dir.join("netresolv.conf"));
+        std::fs::write(&spec_path, serde_json::to_string(&table).map_err(|e| e.to_string())?).map_err(|e| format!("{}: {e}", spec_path.display()))?;
+        std::fs::write(&resolv_path, resolv).map_err(|e| format!("{}: {e}", resolv_path.display()))?;
+        Ok((p.slot, spec_path.display().to_string(), resolv_path.display().to_string()))
     }
 
     pub fn add_mount(&self, name: &str, src: &str, dst: &str, rw: bool, scope: &dyn Fn(&Path, bool) -> Result<(), String>) -> Result<Mount, String> {
@@ -644,7 +692,19 @@ impl LinuxApps {
         let mut sp = init::Spec::new(&canon_root.display().to_string(), name, cmd.to_vec());
         sp.idmap = if s.id_base > 0 { IdMap::Multi(s.id_base) } else { IdMap::Single };
         (sp.uid, sp.gid) = if o.root { (0, 0) } else { (1000, 1000) };
-        sp.net = s.network;
+        let pol = self.net_policy(name)?;
+        match pol.mode {
+            net::Mode::HostShared => sp.net = true,
+            net::Mode::Off => sp.net = false,
+            net::Mode::OutboundOnly => {
+                // its own namespace and the rules; if they cannot be made the run does not start (never the computer's network instead)
+                sp.net = false;
+                (sp.veth, sp.net_spec, sp.net_resolv) = {
+                    let (slot, spec, resolv) = self.prepare_outbound(name, &pol).map_err(|e| format!("the network of {name} could not be prepared: {e}"))?;
+                    (Some(slot), spec, resolv)
+                };
+            }
+        }
         sp.binds = s.mounts.iter().chain(extra.iter()).map(|m| Bind { src: m.src.clone(), dst: m.dst.clone(), rw: m.rw }).collect();
         sp.cwd = if !o.cwd.is_empty() { o.cwd.clone() } else if o.root { "/root".into() } else { "/home/user".into() };
         sp.env = o.env.clone();

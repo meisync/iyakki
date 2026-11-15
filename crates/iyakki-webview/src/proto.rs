@@ -141,6 +141,10 @@ pub enum ToHelper {
     /// The file the shell writes its screen into for a granted screen share (see `docs/development/BROWSER-MEDIA-DEVICES.md`,
     /// "Screen share"); an empty path ends it. Optional (0x15).
     ScreenSource(String),
+    /// The extension snapshot ([`crate::ext`]): the browser extensions' hooks for the web process, as opaque bytes. Replaces the
+    /// previous one; empty extension list clears it. Optional (0x16): a helper without it ignores the message. Not a protocol version
+    /// change: new hook kinds travel inside the bytes.
+    Extensions(crate::ext::ExtBlob),
     /// The shell has copied the pixels of this slot; the helper may draw into it again.
     Ack(u8),
     Quit,
@@ -182,6 +186,10 @@ pub enum FromHelper {
     /// Which devices the page is capturing now, a set of [`media_kind`] bits (0 = none): the engine's `camera-capture-state` and
     /// `microphone-capture-state` and `display-capture-state` (bits 1, 2 and 4). The shell shows its indicator from it. Optional (0x92).
     CaptureState(u8),
+    /// The response headers of the page that just committed, as the engine itself received them (`WebKitURIResponse`): `headers` is one
+    /// `Name: value` line per header (at most 48 000 bytes, cut at a line). The shell scrubs them and keeps them only when the person
+    /// turned developer tools for the chat agent on, for the `browser_headers` tool. Optional (0x93).
+    ResponseHeaders { url: String, status: u32, headers: String },
 }
 
 /// Bits of the `kinds` byte of `PermissionRequest` and `CaptureState`.
@@ -305,6 +313,7 @@ impl ToHelper {
     pub const PERMISSION_ANSWER: u8 = 0x13;
     pub const STOP_CAPTURE: u8 = 0x14;
     pub const SCREEN_SOURCE: u8 = 0x15;
+    pub const EXTENSIONS: u8 = 0x16;
 
     /// The whole framed message, ready to write to the socket.
     pub fn encode(&self) -> Vec<u8> {
@@ -404,6 +413,11 @@ impl ToHelper {
                 w.str(p);
                 w.finish()
             }
+            ToHelper::Extensions(b) => {
+                let mut w = W::new(Self::EXTENSIONS);
+                w.0.extend_from_slice(&b.0[..b.0.len().min(crate::ext::MAX_SNAPSHOT)]);
+                w.finish()
+            }
             ToHelper::Script { id, js, timeout_ms } => {
                 let mut w = W::new(Self::SCRIPT);
                 w.u32(*id).u32(*timeout_ms).str(js);
@@ -454,6 +468,7 @@ impl ToHelper {
             Self::PERMISSION_ANSWER => ToHelper::PermissionAnswer { id: r.u32()?, allow: r.bool()? },
             Self::STOP_CAPTURE => ToHelper::StopCapture { kinds: r.u8()? },
             Self::SCREEN_SOURCE => ToHelper::ScreenSource(r.str()?),
+            Self::EXTENSIONS => ToHelper::Extensions(crate::ext::ExtBlob(r.0.to_vec())),
             Self::SCRIPT => {
                 let (id, timeout_ms) = (r.u32()?, r.u32()?);
                 ToHelper::Script { id, js: r.str()?, timeout_ms }
@@ -482,6 +497,7 @@ impl FromHelper {
     pub const DEV_EVENT: u8 = 0x90;
     pub const PERMISSION_REQUEST: u8 = 0x91;
     pub const CAPTURE_STATE: u8 = 0x92;
+    pub const RESPONSE_HEADERS: u8 = 0x93;
 
     pub fn encode(&self) -> Vec<u8> {
         match self {
@@ -546,6 +562,11 @@ impl FromHelper {
                 w.u8(*k);
                 w.finish()
             }
+            FromHelper::ResponseHeaders { url, status, headers } => {
+                let mut w = W::new(Self::RESPONSE_HEADERS);
+                w.str(url).u32(*status).str(headers);
+                w.finish()
+            }
             FromHelper::ScriptResult { id, ok, json } => {
                 let mut w = W::new(Self::SCRIPT_RESULT);
                 w.u32(*id).u8(*ok as u8).str(json);
@@ -585,6 +606,7 @@ impl FromHelper {
             Self::DEV_EVENT => FromHelper::DevEvent(r.str()?),
             Self::PERMISSION_REQUEST => FromHelper::PermissionRequest { id: r.u32()?, kinds: r.u8()?, origin: r.str()? },
             Self::CAPTURE_STATE => FromHelper::CaptureState(r.u8()?),
+            Self::RESPONSE_HEADERS => FromHelper::ResponseHeaders { url: r.str()?, status: r.u32()?, headers: r.str()? },
             Self::SCRIPT_RESULT => FromHelper::ScriptResult { id: r.u32()?, ok: r.bool()?, json: r.str()? },
             t => return Err(DecodeError::Unknown(t)),
         })
@@ -712,6 +734,7 @@ mod tests {
             FromHelper::DevEvent("F\u{1f}GET\u{1f}404\u{1f}120\u{1f}https://a.org/x.js\u{1f}".into()),
             FromHelper::PermissionRequest { id: 3, kinds: media_kind::MICROPHONE | media_kind::CAMERA, origin: "https://meet.example".into() },
             FromHelper::CaptureState(media_kind::CAMERA),
+            FromHelper::ResponseHeaders { url: "https://a.org/".into(), status: 200, headers: "Content-Type: text/html\nServer: x\n".into() },
         ]
     }
 
@@ -740,6 +763,7 @@ mod tests {
         assert_eq!(ToHelper::StopCapture { kinds: 6 }.encode(), vec![2, 0, 0, 0, 0x14, 6]);
         assert_eq!(ToHelper::ScreenSource("p".into()).encode(), vec![6, 0, 0, 0, 0x15, 1, 0, 0, 0, b'p']);
         assert_eq!(FromHelper::CaptureState(3).encode(), vec![2, 0, 0, 0, 0x92, 3]);
+        assert_eq!(FromHelper::ResponseHeaders { url: "u".into(), status: 404, headers: "h".into() }.encode(), vec![15, 0, 0, 0, 0x93, 1, 0, 0, 0, b'u', 0x94, 1, 0, 0, 1, 0, 0, 0, b'h']);
         assert_eq!(FromHelper::PermissionRequest { id: 2, kinds: 1, origin: "o".into() }.encode(), vec![11, 0, 0, 0, 0x91, 2, 0, 0, 0, 1, 1, 0, 0, 0, b'o']);
         assert_eq!(FromHelper::Fullscreen(true).encode(), vec![2, 0, 0, 0, 0x8D, 1]);
         assert_eq!(FromHelper::AudioPlaying(true).encode(), vec![2, 0, 0, 0, 0x8E, 1]);

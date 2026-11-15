@@ -177,3 +177,37 @@ fn an_imported_flow_sends_nothing_outside_until_switched_on_and_a_second_message
     host.notify_channels(&mine, &ChannelNotice { dedupe_key: "mine:run1:n".into(), ..chan("", false) }).unwrap();
     assert_eq!(hs.st.lock().unwrap().events.len(), 2);
 }
+
+#[test]
+fn quiet_hours_hold_a_message_an_error_goes_through_and_the_tick_sends_what_is_due_and_asks_again() {
+    use super::channel_policy::{Held, Policy};
+    let hs = FakeHs::start();
+    let r = rig("quiet");
+    add_account(&r, &hs);
+    let host = &r.env.host;
+    // quiet hours that contain this minute (UTC)
+    let m = ((crate::clock::now_unix().max(0) as u64 / 60) % 1440) as u32;
+    host.msg_policy.set_policy(Policy { quiet: Some(((m + 1439) % 1440, (m + 120) % 1440)), escalate_after_secs: Some(60), escalate_room: String::new(), ..Policy::default() }).unwrap();
+    let lines = host.notify_channels(&notice(&r), &chan("", false)).unwrap();
+    assert!(lines[0].contains("held until the quiet hours end"), "{lines:?}");
+    assert_eq!(hs.st.lock().unwrap().events.len(), 0, "nothing left the computer");
+    assert_eq!(host.msg_policy.held().len(), 1);
+    // an error goes through, and one that needs the person is watched for an answer
+    let err = Notice { level: "error".into(), needs_you: true, ..notice(&r) };
+    host.notify_channels(&err, &ChannelNotice { dedupe_key: "f1:run2:n".into(), ..chan("", false) }).unwrap();
+    assert_eq!(hs.st.lock().unwrap().events.len(), 1);
+    assert_eq!(host.msg_policy.watching().len(), 1);
+    // a dry run holds nothing
+    host.notify_channels(&Notice { flow_id: "f2".into(), ..notice(&r) }, &ChannelNotice { dedupe_key: "dry".into(), ..chan("", true) }).unwrap();
+    assert_eq!(host.msg_policy.held().len(), 1);
+    // the tick: not yet due, nothing happens
+    iyakki_flow::host::Host::tick(&**host);
+    assert_eq!(hs.st.lock().unwrap().events.len(), 1);
+    // a held message whose time has come goes, and a watched one nobody answered is asked about again
+    host.msg_policy.hold(Held { flow: "f1".into(), room: String::new(), text: "late news".into(), key: "late".into(), until: 1 });
+    host.msg_policy.watch("f1", "old", "door still open", 1);
+    iyakki_flow::host::Host::tick(&**host);
+    let bodies: Vec<String> = hs.st.lock().unwrap().events.iter().map(|e| String::from_utf8_lossy(&e.2).into_owned()).collect();
+    assert_eq!(bodies.len(), 3, "{bodies:?}");
+    assert!(bodies.iter().any(|b| b.contains("late news")) && bodies.iter().any(|b| b.contains("Nobody answered yet: door still open")), "{bodies:?}");
+}

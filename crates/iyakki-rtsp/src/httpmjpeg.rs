@@ -1,5 +1,7 @@
 //! Motion-JPEG over plain HTTP: `multipart/x-mixed-replace` streams (most cameras' `/video.mjpg`) and single-picture addresses
-//! (`/snapshot.jpg`, fetched again for every picture). Basic and Digest sign-in. No TLS and no chunked encoding.
+//! (`/snapshot.jpg`, fetched again for every picture, also when the server sends it in chunks). Basic and Digest (MD5, SHA-256) sign-in.
+//! A redirect (301, 302, 303, 307, 308) is followed up to three times, but only to another path on the same camera: never to another
+//! machine and never to https. No TLS.
 
 use std::io::{Read, Write};
 
@@ -16,7 +18,7 @@ type Connect<T> = Box<dyn FnMut() -> Result<T, Error> + Send>;
 enum Mode {
     Multipart { boundary: Vec<u8> },
     /// A single-picture address; `first` is the body length announced on the connection `open` already made (`None`: read to the end).
-    Single { first: Option<Option<usize>> },
+    Single { first: Option<Option<usize>>, chunked: bool },
 }
 
 pub struct HttpMjpeg<T: Read + Write> {
@@ -163,6 +165,56 @@ fn read_body<T: Read>(t: &mut T, buf: &mut Vec<u8>, len: Option<usize>) -> Resul
     }
 }
 
+/// Where a redirect leads: another path on the same camera, as a new address. A different machine, a different port or https is refused.
+fn redirect_target(url: &Url, head: &Head) -> Result<Url, Error> {
+    let loc = head.get("location").ok_or_else(|| Error::Protocol("the camera moved the picture but did not say where".into()))?;
+    if loc.len() > 1024 || loc.chars().any(|c| c.is_control() || c == ' ') {
+        return Err(Error::Protocol("the camera moved the picture to an address that cannot be used".into()));
+    }
+    let lower = loc.to_ascii_lowercase();
+    if lower.starts_with("https://") {
+        return Err(Error::Unsupported("the camera moved the picture to an encrypted (https) address, which is not supported".into()));
+    }
+    let text = if loc.starts_with('/') && !loc.starts_with("//") { format!("http://{}:{}{}", url.host, url.port, loc) } else { loc.to_string() };
+    let to = crate::url::parse(&text).map_err(|_| Error::Protocol("the camera moved the picture to an address that cannot be used".into()))?;
+    if to.scheme != crate::url::Scheme::Http || !to.host.eq_ignore_ascii_case(&url.host) || to.port != url.port {
+        return Err(Error::Protocol("the camera moved the picture to another machine; the address was not followed (enter the new address instead)".into()));
+    }
+    Ok(Url { user: url.user.clone(), password: url.password.clone(), ..to })
+}
+
+const MAX_REDIRECTS: usize = 3;
+
+fn is_redirect(code: u16) -> bool {
+    matches!(code, 301 | 302 | 303 | 307 | 308)
+}
+
+fn is_chunked(h: &Head) -> bool {
+    h.get("transfer-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("chunked"))
+}
+
+/// A whole body sent in chunks (a single picture), after the head was read; `buf` holds what followed the head.
+fn read_chunked_body<T: Read>(t: &mut T, buf: &mut Vec<u8>) -> Result<Vec<u8>, Error> {
+    let mut d = Dechunk { raw: std::mem::take(buf), ..Default::default() };
+    let mut out = Vec::new();
+    loop {
+        match d.feed(&mut out) {
+            Err(Error::Closed) => return Ok(out),
+            Err(e) => return Err(e),
+            Ok(()) => {}
+        }
+        if out.len() > MAX_PICTURE {
+            return Err(Error::Protocol("the camera sent a picture that is far too large".into()));
+        }
+        let mut tmp = [0u8; 16384];
+        let n = t.read(&mut tmp)?;
+        if n == 0 {
+            return Err(Error::Closed);
+        }
+        d.raw.extend_from_slice(&tmp[..n]);
+    }
+}
+
 fn is_jpeg(b: &[u8]) -> bool {
     b.len() > 4 && b[0] == 0xFF && b[1] == 0xD8
 }
@@ -170,9 +222,12 @@ fn is_jpeg(b: &[u8]) -> bool {
 impl<T: Read + Write> HttpMjpeg<T> {
     pub fn open(mut connect: Connect<T>, url: &Url, creds: Option<(String, String)>) -> Result<HttpMjpeg<T>, Error> {
         let mut auth: Option<Auth> = None;
-        for attempt in 0..2 {
+        let mut url = url.clone();
+        let mut redirects = 0;
+        let mut attempt = 0;
+        loop {
             let mut t = connect()?;
-            t.write_all(&get_request(url, auth.as_mut()))?;
+            t.write_all(&get_request(&url, auth.as_mut()))?;
             let mut buf = Vec::new();
             let head = read_head(&mut t, &mut buf)?;
             match head.code {
@@ -182,26 +237,32 @@ impl<T: Read + Write> HttpMjpeg<T> {
                         let b = ctype.split(';').find_map(|p| p.trim().strip_prefix("boundary=")).map(|b| b.trim_matches('"').trim_start_matches("--").to_string()).filter(|b| !b.is_empty() && b.len() < 100).ok_or_else(|| Error::Protocol("the camera's stream has no boundary".into()))?;
                         Mode::Multipart { boundary: format!("--{b}").into_bytes() }
                     } else if ctype.starts_with("image/jp") {
-                        if head.get("transfer-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("chunked")) {
-                            return Err(Error::Unsupported("this camera sends single pictures in chunks, which is not supported".into()));
-                        }
-                        Mode::Single { first: Some(content_length(&head)?) }
+                        let chunked = is_chunked(&head);
+                        Mode::Single { first: Some(if chunked { None } else { content_length(&head)? }), chunked }
                     } else if ctype.is_empty() {
                         return Err(Error::Protocol("the camera did not say what kind of picture it sends".into()));
                     } else {
                         return Err(Error::Unsupported(format!("this address sends {}, not Motion-JPEG", ctype.chars().filter(|c| c.is_ascii_graphic()).take(40).collect::<String>())));
                     };
                     let basic = auth.as_ref().is_some_and(Auth::is_basic);
-                    let chunked = matches!(mode, Mode::Multipart { .. }) && head.get("transfer-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("chunked"));
+                    let chunked = matches!(mode, Mode::Multipart { .. }) && is_chunked(&head);
                     let mut dechunk = None;
                     if chunked {
                         let mut d = Dechunk { raw: std::mem::take(&mut buf), ..Default::default() };
                         d.feed(&mut buf)?;
                         dechunk = Some(d);
                     }
-                    return Ok(HttpMjpeg { connect, url: url.clone(), auth, t, buf, mode, basic, dechunk });
+                    return Ok(HttpMjpeg { connect, url, auth, t, buf, mode, basic, dechunk });
+                }
+                c if is_redirect(c) => {
+                    redirects += 1;
+                    if redirects > MAX_REDIRECTS {
+                        return Err(Error::Protocol("the camera moved the picture too many times".into()));
+                    }
+                    url = redirect_target(&url, &head)?;
                 }
                 401 if attempt == 0 => {
+                    attempt += 1;
                     let Some((u, p)) = creds.clone() else { return Err(Error::Auth("the camera needs a user name and password".into())) };
                     let hs: Vec<&str> = head.headers.iter().filter(|h| h.0 == "www-authenticate").map(|h| h.1.as_str()).collect();
                     auth = Some(Auth::new(auth::choose(&hs).map_err(Error::Unsupported)?, &u, &p));
@@ -211,7 +272,6 @@ impl<T: Read + Write> HttpMjpeg<T> {
                 c => return Err(Error::Protocol(format!("the camera answered {c}"))),
             }
         }
-        Err(Error::Auth("the camera refused the user name or password".into()))
     }
 
     /// Read more of a multipart stream into `buf`, undoing chunked encoding when the server uses it.
@@ -238,22 +298,34 @@ impl<T: Read + Write> HttpMjpeg<T> {
     /// The next picture as a JPEG file. `Err(Timeout)` keeps what was read.
     pub fn next_jpeg(&mut self) -> Result<Vec<u8>, Error> {
         match &mut self.mode {
-            Mode::Single { first } => {
+            Mode::Single { first, chunked } => {
                 let len = match first.take() {
                     Some(l) => l,
                     None => {
-                        self.t = (self.connect)()?;
-                        self.buf.clear();
-                        let req = get_request(&self.url, self.auth.as_mut());
-                        self.t.write_all(&req)?;
-                        let head = read_head(&mut self.t, &mut self.buf)?;
-                        if head.code != 200 {
-                            return Err(if head.code == 401 { Error::Auth("the camera refused the user name or password".into()) } else { Error::Protocol(format!("the camera answered {}", head.code)) });
+                        let mut redirects = 0;
+                        loop {
+                            self.t = (self.connect)()?;
+                            self.buf.clear();
+                            let req = get_request(&self.url, self.auth.as_mut());
+                            self.t.write_all(&req)?;
+                            let head = read_head(&mut self.t, &mut self.buf)?;
+                            if is_redirect(head.code) {
+                                redirects += 1;
+                                if redirects > MAX_REDIRECTS {
+                                    return Err(Error::Protocol("the camera moved the picture too many times".into()));
+                                }
+                                self.url = redirect_target(&self.url, &head)?;
+                                continue;
+                            }
+                            if head.code != 200 {
+                                return Err(if head.code == 401 { Error::Auth("the camera refused the user name or password".into()) } else { Error::Protocol(format!("the camera answered {}", head.code)) });
+                            }
+                            *chunked = is_chunked(&head);
+                            break if *chunked { None } else { content_length(&head)? };
                         }
-                        content_length(&head)?
                     }
                 };
-                let body = read_body(&mut self.t, &mut self.buf, len)?;
+                let body = if *chunked { read_chunked_body(&mut self.t, &mut self.buf)? } else { read_body(&mut self.t, &mut self.buf, len)? };
                 if is_jpeg(&body) { Ok(body) } else { Err(Error::Protocol("the camera's answer is not a JPEG picture".into())) }
             }
             Mode::Multipart { boundary } => {

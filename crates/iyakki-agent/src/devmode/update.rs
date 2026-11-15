@@ -43,6 +43,8 @@ use super::DevMode;
 
 pub const MANIFEST: &str = "update.json";
 pub const FORMAT: u32 = 1;
+/// Update pack v2: layered root (`layers` section, docs/development/LAYERED-ROOT-DESIGN.md). A device that reads only format 1 refuses it by name.
+pub const FORMAT_LAYERS: u32 = 2;
 pub const MAX_FILES: usize = 400;
 pub const MAX_TOTAL: u64 = 1 << 30;
 /// Room kept on the data partition beyond the copies.
@@ -69,6 +71,9 @@ pub struct Manifest {
     /// The EFI loader is the signed shim chain (Secure Boot).
     pub secure_boot: bool,
     pub files: Vec<FileEntry>,
+    /// Format 2: the layer set the update leaves and which layers it carries. Absent in format 1 (and then not written at all).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layers: Option<super::update_layers::PackLayers>,
 }
 
 // -------------------------------------------------------------------------------------------- names and versions
@@ -83,7 +88,7 @@ pub fn valid_path(p: &str) -> bool {
     c.len() >= 2 && c.len() <= 8 && matches!(c[0], "boot" | "EFI") && c.iter().all(|x| clean_component(x))
 }
 
-fn key(p: &str) -> String {
+pub(super) fn key(p: &str) -> String {
     p.to_ascii_lowercase()
 }
 
@@ -225,7 +230,7 @@ pub fn build_manifest(dir: &Path, files: &[(String, u64, String)], version: Opti
         return Err("the image has no boot/initrd (and no boot/initrd-lean): it is not an IYAKKI boot partition".into());
     }
     let secure_boot = lower.iter().any(|p| p == "efi/boot/mmx64.efi" || p == "efi/boot/grubx64.efi");
-    Ok(Manifest { format: FORMAT, version, variant, built: rel.as_ref().map(|r| r.build_date.clone()).unwrap_or_default(), source: source.to_string(), secure_boot, files: list })
+    Ok(Manifest { format: FORMAT, version, variant, built: rel.as_ref().map(|r| r.build_date.clone()).unwrap_or_default(), source: source.to_string(), secure_boot, files: list, layers: None })
 }
 
 pub fn write_manifest(dir: &Path, m: &Manifest) -> Result<(), String> {
@@ -234,8 +239,11 @@ pub fn write_manifest(dir: &Path, m: &Manifest) -> Result<(), String> {
 
 /// Check a manifest on its own terms: format, paths, sizes, the files every update needs, no duplicates.
 pub fn check_manifest(m: &Manifest) -> Result<(), String> {
-    if m.format != FORMAT {
-        return Err(format!("update format {} is not understood (this device reads format {FORMAT})", m.format));
+    if m.format != FORMAT && m.format != FORMAT_LAYERS {
+        return Err(format!("update format {} is not understood (this device reads formats {FORMAT} and {FORMAT_LAYERS})", m.format));
+    }
+    if (m.format == FORMAT_LAYERS) != m.layers.is_some() {
+        return Err("an update with a layer set must say format 2, and format 2 needs its layer set".into());
     }
     if m.files.is_empty() || m.files.len() > MAX_FILES {
         return Err(format!("an update carries 1 to {MAX_FILES} files"));
@@ -270,6 +278,12 @@ pub fn check_manifest(m: &Manifest) -> Result<(), String> {
     }
     if !seen.contains("boot/initrd") && !seen.contains(INITRD_LEAN) {
         return Err("the image has no boot/initrd (and no boot/initrd-lean): it is not an IYAKKI boot partition".into());
+    }
+    if let Some(pl) = &m.layers {
+        if seen.contains(ROOT_IMAGE) {
+            return Err("an update carries either a single system image or layers, not both".into());
+        }
+        super::update_layers::check_pack(pl, &m.files)?;
     }
     Ok(())
 }
@@ -452,6 +466,19 @@ fn existing_hash(root: &Path, rel: &str) -> Option<(PathBuf, u64, String)> {
     Some((p.clone(), m.len(), files::sha256_file(&p).ok()?))
 }
 
+/// The layer plan of a v2 update against this device (None for a format 1 update), with the set the device starts from now.
+fn layers_plan(env: &Env, m: &Manifest, boot_root: &Path) -> Result<Option<(super::update_layers::LayerPlan, Option<iyakki_stage1::layers::LayerSet>)>, String> {
+    let Some(pl) = &m.layers else { return Ok(None) };
+    let cur = super::update_layers::device_set(env.dm.data_dir(), boot_root);
+    let mut extra = BTreeMap::new();
+    if let Some(k) = crate::store::compinstalled::uname_release() {
+        // the running kernel (a kernel replaced by this same update is not known here; the first stage checks `kernel` ranges at every start)
+        extra.insert("kernel".to_string(), k.trim().split(|c: char| !(c.is_ascii_digit() || c == '.')).next().unwrap_or("").to_string());
+    }
+    let lp = super::update_layers::plan(pl, &m.files, cur.as_ref(), &extra)?;
+    Ok(Some((lp, cur)))
+}
+
 /// Check everything that can be checked before a byte moves. `force` accepts a different variant and an older version only.
 pub fn plan(env: &Env, m: &Manifest, force: bool) -> Result<Plan, String> {
     check_manifest(m)?;
@@ -490,7 +517,12 @@ pub fn plan(env: &Env, m: &Manifest, force: bool) -> Result<Plan, String> {
     let mut needs = Vec::new();
     let (mut same, mut new_alloc, mut old_alloc) = (0usize, 0u64, 0u64);
     let mut notes_root = false;
+    let lay = layers_plan(env, m, &vol.root)?;
     for f in &m.files {
+        // layer payloads (format 2) are staged on the data volume and planned by the layer plan below
+        if super::update_layers::is_payload(&f.path) {
+            continue;
+        }
         // the system image of a lean install goes to the data partition, never to the boot partition (docs/BOOT-SPEED.md)
         if is_root_image(&f.path) {
             notes_root = true;
@@ -517,6 +549,15 @@ pub fn plan(env: &Env, m: &Manifest, force: bool) -> Result<Plan, String> {
             }
         }
     }
+    let mut layer_out = 0u64;
+    if let Some((lp, cur)) = &lay {
+        needs.extend(lp.payload_needed());
+        notes.extend(lp.notes.iter().cloned());
+        layer_out = lp.ops.iter().filter(|o| o.kind != super::update_layers::Kind::Full).map(|o| o.size).sum();
+        if lp.ops.is_empty() && lp.changes(cur.as_ref()) {
+            notes.push("the layers are all on this device; only the layer list changes".into());
+        }
+    }
     let growth = new_alloc as i64 - old_alloc as i64;
     // the marker file and directory entries need a cluster or two
     if growth + 2 * vol.cluster as i64 > vol.free as i64 {
@@ -540,7 +581,7 @@ pub fn plan(env: &Env, m: &Manifest, force: bool) -> Result<Plan, String> {
     let prev_bytes: u64 = ["boot/bzImage", running_initrd(&vol.root)].iter().filter_map(|r| existing_hash(&vol.root, r)).map(|(_, s, _)| s).sum();
     let staged: u64 = needs.iter().filter_map(|n| m.files.iter().find(|f| &f.path == n)).map(|f| f.size).sum();
     let free = (env.data_free)();
-    let want = prev_bytes + staged + DATA_MARGIN;
+    let want = prev_bytes + staged + layer_out + DATA_MARGIN;
     if free < want {
         return Err(format!("the data partition has {} MB free and needs {} MB for the staged files and the copy of the version being replaced", free >> 20, want >> 20));
     }
@@ -904,6 +945,8 @@ fn install_root(env: &Env, m: &Manifest) -> Result<(), String> {
         write_atomic(&dir.join("previous"), &old)?;
     }
     write_atomic(&dir.join("current"), &format!("{id}\nsize={}\n", f.size))?;
+    // a layer set from an earlier update would start before this newer single root: retire its pointers
+    super::update_layers::retire_pointers(env.dm.data_dir());
     // roots no pointer names any more are removed (the seed on the boot partition is not here and stays)
     let keep: Vec<String> = ["current", "previous"].iter().filter_map(|n| read_pointer(env.dm.data_dir(), n)).map(|p| p.id).collect();
     for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
@@ -936,12 +979,17 @@ pub fn apply_with_entry(env: &Env, m: &Manifest, force: bool, who: &str, entry: 
             return Err(format!("{n} is not staged completely on the device: send it again"));
         }
     }
-    if p.needs.is_empty() {
+    let ro = env.boot.open(false)?;
+    let lay = layers_plan(env, m, &ro.root)?;
+    let layers_new = lay.as_ref().is_some_and(|(lp, cur)| lp.changes(cur.as_ref()));
+    if p.needs.is_empty() && !layers_new {
+        drop(ro);
+        repair_boot_cfg(env, who);
         return Ok(json!({ "done": true, "changed": 0, "message": "nothing to change: the boot files are already these" }));
     }
-    let ro = env.boot.open(false)?;
     let run = running_from(&env.release, &ro.root);
-    let root_new = p.needs.iter().any(|n| is_root_image(n));
+    let root_img = p.needs.iter().any(|n| is_root_image(n));
+    let root_new = root_img || layers_new;
     let touches_kernel = root_new || p.needs.iter().any(|n| matches!(key(n).as_str(), "boot/bzimage" | "boot/initrd" | "boot/initrd-lean"));
     // after a change of the system image the previous-version entry must start the root that was replaced, not the new one
     let extra = if root_new { "iyakki.root=previous" } else { "" };
@@ -1003,13 +1051,18 @@ pub fn apply_with_entry(env: &Env, m: &Manifest, force: bool, who: &str, entry: 
     write_bytes(env, &marker_path, &mjson)?;
     // 4a. a lean install's system image goes to the data partition and becomes the root (the kernel is replaced after it, as docs/BOOT-SPEED.md says)
     let mut root_done = false;
-    if root_new {
+    if root_img {
         env.dm.log(who, "", "dev.update.file", "installing the system image on the data partition", true);
         install_root(env, m)?;
         root_done = true;
     }
+    if let (true, Some((lp, cur))) = (layers_new, &lay) {
+        env.dm.log(who, "", "dev.update.file", &format!("installing {} layer file(s) on the data partition, then the layer list", lp.ops.len()), true);
+        super::update_layers::install(env.dm.data_dir(), &vol.root, &staging, cur.as_ref(), lp)?;
+        root_done = true;
+    }
     // 4. replace: initramfs, kernel, the rest, the menu last
-    let mut order: Vec<String> = p.needs.iter().filter(|n| !is_root_image(n)).cloned().collect();
+    let mut order: Vec<String> = p.needs.iter().filter(|n| !is_root_image(n) && !super::update_layers::is_payload(n)).cloned().collect();
     let rank = |n: &str| match key(n).as_str() {
         "boot/initrd" | "boot/initrd-lean" => 0,
         "boot/bzimage" => 1,
@@ -1033,10 +1086,26 @@ pub fn apply_with_entry(env: &Env, m: &Manifest, force: bool, who: &str, entry: 
             if sha256_hex(&got) != sha256_hex(out.as_bytes()) {
                 return Err("grub.cfg reads back different from what was written".into());
             }
+        } else if is_loader_boot_cfg(n) {
+            // the loader reads exactly the RAM disk a row names: a menu made for a full image must not land on a lean stick unchanged (KI-200)
+            let text = std::fs::read_to_string(staging.join(n)).map_err(|e| e.to_string())?;
+            let (out, changes) = iyakki_storage::bootcfg::fix_for_volume(&text, &vol.root);
+            for c in &changes {
+                env.dm.log(who, "", "dev.update.file", &format!("boot.cfg: entry {} names {} which is not on the volume; {} is used", c.entry, c.from, c.to), true);
+            }
+            replace_file(env, &vol, n, Either::Bytes(out.as_bytes()))?;
+            let got = std::fs::read(find_ci(&vol.root, n).ok_or("boot.cfg is missing after the copy")?).map_err(|e| e.to_string())?;
+            if sha256_hex(&got) != sha256_hex(out.as_bytes()) {
+                return Err("boot.cfg reads back different from what was written".into());
+            }
         } else {
             replace_file(env, &vol, n, Either::File(&staging.join(n)))?;
             read_back(&vol, n, &f.sha256)?;
         }
+    }
+    // the loader's menu file names a RAM disk that is on the volume (also when this update brought none): repair what an older push left
+    if let Err(e) = iyakki_storage::bootcfg::fix_volume(&vol.root).map(|ls| ls.iter().for_each(|l| env.dm.log(who, "", "dev.update.bootcfg", &format!("boot.cfg repaired: {l}"), true))) {
+        env.dm.log(who, "", "dev.update.bootcfg", &format!("boot.cfg could not be repaired: {e}"), false);
     }
     // 5. done: the marker goes, then the staged files
     if let Some(mp) = find_ci(&vol.root, MARKER) {
@@ -1058,6 +1127,28 @@ pub fn apply_with_entry(env: &Env, m: &Manifest, force: bool, who: &str, entry: 
     }
     let changed = order.len() + usize::from(root_done);
     Ok(json!({ "done": true, "changed": changed, "from": run.on_disk(), "to": m.version, "previous_entry": prev.is_some(), "loader_copy": loader_note, "system_image": root_done, "message": format!("{changed} file(s) replaced{}: IYAKKI {} -> {}; the boot menu keeps \"{PREV_TITLE}\"", if root_done { " (the system image on the data partition)" } else { "" }, run.on_disk(), m.version) }))
+}
+
+/// Is this path the loader's menu file (`EFI/iyakki-boot/boot.cfg`)?
+fn is_loader_boot_cfg(rel: &str) -> bool {
+    rel.eq_ignore_ascii_case(iyakki_storage::bootcfg::BOOT_CFG)
+}
+
+/// Repair-at-update (KI-200): when the loader's `boot.cfg` names a RAM disk that is not on the boot volume and its lean or full sibling is, the
+/// file is rewritten with the one that exists and each change is logged. Never fails the update: a volume that cannot be opened or a file
+/// that cannot be written is logged and left as it was.
+pub fn repair_boot_cfg(env: &Env, who: &str) {
+    let vol = match env.boot.open(true) {
+        Ok(v) => v,
+        Err(e) => {
+            env.dm.log(who, "", "dev.update.bootcfg", &format!("boot.cfg not checked: {e}"), false);
+            return;
+        }
+    };
+    match iyakki_storage::bootcfg::fix_volume(&vol.root) {
+        Ok(lines) => lines.iter().for_each(|l| env.dm.log(who, "", "dev.update.bootcfg", &format!("boot.cfg repaired: {l}"), true)),
+        Err(e) => env.dm.log(who, "", "dev.update.bootcfg", &format!("boot.cfg could not be repaired: {e}"), false),
+    }
 }
 
 /// For the page and the CLI: is an update unfinished, and what is kept.

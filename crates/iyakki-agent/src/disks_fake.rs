@@ -42,7 +42,7 @@ fn children(prefix: &str, keys: impl Iterator<Item = String>) -> BTreeSet<String
 impl Fake {
     pub fn new() -> Arc<Fake> {
         let f = Fake::default();
-        f.st.lock().unwrap().fs_list = "nodev\tsysfs\nnodev\tproc\nnodev\ttmpfs\n\text4\n\tvfat\n\tiso9660\n".into();
+        f.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).fs_list = "nodev\tsysfs\nnodev\tproc\nnodev\ttmpfs\n\text4\n\tvfat\n\tiso9660\n".into();
         Arc::new(f)
     }
 
@@ -51,7 +51,7 @@ impl Fake {
     }
 
     pub fn calls(&self) -> Vec<String> {
-        self.st.lock().unwrap().calls.clone()
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).calls.clone()
     }
 
     pub fn wrote(&self) -> bool {
@@ -59,12 +59,12 @@ impl Fake {
     }
 
     pub fn set(&self, path: &str, text: &str) {
-        self.st.lock().unwrap().files.insert(path.into(), text.into());
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).files.insert(path.into(), text.into());
     }
 
     /// A drive in `/sys/block`: size in 512-byte sectors, vendor, model; `canon` is the real sysfs path (USB drives have `/usb` in it).
     pub fn add_disk(&self, name: &str, sectors: u64, removable: bool, canon: &str, vendor: &str, model: &str, sector_size: u32) {
-        let mut s = self.st.lock().unwrap();
+        let mut s = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         s.next_mm += 1;
         let major = s.next_mm;
         let b = format!("/sys/block/{name}");
@@ -81,7 +81,7 @@ impl Fake {
 
     /// A partition of a drive with its contents (the first bytes, `probe`); also available as `/dev/<name>`.
     pub fn add_part(&self, disk: &str, name: &str, number: u32, start_sector: u64, sectors: u64, probe: Vec<u8>) {
-        let mut s = self.st.lock().unwrap();
+        let mut s = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let major = s.next_mm;
         let b = format!("/sys/block/{disk}/{name}");
         for (k, v) in [("partition", number.to_string()), ("start", start_sector.to_string()), ("size", sectors.to_string()), ("dev", format!("{major}:{number}"))] {
@@ -94,23 +94,23 @@ impl Fake {
 
     /// A drive's own bytes (`/dev/<name>`).
     pub fn set_dev(&self, name: &str, bytes: Vec<u8>) {
-        self.st.lock().unwrap().devs.insert(format!("/dev/{name}"), bytes);
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).devs.insert(format!("/dev/{name}"), bytes);
     }
 
     pub fn dev_bytes(&self, name: &str) -> Vec<u8> {
-        self.st.lock().unwrap().devs.get(&format!("/dev/{name}")).cloned().unwrap_or_default()
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).devs.get(&format!("/dev/{name}")).cloned().unwrap_or_default()
     }
 
     /// A mount that already exists: `/dev/<name>` at `mp`.
     pub fn add_mount(&self, name: &str, mp: &str, fstype: &str, opts: &str) {
-        let mut s = self.st.lock().unwrap();
+        let mut s = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         s.next_mm += 100;
         let n = s.next_mm;
         s.base_mounts.push(format!("{n} 1 0:{n} / {} {opts} - {fstype} /dev/{name} rw", mp.replace(' ', "\\040")));
     }
 
     pub fn add_process(&self, pid: u32, comm: &str, cwd: &str, fds: &[&str]) {
-        let mut s = self.st.lock().unwrap();
+        let mut s = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         s.files.insert(format!("/proc/{pid}/comm"), format!("{comm}\n"));
         s.links.insert(format!("/proc/{pid}/cwd"), cwd.into());
         s.links.insert(format!("/proc/{pid}/root"), "/".into());
@@ -121,19 +121,19 @@ impl Fake {
     }
 
     pub fn make_busy(&self, mp: &str) {
-        self.st.lock().unwrap().busy.insert(mp.into());
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).busy.insert(mp.into());
     }
 
     pub fn fail_mount(&self, key: &str, err: &str) {
-        self.st.lock().unwrap().mount_errors.insert(key.into(), err.into());
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).mount_errors.insert(key.into(), err.into());
     }
 
     pub fn mounts_now(&self) -> Vec<(String, String)> {
-        self.st.lock().unwrap().mounted.iter().map(|m| (m.0.clone(), m.1.clone())).collect()
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).mounted.iter().map(|m| (m.0.clone(), m.1.clone())).collect()
     }
 
     pub fn last_mount(&self) -> Option<(String, String, String, MountFlags, String)> {
-        self.st.lock().unwrap().mounted.last().cloned()
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).mounted.last().cloned()
     }
 }
 
@@ -146,7 +146,7 @@ fn resolve(s: &St, dev: &str) -> Option<(String, u64, u64)> {
 
 impl DiskEnv for Fake {
     fn read_text(&self, path: &str) -> Option<String> {
-        let s = self.st.lock().unwrap();
+        let s = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         match path {
             "/proc/self/mountinfo" => {
                 let mut t = s.base_mounts.clone();
@@ -164,7 +164,7 @@ impl DiskEnv for Fake {
     }
 
     fn list(&self, path: &str) -> Vec<String> {
-        let s = self.st.lock().unwrap();
+        let s = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut keys: Vec<String> = s.files.keys().cloned().collect();
         keys.extend(s.links.keys().cloned());
         keys.extend(s.dirs.iter().cloned());
@@ -177,15 +177,15 @@ impl DiskEnv for Fake {
     }
 
     fn read_link(&self, path: &str) -> Option<String> {
-        self.st.lock().unwrap().links.get(path).cloned()
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).links.get(path).cloned()
     }
 
     fn canonical(&self, path: &str) -> Option<String> {
-        self.st.lock().unwrap().canon.get(path).cloned()
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).canon.get(path).cloned()
     }
 
     fn dev_read(&self, dev: &str, offset: u64, len: usize) -> Result<Vec<u8>, String> {
-        let s = self.st.lock().unwrap();
+        let s = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let (d, base, lim) = resolve(&s, dev).ok_or_else(|| format!("{dev}: no such device"))?;
         let data = &s.devs[&d];
         let from = (base + offset).min(base + lim) as usize;
@@ -194,7 +194,7 @@ impl DiskEnv for Fake {
     }
 
     fn dev_write(&self, dev: &str, offset: u64, data: &[u8]) -> Result<(), String> {
-        let mut s = self.st.lock().unwrap();
+        let mut s = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let (d, base, lim) = resolve(&s, dev).ok_or_else(|| format!("{dev}: no such device"))?;
         if offset + data.len() as u64 > lim {
             return Err(format!("{dev}: write beyond the end"));
@@ -207,7 +207,7 @@ impl DiskEnv for Fake {
     }
 
     fn dev_zero(&self, dev: &str, offset: u64, len: u64) -> Result<(), String> {
-        let mut s = self.st.lock().unwrap();
+        let mut s = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let (d, base, lim) = resolve(&s, dev).ok_or_else(|| format!("{dev}: no such device"))?;
         if offset + len > lim {
             return Err(format!("{dev}: write beyond the end"));
@@ -220,16 +220,16 @@ impl DiskEnv for Fake {
     }
 
     fn dev_len(&self, dev: &str) -> u64 {
-        let s = self.st.lock().unwrap();
+        let s = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         resolve(&s, dev).map_or(0, |(_, _, l)| l)
     }
 
     fn space(&self, mountpoint: &str) -> Option<(u64, u64)> {
-        self.st.lock().unwrap().space.get(mountpoint).copied()
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).space.get(mountpoint).copied()
     }
 
     fn mount(&self, dev: &str, target: &str, fstype: &str, flags: MountFlags, data: &str) -> Result<(), String> {
-        let mut s = self.st.lock().unwrap();
+        let mut s = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         s.calls.push(format!("mount {dev} {target} {fstype} ro={}", flags.rdonly));
         let key = format!("{fstype}:{}", if flags.rdonly { "ro" } else { "rw" });
         if let Some(e) = s.mount_errors.get(&key).or_else(|| s.mount_errors.get(fstype)).or_else(|| s.mount_errors.get(dev)) {
@@ -240,7 +240,7 @@ impl DiskEnv for Fake {
     }
 
     fn umount(&self, target: &str) -> Result<(), String> {
-        let mut s = self.st.lock().unwrap();
+        let mut s = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         s.calls.push(format!("umount {target}"));
         if s.busy.contains(target) {
             return Err("device is busy".into());
@@ -256,30 +256,30 @@ impl DiskEnv for Fake {
     }
 
     fn make_dir(&self, path: &str) -> Result<(), String> {
-        let mut s = self.st.lock().unwrap();
+        let mut s = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         s.calls.push(format!("mkdir {path}"));
         s.dirs.insert(path.into());
         Ok(())
     }
 
     fn chown(&self, path: &str, uid: u32, gid: u32) -> Result<(), String> {
-        self.st.lock().unwrap().calls.push(format!("chown {path} {uid} {gid}"));
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).calls.push(format!("chown {path} {uid} {gid}"));
         Ok(())
     }
 
     fn remove_dir(&self, path: &str) -> Result<(), String> {
-        let mut s = self.st.lock().unwrap();
+        let mut s = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         s.calls.push(format!("rmdir {path}"));
         s.dirs.remove(path);
         Ok(())
     }
 
     fn sync(&self) {
-        self.st.lock().unwrap().calls.push("sync".into());
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).calls.push("sync".into());
     }
 
     fn write_sys(&self, path: &str, text: &str) -> Result<(), String> {
-        let mut s = self.st.lock().unwrap();
+        let mut s = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         s.calls.push(format!("sys {path} {text}"));
         if let Some(name) = path.strip_prefix("/sys/block/").and_then(|r| r.strip_suffix("/device/delete")) {
             // the drive goes away
@@ -291,7 +291,7 @@ impl DiskEnv for Fake {
     }
 
     fn reread_table(&self, disk_dev: &str) -> Result<(), String> {
-        let mut s = self.st.lock().unwrap();
+        let mut s = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         s.calls.push(format!("reread {disk_dev}"));
         if s.reread_fails {
             return Err("the kernel did not re-read the partition table (busy)".into());
@@ -322,7 +322,7 @@ impl DiskEnv for Fake {
     }
 
     fn mke2fs(&self, dev: &str, label: &str, uuid: &str) -> Result<(), String> {
-        let mut s = self.st.lock().unwrap();
+        let mut s = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         s.calls.push(format!("mke2fs {dev} {label} {uuid}"));
         // write the bits of a fresh ext4 superblock that the probe reads
         let (d, base, lim) = resolve(&s, dev).ok_or("no such device")?;
@@ -339,7 +339,7 @@ impl DiskEnv for Fake {
     }
 
     fn wait_node(&self, dev: &str) -> bool {
-        let s = self.st.lock().unwrap();
+        let s = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         s.alias.contains_key(dev) || s.devs.contains_key(dev)
     }
 }
@@ -506,7 +506,7 @@ pub fn machine() -> Arc<Fake> {
     f.add_part("nvme0n1", "nvme0n1p2", 2, 2048 + gb(1), gb(511) - 4096, sb_ext4("rootfs"));
     f.add_mount("nvme0n1p1", "/boot", "vfat", "rw");
     f.add_mount("nvme0n1p2", "/", "ext4", "rw");
-    f.st.lock().unwrap().space.insert("/".into(), (300_000_000_000, 500_000_000_000));
+    f.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).space.insert("/".into(), (300_000_000_000, 500_000_000_000));
     // a USB stick, FAT32, not mounted
     f.add_disk("sda", gb(64), true, "/sys/devices/pci0000:00/0000:00:14.0/usb1/1-2/1-2:1.0/host6/target6:0:0/6:0:0:0/block/sda", "SanDisk", "Ultra", 512);
     f.set_serial_up("/sys/devices/pci0000:00/0000:00:14.0/usb1/1-2", "4C530001230815ABCD");

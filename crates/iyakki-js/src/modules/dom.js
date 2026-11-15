@@ -5,6 +5,16 @@
   const J = (r) => (r === 'null' ? null : JSON.parse(r));
   const H = (op, a) => J(__host('dom', op, a === undefined ? '{}' : JSON.stringify(a)));
   const q = JSON.stringify;
+  // `a.href` and `img.src` are read again and again for the same few values (a table of contents reads every link twice); the address
+  // is worked out once per value and base. The table is dropped when the page's own address changes (pushState) or it grows large.
+  let absBase = null; const absMemo = new Map();
+  const absUrl = (h) => {
+    const base = g.location.href;
+    if (base !== absBase) { absBase = base; absMemo.clear(); }
+    let r = absMemo.get(h);
+    if (r === undefined) { try { r = new URL(h, base).href; } catch (e) { r = h; } if (absMemo.size >= 4096) absMemo.clear(); absMemo.set(h, r); }
+    return r;
+  };
   // the same for the many calls whose only argument is a node
   const H1 = (op, n) => J(__host('dom', op, '{"n":' + n + '}'));
   // Bumped whenever the shape of the tree changes (insert, remove, innerHTML, textContent). What was asked about the
@@ -13,8 +23,25 @@
   const newCache = () => ({ tn: undefined, pv: -1, p: null, kv: -1, k: null, ekv: -1, ek: null, am: undefined });
   const cc = (w) => w._c || (Object.defineProperty(w, '_c', { value: newCache(), writable: true, enumerable: false, configurable: true }), w._c);
   const wrappers = new Map();
+  // Objects for nodes made by createElement / createTextNode / cloneNode are held weakly until the node is put somewhere (a script that
+  // makes a node only to read a value from it, as `a.href` URL parsing does, would otherwise use up the page's node numbers). A
+  // script that dropped its object cannot tell it is gone; every so often the dead ones are counted and the host gives the nodes back.
+  const weak = new Map(); let made = 0;
+  const sweep = () => {
+    const dead = [];
+    for (const [id, ref] of weak) if (ref.deref() === undefined) { dead.push(id); weak.delete(id); }
+    if (dead.length) __host('dom', 'release', JSON.stringify({ ids: dead }));
+  };
+  const wrapFresh = (id, tag) => {
+    const w = wrap(id, tag);
+    if (w && w !== doc && wrappers.get(id) === w) { wrappers.delete(id); weak.set(id, new WeakRef(w)); if (++made % 1024 === 0) sweep(); }
+    return w;
+  };
+  const pin = (w) => { const id = w._id; const r = weak.get(id); if (r) { weak.delete(id); wrappers.set(id, w); } };
   const hide = (o, k, v) => Object.defineProperty(o, k, { value: v, writable: true, enumerable: false, configurable: true });
   const list = (a) => { Object.defineProperty(a, 'item', { value: (i) => a[i] || null, enumerable: false }); return a; };
+  // a collection that looks again at the page every time it is read (`getElementsByTagName` and the like are live in a browser)
+  const live = (make) => new Proxy({}, { get: (t, p) => { const l = make(); if (p === Symbol.toStringTag) return 'HTMLCollection'; const v = l[p]; return typeof v === 'function' ? v.bind(l) : v; }, has: (t, p) => p in make(), ownKeys: () => Reflect.ownKeys(make()).filter((k) => k !== 'item'), getOwnPropertyDescriptor: (t, p) => { const l = make(); return p in l && p !== 'item' ? { value: l[p], enumerable: p !== 'length', configurable: true, writable: false } : undefined; } });
 
   // ------------------------------------------------------------------ events
   class Event {
@@ -138,6 +165,7 @@
       if (!(child instanceof Node)) throw new TypeError('the argument is not a Node');
       const r = J(__host('dom', 'insert', '{"p":' + this._id + ',"c":' + child._id + ',"r":' + (before ? before._id : 'null') + '}'));
       ver++;
+      pin(child); pin(this);
       afterInsert(child, r);
       return child;
     }
@@ -145,7 +173,7 @@
     insertBefore(c, ref) { return this._insert(c, ref || null); }
     removeChild(c) { if (c.parentNode !== this) throw new Error('NotFoundError: the node is not a child of this node'); __host('dom', 'remove', '{"c":' + c._id + '}'); ver++; return c; }
     replaceChild(n, old) { this.insertBefore(n, old); this.removeChild(old); return old; }
-    cloneNode(deep) { const r = H('clone', { n: this._id, deep: !!deep }); return wrap(r[0], r[1]); }
+    cloneNode(deep) { const r = H('clone', { n: this._id, deep: !!deep }); return wrapFresh(r[0], r[1]); }
     normalize() {}
     getRootNode() { let n = this; while (n.parentNode) n = n.parentNode; return n; }
     compareDocumentPosition() { return 0; }
@@ -225,7 +253,7 @@
     set classList(v) { this.className = String(v); }
     get classList() {
       const el = this; const get = () => (el.getAttribute('class') || '').split(/\s+/).filter(Boolean); const set = (a) => el.setAttribute('class', a.join(' '));
-      return { get length() { return get().length; }, item: (i) => get()[i] || null, contains: (c) => get().includes(String(c)), add(...c) { const a = get(); for (const x of c) if (!a.includes(String(x))) a.push(String(x)); set(a); }, remove(...c) { set(get().filter((x) => !c.map(String).includes(x))); }, toggle(c, f) { c = String(c); const has = get().includes(c); const want = f === undefined ? !has : !!f; if (want && !has) this.add(c); if (!want && has) this.remove(c); return want; }, replace(a, b) { const l = get(); const i = l.indexOf(String(a)); if (i < 0) return false; l[i] = String(b); set(l); return true; }, toString: () => el.className, forEach: (f) => get().forEach(f), [Symbol.iterator]: () => get()[Symbol.iterator](), get value() { return el.className; } };
+      return { get length() { return get().length; }, item: (i) => get()[i] || null, contains: (c) => get().includes(String(c)), add(...c) { const a = get(); for (const x of c) if (!a.includes(String(x))) a.push(String(x)); set(a); }, remove(...c) { set(get().filter((x) => !c.map(String).includes(x))); }, toggle(c, f) { c = String(c); const has = get().includes(c); const want = f === undefined ? !has : !!f; if (want && !has) this.add(c); if (!want && has) this.remove(c); return want; }, replace(a, b) { const l = get(); const i = l.indexOf(String(a)); if (i < 0) return false; l[i] = String(b); set(l); return true; }, toString: () => el.className, forEach: (f) => get().forEach(f), [Symbol.iterator]: () => get()[Symbol.iterator](), [Symbol.toStringTag]: 'DOMTokenList', get value() { return el.className; } };
     }
     get dataset() {
       const el = this;
@@ -242,8 +270,8 @@
     get style() {
       const el = this;
       const read = () => { const m = new Map(); for (const part of (el.getAttribute('style') || '').split(';')) { const i = part.indexOf(':'); if (i > 0) m.set(part.slice(0, i).trim().toLowerCase(), part.slice(i + 1).trim()); } return m; };
-      const write = (m) => { const s = [...m].map(([k, v]) => k + ': ' + v).join('; '); if (s) el.setAttribute('style', s); else el.removeAttribute('style'); };
-      const api = { getPropertyValue: (k) => read().get(String(k).toLowerCase()) || '', setProperty(k, v) { const m = read(); if (v === '' || v == null) m.delete(String(k).toLowerCase()); else m.set(String(k).toLowerCase(), String(v)); write(m); }, removeProperty(k) { const m = read(); const old = m.get(String(k).toLowerCase()) || ''; m.delete(String(k).toLowerCase()); write(m); return old; }, get cssText() { return el.getAttribute('style') || ''; }, set cssText(v) { if (String(v).trim()) el.setAttribute('style', String(v)); else el.removeAttribute('style'); }, get length() { return read().size; }, item: (i) => [...read().keys()][i] || '' };
+      const write = (m) => { const s = [...m].map(([k, v]) => k + ': ' + v + ';').join(' '); if (s) el.setAttribute('style', s); else el.removeAttribute('style'); };
+      const api = { [Symbol.toStringTag]: 'CSSStyleDeclaration', getPropertyValue: (k) => read().get(String(k).toLowerCase()) || '', setProperty(k, v) { const m = read(); if (v === '' || v == null) m.delete(String(k).toLowerCase()); else m.set(String(k).toLowerCase(), String(v)); write(m); }, removeProperty(k) { const m = read(); const old = m.get(String(k).toLowerCase()) || ''; m.delete(String(k).toLowerCase()); write(m); return old; }, get cssText() { return el.getAttribute('style') || ''; }, set cssText(v) { if (String(v).trim()) el.setAttribute('style', String(v)); else el.removeAttribute('style'); }, get length() { return read().size; }, item: (i) => [...read().keys()][i] || '' };
       return new Proxy(api, {
         get: (t, p) => { if (p in t) return t[p]; if (typeof p !== 'string') return undefined; return read().get(kebab(p)) || ''; },
         set: (t, p, v) => { if (p === 'cssText') { t.cssText = v; return true; } if (typeof p !== 'string') return false; t.setProperty(kebab(p), v); return true; },
@@ -263,8 +291,8 @@
     set innerText(v) { this.textContent = v; }
     querySelector(s) { const r = H('query', { n: this._id, sel: String(s), all: false }); return r.length ? wrap(r[0], r[1]) : null; }
     querySelectorAll(s) { return list(wrapPairs(H('query', { n: this._id, sel: String(s), all: true }))); }
-    getElementsByTagName(t) { return list(wrapPairs(H('query', { n: this._id, sel: String(t) || '*', all: true }))); }
-    getElementsByClassName(c) { return list(wrapPairs(H('query', { n: this._id, sel: '.' + String(c).trim().split(/\s+/).join('.'), all: true }))); }
+    getElementsByTagName(t) { return live(() => list(wrapPairs(H('query', { n: this._id, sel: String(t) || '*', all: true })))); }
+    getElementsByClassName(c) { return live(() => list(wrapPairs(H('query', { n: this._id, sel: '.' + String(c).trim().split(/\s+/).join('.'), all: true })))); }
     matches(s) { return H('matches', { n: this._id, sel: String(s) }); }
     closest(s) { const r = H('closest', { n: this._id, sel: String(s) }); return r === null ? null : wrap(r[0], r[1]); }
     append(...n) { for (const x of n) this.appendChild(typeof x === 'string' ? doc.createTextNode(x) : x); }
@@ -308,9 +336,11 @@
       return root;
     }
     get shadowRoot() { return this._shadow && this._shadow.mode === 'open' ? this._shadow : null; }
-    get value() { const v = this.getAttribute('value'); return v === null ? (this.localName === 'textarea' ? this.textContent : '') : v; }
-    set value(v) { this.setAttribute('value', v); }
+    get value() { if (this.localName === 'select') { const o = this.options; const sel = o.find((x) => x.hasAttribute('selected')) || o[0]; return sel ? (sel.hasAttribute('value') ? sel.getAttribute('value') : sel.textContent) : ''; } const v = this.getAttribute('value'); return v === null ? (this.localName === 'textarea' ? this.textContent : (this.localName === 'option' ? this.textContent : '')) : v; }
+    set value(v) { if (this.localName === 'select') { const s = String(v); let hit = false; this.options.forEach((o) => { const ov = o.hasAttribute('value') ? o.getAttribute('value') : o.textContent; if (!hit && ov === s) { o.setAttribute('selected', ''); hit = true; } else o.removeAttribute('selected'); }); return; } this.setAttribute('value', v); }
     get form() { return this.closest('form'); }
+    get type() { const t = this.getAttribute('type'); if (this.localName === 'input') { const v = (t || 'text').toLowerCase(); return ['button', 'checkbox', 'color', 'date', 'datetime-local', 'email', 'file', 'hidden', 'image', 'month', 'number', 'password', 'radio', 'range', 'reset', 'search', 'submit', 'tel', 'text', 'time', 'url', 'week'].includes(v) ? v : 'text'; } if (this.localName === 'select') return this.hasAttribute('multiple') ? 'select-multiple' : 'select-one'; if (this.localName === 'textarea') return 'textarea'; if (this.localName === 'button') return (t || 'submit').toLowerCase(); return t || ''; }
+    set type(v) { this.setAttribute('type', v); }
     get options() { return this.querySelectorAll('option'); }
     get selectedIndex() { return this.options.findIndex((o) => o.hasAttribute('selected')); }
     set selectedIndex(i) { this.options.forEach((o, j) => { if (j === i) o.setAttribute('selected', ''); else o.removeAttribute('selected'); }); }
@@ -325,12 +355,12 @@
     toDataURL() { return 'data:,'; }
     play() { return Promise.resolve(); } pause() {} load() {}
     submit() {} reset() {} checkValidity() { return true; } reportValidity() { return true; } setCustomValidity() {}
-    get elements() { return this.querySelectorAll('input,select,textarea,button'); }
+    get elements() { const a = Array.from(this.querySelectorAll('input,select,textarea,button')); for (const e of a) { const n = e.getAttribute('name') || e.id; if (n && !(n in a)) Object.defineProperty(a, n, { value: e, enumerable: false, configurable: true }); } Object.defineProperty(a, 'namedItem', { value: (n) => a[n] || null, enumerable: false }); return a; }
   }
-  for (const k of REFLECT) if (k !== 'id') Object.defineProperty(Element.prototype, k === 'for' ? 'htmlFor' : k, { get() { return this.getAttribute(k) || ''; }, set(v) { this.setAttribute(k, v); }, configurable: true });
+  for (const k of REFLECT) if (k !== 'id' && k !== 'type') Object.defineProperty(Element.prototype, k === 'for' ? 'htmlFor' : k, { get() { return this.getAttribute(k) || ''; }, set(v) { this.setAttribute(k, v); }, configurable: true });
   for (const k of BOOLS) Object.defineProperty(Element.prototype, k === 'readonly' ? 'readOnly' : k, { get() { return this.hasAttribute(k); }, set(v) { if (this._id === undefined) { Object.defineProperty(this, k === 'readonly' ? 'readOnly' : k, { value: v, writable: true, configurable: true, enumerable: true }); return; } v ? this.setAttribute(k, '') : this.removeAttribute(k); }, configurable: true });
   for (const k of NUMS) Object.defineProperty(Element.prototype, k === 'colspan' ? 'colSpan' : k === 'rowspan' ? 'rowSpan' : k === 'tabindex' ? 'tabIndex' : k === 'maxlength' ? 'maxLength' : k, { get() { const v = parseInt(this.getAttribute(k), 10); return Number.isNaN(v) ? 0 : v; }, set(v) { this.setAttribute(k, String(v)); }, configurable: true });
-  Object.defineProperty(Element.prototype, 'href', { get() { const h = this.getAttribute('href'); if (h === null) return ''; try { return new URL(h, g.location.href).href; } catch (e) { return h; } }, set(v) { this.setAttribute('href', v); }, configurable: true });
+  Object.defineProperty(Element.prototype, 'href', { get() { const h = this.getAttribute('href'); if (h === null) return ''; return absUrl(h); }, set(v) { this.setAttribute('href', v); }, configurable: true });
   // the URL parts of links (<a>, <area>): `a.pathname`, `a.search`, ...
   for (const part of ['protocol', 'host', 'hostname', 'port', 'pathname', 'search', 'hash', 'origin', 'username', 'password']) {
     Object.defineProperty(Element.prototype, part, {
@@ -348,7 +378,7 @@
       configurable: true,
     });
   }
-  Object.defineProperty(Element.prototype, 'src', { get() { const h = this.getAttribute('src'); if (h === null) return ''; try { return new URL(h, g.location.href).href; } catch (e) { return h; } }, set(v) { this.setAttribute('src', v); if (this.localName === 'script') afterInsert(this); }, configurable: true });
+  Object.defineProperty(Element.prototype, 'src', { get() { const h = this.getAttribute('src'); if (h === null) return ''; return absUrl(h); }, set(v) { this.setAttribute('src', v); if (this.localName === 'script') afterInsert(this); }, configurable: true });
   Object.defineProperty(Element.prototype, 'checked', { get() { return this.hasAttribute('checked'); }, set(v) { v ? this.setAttribute('checked', '') : this.removeAttribute('checked'); }, configurable: true });
 
   class HTMLElement extends Element {}
@@ -393,6 +423,8 @@
     if (id === null || id === undefined) return null;
     let w = wrappers.get(id);
     if (w) return w;
+    const wr = weak.get(id);
+    if (wr) { w = wr.deref(); if (w) return w; weak.delete(id); }
     if (id === 0) return doc;
     let name = tag;
     if (name === undefined) { const info = H1('info', id); name = info.t === 3 ? '' : info.name; }
@@ -403,6 +435,8 @@
   };
   // [id, tag, id, tag, ...] as the host sends lists of nodes
   const wrapPairs = (r) => { const out = new Array(r.length >> 1); for (let i = 0; i < r.length; i += 2) out[i >> 1] = wrap(r[i], r[i + 1]); return out; };
+
+  Object.defineProperty(g, '__wrapPairs', { value: wrapPairs, enumerable: false, configurable: true });
 
   // scripts added by other scripts run when they are attached
   const run = (code, name) => { try { __eval(String(code), String(name)); } catch (e) { report(e); } };
@@ -433,15 +467,16 @@
     get _name() { return '#document'; }
     get ownerDocument() { return null; }
     _doc() { if (docV !== ver) { docC = H('doc'); docV = ver; } return docC; }
+    get doctype() { return { nodeType: 10, nodeName: 'html', name: 'html', publicId: '', systemId: '' }; }
     get documentElement() { const d = this._doc(); return d.html === null ? null : wrap(d.html, 'html'); }
     get head() { const d = this._doc(); return d.head === null ? null : wrap(d.head, 'head'); }
     get body() { const d = this._doc(); return d.body === null ? null : wrap(d.body, 'body'); }
     set body(b) { const old = this.body; if (old) old.parentNode.replaceChild(b, old); }
     get title() { const t = this.querySelector('title'); return t ? t.textContent.trim().replace(/\s+/g, ' ') : ''; }
     set title(v) { let t = this.querySelector('title'); if (!t) { t = this.createElement('title'); const h = this.head; if (h) h.appendChild(t); } t.textContent = String(v); }
-    createElement(tag) { tag = String(tag); const el = wrap(+__host('dom', 'create', '{"tag":' + q(tag) + '}'), tag.toLowerCase()); el._c.am = new Map(); const n = el.localName; if (ce.size && ce.has(n)) { upgrade(el, n); hide(el, '_ceUp', true); } return el; }
+    createElement(tag) { tag = String(tag); const el = wrapFresh(+__host('dom', 'create', '{"tag":' + q(tag) + '}'), tag.toLowerCase()); el._c.am = new Map(); const n = el.localName; if (ce.size && ce.has(n)) { upgrade(el, n); hide(el, '_ceUp', true); } return el; }
     createElementNS(ns, tag) { return this.createElement(tag); }
-    createTextNode(t) { return wrap(+__host('dom', 'text', '{"text":' + q(String(t)) + '}'), ''); }
+    createTextNode(t) { return wrapFresh(+__host('dom', 'text', '{"text":' + q(String(t)) + '}'), ''); }
     createComment(t) { const c = wrap(H('text', { text: '' }), ''); return c; }
     createDocumentFragment() { return wrap(H('create', { tag: '#fragment' }), '#fragment'); }
     createEvent(t) {
@@ -459,8 +494,8 @@
     getElementById(id) { const r = H('by_id', { id: String(id) }); return r === null ? null : wrap(r[0], r[1]); }
     querySelector(s) { const r = H('query', { n: 0, sel: String(s), all: false }); return r.length ? wrap(r[0], r[1]) : null; }
     querySelectorAll(s) { return list(wrapPairs(H('query', { n: 0, sel: String(s), all: true }))); }
-    getElementsByTagName(t) { return list(wrapPairs(H('query', { n: 0, sel: String(t) || '*', all: true }))); }
-    getElementsByClassName(c) { return list(wrapPairs(H('query', { n: 0, sel: '.' + String(c).trim().split(/\s+/).join('.'), all: true }))); }
+    getElementsByTagName(t) { return live(() => list(wrapPairs(H('query', { n: 0, sel: String(t) || '*', all: true })))); }
+    getElementsByClassName(c) { return live(() => list(wrapPairs(H('query', { n: 0, sel: '.' + String(c).trim().split(/\s+/).join('.'), all: true })))); }
     getElementsByName(n) { return list(wrapPairs(H('query', { n: 0, sel: '[name="' + String(n).replace(/"/g, '') + '"]', all: true }))); }
     get forms() { return this.querySelectorAll('form'); }
     get images() { return this.querySelectorAll('img'); }
@@ -561,6 +596,7 @@
     return r;
   };
   const after = (n, root) => { // the next node in document order
+    if (!n) return null;
     let x = n.firstChild;
     if (x) return x;
     while (x === null || x === undefined) { if (!n || n === root) return null; x = n.nextSibling; if (!x) n = n.parentNode; }
@@ -777,6 +813,10 @@
   };
   classes.Crypto = class Crypto {}; classes.CryptoKey = class CryptoKey {};
   { const c = g.crypto; Object.setPrototypeOf(c, classes.Crypto.prototype); c.subtle = new classes.SubtleCrypto(); }
+  // every class carries its own name (a constructor's `name`, and `Object.prototype.toString` on an element says `[object HTMLDivElement]`)
+  for (const k of Object.keys(classes)) { try { if (!classes[k].name) Object.defineProperty(classes[k], 'name', { value: k }); } catch (e) {} }
+  Object.defineProperty(Element.prototype, Symbol.toStringTag, { get() { return this.constructor && this.constructor.name ? this.constructor.name : 'Element'; }, configurable: true });
+  try { Object.defineProperty(g, Symbol.toStringTag, { value: 'Window', configurable: true }); } catch (e) {}
   for (const k of Object.keys(classes)) g[k] = classes[k];
   g.customElements = new classes.CustomElementRegistry();
   g.Document = Document; g.MutationObserver = MutationObserver; g.IntersectionObserver = IntersectionObserver; g.ResizeObserver = ResizeObserver; g.DOMParser = DOMParser;
@@ -799,6 +839,7 @@
     click(id) { this.byNode(id).click(); },
     // set what the person typed, then fire the events a browser fires
     input(id, value) { const e = this.byNode(id); e.value = String(value); e.dispatchEvent(new Event('input', { bubbles: true })); e.dispatchEvent(new Event('change', { bubbles: true })); },
-    check(id, on) { const e = this.byNode(id); if (!!e.checked !== !!on) e.click(); },
+    // as a person toggling it: the state changes first, then click, input and change reach the page
+    check(id, on) { const e = this.byNode(id); if (!!e.checked === !!on) return; e.checked = !!on; e.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })); e.dispatchEvent(new Event('input', { bubbles: true })); e.dispatchEvent(new Event('change', { bubbles: true })); },
   };
 })(globalThis);

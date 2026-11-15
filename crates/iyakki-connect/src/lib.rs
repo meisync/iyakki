@@ -7,10 +7,15 @@
 //! A certificate that differs from the pinned one is a hard stop (exit status 2): the password is not sent and the pin is never
 //! replaced silently (`unpin` first, on purpose).
 
+pub mod browser;
 pub mod devkey;
+pub mod instances;
+pub mod link;
 pub mod pins;
 pub mod serve;
 pub mod share;
+pub mod window;
+pub mod windowcmd;
 
 use std::io::{BufRead, Write};
 use std::time::Duration;
@@ -21,7 +26,7 @@ use iyakki_link::rawlink::{Auth, FilesApi, LinkError, RawWs};
 use iyakki_link::sigscheme::DeviceKey;
 
 pub const USAGE: &str = "usage: iyakki-connect <command>\n  probe HOST[:PORT]          show the certificate (names, validity, SHA-256) without trusting it\n  pin HOST[:PORT] [--yes]    remember the certificate (trust on first use); a changed one is refused\n  unpin HOST[:PORT]          forget a pin (the next pin is a new first use)\n  pins                       list the pinned tenants\n  tenants HOST[:PORT] USER   list the tenants this account may use (* marks the one the sign-in is in); the password is read from stdin\n  switch HOST[:PORT] USER TENANT   work in another tenant this account belongs to (the server checks it and says what it stopped and locked); the password is read from stdin
-  login HOST[:PORT] USER     check a sign-in; the password is read from stdin or typed (no echo), never from arguments\n  login HOST[:PORT] USER --key   the same with the device key (nothing secret is sent)\n  key new [--force]          make this device's Ed25519 key (mode 600 in the configuration folder)\n  key enroll HOST[:PORT] USER   sign in with the password once and enrol this device's key (then use --key)\n  key show                   print the public key (ssh-ed25519 line) for the tenant's owner to enrol\n  key import-ssh PATH [--force]   use an unencrypted OpenSSH ssh-ed25519 private key (no RSA)\n  serve HOST[:PORT] --user NAME [--key] [--share DIR [--write]] [--open] [--port N]\n                             show the desktop in your browser at a link on 127.0.0.1 (one-time token); --share DIR lets\n                             the page exchange files with that one folder (read-only unless --write; needs a password sign-in)\n";
+  login HOST[:PORT] USER     check a sign-in; the password is read from stdin or typed (no echo), never from arguments\n  login HOST[:PORT] USER --key   the same with the device key (nothing secret is sent)\n  key new [--force]          make this device's Ed25519 key (mode 600 in the configuration folder)\n  key enroll HOST[:PORT] USER   sign in with the password once and enrol this device's key (then use --key)\n  key show                   print the public key (ssh-ed25519 line) for the tenant's owner to enrol\n  key import-ssh PATH [--force]   use an unencrypted OpenSSH ssh-ed25519 private key (no RSA)\n  key import-agent [NAME] [--force]   sign with an ssh-ed25519 key an ssh-agent holds (SSH_AUTH_SOCK); the secret stays in the agent\n  serve HOST[:PORT] --user NAME [--key] [--share DIR [--write]] [--open] [--port N]\n                             show the desktop in your browser at a link on 127.0.0.1 (one-time token); --share DIR lets\n                             the page exchange files with that one folder (read-only unless --write; needs a password sign-in)\n  window LINK|ADDRESS|NAME [--name NAME] [--yes] [--browser PATH] [--no-browser]   (EXPERIMENTAL)\n                             open a client window for an IYAKKI instance in your installed browser (application mode, private profile): LINK is\n                             the one-time link from Settings (https://host/connect#token, with ?pin= it needs no question); the device key stays here\n  devices                    list the instances this computer has a device on\n  devices forget NAME        forget one (deletes its key here; revoke the device on the instance too)\n";
 
 /// Exit status of a hard stop because the certificate is not the pinned one.
 pub const EXIT_PIN_CHANGED: i32 = 2;
@@ -105,6 +110,7 @@ pub fn run(args: &[String], ctx: &Ctx, input: &mut dyn BufRead, out: &mut dyn Wr
                 Err(Fail::Error(format!("{} was not pinned", pins::key(addr)?)))
             }
         }
+        ("devices", rest) => windowcmd::devices(rest, ctx, out),
         ("pins", []) => {
             let all = ctx.store.list()?;
             if all.is_empty() {
@@ -153,6 +159,12 @@ pub fn run(args: &[String], ctx: &Ctx, input: &mut dyn BufRead, out: &mut dyn Wr
         ("key", ["show"]) => {
             let key = devkey::KeyFile::new(ctx.store.dir()).load()?.ok_or_else(|| Fail::Error("there is no device key yet: run `iyakki-connect key new`".into()))?;
             say(out, devkey::show(&key))
+        }
+        ("key", ["import-agent"]) | ("key", ["import-agent", _]) => {
+            let selector = rest.iter().find(|a| !a.starts_with("--") && a.as_str() != "import-agent" && a.as_str() != "key").map(String::as_str);
+            let key = devkey::import_agent(std::env::var("SSH_AUTH_SOCK").ok().as_deref(), selector)?;
+            devkey::KeyFile::new(ctx.store.dir()).store(&key, flag("--force"))?;
+            say(out, format!("will sign with the key the ssh-agent holds (the secret stays in the agent)\n{}", devkey::show(&key)))
         }
         ("key", ["import-ssh", path]) => {
             let key = devkey::import_ssh(std::path::Path::new(path))?;
@@ -234,7 +246,7 @@ fn fingerprint(der: &[u8]) -> Pin {
     iyakki_link::cloudclient::pin_of(der)
 }
 
-fn changed(addr: &str, pinned: Pin, shown: Pin) -> String {
+pub(crate) fn changed(addr: &str, pinned: Pin, shown: Pin) -> String {
     format!(
         "STOP: the certificate of {addr} changed.\n  pinned: {}\n  shown:  {}\nEither the tenant renewed or replaced its certificate, or this is not the tenant. Nothing was changed. Ask the owner for the new fingerprint; if it matches, `iyakki-connect unpin {addr}` and pin again.",
         pinned.display(),
@@ -434,6 +446,9 @@ pub fn main_with(args: &[String]) -> i32 {
             }
         };
     }
+    if args.first().map(String::as_str) == Some("window") {
+        return window_main(args, &ctx, &mut input, &mut stdout);
+    }
     match run(args, &ctx, &mut input, &mut stdout) {
         Ok(()) => 0,
         Err(f) => {
@@ -460,4 +475,78 @@ fn wait_for_stop(server: &serve::Server) {
     }
     server.stop();
     std::thread::sleep(Duration::from_millis(800));
+}
+
+/// `window`: start the loopback window server, open the browser on it, wait until the browser closes (or Ctrl+C), clean up.
+fn window_main(args: &[String], ctx: &Ctx, input: &mut dyn BufRead, out: &mut dyn Write) -> i32 {
+    let prepared = match windowcmd::prepare(args, ctx, input, out) {
+        Ok(p) => p,
+        Err(f) => {
+            eprintln!("iyakki-connect: {}", f.text());
+            return f.status();
+        }
+    };
+    let w = &prepared.window;
+    unsafe {
+        libc::signal(libc::SIGINT, on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t);
+    }
+    let mut cleanup: Option<std::path::PathBuf> = None;
+    let mut child: Option<(std::process::Child, bool)> = None;
+    if prepared.print_only {
+        println!("Open this address in a browser on this computer (it works once, on this computer only):\n  {}", w.launch_url());
+    } else {
+        let started = browser::find_here(prepared.browser.as_deref()).and_then(|b| {
+            let (profile, start) = browser::prepare_profile(&browser::profile_base(), w.launch_url(), b.kind)?;
+            cleanup = start.parent().map(|p| p.to_path_buf());
+            let c = browser::command(&b, &profile, &start, &prepared.browser_args);
+            if let Some(n) = c.note {
+                eprintln!("iyakki-connect: {n}");
+            }
+            println!("Opening {} for {} ...", b.name, prepared.name);
+            let child = std::process::Command::new(&c.program).args(&c.args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map_err(|e| format!("cannot start {}: {e}", c.program.display()))?;
+            // a browser that is only asked to open a file (Safari) returns at once: then the window lives until Ctrl+C
+            Ok((child, b.kind != browser::Kind::Safari))
+        });
+        match started {
+            Ok(c) => child = Some(c),
+            Err(e) => {
+                eprintln!("iyakki-connect: {e}");
+                if let Some(d) = &cleanup {
+                    let _ = std::fs::remove_dir_all(d);
+                }
+                return 1;
+            }
+        }
+        if !child.as_ref().is_some_and(|c| c.1) {
+            println!("Press Ctrl+C to stop.");
+        }
+    }
+    loop {
+        if STOP.load(std::sync::atomic::Ordering::Relaxed) || w.stopped() {
+            break;
+        }
+        if let Some((c, true)) = child.as_mut() {
+            if c.try_wait().map(|s| s.is_some()).unwrap_or(true) {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    w.stop();
+    if let Some((c, _)) = child.as_mut() {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    if let Some(d) = cleanup {
+        let _ = std::fs::remove_dir_all(d);
+    }
+    match w.failure() {
+        Some(m) => {
+            eprintln!("iyakki-connect: STOP: {m}");
+            EXIT_PIN_CHANGED
+        }
+        None => 0,
+    }
 }

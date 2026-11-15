@@ -2,10 +2,10 @@
 #
 # The default images (libre, hw, web) stay as they are. Native k3s needs none of this: IYAKKI downloads the k3s program, checks it
 # against the project's SHA-256 file and installs it into the data partition (docs/K3S-DEV.md, phase 4). Only the Podman variant
-# ("run the official k3s image as a privileged container") needs a container engine in the image. build.sh does not use this file
-# yet; to try it by hand, append it to the defconfig of the variant you build:
+# ("run the official k3s image as a privileged container") needs a container engine in the image. build.sh appends this
+# file when WITH_PODMAN=1 is set (any variant except the release image, which refuses it: crun is GPL), and changed.sh counts it:
 #
-#   cat dist/buildroot/configs/iyakki_cluster.fragment >> target/buildroot-libre/defconfig      (then run the usual defconfig / make)
+#   WITH_PODMAN=1 ./build.sh mac
 #
 # Size and RAM must be measured first (podman, conmon, crun and netavark add tens of megabytes to the image and, with the images
 # k3s pulls, much more to the data partition). Rootful Podman only: k3s cannot run rootless.

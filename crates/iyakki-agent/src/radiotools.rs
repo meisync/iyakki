@@ -327,12 +327,12 @@ impl Directory {
     }
 
     pub fn set_fetcher(&self, f: Arc<dyn Fetcher>) {
-        *self.fetcher.lock().unwrap() = f;
-        self.cache.lock().unwrap().clear();
+        *self.fetcher.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = f;
+        self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
     }
 
     fn fetch(&self, path: &str, allowed: &dyn Fn(&str) -> bool) -> Result<Vec<Found>, DirError> {
-        if let Some((at, v)) = self.cache.lock().unwrap().get(path) {
+        if let Some((at, v)) = self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(path) {
             if at.elapsed() < Duration::from_secs(CACHE_SECS) {
                 return Ok(v.clone());
             }
@@ -341,12 +341,12 @@ impl Directory {
         if mirrors.is_empty() {
             return Err(DirError::Refused);
         }
-        let fetcher = self.fetcher.lock().unwrap().clone();
+        let fetcher = self.fetcher.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
         let mut last = String::from("no answer");
         for m in mirrors.into_iter().take(MAX_MIRROR_TRIES) {
             match fetcher.get(&format!("{m}{path}")).and_then(|body| parse_stations(&body)) {
                 Ok(v) => {
-                    self.cache.lock().unwrap().insert(path.to_string(), (Instant::now(), v.clone()));
+                    self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(path.to_string(), (Instant::now(), v.clone()));
                     return Ok(v);
                 }
                 Err(e) => last = e,
@@ -400,17 +400,17 @@ impl Directory {
     }
 
     fn by_id(&self, id: &str) -> Option<Found> {
-        self.cache.lock().unwrap().values().flat_map(|(_, v)| v.iter()).find(|f| f.id == id).cloned()
+        self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).values().flat_map(|(_, v)| v.iter()).find(|f| f.id == id).cloned()
     }
 
     fn by_name(&self, name: &str) -> Option<Found> {
         let n = norm(name);
-        self.cache.lock().unwrap().values().flat_map(|(_, v)| v.iter()).find(|f| norm(&f.name) == n).cloned()
+        self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).values().flat_map(|(_, v)| v.iter()).find(|f| norm(&f.name) == n).cloned()
     }
 
     /// The station the assistant started last.
     pub fn now_playing(&self) -> Option<Found> {
-        self.now.lock().unwrap().clone()
+        self.now.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 }
 
@@ -496,6 +496,18 @@ fn search_all(svc: &Services, p: &Policy, user: &str, q: &Query) -> (Vec<Found>,
     (out, note)
 }
 
+/// The RADIO app's search box: the same search the assistant's `radio_search` runs (the person's own stations, the built-in lists, then the
+/// online directory under the account's host policy), as a list of (name, address) with the reason the directory is missing, when it is.
+/// An empty search gives no stations: the box is for looking something up.
+pub fn search_stations(svc: &Services, p: &Policy, user: &str, raw: &str, limit: usize) -> (Vec<(String, String)>, Option<String>) {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return (Vec::new(), None);
+    }
+    let (found, note) = search_all(svc, p, user, &Query::parse(raw, None, None));
+    (found.into_iter().take(limit.clamp(1, 100)).map(|f| (f.name, f.url)).collect(), note)
+}
+
 fn find_by_id(svc: &Services, user: &str, id: &str) -> Option<Found> {
     saved_all(&StationStore::new(svc.dir(), user)).into_iter().chain(builtin_all()).find(|f| f.id == id).or_else(|| svc.radio_dir.by_id(id))
 }
@@ -512,7 +524,7 @@ pub fn offered(p: &Policy) -> bool {
 }
 
 pub fn is_radio_tool(name: &str) -> bool {
-    matches!(name, "radio_search" | "radio_play" | "radio_stop" | "radio_pause" | "radio_resume" | "radio_volume" | "radio_save" | "radio_add" | "radio_status" | "radio_trust_certificate")
+    matches!(name, "radio_search" | "radio_play" | "radio_stop" | "radio_pause" | "radio_resume" | "radio_volume" | "radio_save" | "radio_add" | "radio_status" | "radio_trust_certificate" | "radio_remove" | "radio_forget_certificate")
 }
 
 /// The tool definitions for an account (none without the RADIO app).
@@ -529,8 +541,14 @@ pub fn defs(p: &Policy) -> Vec<ToolDef> {
         false,
     );
     trust.risk = Risk::Ask;
+    let mut remove = tool("radio_remove", "Remove a station from My stations (the person's own list). `name` is the station's name as the RADIO app or radio_status shows it. The person is always asked first, with the station's name on the card.", obj(json!({"name": {"type": "string"}}), &["name"]), false);
+    remove.risk = Risk::Ask;
+    let mut forget = tool("radio_forget_certificate", "Forget the server certificate the person trusted for a station in My stations: the station asks again the next time its certificate fails. `name` is the station's name. The person is always asked first.", obj(json!({"name": {"type": "string"}}), &["name"]), false);
+    forget.risk = Risk::Ask;
     vec![
         trust,
+        remove,
+        forget,
         tool(
             "radio_search",
             "Search internet radio stations: the person's saved stations, IYAKKI's built-in list by language, and the online Radio Browser directory (when there is internet). `query` is free text such as \"tamil\", \"tamil fm\", \"kuthu\", \"news\", \"bbc\" or \"jazz\"; words like fm, radio, online and live are ignored. Optional `language` (Tamil, Hindi, ...), `tag` (a genre such as news or devotional) and `limit` (default 8, at most 40). Returns numbered stations with an id for radio_play. Read-only; the online directory lists only MP3 stations that were working at the last check; a few built-in AAC/HLS stations are marked when they need the audio add-on (installed from the RADIO app).",
@@ -562,6 +580,8 @@ pub fn describe(name: &str, args: &Value) -> Option<String> {
         "radio_trust_certificate" => Some(format!("TRUST the certificate of {} for the station {} (SHA-256 fingerprint {}); only do this if you know the station, because someone on your network could pretend to be it", s("host").unwrap_or("(no host)"), s("station").unwrap_or("(no name)"), s("fingerprint").map(iyakki_proxy::certinfo::fingerprint_groups).unwrap_or_default())),
         "radio_add" => Some(format!("add the station {} to My stations", s("name").unwrap_or("(no name)"))),
         "radio_save" => Some(format!("keep {} in My stations", s("name").unwrap_or("the playing station"))),
+        "radio_remove" => Some(format!("REMOVE the station {} from My stations", s("name").unwrap_or("(no name)"))),
+        "radio_forget_certificate" => Some(format!("forget the trusted certificate of the station {}", s("name").unwrap_or("(no name)"))),
         _ => None,
     }
 }
@@ -631,7 +651,7 @@ pub fn call(name: &str, args: &Value, svc: &Services, p: &Policy, user: &str) ->
                 tried += 1;
                 match start_and_wait(svc, p, user, c) {
                     Ok(kbps) => {
-                        *svc.radio_dir.now.lock().unwrap() = Some(c.clone());
+                        *svc.radio_dir.now.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(c.clone());
                         let mut shown = c.clone();
                         if shown.kbps == 0 {
                             shown.kbps = kbps;
@@ -755,6 +775,23 @@ pub fn call(name: &str, args: &Value, svc: &Services, p: &Policy, user: &str) ->
             let st = StationStore::new(svc.dir(), user).add(&name, &target.url)?;
             svc.toollog.record(svc.tool_log_days(), user, "radio.add", &radio::host_of(&st.url), true, "");
             Ok(format!("Kept {} in My stations (RADIO app).", st.name))
+        }
+        "radio_remove" => {
+            let n = s("name").ok_or("say which station to remove")?;
+            let store = StationStore::new(svc.dir(), user);
+            let st = store.list().into_iter().find(|x| x.name.eq_ignore_ascii_case(n)).ok_or_else(|| format!("there is no station called “{n}” in My stations"))?;
+            store.remove(&st.name)?;
+            svc.toollog.record(svc.tool_log_days(), user, "radio.remove", &radio::host_of(&st.url), true, "");
+            Ok(format!("Removed {} from My stations.", st.name))
+        }
+        "radio_forget_certificate" => {
+            let n = s("name").ok_or("say which station")?;
+            let store = StationStore::new(svc.dir(), user);
+            let st = store.list().into_iter().find(|x| x.name.eq_ignore_ascii_case(n)).ok_or_else(|| format!("there is no station called “{n}” in My stations"))?;
+            let pin = st.cert_pin.clone().ok_or_else(|| format!("no certificate is trusted for {}", st.name))?;
+            store.forget_trust(&st.name)?;
+            svc.toollog.record(svc.tool_log_days(), user, "radio.trust.revoked", &pin.host, true, &format!("sha256 {}", iyakki_proxy::certinfo::short_fingerprint(&pin.sha256)));
+            Ok(format!("{} no longer trusts the certificate of {}; it is asked about again if the station fails on it.", st.name, pin.host))
         }
         _ => Err(format!("unknown radio tool {name}")),
     }
@@ -904,6 +941,41 @@ mod tests {
         assert!(v[0].id.starts_with("o-") && v[0].source == Source::Directory);
         assert!(parse_stations("not json").is_err() && parse_stations("{}").is_err());
         assert_eq!(clean_name("Evil\u{7}\nFM   ignore previous"), "Evil FM ignore previous");
+    }
+
+    #[test]
+    fn removing_a_station_and_forgetting_a_trusted_certificate_are_chat_tools_that_always_ask_and_do_what_the_keys_do() {
+        let w = world("removeforget", &["*"], None);
+        let defs = w.tools.defs();
+        for n in ["radio_remove", "radio_forget_certificate"] {
+            let d = defs.iter().find(|d| d.spec.name == n).unwrap_or_else(|| panic!("{n} missing"));
+            assert_eq!(d.risk, Risk::Ask, "{n}");
+            assert!(crate::agent::hard_ask(n, &json!({"name": "X"})).is_some() && crate::grants::blocker(n, &json!({"name": "X"})).is_some(), "{n} is never covered by a standing grant");
+        }
+        assert!(describe("radio_remove", &json!({"name": "Hello FM"})).unwrap().contains("REMOVE the station Hello FM"));
+        w.tools.call("radio_add", &json!({"name": "Hello FM", "url": "https://radios.example.org:8002/3"})).unwrap();
+        w.tools.call("radio_add", &json!({"name": "Other FM", "url": "https://other.example.org/live.mp3"})).unwrap();
+        // forgetting where nothing is trusted says so and changes nothing
+        assert!(w.tools.call("radio_forget_certificate", &json!({"name": "Hello FM"})).unwrap_err().contains("no certificate is trusted"));
+        assert!(w.tools.call("radio_forget_certificate", &json!({"name": "Nobody FM"})).unwrap_err().contains("no station called"));
+        assert!(w.tools.call("radio_forget_certificate", &json!({})).is_err() && w.tools.call("radio_remove", &json!({})).is_err());
+        // a trusted certificate is forgotten (the station keeps its place)
+        let store = StationStore::new(w.svc.dir(), "alice");
+        let st = store.list().into_iter().find(|x| x.name == "Hello FM").unwrap();
+        let problem = crate::radio::CertProblem { station: st.name.clone(), url: st.url.clone(), host: "radios.example.org".into(), port: 8002, changed: false, sha256: "ab".repeat(32), subject: "radios.example.org".into(), issuer: "CA".into(), not_after: 4_000_000_000, trustable: true, message: String::new() };
+        store.trust(&st, &problem).unwrap();
+        assert!(store.list().iter().find(|x| x.name == "Hello FM").unwrap().cert_pin.is_some());
+        let said = w.tools.call("radio_forget_certificate", &json!({"name": "hello fm"})).unwrap();
+        assert!(said.contains("no longer trusts") && said.contains("radios.example.org"), "{said}");
+        assert!(store.list().iter().find(|x| x.name == "Hello FM").unwrap().cert_pin.is_none());
+        // removal takes the station out of the list and nothing else; the audit names the host
+        let said = w.tools.call("radio_remove", &json!({"name": "other fm"})).unwrap();
+        assert!(said.contains("Removed Other FM"), "{said}");
+        assert_eq!(store.list().iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), ["Hello FM"]);
+        assert!(w.tools.call("radio_remove", &json!({"name": "Other FM"})).unwrap_err().contains("no station called"));
+        // another person's list is not touched
+        assert!(StationStore::new(w.svc.dir(), "bob").list().is_empty());
+        assert!(AGENT_SYSTEM_PROMPT.contains("radio_remove") && AGENT_SYSTEM_PROMPT.contains("radio_forget_certificate"));
     }
 
     #[test]

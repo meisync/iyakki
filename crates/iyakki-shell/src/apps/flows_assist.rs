@@ -212,6 +212,36 @@ impl FlowsApp {
         self.update_assist();
     }
 
+    /// What the flows list shows of assist: which flows have a suggestion waiting and whether the account-wide kill switch is on.
+    pub(super) fn update_assist_list(&mut self) {
+        if self.cur.is_some() {
+            return;
+        }
+        let book = self.env.assist_store();
+        let sug: Vec<String> = self.flows.iter().filter(|f| !book.open_list(&f.id).is_empty()).map(|f| f.id.clone()).collect();
+        let off = !book.global().enabled;
+        if sug != self.sug_flows || off != self.assist_off {
+            self.sug_flows = sug;
+            self.assist_off = off;
+            self.redraw = true;
+        }
+    }
+
+    /// The kill switch for every flow of this account: assist (copilot and autopilot) does nothing while it is stopped.
+    pub(super) fn assist_toggle_kill(&mut self) {
+        let book = self.env.assist_store();
+        let stopped = !book.global().enabled;
+        match book.set_enabled(stopped) {
+            Ok(()) => {
+                iyakki_flow::host::Host::audit(self.env.host.as_ref(), if stopped { "flow.assist.resume_all" } else { "flow.assist.stop_all" }, &format!("by {}", self.env.who()));
+                self.say(if stopped { "Assist is on again for the flows that have it switched on." } else { "Assist is stopped for every flow: no suggestions, no autopilot, until you switch it on again." }, true);
+            }
+            Err(e) => self.say(e, false),
+        }
+        self.update_assist_list();
+        self.redraw = true;
+    }
+
     pub(super) fn assist_toggle_pause(&mut self) {
         let Some(id) = self.cur.clone() else { return };
         let book = self.env.assist_store();

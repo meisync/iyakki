@@ -109,6 +109,7 @@ const T_COVERAGE: usize = 143;
 const T_PICS_GO: usize = 215;
 const T_PICS_SKIP: usize = 216;
 const T_PICS_CANCEL: usize = 217;
+const T_PDF: usize = 218;
 #[allow(dead_code)] // reserved token id
 const T_LOOK: usize = 144;
 const T_QUALITY: usize = 145;
@@ -130,6 +131,7 @@ const T_CHOICE_INSTALL: usize = 170; // + index of the picture model in the list
 const T_ALT_PICK: usize = 700; // + scene * 24 + index of the extra picture
 const T_ALT_DEL: usize = 860; // + scene * 24 + index
 const T_ALT_MORE: usize = 1010; // + scene
+const T_LINK: usize = 1100; // + scene * 3 + which of its offered links
 
 const SUGGESTIONS: [&str; 6] = ["A little fox who is afraid of the dark", "The moon lost its silver mitten", "A robot who learns to laugh", "The kindest dragon in the valley", "A rainy day treasure hunt", "A tiny seed that wanted to touch the sky"];
 const SPEEDS: [f32; 6] = [0.8, 0.9, 1.0, 1.1, 1.25, 1.5];
@@ -198,6 +200,8 @@ enum Modal {
     Model(TalesPick),
     /// The picture log (the button Picture log, or g).
     PicLog(PicLogView),
+    /// A web link to a picture the person may approve for a scene (`scene`, address): nothing is fetched before they say yes.
+    FetchLink(usize, String),
 }
 
 /// The picture log window: how far it is scrolled (in wrapped lines) and what the last drawing measured.
@@ -389,6 +393,8 @@ struct Pic {
     ms: u64,
     /// The other pictures of this scene (other styles or seeds); the picture above is the one chosen as the main one.
     alts: Vec<Alt>,
+    /// Web links to a picture that the writer's reply held and that were not fetched: the person may approve one (`Fetch`).
+    links: Vec<String>,
 }
 
 /// One more picture of a scene.
@@ -440,6 +446,8 @@ struct PicOut {
     size: String,
     /// How it was made (set for a picture model's image).
     made: Option<(illus::Look, Option<u64>, String, String, u64)>,
+    /// Links to pictures that the reply held and nobody fetched.
+    links: Vec<String>,
 }
 
 /// The picture model the server does not have: what to say and what to download.
@@ -464,6 +472,8 @@ struct PicMsg {
     alt: Option<AltJob>,
     /// The picture model is not on the server: nothing was asked of it.
     missing: Option<MissingModel>,
+    /// This is the answer to an approved link (`fetch_link`), not a drawing: a failure leaves the picture the scene has.
+    linked: bool,
     idx: usize,
     res: Result<PicOut, String>,
     /// What the picture log learned in the thread (the request and its answer).
@@ -663,6 +673,8 @@ fn normalize_options(o: &mut StoryOptions) {
 }
 
 pub struct StoryApp {
+    /// The core the tile was last given (to reword a failure when the drive is gone).
+    os: Option<Arc<dyn iyakki_core_api::Os>>,
     page: Page,
     focus: Focus,
     opts: StoryOptions,
@@ -859,6 +871,7 @@ impl StoryApp {
         let (pic_tx, pic_rx) = channel();
         let (health_tx, health_rx) = channel();
         let mut app = StoryApp {
+            os: Some(cx.os.clone()),
             page: Page::Story,
             focus: Focus::Idea,
             opts,
@@ -1159,12 +1172,12 @@ impl StoryApp {
 
     /// Every (provider, model) of the enabled providers: the same list the chat's model chooser starts with.
     fn text_models(cx: &AppCx) -> Vec<(String, String)> {
-        let st = cx.services.settings.lock().unwrap();
+        let st = cx.services.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         st.get().providers.iter().filter(|p| p.enabled).flat_map(|p| p.models.iter().map(move |m| (p.id.clone(), m.clone()))).collect()
     }
 
     fn chat_choice(cx: &AppCx) -> Option<ModelChoice> {
-        cx.services.settings.lock().unwrap().get().chat.clone()
+        cx.services.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().chat.clone()
     }
 
     fn model_plan(&self, cx: &AppCx) -> ModelPlan {
@@ -1600,9 +1613,66 @@ impl StoryApp {
         }
         if self.story.blocks.is_empty() {
             self.start_create(cx);
+        } else if let Some((scene, url)) = iyakki_agent::scene::reply::asks_for_link(&text, self.pics.len()) {
+            // "use https://... for picture 2": the same question as the button; nothing is fetched before the person says yes
+            self.idea.set("");
+            self.sync_fields();
+            self.modal = Some(Modal::FetchLink(scene, url));
+        } else if iyakki_agent::storypdf::asks_for_pdf(&text) {
+            // "make it a PDF": the same writer as the button, shown as a step of the conversation
+            self.idea.set("");
+            self.sync_fields();
+            self.save_pdf(cx, Some(&text));
         } else {
             self.start_revision(text, cx);
         }
+    }
+
+    /// Save the story as `Stories/<title>/story.pdf` beside `story.md`: the text, the headings and the pictures that are ready, written
+    /// by the in-house PDF writer (not by the model). The story is saved first when it is not yet. `asked` is the person's message when
+    /// the PDF was asked for in the conversation: it and the result then show as a step on the timeline.
+    fn save_pdf(&mut self, cx: &AppCx, asked: Option<&str>) {
+        if self.gen.is_some() {
+            self.note = Some(("Wait until the story is written, then save the PDF.".into(), false));
+            return;
+        }
+        if self.story.blocks.is_empty() {
+            self.note = Some(("There is no story to put in a PDF yet.".into(), false));
+            return;
+        }
+        let step = asked.map(|t| {
+            self.convo.push(Message::user(t.to_string()));
+            self.step("PDF", "story.pdf")
+        });
+        let result = self.make_pdf(cx);
+        match &result {
+            Ok(m) => self.note = Some((m.clone(), true)),
+            Err(e) => self.note = Some((e.clone(), false)),
+        }
+        if let Some(c) = step {
+            self.step_done(&c, result.is_ok(), &result.unwrap_or_else(|e| e));
+        }
+    }
+
+    fn make_pdf(&mut self, cx: &AppCx) -> Result<String, String> {
+        if self.saved.is_none() {
+            self.save_story(cx, "");
+        }
+        let id = self.saved_id().ok_or_else(|| self.note.as_ref().map(|n| n.0.clone()).unwrap_or_else(|| "The story could not be saved, so there is no folder for its PDF.".into()))?;
+        let (story, opts, pics, _) = self.export_source(None)?;
+        let made = iyakki_agent::storypdf::story_pdf(&story, &opts, &pics, iyakki_pdf::PageSize::A4, Some(iyakki_agent::pdftools::pdf_date(now_secs() as i64)))?;
+        let (path, replaced) = self.store.save_pdf(&id, &made.bytes)?;
+        cx.audit.record(&cx.session.user, "story.pdf", &id);
+        let _ = path;
+        Ok(format!(
+            "Saved Stories/{id}/story.pdf ({} page{}, {} picture{}{}){}.",
+            made.pages,
+            if made.pages == 1 { "" } else { "s" },
+            made.pictures,
+            if made.pictures == 1 { "" } else { "s" },
+            if made.left_out > 0 { format!(", {} left out", made.left_out) } else { String::new() },
+            if replaced { "; the earlier copy was replaced" } else { "" }
+        ))
     }
 
     /// A step of the conversation: shown as a dot on the timeline of the panel until `step_done` gives its result.
@@ -1683,7 +1753,7 @@ impl StoryApp {
         // what the text says fills the options the person did not choose; the pictures follow what is available
         self.refresh_tts(cx);
         let mut o = self.with_hints(&base);
-        o.pictures = base.pictures.resolve(!self.image_models.is_empty());
+        o.pictures = self.resolve_pictures(base.pictures, base.drawing);
         o.style = self.style_for(&base.topic, o.audience, o.genre);
         let msgs = match st::messages(&o) {
             Ok(m) => m,
@@ -1833,7 +1903,7 @@ impl StoryApp {
         } else if h.genre.is_some() && self.story_opts.style == st::auto_style(self.story_opts.audience, self.story_opts.genre) {
             o.style = st::auto_style(o.audience, o.genre);
         }
-        o.pictures = self.opts.pictures.resolve(!self.image_models.is_empty());
+        o.pictures = self.resolve_pictures(self.opts.pictures, self.opts.drawing);
         let msgs = match st::revision_messages(&o, &self.story, &earlier, &text) {
             Ok(m) => m,
             Err(e) => {
@@ -1974,7 +2044,7 @@ impl StoryApp {
                         _ => format!("SVG drawing: {}", st::image_prompt(&title, &o, &sc)),
                     };
                     fresh.push(self.pics.len());
-                    self.pics.push(Pic { scene: sc, state: PicState::Queued, bytes: None, ext: "svg".into(), prompt, mode: o.pictures, style: o.style, key: self.pic_gen, call: None, how: String::new(), log: String::new(), feedback: String::new(), size: String::new(), look: o.pic.styles_list()[0], seed: None, provider: String::new(), model: String::new(), ms: 0, alts: Vec::new() });
+                    self.pics.push(Pic { scene: sc, state: PicState::Queued, bytes: None, ext: "svg".into(), prompt, mode: o.pictures, style: o.style, key: self.pic_gen, call: None, how: String::new(), log: String::new(), feedback: String::new(), size: String::new(), look: o.pic.styles_list()[0], seed: None, provider: String::new(), model: String::new(), ms: 0, alts: Vec::new(), links: Vec::new() });
                 }
             }
         }
@@ -2024,7 +2094,7 @@ impl StoryApp {
         self.story = doc.story.clone();
         self.raw = doc.story.markdown();
         self.story_opts = self.options_of(&doc.entry);
-        self.story_opts.pictures = self.opts.pictures.resolve(!self.image_models.is_empty());
+        self.story_opts.pictures = self.resolve_pictures(self.opts.pictures, self.opts.drawing);
         self.story_opts.style = old.first().map_or_else(|| st::auto_style(self.story_opts.audience, self.story_opts.genre), |p| p.style);
         self.saved = Some(doc.entry.clone());
         self.ver = n;
@@ -2521,7 +2591,7 @@ impl StoryApp {
                             Ok(f) => {
                                 let size = scene::reply::dimensions(&f.bytes, f.ext).map(|(w, h)| format!("{w}x{h}")).unwrap_or_default();
                                 let log = format!("=== image model ===\nPROMPT\n{prompt}\nNEGATIVE (sent: {})\n{}\nSEED {seed}\nRESULT: {} accepted\n", built.negative_sent, built.negative, f.ext);
-                                Ok(PicOut { bytes: f.bytes, ext: f.ext.to_string(), prompt: prompt.clone(), how: "image".into(), who: picture_model.as_ref().map_or("the picture model".into(), |m| m.1.clone()), note: None, log, sheet: None, setting: None, size, made: Some((look, Some(seed), trace.provider.clone(), trace.model.clone(), trace.ms)) })
+                                Ok(PicOut { bytes: f.bytes, ext: f.ext.to_string(), prompt: prompt.clone(), how: "image".into(), who: picture_model.as_ref().map_or("the picture model".into(), |m| m.1.clone()), note: None, log, sheet: None, setting: None, size, made: Some((look, Some(seed), trace.provider.clone(), trace.model.clone(), trace.ms)), links: Vec::new() })
                             }
                             Err(e) => {
                                 rejected = Some(e.clone());
@@ -2543,7 +2613,7 @@ impl StoryApp {
                         let sh = need_sheet(d);
                         match scene::draw_picture(d.chat.as_ref(), &title, &o, &scene, &sh, &scene::DrawCfg { strong: d.strong, story_text: &story_text, feedback: &feedback, workdir: Some(workdir.as_path()), allow_video: o.video }) {
                             Ok(x) => {
-                                out = Some(PicOut { bytes: x.bytes, ext: x.ext.into(), prompt: x.prompt, how: x.how.into(), who: d.who.clone(), note: x.note, log: x.log, sheet: None, setting: None, size: String::new(), made: None });
+                                out = Some(PicOut { bytes: x.bytes, ext: x.ext.into(), prompt: x.prompt, how: x.how.into(), who: d.who.clone(), note: x.note, log: x.log, sheet: None, setting: None, size: String::new(), made: None, links: x.links });
                                 break;
                             }
                             Err(e) => last = format!("{}: {e}", d.who),
@@ -2557,7 +2627,7 @@ impl StoryApp {
                 r.setting = made_setting.take();
                 r
             });
-            let _ = tx.send(PicMsg { gen, alt, idx, res, events, missing });
+            let _ = tx.send(PicMsg { gen, alt, idx, res, events, missing, linked: false });
         });
     }
 
@@ -2661,6 +2731,7 @@ impl StoryApp {
                         "rich svg" => format!("rich SVG drawing by {}", out.who),
                         "image reply" => format!("image by {}", out.who),
                         "video reply" => format!("video clip by {}", out.who),
+                        "linked" => format!("picture from {} (you approved the link)", out.who),
                         "composed" => "cartoon (built-in)".to_string(),
                         "model svg" => "an SVG drawing".to_string(),
                         _ => "built-in sketch".to_string(),
@@ -2673,12 +2744,17 @@ impl StoryApp {
                     p.prompt = out.prompt;
                     p.how = how;
                     p.size = out.size;
+                    p.links = out.links;
                     if let Some((look, seed, provider, model, ms)) = out.made {
                         (p.look, p.seed, p.provider, p.model, p.ms) = (look, seed, provider, model, ms);
                     }
                     p.log = out.log;
                     p.state = PicState::Ready;
                     self.pic_result(m.idx, true, &said);
+                }
+                Err(e) if m.linked => {
+                    // the approved link did not give a picture: the scene keeps what it has, and the person is told why
+                    self.note = Some((format!("The picture from the link could not be used: {e}"), false));
                 }
                 Err(e) if self.pic_auto && self.pics[m.idx].mode == PictureMode::ImageModel => {
                     // images are preferred; when they do not work this scene and the rest are drawn as SVG, said once
@@ -2721,6 +2797,22 @@ impl StoryApp {
             self.pump_pictures(cx);
             self.dirty = true;
         }
+    }
+
+    /// The person said yes to this address for this scene's picture: fetched in the background through the account's own host rules,
+    /// judged like any picture, and shown as the scene's picture when it passes.
+    fn fetch_link(&mut self, idx: usize, url: &str, cx: &AppCx) {
+        let Some(p) = self.pics.get(idx) else { return };
+        let prompt = p.prompt.clone();
+        let (web, policy, allow_video) = (cx.web.clone(), cx.session.policy.clone(), self.story_opts.video);
+        let (gen, tx, url) = (self.pic_gen, self.pic_tx.clone(), url.to_string());
+        let host = iyakki_agent::scene::reply::host_of(&url);
+        cx.audit.record(&cx.session.user, "story.picture.link", &host);
+        self.note = Some((format!("Fetching the picture from {host}..."), true));
+        std::thread::spawn(move || {
+            let res = iyakki_agent::scene::reply::fetch_link(&url, web.as_ref(), &|h: &str| policy.allows_host(h), allow_video).map(|f| PicOut { bytes: f.bytes, ext: f.ext.to_string(), prompt, how: "linked".into(), who: host, note: None, log: String::new(), sheet: None, setting: None, size: String::new(), made: None, links: Vec::new() });
+            let _ = tx.send(PicMsg { gen, alt: None, idx, res, events: Vec::new(), missing: None, linked: true });
+        });
     }
 
     fn redo_picture(&mut self, idx: usize, cx: &AppCx) {
@@ -2864,7 +2956,7 @@ impl StoryApp {
     /// Start the download of the picture model that is not on the server (the same download as Settings → Models, with progress).
     fn start_install(&mut self, cx: &AppCx) {
         let Some((p, m, size)) = self.install.as_ref().filter(|i| !i.started).map(|i| (i.provider.clone(), i.model.clone(), i.size.clone())) else { return };
-        match cx.services.pull_model(&p, &m) {
+        match cx.services.pull_model_for(&cx.session.user, &p, &m) {
             Ok(()) => {
                 if let Some(i) = self.install.as_mut() {
                     i.started = true;
@@ -3348,7 +3440,7 @@ impl StoryApp {
             let style = PictureStyle::from_id(&p.style).unwrap_or_default();
             let key = hash(&format!("{id}{}{}", p.title, p.bytes.len()));
             let alts: Vec<Alt> = p.variants.iter().map(|v| Alt { look: illus::Look::from_id(&v.style).unwrap_or_default(), seed: v.seed, provider: v.provider.clone(), model: v.model.clone(), size: v.size.clone(), ms: v.ms, ext: v.ext.clone(), key: hash(&format!("{id}{}{}{}", p.title, v.style, v.bytes.len())), bytes: Arc::new(v.bytes.clone()), prompt: v.prompt.clone() }).collect();
-            self.pics.push(Pic { scene: st::Scene { place_before: p.unit, title: p.title, text: p.scene_text }, state: PicState::Ready, bytes: Some(Arc::new(p.bytes)), ext: p.ext, prompt: p.prompt, mode, style, key, call: None, how: String::new(), log: String::new(), feedback: String::new(), size: p.size, look: illus::Look::from_id(&p.look).unwrap_or_default(), seed: p.seed, provider: p.provider.clone(), model: p.model.clone(), ms: p.ms, alts });
+            self.pics.push(Pic { scene: st::Scene { place_before: p.unit, title: p.title, text: p.scene_text }, state: PicState::Ready, bytes: Some(Arc::new(p.bytes)), ext: p.ext, prompt: p.prompt, mode, style, key, call: None, how: String::new(), log: String::new(), feedback: String::new(), size: p.size, look: illus::Look::from_id(&p.look).unwrap_or_default(), seed: p.seed, provider: p.provider.clone(), model: p.model.clone(), ms: p.ms, alts, links: Vec::new() });
         }
         self.story_opts.style = self.pics.first().map_or_else(|| st::auto_style(self.story_opts.audience, self.story_opts.genre), |p| p.style);
         self.chunks = st::chunks_for(&self.story.units(), 0, st::MAX_CHUNK_CHARS);
@@ -3641,6 +3733,12 @@ impl StoryApp {
             n if (T_ALT_PICK..T_ALT_PICK + 6 * 24).contains(&n) => self.choose_main((n - T_ALT_PICK) / 24, (n - T_ALT_PICK) % 24),
             n if (T_ALT_DEL..T_ALT_DEL + 6 * 24).contains(&n) => self.delete_alt((n - T_ALT_DEL) / 24, (n - T_ALT_DEL) % 24),
             n if (T_ALT_MORE..T_ALT_MORE + 6).contains(&n) => self.more_alt(n - T_ALT_MORE, cx),
+            n if (T_LINK..T_LINK + 18).contains(&n) => {
+                let (i, k) = ((n - T_LINK) / 3, (n - T_LINK) % 3);
+                if let Some(u) = self.pics.get(i).and_then(|p| p.links.get(k)).cloned() {
+                    self.modal = Some(Modal::FetchLink(i, u));
+                }
+            }
             T_QUALITY => self.set_pic(|o| o.quality = o.quality.next()),
             T_KEEPLOOK => self.set_pic(|o| o.keep_look = !o.keep_look),
             T_STORYMODEL => self.cycle_story_model(cx),
@@ -3739,6 +3837,7 @@ impl StoryApp {
             T_COPY => self.copy_story(),
             T_SAVE => self.save_story(cx, ""),
             T_EXPORT => self.ask_export(None),
+            T_PDF => self.save_pdf(cx, None),
             T_NEW => self.new_story(cx),
             T_STOP_WRITING => self.stop_writing(),
             T_CANCEL_AUDIO => {
@@ -3818,6 +3917,14 @@ impl StoryApp {
                 if let Some(Modal::PicLog(v)) = self.modal.as_mut() {
                     v.confirm_clear = false;
                 }
+            }
+            return Flow::Stay;
+        }
+        if let Some(Modal::FetchLink(idx, url)) = &self.modal {
+            let (idx, url) = (*idx, url.clone());
+            self.modal = None;
+            if *k == Key::Char('y') {
+                self.fetch_link(idx, &url, cx);
             }
             return Flow::Stay;
         }
@@ -3997,6 +4104,7 @@ impl StoryApp {
                 (_, Some('f')) => self.click(T_FAV, cx),
                 (_, Some('c')) => self.copy_story(),
                 (_, Some('e')) => self.ask_export(None),
+                (_, Some('d')) => self.click(T_PDF, cx),
                 (_, Some('w')) => self.save_audio(cx),
                 (_, Some('v')) => self.cycle_voice(cx),
                 (_, Some('+')) | (_, Some('=')) => self.cycle_speed(true, cx),
@@ -4215,7 +4323,7 @@ impl StoryApp {
             ModelPlan::Chosen(c) => c.model,
             ModelPlan::SameAsChat { .. } => self.image_models.first().map_or("the picture model".to_string(), |m| m.1.clone()),
         };
-        match self.opts.pictures.resolve(!self.image_models.is_empty()) {
+        match self.resolve_pictures(self.opts.pictures, self.opts.drawing) {
             PictureMode::Off => "Pictures: off".into(),
             PictureMode::ImageModel if self.image_models.is_empty() && self.prefs.picture_model.is_none() => "Pictures: images (no picture model set up)".into(),
             PictureMode::ImageModel => format!("Pictures: images via {}", self.resolved_for(&self.pic_now(), cx).map_or_else(picture_name, |r| r.model)),
@@ -4224,6 +4332,15 @@ impl StoryApp {
                 if rich { format!("Pictures: rich SVG by {who}") } else { "Pictures: cartoon (built-in)".into() }
             }
         }
+    }
+
+    /// What Auto pictures really are: images when a picture model exists, except when the person chose Drawing: Rich SVG or
+    /// Built-in cartoon, which are drawings by definition (found by the live run: the choice was ignored while a picture model existed).
+    fn resolve_pictures(&self, pictures: PictureMode, drawing: st::DrawingMode) -> PictureMode {
+        if pictures == PictureMode::Auto && matches!(drawing, st::DrawingMode::Rich | st::DrawingMode::Cartoon) {
+            return PictureMode::Drawings;
+        }
+        pictures.resolve(!self.image_models.is_empty())
     }
 
     /// Whether drawings are made as rich SVG (a strong writer, or the person said so) and by whom; else the built-in cartoon.
@@ -4315,7 +4432,7 @@ impl StoryApp {
     fn banner(&mut self, g: &mut Gfx, x: f32, y: f32, w: f32, s: f32) -> f32 {
         let shown = self.note.clone().or_else(|| self.wait_text.clone().map(|t| (t, true)));
         if let Some((m, ok)) = &shown {
-            let m = if *ok { m.clone() } else { iyakki_storage::loss::reword(m) };
+            let m = if *ok { m.clone() } else { self.os.as_ref().map(|o| o.disks().reword_failure(m)).unwrap_or_else(|| m.clone()) };
             let lines = g.wrap(13.0 * s, &m, Face::Sans, w - 24.0 * s);
             let lh = g.line_height(13.0 * s, Face::Sans);
             let h = lines.len().min(3) as f32 * lh + 12.0 * s;
@@ -4562,10 +4679,16 @@ impl StoryApp {
         if total <= 0.0 {
             let lines = ["Describe a story and press Send.", "Say it in words if you like: a 5-minute funny story in Tamil about a fox who is afraid of the dark.", "Then tell me what to change: shorter, a different name, funnier, another language, or redraw picture 2 as a comic."];
             let mut y = log.y + 8.0 * s;
-            for (i, l) in lines.iter().enumerate() {
+            // the help lines stay above the composer: a short window shows the first lines only (never one running into the controls)
+            let limit = (log.y + log.h).min(comp_y - 2.0 * s);
+            'help: for (i, l) in lines.iter().enumerate() {
                 for w in g.wrap(if i == 0 { 15.5 * s } else { 13.5 * s }, l, Face::Sans, log.w) {
+                    let step = if i == 0 { 22.0 * s } else { 19.0 * s };
+                    if y + step > limit {
+                        break 'help;
+                    }
                     g.text(log.x, y, if i == 0 { 15.5 * s } else { 13.5 * s }, if i == 0 { TEXT } else { MUTED }, &w, Face::Sans);
-                    y += if i == 0 { 22.0 * s } else { 19.0 * s };
+                    y += step;
                 }
                 y += 8.0 * s;
             }
@@ -4910,6 +5033,7 @@ impl StoryApp {
                 btns.push(("Picture log (g)".into(), T_PICLOG, MUTED, true));
             }
             btns.push(("Export…".into(), T_EXPORT, MUTED, true));
+            btns.push(("Save PDF".into(), T_PDF, MUTED, true));
             if let Some(e) = &self.saved {
                 btns.push((if e.favourite { "Unfavourite".into() } else { "Favourite".into() }, T_FAV, MUTED, true));
             }
@@ -5017,6 +5141,14 @@ impl StoryApp {
             self.pic_buttons.push((R::new(slot.x + slot.w - bw - 8.0 * s, slot.y + slot.h - bsz * 2.1 - 8.0 * s, bw, bsz * 2.1), label, idx, col));
             let dw = g.text_width(bsz, "Delete", Face::Bold) + bsz * 1.7;
             self.pic_buttons.push((R::new(slot.x + slot.w - bw - dw - 14.0 * s, slot.y + slot.h - bsz * 2.1 - 8.0 * s, dw, bsz * 2.1), "Delete", idx + 100, ERR));
+        }
+        // links the writer's reply held: nothing was fetched; one button per link names the site, the person decides
+        if matches!(state, PicState::Ready) && self.gen.is_none() && idx < 6 {
+            let links = self.pics[idx].links.clone();
+            for (k, u) in links.iter().take(3).enumerate() {
+                let label = format!("Fetch the picture from {}", iyakki_agent::scene::reply::host_of(u));
+                self.gal_hits.push((R::new(slot.x + 8.0 * s, slot.y + 8.0 * s + k as f32 * 30.0 * s, 0.0, 0.0), T_LINK + idx * 3 + k, label));
+            }
         }
         self.draw_gallery(g, slot, s, idx);
     }
@@ -5747,6 +5879,10 @@ impl StoryApp {
                 let shown = g.fit(19.0 * s, title, Face::Bold, 300.0 * s);
                 super::widgets::render_confirm(g, area, s, &format!("Delete \"{shown}\" and everything saved with it?"), "Delete");
             }
+            Some(Modal::FetchLink(_, url)) => {
+                let host = iyakki_agent::scene::reply::host_of(url);
+                super::widgets::render_confirm(g, area, s, &format!("Fetch one picture from {host}? Your computer asks that site for the file at the link; nothing else is sent."), "Fetch");
+            }
             Some(Modal::Export(p, _)) => p.render(g, area, s, ACCENT),
             Some(Modal::Model(_)) | Some(Modal::PicLog(_)) | None => {}
         }
@@ -5788,7 +5924,7 @@ impl App for StoryApp {
     }
     fn hint(&self) -> String {
         match self.page {
-            Page::Story => "Enter send · Ctrl+J new line · Ctrl+P model or agent · Ctrl+O options · Space play · Ctrl+S save · e export · l saved stories · Esc back".into(),
+            Page::Story => "Enter send · Ctrl+J new line · Ctrl+P model or agent · Ctrl+O options · Space play · Ctrl+S save · e export · d PDF · l saved stories · Esc back".into(),
             Page::Library => "↑↓ choose · Enter open · Space listen · f favourite · d delete · / search".into(),
         }
     }
@@ -5812,6 +5948,7 @@ impl App for StoryApp {
     }
 
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
+        self.os = Some(cx.os.clone());
         if matches!(ev, Event::Tick) {
             self.ticks += 1;
             self.poll(cx);
@@ -5843,7 +5980,7 @@ impl App for StoryApp {
                 _ => {}
             }
         }
-        if matches!(self.modal, Some(Modal::ConfirmDelete(..))) && !matches!(ev, Event::Key(_)) {
+        if matches!(self.modal, Some(Modal::ConfirmDelete(..) | Modal::FetchLink(..))) && !matches!(ev, Event::Key(_)) {
             return Flow::Stay;
         }
         if matches!(self.modal, Some(Modal::Model(_))) && !matches!(ev, Event::Key(_)) {
@@ -7544,6 +7681,108 @@ mod tests {
     }
 
     #[test]
+    fn save_pdf_writes_story_pdf_beside_story_md_with_the_text_and_pictures() {
+        let t = Teller::new(STORY);
+        let (mut a, cx, home) = make("tales-pdf", &t);
+        a.prefs.auto_save = false;
+        write_story(&mut a, &cx, "a fox");
+        until(&mut a, &cx, "the drawings", |a| a.pics.iter().all(|p| p.state == PicState::Ready));
+        assert!(a.saved_id().is_none());
+        click(&mut a, &cx, T_PDF);
+        let id = a.saved_id().expect("the story is saved first, so the PDF has a folder");
+        let dir = home.join(format!("Stories/{id}"));
+        assert!(dir.join("story.md").is_file(), "the text is beside it");
+        let bytes = std::fs::read(dir.join("story.pdf")).expect("story.pdf");
+        let d = iyakki_pdf::Document::open(bytes.clone()).unwrap();
+        let text: String = (0..d.page_count()).map(|i| d.page_text(i).unwrap()).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("The Brave Little Fox") && text.contains("Once upon a time a small fox lived near the river."), "{text}");
+        assert_eq!(bytes.windows(15).filter(|w| *w == b"/Subtype /Image").count(), 2, "both illustrations are in the file");
+        let note = a.note_text().unwrap();
+        assert!(note.contains(&format!("Saved Stories/{id}/story.pdf")) && note.contains("2 pictures") && !note.contains("replaced"), "{note}");
+        // the keyboard does the same, and the earlier copy is replaced, said so
+        key(&mut a, &cx, Key::Char('d'));
+        assert!(a.note_text().unwrap().contains("the earlier copy was replaced"), "{:?}", a.note_text());
+        assert!(!dir.join("story.pdf.part").exists());
+        // it goes with the story
+        a.go(Page::Library, &cx);
+        assert_eq!(a.library_ids(), vec![id.clone()]);
+        let _ = a.store.delete(&id);
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn save_pdf_is_reachable_at_the_four_standard_sizes_by_button_and_keyboard() {
+        let t = Teller::new(STORY);
+        let (mut a, cx, home) = make("tales-pdf-sizes", &t);
+        write_story(&mut a, &cx, "a fox");
+        until(&mut a, &cx, "the drawings", |a| a.pics.iter().all(|p| p.state == PicState::Ready));
+        let mut button_seen = Vec::new();
+        for (w, h) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (800, 480)] {
+            for text_scale in [1.0f32, 1.35] {
+                let s = crate::shell::scale_for(w, h) * text_scale;
+                a.go(Page::Story, &cx);
+                a.pane_open = false;
+                let (g, area) = draw_at(&mut a, &cx, w, h, s, 0);
+                let what = format!("story page at {w}x{h} (text x{text_scale})");
+                assert_layout(&g, area, &what);
+                if let Some(btn) = g.hits.iter().find(|h| h.label == "Save PDF") {
+                    button_seen.push((w, h, text_scale));
+                    assert!(btn.rect.x >= area.x && btn.rect.x + btn.rect.w <= area.x + area.w + 1.0, "{what}: the button is inside the tile");
+                    // pressing the drawn button writes the file
+                    a.handle(&Event::Tab(T_PDF), &cx);
+                    assert!(a.note_text().unwrap().contains("story.pdf"), "{what}: {:?}", a.note_text());
+                } else {
+                    // the toolbar drops what does not fit; the key always works and the help line names it
+                    key(&mut a, &cx, Key::Char('d'));
+                    assert!(a.note_text().unwrap().contains("story.pdf"), "{what}: {:?}", a.note_text());
+                }
+                let (g, _) = draw_at(&mut a, &cx, w, h, s, 1);
+                assert!(g.hits.iter().any(|h| h.label == "Saved ✓" || h.label == "Save story"), "{what}: still drawn after the export");
+            }
+        }
+        assert!(button_seen.iter().any(|(w, _, _)| *w >= 1280), "the button is on the toolbar on the wide sizes: {button_seen:?}");
+        let id = a.saved_id().unwrap();
+        assert!(home.join(format!("Stories/{id}/story.pdf")).is_file());
+    }
+
+    #[test]
+    fn the_conversation_can_ask_for_the_pdf_and_it_is_a_step_and_not_a_correction() {
+        let t = Teller::new(STORY);
+        let (mut a, cx, home) = make("tales-pdf-chat", &t);
+        write_story(&mut a, &cx, "a fox");
+        until(&mut a, &cx, "the drawings", |a| a.pics.iter().all(|p| p.state == PicState::Ready));
+        let asked_before = t.seen.lock().unwrap().len();
+        a.handle(&Event::AreaAt(IDEA_AREA, 14.0, 14.0), &cx);
+        typ(&mut a, &cx, "please make it a PDF");
+        key(&mut a, &cx, Key::Ctrl('n'));
+        assert_eq!(t.seen.lock().unwrap().len(), asked_before, "the model was not asked to rewrite the story");
+        let id = a.saved_id().expect("saved");
+        assert!(home.join(format!("Stories/{id}/story.pdf")).is_file());
+        assert!(a.convo.iter().any(|m| m.tool_calls.iter().any(|c| c.name == "PDF")), "a PDF step is on the timeline");
+        assert!(a.convo.iter().any(|m| m.content.contains("Saved Stories/")), "and its result");
+        assert!(a.idea.text.is_empty());
+        // a message that only mentions a pdf is a correction as before
+        a.handle(&Event::AreaAt(IDEA_AREA, 14.0, 14.0), &cx);
+        typ(&mut a, &cx, "the fox reads a pdf in the library");
+        key(&mut a, &cx, Key::Ctrl('n'));
+        until(&mut a, &cx, "the revision", |a| !a.is_writing());
+        assert!(t.seen.lock().unwrap().len() > asked_before, "this one went to the model");
+    }
+
+    #[test]
+    fn a_story_in_another_script_is_refused_in_plain_words_and_no_file_is_made() {
+        let t = Teller::new("# \u{0b95}\u{0ba4}\u{0bc8}\n\n\u{0b92}\u{0bb0}\u{0bc1} \u{0ba8}\u{0bb0}\u{0bbf} \u{0b87}\u{0bb0}\u{0bc1}\u{0ba8}\u{0bcd}\u{0ba4}\u{0ba4}\u{0bc1}.\n");
+        let (mut a, cx, home) = make("tales-pdf-tamil", &t);
+        a.prefs.auto_save = false;
+        write_story(&mut a, &cx, "a fox");
+        click(&mut a, &cx, T_PDF);
+        let note = a.note_text().unwrap();
+        assert!(note.contains("cannot be written in a PDF yet") && note.contains("Nothing was saved"), "{note}");
+        let id = a.saved_id().unwrap();
+        assert!(!home.join(format!("Stories/{id}/story.pdf")).exists());
+    }
+
+    #[test]
     fn export_makes_one_html_page_with_the_pictures_inside_or_the_text() {
         let t = Teller::new(STORY);
         let (mut a, cx, _) = make("tales-export", &t);
@@ -8393,6 +8632,65 @@ mod tests {
         assert!(log.contains("cdn.example.org") && log.contains("not fetched without your approval"), "{log}");
     }
 
+    /// A web that serves one picture and remembers every address it was asked for.
+    struct OnePicture(Vec<u8>, Mutex<Vec<String>>);
+    impl iyakki_web::Fetch for OnePicture {
+        fn get(&self, url: &iyakki_web::Url) -> Result<iyakki_web::Response, String> {
+            self.1.lock().unwrap().push(url.to_string());
+            if url.to_string() == "https://cdn.example.org/x/scene.png" {
+                Ok(iyakki_web::Response { status: 200, content_type: "image/png".into(), body: self.0.clone(), ..Default::default() })
+            } else {
+                Err("no route".into())
+            }
+        }
+    }
+
+    #[test]
+    fn a_link_in_the_writers_reply_is_offered_and_fetched_only_after_the_person_says_yes_and_a_message_with_an_address_asks_the_same_question() {
+        let own = Teller::new(STORY);
+        let agent = Teller::new(STORY);
+        *agent.svg.lock().unwrap() = "![scene](https://cdn.example.org/x/scene.png)".into();
+        let (mut a, cx0, _) = make("tales-link-ok", &own);
+        let web = Arc::new(OnePicture(tiny_png(), Mutex::new(vec![])));
+        let mut cx = cx0.clone();
+        cx.web = web.clone();
+        let (ta, to) = (agent.clone(), own.clone());
+        a.test_drawers = Some(Arc::new(move |_| vec![Drawer { chat: Arc::new(Shared(ta.clone())), strong: true, who: "Claude Code".into() }, Drawer { chat: Arc::new(Shared(to.clone())), strong: false, who: "qwen3:8b".into() }]));
+        write_story(&mut a, &cx, "a fox");
+        until(&mut a, &cx, "the pictures", all_pictures_ready);
+        assert!(a.pics.iter().all(|p| p.ext == "svg" && p.links == vec!["https://cdn.example.org/x/scene.png".to_string()]), "the built-in picture, and the link offered");
+        assert!(web.1.lock().unwrap().is_empty(), "nothing was fetched by itself");
+        // the button names the site; a click asks; any other key than y keeps things as they are
+        let (g, _) = draw(&mut a, &cx, 1280, 720, 0);
+        assert!(g.hits.iter().any(|h| h.ev == Event::Tab(T_LINK) && h.label.contains("cdn.example.org")), "one button names the site");
+        click(&mut a, &cx, T_LINK);
+        assert!(matches!(&a.modal, Some(Modal::FetchLink(0, u)) if u.contains("cdn.example.org")));
+        let _ = draw(&mut a, &cx, 1280, 720, 0);
+        key(&mut a, &cx, Key::Char('n'));
+        assert!(a.modal.is_none() && web.1.lock().unwrap().is_empty(), "no: nothing is fetched");
+        // yes: fetched in the background, judged, and shown as the scene's picture
+        click(&mut a, &cx, T_LINK);
+        key(&mut a, &cx, Key::Char('y'));
+        until(&mut a, &cx, "the linked picture", |a| a.pics[0].how.contains("you approved the link"));
+        assert_eq!((a.pics[0].ext.as_str(), web.1.lock().unwrap().clone()), ("png", vec!["https://cdn.example.org/x/scene.png".to_string()]));
+        assert!(a.pics[0].links.is_empty(), "the offer is used up");
+        assert!(cx.audit.recent(40).iter().any(|l| l.contains("story.picture.link") && l.contains("cdn.example.org")));
+        // a link that gives no picture leaves the scene as it was and says why
+        let before = a.pics[1].bytes.clone();
+        a.pics[1].links = vec!["https://cdn.example.org/gone.png".to_string()];
+        click(&mut a, &cx, T_LINK + 3);
+        key(&mut a, &cx, Key::Char('y'));
+        until(&mut a, &cx, "the failure", |a| a.note.as_ref().is_some_and(|n| n.0.contains("could not be used")));
+        assert_eq!(a.pics[1].bytes, before);
+        assert_eq!(a.pics[1].state, PicState::Ready);
+        // an address in a message of the conversation asks the same question
+        a.idea.set("use https://cdn.example.org/x/scene.png for picture 2");
+        a.submit(&cx);
+        assert!(matches!(&a.modal, Some(Modal::FetchLink(1, _))), "picture 2 is index 1");
+        key(&mut a, &cx, Key::Esc);
+        assert!(a.modal.is_none());
+    }
+
     #[test]
     fn the_drawing_option_cycles_and_shows_in_options_and_on_the_chip() {
         let t = Teller::new(STORY);
@@ -9156,8 +9454,8 @@ mod tests {
         b.pics[0].alts.push(filler);
         assert!(b.cap_error_alt(1000).unwrap_err().contains("this story's pictures"), "extra pictures count towards the story's limit");
         b.alt_running = Some(0);
-        let out = PicOut { bytes: tiny_png(), ext: "png".into(), prompt: "p".into(), how: "image".into(), who: "SD-Turbo".into(), note: None, log: String::new(), sheet: None, setting: None, size: "8x8".into(), made: None };
-        b.pic_tx.send(PicMsg { gen: b.pic_gen, alt: Some(AltJob { idx: 0, look: illus::Look::Anime, n: 0 }), idx: 0, res: Ok(out), events: vec![], missing: None }).unwrap();
+        let out = PicOut { bytes: tiny_png(), ext: "png".into(), prompt: "p".into(), how: "image".into(), who: "SD-Turbo".into(), note: None, log: String::new(), sheet: None, setting: None, size: "8x8".into(), made: None, links: Vec::new() };
+        b.pic_tx.send(PicMsg { gen: b.pic_gen, alt: Some(AltJob { idx: 0, look: illus::Look::Anime, n: 0 }), idx: 0, res: Ok(out), events: vec![], missing: None, linked: false }).unwrap();
         b.handle(&Event::Tick, &cx2);
         assert!(b.alt_jobs.is_empty() && b.alt_running.is_none(), "the job stopped");
         assert_eq!(b.pics[0].alts.len(), 1, "nothing that exists was dropped, nothing was added");
@@ -10048,4 +10346,6 @@ J
 
     // frame cost of the reading view (a separate file; items are part of this module)
     include!("story_perf_tests.rs");
+    // live checks against a real Lemonade server (all ignored; see the file)
+    include!("story_live_tests.rs");
 }

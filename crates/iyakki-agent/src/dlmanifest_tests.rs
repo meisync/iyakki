@@ -461,10 +461,10 @@ fn kubectl_takes_its_version_from_the_manifest_and_falls_back_to_the_vendor_look
     assert_eq!(m.latest_version(d, &net).unwrap(), "v1.31.0");
     assert_eq!(net.0.load(std::sync::atomic::Ordering::SeqCst), 2);
     // an item that is not wired yet ignores the manifest
-    let n2 = newer(|m| item(m, "cli:terraform").version = "v9.9.9".into());
+    let n2 = newer(|m| item(m, "cli:ffmpeg").version = "v9.9.9".into());
     let s2 = Store::new(&root.join("dlmanifest"));
     s2.apply(&signed(&n2).0, &signed(&n2).1).unwrap();
-    assert_eq!(version_override_with(&s2, "terraform"), None);
+    assert_eq!(version_override_with(&s2, "ffmpeg"), None);
 }
 
 // ---- fetching (the scripted network of netprobe; the check itself runs on the test thread)
@@ -608,6 +608,100 @@ mod fetching {
         let (b, g) = signed(&newer(|m| item(m, "cli:helm").version = "v3.99.0".into()));
         s.apply(&b, &g).unwrap();
         assert_eq!(version_override_with(&s, "helm").as_deref(), Some("v3.99.0"));
-        assert_eq!(version_override_with(&s, "terraform"), None);
+        assert_eq!(version_override_with(&s, "ffmpeg"), None);
     }
+}
+
+#[test]
+fn every_wired_lookup_is_a_float_sum_item_with_a_vendor_lookup_and_follows_the_manifest() {
+    use crate::clis::VersionFrom;
+    let b = bundled();
+    // the list is exactly the float+sum command-line items that have a lookup to replace
+    let mut want: Vec<String> = Vec::new();
+    for it in &b.items {
+        let Some(id) = it.id.strip_prefix("cli:") else { continue };
+        let d = crate::clis::def(id).unwrap_or_else(|| panic!("{id} is not in the CLI list"));
+        if it.kind == Kind::FloatSum && d.pin.is_empty() && !matches!(d.version, VersionFrom::Latest) {
+            want.push(it.id.clone());
+        }
+    }
+    let mut have: Vec<String> = WIRED.iter().map(|s| s.to_string()).collect();
+    want.sort();
+    have.sort();
+    assert_eq!(have, want, "WIRED and the CLI list drifted apart");
+    // each one takes its version from a signed manifest and ignores an unusable one
+    let s = Store::with(&dir("wired-all"), Some(test_signing_key().verifying_key()), bundled());
+    for id in WIRED {
+        assert_eq!(version_override_with(&s, id.trim_start_matches("cli:")), None, "{id}: nothing before a manifest");
+    }
+    let (bytes, sig) = signed(&newer(|m| {
+        for id in WIRED {
+            item(m, id).version = "v7.8.9".into();
+        }
+    }));
+    s.apply(&bytes, &sig).unwrap();
+    for id in WIRED {
+        assert_eq!(version_override_with(&s, id.trim_start_matches("cli:")).as_deref(), Some("v7.8.9"), "{id}");
+    }
+    // the lookup itself, through latest_version, for an item that was not wired before
+    let root = dir("wired-lookup");
+    let m = crate::clis::CliManager::new(&root);
+    let net = Net(Default::default());
+    let store = Store::new(&root.join("dlmanifest"));
+    let n = newer(|m| item(m, "cli:gh").version = "v2.99.0".into());
+    store.apply(&signed(&n).0, &signed(&n).1).unwrap();
+    assert_eq!(m.latest_version(crate::clis::def("gh").unwrap(), &net).unwrap(), "v2.99.0");
+    assert_eq!(net.0.load(std::sync::atomic::Ordering::SeqCst), 0, "no network lookup was made");
+    // the shape of a version
+    for good in ["v1.31.0", "0.5.1", "1.9.0", "v1.30.4+k3s1", "26.00"] {
+        assert!(version_shape_ok(good), "{good}");
+    }
+    for bad in ["latest", "-1", "v", "vx1", ".1", "+1"] {
+        assert!(!version_shape_ok(bad), "{bad}");
+    }
+    let (bytes, sig) = signed(&newer(|m| {
+        m.sequence += 1;
+        item(m, "cli:uv").version = "latest".into();
+    }));
+    s.apply(&bytes, &sig).unwrap();
+    assert_eq!(version_override_with(&s, "uv"), None, "a word that is no version is not used");
+}
+
+/// The pin command's digest of a file, against the system's own SHA-256 tool as a second implementation (skipped where there is none).
+#[test]
+fn the_digest_the_pin_command_records_equals_the_system_sha256_tool_for_files_of_every_awkward_size() {
+    let tool = |path: &std::path::Path| -> Option<String> {
+        for (prog, args) in [("shasum", vec!["-a", "256"]), ("sha256sum", vec![])] {
+            if let Ok(o) = std::process::Command::new(prog).args(&args).arg(path).output() {
+                if o.status.success() {
+                    return String::from_utf8_lossy(&o.stdout).split_whitespace().next().map(str::to_string);
+                }
+            }
+        }
+        None
+    };
+    let d = dir("pinsha");
+    std::fs::create_dir_all(&d).unwrap();
+    let man = d.join("downloads.json");
+    let ver = bundled().items.into_iter().find(|i| i.id == "cli:duckdb").unwrap().version;
+    let mut seen = 0;
+    for (i, len) in [0usize, 1, 55, 56, 63, 64, 65, 119, 120, 128, 1000, 65_535, 65_536, 300_001].into_iter().enumerate() {
+        let f = d.join(format!("duckdb-wheel-{i}.whl"));
+        let data: Vec<u8> = (0..len).map(|k| (k.wrapping_mul(2654435761) >> 7) as u8).collect();
+        std::fs::write(&f, &data).unwrap();
+        let Some(want) = tool(&f) else {
+            eprintln!("skipped: no sha256 tool on this machine");
+            return;
+        };
+        std::fs::write(&man, to_json(&bundled())).unwrap();
+        let args: Vec<String> = ["pin", man.to_str().unwrap(), "duckdb", "--version", ver.as_str(), "--source", "t", "--date", "2026-11-14", "--file", f.to_str().unwrap()].iter().map(|s| s.to_string()).collect();
+        run(&args).unwrap();
+        let it = parse(&std::fs::read(&man).unwrap()).unwrap().items.into_iter().find(|i| i.id == "cli:duckdb").unwrap();
+        match it.checksum {
+            Some(Checksum::Sha256 { files, .. }) => assert_eq!(files[0].sha256, want, "{len} bytes"),
+            other => panic!("{other:?}"),
+        }
+        seen += 1;
+    }
+    assert_eq!(seen, 14);
 }

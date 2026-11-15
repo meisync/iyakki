@@ -148,3 +148,71 @@ fn flow_publish_and_rollback_still_ask_every_time() {
         assert!(crate::agent::hard_ask(name, &json!({})).is_some(), "{name} is hard-ask, also in Auto and Autopilot");
     }
 }
+
+#[test]
+fn the_whole_flow_trial_by_chat_refuses_steps_with_effects_and_needs_a_run() {
+    let w = world("trial");
+    let call = |name: &str, args: Value| w.env.call(name, &args, None);
+    let f = build_flow(&json!({"name": "Mixed", "nodes": [{"id": "call", "kind": "http", "config": {"url": "http://127.0.0.1:1/x"}, "retry": {"attempts": 1}}, {"id": "tell", "kind": "notify", "config": {"title": "x"}}], "edges": [{"from": "start", "to": "call"}, {"from": "call", "to": "tell"}]})).unwrap();
+    let made = w.env.create_draft(f, "user:test").unwrap();
+    let err = call("flow_trial", json!({"flow": made.id})).unwrap_err();
+    assert!(err.contains("no run yet"), "{err}");
+    w.env.store.publish(&made.id, &iyakki_flow::store::PublishReq { by: "user:test", label: "", changelog: "v1", approved_by: Some("user:test") }).unwrap();
+    let run = w.env.engine.start_run(StartRequest::new(&made.id).trigger("cron", "scheduler")).unwrap().run_id;
+    w.env.engine.wait_for(&run, Duration::from_secs(10), |r| r.status.is_terminal()).unwrap();
+    let out = call("flow_trial", json!({"flow": made.id})).unwrap();
+    assert!(out.contains("refused tell"), "{out}");
+    assert!(out.contains("(no effects)"), "{out}");
+    // the draft was not changed and nothing was published
+    assert_eq!(w.env.store.versions(&made.id).len(), 1);
+}
+
+#[test]
+fn a_run_the_assistant_starts_is_waiting_work_in_the_ledger_and_ends_with_how_it_ended() {
+    use crate::pending::{Source, State};
+    let w = world("ledger");
+    let call = |name: &str, args: Value| w.env.call(name, &args, None);
+    let f = build_flow(&json!({"name": "Dead address", "nodes": [{"id": "call", "kind": "http", "config": {"url": "http://127.0.0.1:1/x"}, "retry": {"attempts": 1}}], "edges": [{"from": "start", "to": "call"}]})).unwrap();
+    let made = w.env.create_draft(f, "user:test").unwrap();
+    w.env.store.publish(&made.id, &iyakki_flow::store::PublishReq { by: "user:test", label: "", changelog: "v1", approved_by: Some("user:test") }).unwrap();
+    let out = call("flow_run", json!({"flow": made.id})).unwrap();
+    let run = out.split_whitespace().nth(2).unwrap().trim_end_matches('.').to_string();
+    let t0 = std::time::Instant::now();
+    loop {
+        let t = w.env.ledger().list("").into_iter().find(|t| t.source == Source::Flow && t.key == run);
+        match t {
+            Some(t) if t.state.finished() => {
+                assert_eq!(t.state, State::FinishedFailed, "{t:?}");
+                assert!(t.label.contains("Dead address") && t.detail.contains("ended"), "{t:?}");
+                break;
+            }
+            Some(_) => {}
+            None => panic!("no ticket for run {run}"),
+        }
+        assert!(t0.elapsed() < Duration::from_secs(20), "the ticket never ended");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // a scheduled run (later) is not waiting work now
+    let before = w.env.ledger().list("").len();
+    let later = call("flow_run", json!({"flow": made.id, "at": "2099-01-01T00:00:00Z"}));
+    if later.is_ok() {
+        assert_eq!(w.env.ledger().list("").len(), before, "a run scheduled for later is not reported as running");
+    }
+}
+
+#[test]
+fn the_last_open_flow_stays_four_hours_and_then_the_record_is_gone() {
+    let w = world("lastttl");
+    let made = w.env.create_draft(build_flow(&json!({"name": "Sticky", "nodes": [{"id": "n", "kind": "notify", "config": {"title": "hi"}}]})).unwrap(), "user:test").unwrap();
+    set_last_flow(&w.env.svc, &w.env.user, &made.id, "Sticky");
+    let now = crate::clock::now_unix();
+    assert_eq!(LAST_FLOW_TTL_SECS, 4 * 3600);
+    assert_eq!(last_flow_at(&w.env, now).map(|x| x.0), Some(made.id.clone()));
+    // three hours and fifty-nine minutes later it is still there, and exactly at the limit too
+    assert!(last_flow_at(&w.env, now + 4 * 3600 - 60).is_some());
+    assert!(last_flow_at(&w.env, now + 4 * 3600).is_some());
+    // a second past the four hours it is forgotten, and it stays forgotten
+    assert!(last_flow_at(&w.env, now + 4 * 3600 + 5).is_none());
+    assert!(!last_flow_recorded(&w.env.svc, &w.env.user));
+    assert!(last_flow_at(&w.env, now).is_none());
+}

@@ -144,3 +144,13 @@ Step 4, first cut, in `crates/iyakki-wake` (no dependencies; steps to record and
 
 Not built: wiring the spotter to the microphone (so opting in starts no listening and the status says so), the top-bar indicator, the second-stage Whisper confirm, the sensitivity/miss counters in the tile. Accuracy on real voices and rooms is unknown: the only trained model so far used synthetic stub speech.
 
+
+
+## Cloud mode status (2026-11-13, F-VOICE-38, lane P-B)
+
+What already works by design and is now tested: in a web page session (a cloud tenant, or a desktop served to a browser) `browsersource::recorders_for` hands My IYAKKI the page's
+microphone (16 kHz mono chunks on the binary channel, switched on only by the person's own click, with the media policy deciding first), and `voiceassist_cloud_tests.rs` runs the
+whole loop (tap, listen, pause, speech to text, agent, spoken answer, follow-up window, idle) over it with fakes. The answer's sound goes the other way through the mixer's tee into
+`BrowserMedia::push_audio` (48 kHz stereo, at most about two seconds queued). **Not verified:** the delay of a real page, the echo gate when the page plays the answer a moment late
+(the speaker level is still a fixed estimate), a push-to-talk button in the web page itself, and a WebRTC path (the WebSocket binary channel is what exists).
+\n

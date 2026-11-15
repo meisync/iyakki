@@ -7,7 +7,7 @@
 #   changed.sh <variant> --explain            also print every input group with its hash
 #
 # <variant> is what build.sh takes: libre|hw|mac|web|macweb (ARCH=aarch64 for the ARM image, like build.sh). The same environment
-# switches count (WEB_H264, WEB_AV_ADDON, WEB_MEDIA, WEB_IRIS, WEB_CROCUS, WITH_FFMPEG, IYAKKI_PROFILE), because they change the composed defconfig.
+# switches count (WEB_H264, WEB_AV_ADDON, WEB_MEDIA, WEB_IRIS, WEB_CROCUS, WITH_FFMPEG, WITH_PODMAN, IYAKKI_PROFILE), because they change the composed defconfig.
 #
 # First line of the output is exactly one of
 #   NOTHING             the images are up to date: reuse them
@@ -64,6 +64,7 @@ compose() {
     if [ "${WEB_MEDIA:-0}" = 1 ]; then cat "$CFG/iyakki_web_media.fragment"; fi
   fi
   [ "${WITH_FFMPEG:-0}" = 1 ] && cat "$CFG/iyakki_media.fragment"
+  [ "${WITH_PODMAN:-0}" = 1 ] && cat "$CFG/iyakki_cluster.fragment"
   return 0
 }
 compose > "$WORK/defconfig"; [ -z "${IYAKKI_DUMP_DEFCONFIG:-}" ] || cp "$WORK/defconfig" "$IYAKKI_DUMP_DEFCONFIG"; [ -z "${IYAKKI_DUMP_DEFCONFIG:-}" ] || cp "$WORK/defconfig" "$IYAKKI_DUMP_DEFCONFIG"; [ -z "${IYAKKI_DUMP_DEFCONFIG:-}" ] || cp "$WORK/defconfig" "$IYAKKI_DUMP_DEFCONFIG"; [ -z "${IYAKKI_DUMP_DEFCONFIG:-}" ] || cp "$WORK/defconfig" "$IYAKKI_DUMP_DEFCONFIG"

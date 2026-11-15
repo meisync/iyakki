@@ -19,6 +19,8 @@ struct RecFake {
     asked: RefCell<Vec<(u64, RecSeek)>>,
     frame_err: RefCell<Option<String>>,
     audit: RefCell<Vec<AuditRow>>,
+    limits: RefCell<iyakki_tile_api::cameras::RecLimits>,
+    limits_set: RefCell<Vec<(Option<u64>, Option<u64>)>>,
 }
 
 /// Pictures every second from 10:00 to 10:00:09 of the newer day, and from 20:00 to 20:00:04 of the older.
@@ -35,7 +37,7 @@ fn info(owner: bool) -> RecInfo {
 impl RecFake {
     fn new(owner: bool) -> RecFake {
         let c = CamInfo { id: "c0".into(), name: "Front door".into(), kind: Kind::Network, address: "rtsp://10.0.0.5/live".into(), user: "admin".into(), status: Status::Live, fps: 5.0, size: (8, 4), manage: true, owner: "amy".into(), allowed: vec![], has_password: true };
-        RecFake { cams: vec![c], info: RefCell::new(info(owner)), recording: Cell::new(false), set: RefCell::new(vec![]), exports: RefCell::new(vec![]), started: RefCell::new(vec![]), asked: RefCell::new(vec![]), frame_err: RefCell::new(None), audit: RefCell::new(vec![]) }
+        RecFake { cams: vec![c], info: RefCell::new(info(owner)), recording: Cell::new(false), set: RefCell::new(vec![]), exports: RefCell::new(vec![]), started: RefCell::new(vec![]), asked: RefCell::new(vec![]), frame_err: RefCell::new(None), audit: RefCell::new(vec![]), limits: RefCell::new(iyakki_tile_api::cameras::RecLimits { total_mb: 100_000, min_free_mb: 5_000, min_floor_mb: 256, can_change: true }), limits_set: RefCell::new(vec![]) }
     }
 }
 
@@ -75,6 +77,16 @@ impl CameraSource for RecFake {
         if let Some(w) = &c.windows {
             self.info.borrow_mut().windows = w.clone();
         }
+        Ok(())
+    }
+    fn rec_limits(&self) -> Option<iyakki_tile_api::cameras::RecLimits> {
+        Some(self.limits.borrow().clone())
+    }
+    fn rec_limits_set(&self, t: Option<u64>, f: Option<u64>) -> Result<(), String> {
+        if f.is_some_and(|f| f < 256) {
+            return Err("the free-space floor cannot be below 256 MB".into());
+        }
+        self.limits_set.borrow_mut().push((t, f));
         Ok(())
     }
     fn rec_days(&self, _: &str) -> Result<Vec<RecDay>, String> {
@@ -123,7 +135,7 @@ fn cx_of(f: &RecFake) -> TileCx<'_> {
         }
     }
     static NO_USE: NoUse = NoUse;
-    TileCx { user: "amy", manage_settings: false, usage: &NO_USE, calendar: &iyakki_tile_api::calendar::NoCalendar, audit: &iyakki_tile_api::NoAudit, remote: &iyakki_tile_api::remote::NoRemote, cameras: f }
+    TileCx { user: "amy", manage_settings: false, usage: &NO_USE, calendar: &iyakki_tile_api::calendar::NoCalendar, audit: &iyakki_tile_api::NoAudit, remote: &iyakki_tile_api::remote::NoRemote, cameras: f, radio: &iyakki_tile_api::radio::NoRadio }
 }
 
 fn draw(a: &mut CamerasApp, cx: &TileCx) -> Gfx {
@@ -398,4 +410,52 @@ fn this_computers_own_camera_is_never_recordable_and_the_tile_says_so() {
     key(&mut a, &cx, 'p');
     assert!(a.recordings().is_none());
     assert!(a.note().is_some_and(|n| !n.1 && n.0.contains("never recorded")));
+}
+
+fn retype(a: &mut CamerasApp, cx: &TileCx, text: &str) {
+    for _ in 0..14 {
+        a.handle(&Event::Key(Key::Backspace), cx);
+    }
+    for c in text.chars() {
+        key(a, cx, c);
+    }
+}
+
+#[test]
+fn the_limits_for_all_cameras_are_a_form_with_its_own_checks_and_everybody_else_only_reads_them() {
+    let f = RecFake::new(true);
+    let cx = cx_of(&f);
+    let mut a = open(&f);
+    key(&mut a, &cx, 'g');
+    assert!(a.recordings().unwrap().in_settings());
+    // a word is refused and the form stays open
+    retype(&mut a, &cx, "abc");
+    a.handle(&Event::Key(Key::Tab), &cx);
+    a.handle(&Event::Key(Key::Enter), &cx);
+    assert!(a.recordings().unwrap().in_settings());
+    assert!(f.limits_set.borrow().is_empty());
+    // a floor below the least is refused by the recorder with its reason
+    a.handle(&Event::Key(Key::BackTab), &cx);
+    retype(&mut a, &cx, "50");
+    a.handle(&Event::Key(Key::Tab), &cx);
+    retype(&mut a, &cx, "0.1");
+    a.handle(&Event::Key(Key::Enter), &cx);
+    assert!(a.recordings().unwrap().in_settings());
+    assert!(f.limits_set.borrow().is_empty());
+    retype(&mut a, &cx, "2");
+    a.handle(&Event::Key(Key::Enter), &cx);
+    assert!(!a.recordings().unwrap().in_settings(), "saved: the page is back");
+    assert_eq!(*f.limits_set.borrow(), vec![(Some(50 * 1024), Some(2 * 1024))]);
+    assert!(a.recordings().unwrap().note().is_some_and(|(t, ok)| ok && t.contains("Limits for all cameras saved")));
+    // somebody who is not an administrator reads the numbers and no form opens
+    f.limits.borrow_mut().can_change = false;
+    key(&mut a, &cx, 'g');
+    assert!(!a.recordings().unwrap().in_settings());
+    assert!(a.recordings().unwrap().note().is_some_and(|(t, _)| t.contains("Only an administrator")), "{:?}", a.recordings().unwrap().note());
+    // the camera's own settings form does not turn into the limits form
+    key(&mut a, &cx, 'c');
+    assert!(a.recordings().unwrap().in_settings());
+    a.handle(&Event::Key(Key::Esc), &cx);
+    assert!(!a.recordings().unwrap().in_settings());
+    assert_eq!(f.limits_set.borrow().len(), 1);
 }

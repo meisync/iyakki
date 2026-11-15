@@ -127,12 +127,21 @@ For a stick: write `OUT/iyakki-lean-x86_64.img` to a USB drive with the normal w
 Next steps for the build: call the split from `repack.sh` (flag `--lean`) and size the boot volume in `genimage-install.cfg`; rebuild the kernel (Mac and PC) with the new fragment.
 
 ## Not done in this round (stated plainly)
-* **Prefetch** of the boot-order file list after the splash (`readahead`/`posix_fadvise`, bounded by the memory gate, paused while the foreground
-  reads): designed only. With a lazily read root it matters more, so it comes after the Mac measurement; record the order with a QEMU run using `fanotify`.
+* **Prefetch** of the boot-order file list (F-BOOT-30): built, off by default, **not measured**. `iyakki.bootrecord=1` on the kernel command line
+  notes every file opened on the root mount for the first 90 seconds (fanotify) and keeps the list in `/var/lib/iyakki/boot-order.list`;
+  `iyakki.prefetch=on` makes the next boots ask the kernel to read those files into the page cache (`posix_fadvise` WILLNEED) in the background after
+  the critical path, within a quarter of the available memory (512 MiB always left free, 1 GiB at most), in batches of about 8 MiB, pausing while the
+  disk pressure is above 5 percent, stopping when memory gets short or after two minutes (`crates/iyakki-core/src/bootprefetch.rs`). Not done: a
+  Settings switch and chat tool (it is a developer option), a recorded list shipped with the image, and the measurement on the Mac that it shortens the first start
+  (with a lazily read root it should matter more).
 * **Experimental compressed memory** (owner decisions: zswap plus a small swap file when there is a data disk, zram otherwise; one Off/On setting
-  in Settings, admin only, off by default, `iyakki.zram=exp`; the memory gate counts zram only when on): not implemented. Facts gathered:
-  the real root compresses 663 MB to 220 MB (zstd -3, 3.0x) and 173 MB (zstd -19, 3.8x); lz4 was not available to measure. A root on zram for the
-  no-disk live case would hold about that. Defaults are untouched (zram 50 percent, swappiness 100).
+  in Settings, admin only, off by default; the memory gate counts the saving only when on): built as `iyakki-zram::compressed`. Switch: Settings, Memory,
+  "Compressed memory, experimental" (key E), or `compressed-memory=on` in system.conf, or the boot option `iyakki.zram=exp` (which locks the page); the
+  assistant has `compressed_memory_status` and `compressed_memory_set`. At boot `memory_settings()` makes the plan after the data volume is mounted: with
+  the data volume on a disk with room (twice the file and at least 1 GiB free), zram off, zswap on and a swap file of a quarter of RAM (512 MiB to 4 GiB);
+  otherwise zram only. `MemFacts::with_compressed_credit` counts half of the saving for the screen memory gate. Not done: feeding the real zram and zswap
+  figures to the gate, and a run on a real machine. Facts gathered: the real root compresses 663 MB to 220 MB (zstd -3, 3.0x) and 173 MB (zstd -19, 3.8x);
+  lz4 was not available to measure. The kernel (6.12) is built with `CONFIG_ZSWAP=y`, zstd and zsmalloc (`linux.fragment`). Defaults are untouched (zram 50 percent, swappiness 100).
 * GRUB: `set timeout="3"` kept; no GRUB setting was changed (the graphics modules load once; `linuxefi` does not exist in this GRUB build); no
   bootloader replacement (no measured win to justify one). FAT cluster size cannot be raised on a 100 to 300 MB volume (FAT32 needs 65525 clusters).
 * Kernel command line options (`tsc=reliable`, `nowatchdog`, `raid=noautodetect`) were not changed: nothing measured shows them on the critical path;
@@ -347,3 +356,33 @@ and the hot-plug listener for an interface that shows up later); the boot sequen
 On screen, a "Wi-Fi" row exists only while a cable carries the default route and the Wi-Fi adapter is not up (for 3 minutes at most); the sign-in line says
 "Wi-Fi: starting in the background" at its end, the row is not part of the "x of y", does not keep the line busy and never turns it red
 (`startup::login_view`, `startup_probe::wifi_state`). Without a cable, or without a Wi-Fi adapter, nothing changes. Not tried on the Mac yet.
+
+## Layered root (2026-11-11, alpha.3)
+
+Design: [`development/LAYERED-ROOT-DESIGN.md`](development/LAYERED-ROOT-DESIGN.md). The one `root.sfs` can be built as `base`, `core` and `ui` squashfs layers
+(`lean-image.sh --layers`, rules in `dist/buildroot/layers.txt`); the first stage mounts each read-only at `/layers/NAME` and stacks them with overlayfs
+(`lowerdir=<patches>:ui:core:base`) under the same RAM-backed upper layer as before. Without `boot/layers.json` (or an updated `iyakki/layers/current.json`) nothing changes.
+
+**Measured (QEMU through UEFI and GRUB, KVM, this computer; boot 2026-11-11):** the layered seed image reaches `root layers mounted: base core ui` and `switching root`;
+volumes found at 4296 ms in both layouts; the three layers were mounted in 24 ms (single root: 12 ms), overlay and switch at 4327 ms (single root: 4313 ms). The single-root image
+of the same system still boots (`root boot/root.sfs mounted`). `dist/buildroot/layers-data-qemu-test.sh OLD NEW` boots a disk whose newer layers are on the data volume.
+
+**Layer sizes of the current system (zstd -3; -19 is about 8 percent smaller):** base 397.8 MB (4991 files), core 39.2 MB (30 files, 98 MB `iyakki` program inside), ui 8.5 MB (50 files),
+together 467 MB, the same as the one `root.sfs`. Building them takes 16 s on top of the cpio unpack; the build is reproducible (a second build gave the same three hashes).
+
+**Update pack sizes against the last build (`iyakki dev update-pack --against`, measured here with the real layers of this system; the pack folder also holds about 21 MB of boot
+files (kernel, small RAM disk, menu, loader) that the device compares by hash and stages only when they differ):**
+
+| Change | Layer payload that travels | Whole-root pack today |
+|---|---|---|
+| nothing changed | 0 bytes (all three layers `keep`) | 417 to 467 MB |
+| one font file added (ui) | 23 KB (delta of the ui layer) | 417 to 467 MB |
+| one small file added to core (the program unchanged) | 44 KB (delta of the core layer) | 417 to 467 MB |
+| core: another build of the `iyakki` program (the 1111 build against today's) | 38 MB whole (the delta of the compressed layer is 37.7 MB, not clearly smaller, so the layer is sent whole) | 417 to 467 MB |
+| same, with the core layer stored uncompressed (`store` in `layers.txt`, 98 MB on disk) | 15.5 MB delta | 417 to 467 MB |
+| base: one 1 MB library added | 1.0 MB delta (398 MB layer; the delta took 114 s and 1.5 GB of memory in a debug build) | 417 to 467 MB |
+
+Reading it plainly: the win is real for ui, small core and base changes, and 10 times smaller for a relinked program (38 MB against 450 MB). A delta of a *compressed* squashfs cannot
+see through the compression, so a rebuilt program is sent whole (38 MB). Storing the core layer uncompressed makes the delta 2.5 times smaller (15.5 MB) at the price of 60 MB more
+on the data volume, and does not fit the seed on the 465 MB boot volume (so it would apply to updated layers only); not switched on, an owner decision. Until the shell is its own program,
+a shell string change changes the `iyakki` program and therefore the core layer. **Not measured:** anything on a real machine (copy speed to a USB drive, boot with layers on a Mac).

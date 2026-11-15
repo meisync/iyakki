@@ -96,6 +96,12 @@ impl ObjectStorageTools {
 }
 
 impl Tools for ObjectStorageTools {
+
+    fn inner_tools(&self) -> Option<&dyn Tools> {
+
+        Some(&*self.inner)
+
+    }
     fn defs(&self) -> Vec<ToolDef> {
         let mut v = self.inner.defs();
         v.retain(|d| !is_object_storage_tool(&d.spec.name));

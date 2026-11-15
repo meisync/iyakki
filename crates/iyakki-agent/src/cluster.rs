@@ -20,6 +20,8 @@ use crate::exec::{self, Extra};
 
 pub const NAMESPACE: &str = "iyakki-sandbox";
 pub const MAX_CODE: usize = 64 * 1024;
+/// The most text a run can be given on its standard input.
+pub const MAX_STDIN: usize = 16 * 1024;
 const MAX_OUTPUT: usize = 64 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -224,19 +226,19 @@ impl Cluster {
 
     /// For tests on machines that are not the real thing.
     pub fn assume_machine(&self, root: bool, cgroups: bool) {
-        let mut o = self.over.lock().unwrap();
+        let mut o = self.over.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         o.root = Some(root);
         o.cgroups = Some(cgroups);
     }
 
     /// For tests: pretend `/` is (or is not) a RAM root file system.
     pub fn assume_ramfs(&self, ramfs: bool) {
-        self.over.lock().unwrap().ramfs = Some(ramfs);
+        self.over.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ramfs = Some(ramfs);
     }
 
     /// The live system runs from RAM: `/` is `rootfs`, which the kubelet cannot measure.
     fn root_is_ramfs(&self) -> bool {
-        self.over.lock().unwrap().ramfs.unwrap_or_else(ramfs_root_now)
+        self.over.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ramfs.unwrap_or_else(ramfs_root_now)
     }
 
     pub fn kubeconfig(&self) -> PathBuf {
@@ -248,16 +250,16 @@ impl Cluster {
     }
 
     pub fn state(&self) -> ClusterState {
-        self.state.lock().unwrap().clone()
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 
     fn set_state(&self, s: ClusterState) {
-        *self.state.lock().unwrap() = s;
+        *self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = s;
     }
 
     /// What is missing for the cluster to run here (empty when it can).
     pub fn requirements(&self) -> Vec<String> {
-        let o = self.over.lock().unwrap();
+        let o = self.over.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut v = Vec::new();
         // SAFETY: geteuid has no preconditions.
         let root = o.root.unwrap_or_else(|| unsafe { libc::geteuid() } == 0);
@@ -334,11 +336,11 @@ impl Cluster {
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log2))
             .process_group(0);
-        if self.root_is_ramfs() && self.over.lock().unwrap().ramfs.is_none() {
+        if self.root_is_ramfs() && self.over.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ramfs.is_none() {
             start_in_ram_root_jail(&mut cmd)?;
         }
         let child = cmd.spawn().map_err(|e| format!("could not start k3s: {e}"))?;
-        *self.child.lock().unwrap() = Some(child);
+        *self.child.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(child);
         self.set_state(ClusterState::Starting);
         let gen = self.gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         let me = self.clone();
@@ -355,7 +357,7 @@ impl Cluster {
         let began = Instant::now();
         while self.current(gen) {
             {
-                let mut c = self.child.lock().unwrap();
+                let mut c = self.child.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some(ch) = c.as_mut() {
                     let life = iyakki_core_api::child_status(ch);
                     if life.is_over() {
@@ -399,7 +401,7 @@ impl Cluster {
 
     /// Asks k3s to shut down (SIGTERM, which stops its containers cleanly) and, if it has not by then, ends it.
     pub fn stop(&self) -> Result<(), String> {
-        let child = self.child.lock().unwrap().take();
+        let child = self.child.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
         self.gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let Some(mut child) = child else {
             self.set_state(ClusterState::Stopped);
@@ -427,6 +429,36 @@ impl Cluster {
         Ok(())
     }
 
+    /// Apply YAML text (one or several documents) to the machine's own cluster. The cluster must be running.
+    pub fn apply_yaml_text(&self, yaml: &str) -> Result<String, String> {
+        if self.state() != ClusterState::Running {
+            return Err(format!("the container cluster is {}. Start it first (cluster_start), then try again.", self.state().label()));
+        }
+        std::fs::create_dir_all(self.dir.join("jobs")).map_err(io_err)?;
+        let mut r = [0u8; 4];
+        let _ = iyakki_sec::random_fill(&mut r);
+        let p = self.dir.join("jobs").join(format!("svc-{}.yaml", r.iter().map(|b| format!("{b:02x}")).collect::<String>()));
+        std::fs::write(&p, yaml).map_err(io_err)?;
+        let out = self.kubectl(&["apply", "-f", &p.display().to_string()], 60);
+        let _ = std::fs::remove_file(&p);
+        out
+    }
+
+    /// Runs `kubectl apply -n <namespace>` on YAML text for a task's own namespace (the cluster must be running).
+    fn apply_in(&self, namespace: &str, yaml: &str) -> Result<String, String> {
+        if self.state() != ClusterState::Running {
+            return Err(format!("the container cluster is {}. Start it first (cluster_start), then try again.", self.state().label()));
+        }
+        std::fs::create_dir_all(self.dir.join("jobs")).map_err(io_err)?;
+        let mut r = [0u8; 4];
+        let _ = iyakki_sec::random_fill(&mut r);
+        let p = self.dir.join("jobs").join(format!("task-{}.yaml", r.iter().map(|b| format!("{b:02x}")).collect::<String>()));
+        std::fs::write(&p, yaml).map_err(io_err)?;
+        let out = self.kubectl(&["apply", "-n", namespace, "-f", &p.display().to_string()], 60);
+        let _ = std::fs::remove_file(&p);
+        out
+    }
+
     fn manifest_file(&self, name: &str, v: &Value) -> Result<PathBuf, String> {
         std::fs::create_dir_all(self.dir.join("jobs")).map_err(io_err)?;
         let p = self.dir.join("jobs").join(format!("{name}.json"));
@@ -437,8 +469,22 @@ impl Cluster {
 
     /// The Job that runs `code` (exposed so it can be checked without a cluster).
     pub fn job_manifest(name: &str, lang: &Language, code: &str, timeout: u64, network: bool) -> Value {
-        let mut command: Vec<&str> = lang.command.to_vec();
+        Self::job_manifest_with_input(name, lang, code, timeout, network, "")
+    }
+
+    /// As [`Cluster::job_manifest`], with text the program reads on its standard input. A job has no attached input, so the text goes
+    /// in as the environment variable `IYAKKI_STDIN` and a `sh` wrapper pipes it in; with no text the manifest is the plain one.
+    pub fn job_manifest_with_input(name: &str, lang: &Language, code: &str, timeout: u64, network: bool, stdin: &str) -> Value {
+        let mut command: Vec<&str> = Vec::new();
+        if !stdin.is_empty() {
+            command.extend(["sh", "-c", "printf '%s' \"$IYAKKI_STDIN\" | exec \"$@\"", "iyakki"]);
+        }
+        command.extend(lang.command.iter().copied());
         command.push(code);
+        let mut env = vec![json!({"name": "HOME", "value": "/work"}), json!({"name": "PYTHONDONTWRITEBYTECODE", "value": "1"})];
+        if !stdin.is_empty() {
+            env.push(json!({"name": "IYAKKI_STDIN", "value": stdin}));
+        }
         json!({
             "apiVersion": "batch/v1",
             "kind": "Job",
@@ -459,7 +505,7 @@ impl Cluster {
                             "image": lang.image,
                             "command": command,
                             "workingDir": "/work",
-                            "env": [{"name": "HOME", "value": "/work"}, {"name": "PYTHONDONTWRITEBYTECODE", "value": "1"}],
+                            "env": env,
                             "securityContext": {"allowPrivilegeEscalation": false, "capabilities": {"drop": ["ALL"]}},
                             "resources": {"limits": {"cpu": "1", "memory": "512Mi", "ephemeral-storage": "256Mi"}, "requests": {"cpu": "50m", "memory": "32Mi"}},
                             "volumeMounts": [{"name": "work", "mountPath": "/work"}]
@@ -508,6 +554,17 @@ impl Cluster {
     /// Runs `code` in a fresh container of the language's image and returns what it printed. Waits at most
     /// `timeout` seconds for the code itself (plus time to fetch the image the first time).
     pub fn sandbox_run(&self, language_name: &str, code: &str, timeout: u64, network: bool) -> Result<SandboxResult, String> {
+        self.sandbox_run_io(language_name, code, "", timeout, network, &std::sync::atomic::AtomicBool::new(false))
+    }
+
+    /// As [`Cluster::sandbox_run`], with text on the program's standard input (up to [`MAX_STDIN`] bytes, no NUL) and a flag that
+    /// stops the run for real: when it becomes true the job is deleted from the cluster (within a fraction of a second) and the
+    /// answer says it was stopped.
+    pub fn sandbox_run_io(&self, language_name: &str, code: &str, stdin: &str, timeout: u64, network: bool, cancel: &std::sync::atomic::AtomicBool) -> Result<SandboxResult, String> {
+        use std::sync::atomic::Ordering::SeqCst;
+        if stdin.len() > MAX_STDIN || stdin.contains('\0') {
+            return Err(format!("the input may be up to {} KB of text", MAX_STDIN / 1024));
+        }
         let lang = language(language_name).ok_or_else(|| format!("languages available: {}", LANGUAGES.iter().map(|l| l.name).collect::<Vec<_>>().join(", ")))?;
         if code.trim().is_empty() || code.len() > MAX_CODE || code.contains('\0') {
             return Err(format!("give some code (up to {} KB)", MAX_CODE / 1024));
@@ -521,7 +578,7 @@ impl Cluster {
         let name = format!("sbx-{}", r.iter().map(|b| format!("{b:02x}")).collect::<String>());
         let setup = self.manifest_file("setup", &Self::setup_manifest())?;
         self.kubectl(&["apply", "-f", &setup.display().to_string()], 60)?;
-        let mut manifest = Self::job_manifest(&name, lang, code, timeout, network);
+        let mut manifest = Self::job_manifest_with_input(&name, lang, code, timeout, network, stdin);
         if self.root_is_ramfs() {
             without_storage_limits(&mut manifest);
         }
@@ -533,6 +590,10 @@ impl Cluster {
         let give_up = Duration::from_secs(timeout + 240);
         let mut outcome: Option<bool> = None;
         while started.elapsed() < give_up {
+            if cancel.load(SeqCst) {
+                let _ = self.kubectl(&["delete", "job", &name, "-n", NAMESPACE, "--wait=false"], 30);
+                return Ok(SandboxResult { ok: false, output: "[stopped by you]".into(), seconds: started.elapsed().as_secs() });
+            }
             let j = self.kubectl(&["get", "job", &name, "-n", NAMESPACE, "-o", "json"], 30).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
             if let Some(j) = &j {
                 if j.pointer("/status/succeeded").and_then(Value::as_u64).unwrap_or(0) >= 1 {
@@ -554,7 +615,12 @@ impl Cluster {
                     }
                 }
             }
-            std::thread::sleep(Duration::from_millis(1500));
+            for _ in 0..15 {
+                if cancel.load(SeqCst) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
         }
         let mut logs = self.kubectl(&["logs", &format!("job/{name}"), "-n", NAMESPACE, "--tail=500", &format!("--limit-bytes={MAX_OUTPUT}")], 30).unwrap_or_default();
         if logs.trim() == "(no output, exit status 0)" {
@@ -602,6 +668,45 @@ pub fn write_fake_k3s(root: &Path, rec: &Path, job_result: &str) {
     let _ = std::fs::remove_file(root.join("bin/k3s"));
     std::os::unix::fs::symlink(&prog, root.join("bin/k3s")).unwrap();
     std::fs::write(root.join("state.json"), r#"{"k3s":{"id":"k3s","version":"v1","reported":"","at":1,"bins":["k3s"],"verified":true,"by":"root"}}"#).unwrap();
+}
+
+/// A namespace name that is safe to hand to kubectl: a DNS label (lower case letters, digits, dashes).
+fn namespace_ok(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 63 && !name.starts_with('-') && !name.ends_with('-') && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// The machine's own cluster is where a parallel task gets its namespace (`taskenv::TaskCluster`).
+impl crate::taskenv::TaskCluster for Cluster {
+    fn create_namespace(&self, name: &str) -> Result<(), String> {
+        if !namespace_ok(name) {
+            return Err(format!("{name:?} is not a usable namespace name"));
+        }
+        if self.state() != ClusterState::Running {
+            return Err(format!("the container cluster is {}", self.state().label()));
+        }
+        match self.kubectl(&["create", "namespace", name], 30) {
+            Ok(_) => Ok(()),
+            Err(e) if e.contains("AlreadyExists") || e.contains("already exists") => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn delete_namespace(&self, name: &str) -> Result<(), String> {
+        if !namespace_ok(name) {
+            return Err(format!("{name:?} is not a usable namespace name"));
+        }
+        if self.state() != ClusterState::Running {
+            return Err(format!("the container cluster is {}", self.state().label()));
+        }
+        self.kubectl(&["delete", "namespace", name, "--wait=false", "--ignore-not-found"], 30).map(|_| ())
+    }
+
+    fn apply(&self, namespace: &str, manifest: &str) -> Result<String, String> {
+        if !namespace_ok(namespace) {
+            return Err(format!("{namespace:?} is not a usable namespace name"));
+        }
+        self.apply_in(namespace, manifest)
+    }
 }
 
 #[cfg(test)]
@@ -744,6 +849,45 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_run_can_be_given_input_and_stopped_for_real() {
+        // the manifest: no input keeps the plain command; input is piped in by a wrapper and never put in the command line
+        let plain = Cluster::job_manifest_with_input("sbx-1", language("python").unwrap(), "print(input())", 5, false, "");
+        assert_eq!(plain, Cluster::job_manifest("sbx-1", language("python").unwrap(), "print(input())", 5, false));
+        let fed = Cluster::job_manifest_with_input("sbx-1", language("python").unwrap(), "print(input())", 5, false, "42\n");
+        let c0 = &fed["spec"]["template"]["spec"]["containers"][0];
+        assert_eq!(c0["command"][0], "sh");
+        assert!(c0["command"].to_string().contains("exec \\\"$@\\\"") && !c0["command"].to_string().contains("42"));
+        assert!(c0["env"].as_array().unwrap().iter().any(|e| e["name"] == "IYAKKI_STDIN" && e["value"] == "42\n"));
+        // against the stand-in cluster: the input reaches the applied manifest; a job that never ends is deleted when the flag is raised
+        let d = tmp("cl-io");
+        let clis = fake_k3s(&d, "{}");
+        let c = Arc::new(Cluster::new(&d.join("cluster"), clis));
+        c.assume_machine(true, true);
+        c.start().unwrap();
+        wait_state(&c, ClusterState::Running);
+        assert!(c.sandbox_run_io("python", "print(1)", "a\0b", 20, false, &std::sync::atomic::AtomicBool::new(false)).unwrap_err().contains("input"));
+        assert!(c.sandbox_run_io("python", "print(1)", &"x".repeat(MAX_STDIN + 1), 20, false, &std::sync::atomic::AtomicBool::new(false)).is_err());
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let f2 = flag.clone();
+        let h = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(700));
+            f2.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let t = Instant::now();
+        let r = c.sandbox_run_io("python", "print(input())", "typed text\n", 600, false, &flag).unwrap();
+        h.join().unwrap();
+        assert!(!r.ok && r.output.contains("stopped by you"), "{r:?}");
+        assert!(t.elapsed() < Duration::from_secs(20), "stopped long before the job's own limit");
+        let manifests = std::fs::read_to_string(d.join("kubectl.log.manifests")).unwrap();
+        assert!(manifests.contains("IYAKKI_STDIN") && manifests.contains("typed text"));
+        let log = std::fs::read_to_string(d.join("kubectl.log")).unwrap();
+        assert!(log.lines().any(|l| l.starts_with("delete job sbx-")), "the job was deleted from the cluster: {log}");
+        // a flag already raised stops it before anything runs long
+        let raised = std::sync::atomic::AtomicBool::new(true);
+        assert!(c.sandbox_run_io("python", "print(1)", "", 600, false, &raised).unwrap().output.contains("stopped by you"));
+    }
+
+    #[test]
     fn a_failed_job_a_network_run_and_a_k3s_that_dies_are_reported() {
         let d = tmp("cl-fail");
         let clis = fake_k3s(&d, r#"{"status":{"failed":1}}"#);
@@ -771,6 +915,27 @@ pub(crate) mod tests {
         }
         assert!(matches!(c.state(), ClusterState::Failed(ref e) if e.contains("k3s exited")), "{:?}", c.state());
         assert!(c.sandbox_run("python", "print(1)", 30, false).unwrap_err().contains("failed"));
+    }
+    #[test]
+    fn a_task_namespace_is_created_applied_into_and_deleted_through_kubectl() {
+        use crate::taskenv::TaskCluster;
+        let d = tmp("cl-task");
+        let clis = fake_k3s(&d, "{}");
+        let c = Arc::new(Cluster::new(&d.join("cluster"), clis));
+        c.assume_machine(true, true);
+        assert!(c.create_namespace("task-1").unwrap_err().contains("cluster is"), "not running yet");
+        c.start().unwrap();
+        wait_state(&c, ClusterState::Running);
+        assert!(c.create_namespace("Bad Name; rm").unwrap_err().contains("not a usable"));
+        assert!(c.create_namespace("--all").is_err());
+        c.create_namespace("task-t1-demo").unwrap();
+        let out = c.apply("task-t1-demo", "kind: ConfigMap\nmetadata:\n  name: x\n");
+        assert!(out.is_ok(), "{out:?}");
+        c.delete_namespace("task-t1-demo").unwrap();
+        let rec = std::fs::read_to_string(d.join("kubectl.log")).unwrap();
+        assert!(rec.contains("create namespace task-t1-demo") && rec.contains("apply -n task-t1-demo -f") && rec.contains("delete namespace task-t1-demo --wait=false"), "{rec}");
+        assert!(std::fs::read_to_string(d.join("kubectl.log.manifests")).unwrap().contains("kind: ConfigMap"));
+        let _ = c.stop();
     }
 }
 
@@ -806,4 +971,5 @@ mod gone_tests {
         assert!(t.elapsed() < Duration::from_secs(2));
         assert_eq!(c.state(), ClusterState::Stopped);
     }
+
 }

@@ -27,18 +27,20 @@ image git BR2_PACKAGE_GIT
 image ssh BR2_PACKAGE_DROPBEAR_CLIENT
 optional kubectl downloaded with the k3s program at the person's click; callers ask has("kubectl") first
 optional k3s downloaded at the person's click (docs/K3S-DEV.md)
-optional podman only in the cluster fragment (iyakki_cluster.fragment), not in the default image
+optional podman only when built with WITH_PODMAN=1 (iyakki_cluster.fragment), not in the default image and never in the release image
 optional docker a developer machine's engine, never in the image
 host npx developer machine (coverage runs)
 host xdg-open a desktop session only (webengine::host_session); the image uses its own browser
 host rustc developer machine
 host rustup developer machine
+host python3 developer machine (dash/s3.rs SigV4 cross-check test only; skipped when absent)
 host apt-cache Debian or Ubuntu desktop (Linux apps tile)
 exempt cli.rs the restricted command shell's own "curl" built-in
 exempt grants.rs command-policy list (programs that are never auto-approved)
 exempt autopilot.rs command-policy list (programs the autopilot knows)
 exempt boardtrack.rs words that classify a task, not a spawn
 exempt devcluster.rs command-policy text: what a command would download
+exempt s3.rs test only: the SigV4 cross-check runs a Python script held in a raw string, which this scanner reads as production code after the raw string breaks its test-module skip; never runs on the image
 exempt flows/programs.rs allowed-program list of flow steps; a flow step reports a missing program itself
 exempt linuxapps_init.rs installs curl inside a Debian guest, not on the image
 exempt dockerlint.rs advice text about Dockerfiles

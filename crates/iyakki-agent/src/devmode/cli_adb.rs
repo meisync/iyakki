@@ -34,6 +34,7 @@ pub(super) fn run(cmd: &str, args: &Args, connect: &dyn Fn() -> Result<DevClient
         "info" => connect().and_then(|c| info(&c, out)),
         "ps" => connect().and_then(|c| ps(&c, out)),
         "dmesg" => connect().and_then(|c| dmesg(&c, args, out)),
+        "doctor" => connect().and_then(|c| doctor(&c, args, out)),
         "logs" if args.has("--system") => connect().and_then(|c| syslog(&c, args, out)),
         "status" => connect().and_then(|c| status(&c, out)),
         "files" | "file" => connect().and_then(|c| files(&c, args, out)),
@@ -74,6 +75,9 @@ fn info(c: &DevClient, out: &mut dyn FnMut(&str)) -> Result<(), String> {
     for g in v["gpu"].as_array().into_iter().flatten() {
         out(&format!("  gpu        {} driver {} ({}:{}) outputs: {}", s(g, "card"), if s(g, "driver").is_empty() { "none" } else { s(g, "driver") }, s(g, "vendor"), s(g, "device"), g["connected"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(" ")).filter(|x| !x.is_empty()).unwrap_or_else(|| "none connected".into())));
     }
+    for l in v["compat"]["lines"].as_array().into_iter().flatten().filter_map(|x| x.as_str()) {
+        out(&format!("  compat     {l}"));
+    }
     let snd: Vec<&str> = v["sound"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect()).unwrap_or_default();
     out(&format!("  sound      {}", if snd.is_empty() { "no sound card".to_string() } else { snd.join(" | ") }));
     for d in v["disks"].as_array().into_iter().flatten() {
@@ -97,6 +101,19 @@ fn ps(c: &DevClient, out: &mut dyn FnMut(&str)) -> Result<(), String> {
     }
     if v["all"].as_bool() != Some(true) {
         out("(only this account's processes: the full list is for administrator accounts)");
+    }
+    Ok(())
+}
+
+/// `iyakki dev doctor [--detail]`: the DOCTOR report of the paired device (F-DOCTOR-03). The exit status of the command stays 0; the first
+/// line says whether anything needs attention.
+fn doctor(c: &DevClient, args: &Args, out: &mut dyn FnMut(&str)) -> Result<(), String> {
+    let v = c.call("GET", "/v1/dev/doctor", &[("detail", if args.has("--detail") || args.has("-d") { "1" } else { "0" })], b"")?;
+    for l in s(&v, "text").lines() {
+        out(l);
+    }
+    if v["live"].as_bool() != Some(true) {
+        out("(This device answered without its running system's state: no dev cluster, vault or VPN lines.)");
     }
     Ok(())
 }
@@ -399,27 +416,94 @@ fn screenshots(c: &DevClient, args: &Args, out: &mut dyn FnMut(&str)) -> Result<
         None => 0,
     };
     let fps: u64 = args.get("--fps").and_then(|f| f.parse().ok()).unwrap_or(2).clamp(1, 5);
+    let fetch = || c.call_bytes("GET", "/v1/dev/screenshot", &[("display", display)], b"");
+    take_pictures(&fetch, secs, fps, args.get("-o"), &|d| std::thread::sleep(d), out)
+}
+
+/// One picture (`secs` 0) or a paced sequence of at most [`MAX_FRAMES`] pictures into a folder. `fetch` asks the device for one PNG;
+/// `sleep` is how the pacing waits (a test passes a recorder).
+fn take_pictures(fetch: &dyn Fn() -> Result<Vec<u8>, String>, secs: u64, fps: u64, to: Option<&str>, sleep: &dyn Fn(Duration), out: &mut dyn FnMut(&str)) -> Result<(), String> {
     if secs == 0 {
-        let png = c.call_bytes("GET", "/v1/dev/screenshot", &[("display", display)], b"")?;
-        let file = args.get("-o").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(format!("iyakki-screen-{}.png", crate::clock::now_unix())));
+        let png = fetch()?;
+        let file = to.map(PathBuf::from).unwrap_or_else(|| PathBuf::from(format!("iyakki-screen-{}.png", crate::clock::now_unix())));
         std::fs::write(&file, &png).map_err(|e| format!("{}: {e}", file.display()))?;
         out(&format!("Saved {} ({} KB).", file.display(), png.len().div_ceil(1024)));
         return Ok(());
     }
     let frames = (secs * fps).clamp(1, MAX_FRAMES);
-    let dir = PathBuf::from(args.get("-o").unwrap_or("iyakki-record"));
+    let dir = PathBuf::from(to.unwrap_or("iyakki-record"));
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let started = std::time::Instant::now();
     for i in 0..frames {
-        let png = c.call_bytes("GET", "/v1/dev/screenshot", &[("display", display)], b"")?;
+        let png = fetch()?;
         std::fs::write(dir.join(format!("frame-{i:04}.png")), &png).map_err(|e| e.to_string())?;
         let due = Duration::from_millis(1000 / fps * (i + 1));
         if let Some(wait) = due.checked_sub(started.elapsed()) {
-            std::thread::sleep(wait);
+            sleep(wait);
         }
     }
     out(&format!("Saved {frames} pictures in {} (frame-0000.png ...; at most {MAX_FRAMES} frames).", dir.display()));
     Ok(())
+}
+
+#[cfg(test)]
+mod screenshot_tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+
+    fn folder(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("iyakki-shots-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
+    #[test]
+    fn a_recording_is_a_paced_numbered_png_sequence_capped_at_the_most_frames_and_a_failed_picture_stops_it() {
+        // two seconds at 3 fps: six numbered files, each with the picture of its turn, paced a third of a second apart
+        let d = folder("seq");
+        let n = Cell::new(0u8);
+        let fetch = || {
+            n.set(n.get() + 1);
+            Ok(vec![n.get(); 3])
+        };
+        let waits = RefCell::new(Vec::new());
+        let mut said = Vec::new();
+        take_pictures(&fetch, 2, 3, Some(d.to_str().unwrap()), &|w| waits.borrow_mut().push(w), &mut |l| said.push(l.to_string())).unwrap();
+        for i in 0..6u8 {
+            assert_eq!(std::fs::read(d.join(format!("frame-{i:04}.png"))).unwrap(), vec![i + 1; 3], "frame {i}");
+        }
+        assert!(!d.join("frame-0006.png").exists());
+        assert!(said.len() == 1 && said[0].starts_with("Saved 6 pictures in "), "{said:?}");
+        let w = waits.borrow();
+        assert!(w.len() <= 6 && w.iter().all(|x| *x <= Duration::from_millis(1000 / 3 * 6)), "the waits only fill the time up to each frame's turn: {w:?}");
+        // far more than the cap is asked for: the cap wins and the sentence says how many
+        let d2 = folder("cap");
+        n.set(0);
+        let mut said = Vec::new();
+        take_pictures(&fetch, 1000, 5, Some(d2.to_str().unwrap()), &|_| {}, &mut |l| said.push(l.to_string())).unwrap();
+        assert_eq!(std::fs::read_dir(&d2).unwrap().count() as u64, MAX_FRAMES);
+        assert!(d2.join(format!("frame-{:04}.png", MAX_FRAMES - 1)).exists() && !d2.join(format!("frame-{MAX_FRAMES:04}.png")).exists());
+        assert!(said[0].contains(&format!("Saved {MAX_FRAMES} pictures")) && said[0].contains("at most 120 frames"), "{said:?}");
+        // a device that stops answering ends the recording with its reason and keeps what was taken
+        let d3 = folder("fail");
+        let k = Cell::new(0);
+        let flaky = || {
+            k.set(k.get() + 1);
+            if k.get() > 2 { Err("the device went away".to_string()) } else { Ok(vec![1]) }
+        };
+        let e = take_pictures(&flaky, 5, 2, Some(d3.to_str().unwrap()), &|_| {}, &mut |_| panic!("no success line after a failure")).unwrap_err();
+        assert_eq!(e, "the device went away");
+        assert_eq!(std::fs::read_dir(&d3).unwrap().count(), 2, "the two pictures taken before are kept");
+        // one picture goes to the file named, and says its size
+        let one = d.join("one.png");
+        let mut said = Vec::new();
+        take_pictures(&|| Ok(vec![7u8; 2048]), 0, 2, Some(one.to_str().unwrap()), &|_| {}, &mut |l| said.push(l.to_string())).unwrap();
+        assert_eq!(std::fs::read(&one).unwrap().len(), 2048);
+        assert!(said[0].contains("one.png") && said[0].contains("(2 KB)"), "{said:?}");
+        for x in [&d, &d2, &d3] {
+            let _ = std::fs::remove_dir_all(x);
+        }
+    }
 }
 
 // -------------------------------------------------------------------------------------------- config
@@ -769,7 +853,17 @@ fn shell_cmd(c: &DevClient, args: &Args, out: &mut dyn FnMut(&str)) -> Result<()
     unsafe {
         libc::signal(libc::SIGINT, on_sigint as extern "C" fn(libc::c_int) as usize);
     }
-    let result = if !args.after.is_empty() {
+    let result = if args.has("--tty") {
+        // a real terminal (F-DEV-16): the command, or an interactive shell when none is given
+        let line = args.after.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ");
+        super::ttyclient::run(c, sid, &line, out).and_then(|code| {
+            if code == 0 {
+                Ok(())
+            } else {
+                Err(format!("the command ended with status {code}"))
+            }
+        })
+    } else if !args.after.is_empty() {
         let line = args.after.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ");
         shell_exec(c, sid, &line, None, &INTERRUPT, out).and_then(|code| if code == 0 { Ok(()) } else { Err(format!("the command ended with status {code}")) })
     } else {
@@ -912,9 +1006,9 @@ fn forward_cmd(c: &DevClient, args: &Args, out: &mut dyn FnMut(&str)) -> Result<
 // -------------------------------------------------------------------------------------------- system update
 
 fn update_pack(args: &Args, out: &mut dyn FnMut(&str)) -> Result<(), String> {
-    let img = args.pos.get(1).ok_or("usage: iyakki dev update-pack IMAGE.img -o DIR [--version V] [--variant NAME] [--sign KEYFILE]")?;
+    let img = args.pos.get(1).ok_or("usage: iyakki dev update-pack IMAGE.img -o DIR [--version V] [--variant NAME] [--against PREV] [--sign KEYFILE]")?;
     let dir = PathBuf::from(args.get("-o").ok_or("where should the payload go? -o DIR")?);
-    pack(Path::new(img), &dir, args.get("--version"), args.get("--variant"), out)?;
+    pack(Path::new(img), &dir, args.get("--version"), args.get("--variant"), args.get("--against").map(Path::new), out)?;
     // the owner signs a pack for the Update centre (Settings -> System update): the key file holds 64 hex characters and never leaves the owner's computer
     if let Some(kf) = args.get("--sign") {
         let key = std::fs::read_to_string(kf).map_err(|e| format!("{kf}: {e}")).and_then(|t| crate::pkg::signing_key_from_hex(&t).map_err(|e| e.to_string()))?;
@@ -925,13 +1019,27 @@ fn update_pack(args: &Args, out: &mut dyn FnMut(&str)) -> Result<(), String> {
 }
 
 /// Extract the boot files of an install image into `dir` and write the manifest. The image is only read.
-pub fn pack(img: &Path, dir: &Path, version: Option<&str>, variant: Option<&str>, out: &mut dyn FnMut(&str)) -> Result<(), String> {
+pub fn pack(img: &Path, dir: &Path, version: Option<&str>, variant: Option<&str>, against: Option<&Path>, out: &mut dyn FnMut(&str)) -> Result<(), String> {
     if dir.exists() && std::fs::read_dir(dir).map(|mut d| d.next().is_some()).unwrap_or(false) {
         return Err(format!("{} is not empty: pick a new folder for the payload", dir.display()));
     }
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let files = iyakki_usb::bootpack::extract(img, dir)?;
     let list: Vec<(String, u64, String)> = files.iter().map(|f| (f.path.clone(), f.size, f.sha256.clone())).collect();
+    // an image with layers makes a v2 pack: only the layers that changed against PREV are carried (docs/development/LAYERED-ROOT-DESIGN.md)
+    let prev = match against {
+        Some(p) => Some(super::pack_layers::load_previous(p).inspect_err(|_| {
+            let _ = std::fs::remove_dir_all(dir);
+        })?),
+        None => None,
+    };
+    let (list, layers) = super::pack_layers::layerize(dir, list, prev.as_ref(), out).inspect_err(|_| {
+        let _ = std::fs::remove_dir_all(dir);
+    })?;
+    if layers.is_none() && against.is_some() {
+        let _ = std::fs::remove_dir_all(dir);
+        return Err("--against needs an image made with layers (lean-image.sh --layers): this image has no boot/layers.json".into());
+    }
     let name = img.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let m = match super::update::build_manifest(dir, &list, version, variant, &name) {
         Ok(m) => m,
@@ -940,6 +1048,14 @@ pub fn pack(img: &Path, dir: &Path, version: Option<&str>, variant: Option<&str>
             return Err(e);
         }
     };
+    let mut m = m;
+    if layers.is_some() {
+        m.format = super::update::FORMAT_LAYERS;
+        m.layers = layers;
+        super::update::check_manifest(&m).inspect_err(|_| {
+            let _ = std::fs::remove_dir_all(dir);
+        })?;
+    }
     super::update::write_manifest(dir, &m)?;
     out(&format!("Payload for IYAKKI {} ({} image{}): {} files, {} MB, in {}", m.version, m.variant, if m.secure_boot { ", Secure Boot signed" } else { "" }, m.files.len(), m.files.iter().map(|f| f.size).sum::<u64>() >> 20, dir.display()));
     Ok(())
@@ -1003,7 +1119,7 @@ fn update(c: &DevClient, args: &Args, out: &mut dyn FnMut(&str)) -> Result<(), S
     let dir = if src.is_file() {
         let t = std::env::temp_dir().join(format!("iyakki-update-{}-{}", std::process::id(), crate::clock::now_unix()));
         out("Reading the boot partition of the image...");
-        pack(&src, &t, args.get("--version"), args.get("--variant"), out)?;
+        pack(&src, &t, args.get("--version"), args.get("--variant"), None, out)?;
         temp = Some(t.clone());
         t
     } else {

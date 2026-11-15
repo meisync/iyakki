@@ -22,6 +22,7 @@ use iyakki_agent::mediaserve::LocalServe;
 use super::browser_full::{Full, Note, Start};
 use super::neon::{glow_card, level_bars, mix, round_button, with_alpha, Glyph, CYAN, MAGENTA};
 use super::widgets::{render_confirm, Form, FormEvent, PickEvent, Picker};
+use super::media_port::{CxPort, MediaParts, MediaPort};
 use super::{blink, App, AppCx, Flow};
 use crate::gfx::{rgb, Face, Gfx, Icon};
 use crate::ui::{Event, Key, TextField, CARD, CARD_HOVER, CARD_SEL, DIM, ERR, MUTED, OK, R, TEXT};
@@ -250,13 +251,12 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 }
 
 impl MediaApp {
-    pub fn new(cx: &AppCx) -> MediaApp {
-        MediaApp::with_player(cx, media::shared())
+    pub fn new(p: &dyn MediaPort) -> MediaApp {
+        MediaApp::with_player(p, media::shared())
     }
 
-    pub fn with_player(cx: &AppCx, player: Arc<MediaPlayer>) -> MediaApp {
-        iyakki_agent::player::register_dir(cx.services.clis.bin_dir());
-        let store = MediaStore::new(cx.services.dir(), &cx.session.user);
+    pub fn with_player(p: &dyn MediaPort, player: Arc<MediaPlayer>) -> MediaApp {
+        let MediaParts { store, index, dlq } = p.parts();
         let (shuffle, repeat) = store.flags();
         let mut a = MediaApp {
             page: Page::Tracks,
@@ -272,7 +272,7 @@ impl MediaApp {
             host_menu: None,
             store,
             player,
-            index: cx.services.media_index(&cx.session.user),
+            index,
             sort: Sort::Relevance,
             epoch: 0,
             cache: RefCell::new(None),
@@ -285,7 +285,7 @@ impl MediaApp {
             shuffle,
             repeat,
             status: None,
-            dlq: cx.services.media_queue(&cx.session.user),
+            dlq,
             flash: None,
             seen_finished: 0,
             samples: media::samples_dir(),
@@ -297,9 +297,9 @@ impl MediaApp {
             ui_scale: 1.0,
         };
         a.seen_finished = a.dlq.last_finished().0;
-        a.dlq.set_context(a.dl_context(cx));
-        a.adopt_queue(cx);
-        a.start_scan(cx);
+        a.dlq.set_context(a.dl_context(p));
+        a.adopt_queue(p);
+        a.start_scan(p);
         a
     }
 
@@ -346,15 +346,15 @@ impl MediaApp {
     }
 
     /// May this account read (and so list and play) the file? The samples can always be read.
-    fn may_read(&self, cx: &AppCx, path: &str) -> bool {
-        cx.session.policy.allows_read(&cx.session.user, path) || self.samples.as_deref().is_some_and(|d| media::is_sample_in(d, path)) || self.store.host_mount_for(path).is_some()
+    fn may_read(&self, p: &dyn MediaPort, path: &str) -> bool {
+        p.may_read(path) || self.samples.as_deref().is_some_and(|d| media::is_sample_in(d, path)) || self.store.host_mount_for(path).is_some()
     }
 
     /// Scan the folders in the background and bring the index up to date there too (the account's read scope decides what
     /// is looked at, plus the read-only sample folder).
-    fn start_scan(&mut self, cx: &AppCx) {
+    fn start_scan(&mut self, p: &dyn MediaPort) {
         let folders = self.scan_list();
-        let (policy, user) = (cx.session.policy.clone(), cx.session.user.clone());
+        let (policy, user) = (p.policy(), p.user());
         let samples = self.samples.clone();
         let hosts: Vec<String> = self.store.host_mounts().into_iter().map(|m| m.path).collect();
         self.host_seen = self.host_available();
@@ -589,18 +589,18 @@ impl MediaApp {
     // ---------------------------------------------------------------- the shared queue
 
     /// Tell the shared player about the queue, so the assistant's tools and a later visit to this app see it.
-    fn publish_queue(&mut self, cx: &AppCx) {
-        self.seen_rev = self.player.set_queue(&cx.session.user, self.queue.clone(), self.qpos, self.queue_active);
+    fn publish_queue(&mut self, p: &dyn MediaPort) {
+        self.seen_rev = self.player.set_queue(&p.user(), self.queue.clone(), self.qpos, self.queue_active);
     }
 
     /// Take over the queue somebody else (the assistant) started, when it is this person's.
-    fn adopt_queue(&mut self, cx: &AppCx) {
+    fn adopt_queue(&mut self, p: &dyn MediaPort) {
         let st = self.player.queue_state();
         if st.rev == self.seen_rev {
             return;
         }
         self.seen_rev = st.rev;
-        if st.user == cx.session.user {
+        if st.user == p.user() {
             self.queue = st.items;
             self.qpos = st.pos;
             self.queue_active = st.active;
@@ -617,18 +617,18 @@ impl MediaApp {
         }
     }
 
-    fn play_current(&mut self, cx: &AppCx) {
+    fn play_current(&mut self, p: &dyn MediaPort) {
         let Some(path) = self.queue.get(self.qpos).cloned() else { return };
-        if !self.may_read(cx, &path) {
+        if !self.may_read(p, &path) {
             self.queue_active = false;
             self.say("Your account may not read that file.", false);
-            self.publish_queue(cx);
+            self.publish_queue(p);
             return;
         }
         if !std::path::Path::new(&path).is_file() {
             self.queue_active = false;
             self.say("That file is gone.", false);
-            self.publish_queue(cx);
+            self.publish_queue(p);
             return;
         }
         let label = self.label_of(&path);
@@ -637,8 +637,8 @@ impl MediaApp {
         if self.video_route() == VideoRoute::Native && (media::is_video_path(&path) || non_mp3_audio) {
             self.player.stop();
             self.queue_active = false;
-            self.publish_queue(cx);
-            self.start_native(&path, &label, cx);
+            self.publish_queue(p);
+            self.start_native(&path, &label, p);
             return;
         }
         if media::is_video_path(&path) {
@@ -647,21 +647,21 @@ impl MediaApp {
                 VideoRoute::Embedded(helper) => {
                     self.player.stop();
                     self.queue_active = false;
-                    self.publish_queue(cx);
-                    self.start_video(helper, &path, &label, cx);
+                    self.publish_queue(p);
+                    self.start_video(helper, &path, &label, p);
                     return;
                 }
                 VideoRoute::Missing => {
                     self.queue_active = false;
                     self.say(format!("{VIDEO_NEEDS}."), false);
-                    self.publish_queue(cx);
+                    self.publish_queue(p);
                     return;
                 }
             }
         }
-        match self.player.play(&cx.session.user, &label, &path) {
+        match self.player.play(&p.user(), &label, &path) {
             Ok(()) => {
-                cx.audit.record(&cx.session.user, "media.play", path.rsplit('/').next().unwrap_or(""));
+                p.audit("media.play", path.rsplit('/').next().unwrap_or(""));
                 self.status = None;
                 let mut g = self.index.lock().unwrap_or_else(|e| e.into_inner());
                 if g.record_play(&mediaindex::item_id(&path), iyakki_agent::clock::now_unix()).is_ok() {
@@ -675,10 +675,10 @@ impl MediaApp {
                 self.say(e, false);
             }
         }
-        self.publish_queue(cx);
+        self.publish_queue(p);
     }
 
-    fn start_queue(&mut self, mut paths: Vec<String>, mut pos: usize, cx: &AppCx) {
+    fn start_queue(&mut self, mut paths: Vec<String>, mut pos: usize, p: &dyn MediaPort) {
         if paths.is_empty() {
             return;
         }
@@ -693,26 +693,26 @@ impl MediaApp {
         self.queue = paths;
         self.qpos = pos;
         self.queue_active = true;
-        self.play_current(cx);
+        self.play_current(p);
     }
 
-    fn stop(&mut self, cx: &AppCx) {
+    fn stop(&mut self, p: &dyn MediaPort) {
         self.queue_active = false;
         self.player.stop();
-        self.publish_queue(cx);
+        self.publish_queue(p);
     }
 
-    fn step_queue(&mut self, d: i32, cx: &AppCx) {
+    fn step_queue(&mut self, d: i32, p: &dyn MediaPort) {
         if !self.queue_active || self.queue.is_empty() {
             self.say("Nothing is queued: press Enter on a track first.", false);
             return;
         }
         self.qpos = (self.qpos as i32 + d).rem_euclid(self.queue.len() as i32) as usize;
-        self.play_current(cx);
+        self.play_current(p);
     }
 
     /// The player ended by itself: carry on with the queue.
-    fn advance(&mut self, cx: &AppCx) {
+    fn advance(&mut self, p: &dyn MediaPort) {
         if !self.queue_active {
             return;
         }
@@ -727,14 +727,14 @@ impl MediaApp {
             }
             Repeat::Off => {
                 self.queue_active = false;
-                self.publish_queue(cx);
+                self.publish_queue(p);
                 return;
             }
         }
-        self.play_current(cx);
+        self.play_current(p);
     }
 
-    fn activate(&mut self, cx: &AppCx) {
+    fn activate(&mut self, p: &dyn MediaPort) {
         let Some(row) = self.selected() else { return };
         match row.act {
             Act::Track(_) | Act::Item(..) => {
@@ -746,7 +746,7 @@ impl MediaApp {
                         _ => None,
                     })
                     .collect();
-                self.start_queue(paths, self.sel_now(), cx);
+                self.start_queue(paths, self.sel_now(), p);
             }
             Act::Artist(a) => {
                 self.drill = Some(Drill::Artist(a));
@@ -775,14 +775,14 @@ impl MediaApp {
             Act::Folder(f) if self.samples.as_deref().is_some_and(|d| d.to_string_lossy() == f.as_str()) => self.say("The IYAKKI samples are built in and read-only: they cannot be changed or removed.", true),
             Act::Folder(f) if self.store.host_mount_states().iter().any(|(m, _)| m.path == f) => self.say("This folder is shared from your computer, read-only: nothing here changes it. Stop sharing, or turn it into a copy, under Host files in the DATA tile.", true),
             Act::Folder(_) => self.say("Press R to look at the folders again, n to add one, d to remove the chosen one.", true),
-            Act::Download(_) => self.activate_download(cx),
+            Act::Download(_) => self.activate_download(p),
         }
     }
 
     /// Hand a whole playlist (an M3U file under the person's data folder) to the player in one go.
-    fn play_playlist_file(&mut self, name: &str, cx: &AppCx) {
-        let Some(p) = self.store.playlist(name) else { return };
-        let mut items: Vec<String> = p.items.into_iter().filter(|i| self.may_read(cx, i) && std::path::Path::new(i).is_file()).collect();
+    fn play_playlist_file(&mut self, name: &str, p: &dyn MediaPort) {
+        let Some(pl) = self.store.playlist(name) else { return };
+        let mut items: Vec<String> = pl.items.into_iter().filter(|i| self.may_read(p, i) && std::path::Path::new(i).is_file()).collect();
         if items.is_empty() {
             self.say("Nothing in that playlist can be played.", false);
             return;
@@ -798,19 +798,19 @@ impl MediaApp {
             }
         };
         self.queue_active = false;
-        match self.player.play(&cx.session.user, &format!("Playlist {name}"), &file.to_string_lossy()) {
+        match self.player.play(&p.user(), &format!("Playlist {name}"), &file.to_string_lossy()) {
             Ok(()) => {
-                cx.audit.record(&cx.session.user, "media.play", &format!("playlist {name}"));
+                p.audit("media.play", &format!("playlist {name}"));
                 self.say(format!("Playing {} item{} of {name} in the player.", items.len(), if items.len() == 1 { "" } else { "s" }), true);
             }
             Err(e) => self.say(e, false),
         }
-        self.publish_queue(cx);
+        self.publish_queue(p);
     }
 
     // ---------------------------------------------------------------- ratings, tags, downloads
 
-    fn rate_selected(&mut self, stars: u8, cx: &AppCx) {
+    fn rate_selected(&mut self, stars: u8, p: &dyn MediaPort) {
         let Some(path) = self.selected_path() else { return };
         let id = mediaindex::item_id(&path);
         let r = {
@@ -823,7 +823,7 @@ impl MediaApp {
         };
         match r {
             Ok(()) => {
-                cx.audit.record(&cx.session.user, "media.rate", &format!("{} {stars}", path.rsplit('/').next().unwrap_or("")));
+                p.audit("media.rate", &format!("{} {stars}", path.rsplit('/').next().unwrap_or("")));
                 self.epoch += 1;
                 self.say(if stars == 0 { "Rating cleared.".to_string() } else { format!("Rated {}", mediaindex::stars_text(stars)) }, true);
             }
@@ -846,7 +846,7 @@ impl MediaApp {
         self.mode = Mode::Tag(f, it.id);
     }
 
-    fn submit_tags(&mut self, cx: &AppCx) {
+    fn submit_tags(&mut self, p: &dyn MediaPort) {
         let Mode::Tag(form, id) = &mut self.mode else { return };
         let split = |s: String| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect::<Vec<_>>();
         let (types, tags) = (split(form.value(0)), split(form.value(1)));
@@ -862,7 +862,7 @@ impl MediaApp {
         match r {
             Err(e) => form.error = Some(e),
             Ok(()) => {
-                cx.audit.record(&cx.session.user, "media.tag", id);
+                p.audit("media.tag", id);
                 self.mode = Mode::Browse;
                 self.epoch += 1;
                 self.say("Types and tags saved.", true);
@@ -871,13 +871,13 @@ impl MediaApp {
     }
 
     /// The library folders this account may write to (for downloads), with Pictures. The built-in samples are never among them.
-    fn download_folders(&self, cx: &AppCx) -> Vec<String> {
-        let all = mediaindex::picture_folders(&self.store.folders(), &cx.session.user);
-        all.into_iter().filter(|f| cx.session.policy.allows_write(&cx.session.user, &format!("{f}/x"))).collect()
+    fn download_folders(&self, p: &dyn MediaPort) -> Vec<String> {
+        let all = mediaindex::picture_folders(&self.store.folders(), &p.user());
+        all.into_iter().filter(|f| p.may_write(&format!("{f}/x"))).collect()
     }
 
-    fn dl_context(&self, cx: &AppCx) -> mediaqueue::Context {
-        mediaqueue::Context { svc: cx.services.clone(), policy: cx.session.policy.clone(), user: cx.session.user.clone(), folders: self.download_folders(cx) }
+    fn dl_context(&self, p: &dyn MediaPort) -> mediaqueue::Context {
+        p.download_context(self.download_folders(p))
     }
 
     /// What the first address in the form's address field says about the kind of file.
@@ -887,12 +887,12 @@ impl MediaApp {
 
     /// Keep what the download form shows in step with what was typed: the example chips follow the kind of file as soon as the
     /// address names it, and the folder line says where the file will go.
-    fn refresh_download_form(&self, form: &mut Form, folders: &[String], cx: &AppCx) {
+    fn refresh_download_form(&self, form: &mut Form, folders: &[String], p: &dyn MediaPort) {
         let kind = Self::form_kind(form);
         form.set_chips(1, chip_rows(kind));
         let label = match form.choice_idx(4) {
             0 => {
-                let name = mediadl::planned_folder(folders, &cx.session.policy, &cx.session.user, kind).map(|p| mediaqueue::folder_label(&p.to_string_lossy()));
+                let name = p.planned_folder(folders, kind).map(|p| mediaqueue::folder_label(&p.to_string_lossy()));
                 match (kind, name) {
                     (Some(_), Some(n)) => format!("Folder: {n} (auto)"),
                     (None, _) => "Folder: by file type, decided when it arrives (auto)".to_string(),
@@ -904,8 +904,8 @@ impl MediaApp {
         form.set_label(4, &format!("{label}    (Tab here, then ← → to choose another)"));
     }
 
-    fn open_download(&mut self, cx: &AppCx) {
-        let folders = self.download_folders(cx);
+    fn open_download(&mut self, p: &dyn MediaPort) {
+        let folders = self.download_folders(p);
         if folders.is_empty() {
             self.say("None of your library folders may be written to, so nothing can be downloaded.", false);
             return;
@@ -919,11 +919,11 @@ impl MediaApp {
             .text("Tags", "", "your own words, comma separated")
             .text("Rating (0-5)", "0", "0 = unrated")
             .choice("Folder", &opts, 0);
-        self.refresh_download_form(&mut f, &folders, cx);
+        self.refresh_download_form(&mut f, &folders, p);
         self.mode = Mode::Download(f, folders);
     }
 
-    fn submit_download(&mut self, cx: &AppCx) {
+    fn submit_download(&mut self, p: &dyn MediaPort) {
         let Mode::Download(form, folders) = &mut self.mode else { return };
         let urls: Vec<String> = form.value(0).split_whitespace().map(str::to_string).collect();
         if urls.is_empty() {
@@ -945,12 +945,12 @@ impl MediaApp {
             0 => None,
             i => folders.get(i - 1).cloned(),
         };
-        let ctx = mediaqueue::Context { svc: cx.services.clone(), policy: cx.session.policy.clone(), user: cx.session.user.clone(), folders: folders.clone() };
+        let ctx = p.download_context(folders.clone());
         let (mut queued, mut errors) = (vec![], vec![]);
         for url in urls {
             match self.dlq.enqueue(ctx.clone(), mediaqueue::Request { url: url.clone(), categories: categories.clone(), tags: tags.clone(), rating, folder: folder.clone() }) {
                 Ok(id) => {
-                    cx.audit.record(&cx.session.user, "media.download", &url.chars().take(200).collect::<String>());
+                    p.audit("media.download", &url.chars().take(200).collect::<String>());
                     queued.push(id);
                 }
                 Err(e) => errors.push(format!("{}: {e}", url.chars().take(60).collect::<String>())),
@@ -1032,12 +1032,12 @@ impl MediaApp {
     }
 
     /// Enter on a download: play a finished one, say why a failed one failed.
-    fn activate_download(&mut self, cx: &AppCx) {
+    fn activate_download(&mut self, p: &dyn MediaPort) {
         let Some(d) = self.selected_download() else { return };
         match d.status {
             Status::Succeeded if !d.file.is_empty() => {
                 if std::path::Path::new(&d.file).is_file() {
-                    self.start_queue(vec![d.file.clone()], 0, cx);
+                    self.start_queue(vec![d.file.clone()], 0, p);
                 } else {
                     self.say("That file is gone from the folder.", false);
                 }
@@ -1049,7 +1049,7 @@ impl MediaApp {
         }
     }
 
-    fn download_key(&mut self, c: char, cx: &AppCx) {
+    fn download_key(&mut self, c: char, p: &dyn MediaPort) {
         let Some(d) = self.selected_download() else {
             if c == 'c' {
                 let n = self.dlq.clear_finished();
@@ -1060,7 +1060,7 @@ impl MediaApp {
         let r = match c {
             'x' => self.dlq.cancel(d.id).map(|_| format!("Cancelling #{}…", d.id)),
             'r' => {
-                self.dlq.set_context(self.dl_context(cx));
+                self.dlq.set_context(self.dl_context(p));
                 self.dlq.retry(d.id).map(|_| format!("#{} is back in the queue.", d.id))
             }
             'd' => self.dlq.remove(d.id).map(|_| format!("Removed #{} from the list (the file, if any, stays).", d.id)),
@@ -1121,9 +1121,9 @@ impl MediaApp {
     }
 
     /// Use another sample folder (tests) or none.
-    pub fn set_samples_dir(&mut self, d: Option<std::path::PathBuf>, cx: &AppCx) {
+    pub fn set_samples_dir(&mut self, d: Option<std::path::PathBuf>, p: &dyn MediaPort) {
         self.samples = d;
-        self.start_scan(cx);
+        self.start_scan(p);
     }
 
     pub fn video_playing(&self) -> bool {
@@ -1131,12 +1131,12 @@ impl MediaApp {
     }
 
     /// Play a file in IYAKKI's own player (the view takes the page area).
-    fn start_native(&mut self, path: &str, label: &str, cx: &AppCx) {
+    fn start_native(&mut self, path: &str, label: &str, p: &dyn MediaPort) {
         self.native = None;
         let area = if self.area.w > 64.0 && self.area.h > 64.0 { self.area } else { R::new(0.0, 0.0, 800.0, 520.0) };
         match super::mediaplay::NativeView::start(path, label, area) {
             Ok(v) => {
-                cx.audit.record(&cx.session.user, "media.video", path.rsplit('/').next().unwrap_or(""));
+                p.audit("media.video", path.rsplit('/').next().unwrap_or(""));
                 let mut g = self.index.lock().unwrap_or_else(|e| e.into_inner());
                 if g.record_play(&mediaindex::item_id(path), iyakki_agent::clock::now_unix()).is_ok() {
                     let _ = g.save();
@@ -1149,7 +1149,7 @@ impl MediaApp {
         }
     }
 
-    fn start_video(&mut self, helper: std::path::PathBuf, path: &str, label: &str, cx: &AppCx) {
+    fn start_video(&mut self, helper: std::path::PathBuf, path: &str, label: &str, p: &dyn MediaPort) {
         self.close_video();
         let serve = match LocalServe::start(std::path::Path::new(path), label) {
             Ok(s) => s,
@@ -1158,7 +1158,7 @@ impl MediaApp {
                 return;
             }
         };
-        let profile = match iyakki_agent::webengine::prepare_profile(cx.services.dir(), &cx.session.user) {
+        let profile = match p.web_profile() {
             Ok(p) => p,
             Err(e) => {
                 self.say(format!("The web engine's profile folder could not be made: {e}"), false);
@@ -1181,7 +1181,7 @@ impl MediaApp {
         match Full::start(start) {
             Ok(mut full) => {
                 full.navigate(&serve.url);
-                cx.audit.record(&cx.session.user, "media.video", path.rsplit('/').next().unwrap_or(""));
+                p.audit("media.video", path.rsplit('/').next().unwrap_or(""));
                 let mut g = self.index.lock().unwrap_or_else(|e| e.into_inner());
                 if g.record_play(&mediaindex::item_id(path), iyakki_agent::clock::now_unix()).is_ok() {
                     let _ = g.save();
@@ -1199,7 +1199,7 @@ impl MediaApp {
     }
 
     /// Heartbeat and keys while a video plays.
-    fn video_event(&mut self, ev: &Event, _cx: &AppCx) {
+    fn video_event(&mut self, ev: &Event, _p: &dyn MediaPort) {
         let Some(v) = &mut self.video else { return };
         match ev {
             Event::Tick => {
@@ -1253,7 +1253,7 @@ impl MediaApp {
         self.mode = Mode::Pick(Picker::new("Add to playlist", items));
     }
 
-    fn add_pending(&mut self, name: &str, cx: &AppCx) {
+    fn add_pending(&mut self, name: &str, p: &dyn MediaPort) {
         let mut n = 0;
         for p in std::mem::take(&mut self.pending) {
             match self.store.add_item(name, &p) {
@@ -1264,19 +1264,19 @@ impl MediaApp {
                 }
             }
         }
-        cx.audit.record(&cx.session.user, "media.playlist.add", name);
+        p.audit("media.playlist.add", name);
         self.say(format!("Added {n} item{} to {name}.", if n == 1 { "" } else { "s" }), true);
     }
 
-    fn submit_form(&mut self, cx: &AppCx) {
+    fn submit_form(&mut self, p: &dyn MediaPort) {
         let Mode::Form(form, what) = &mut self.mode else { return };
         let value = form.value(0);
         let result: Result<String, String> = match what {
             FormFor::NewPlaylist => self.store.create(&value).map(|n| {
-                cx.audit.record(&cx.session.user, "media.playlist.create", &n);
+                p.audit("media.playlist.create", &n);
                 n
             }),
-            FormFor::Rename(old) => self.store.rename(old, &value).inspect(|n| cx.audit.record(&cx.session.user, "media.playlist.rename", n)),
+            FormFor::Rename(old) => self.store.rename(old, &value).inspect(|n| p.audit("media.playlist.rename", n)),
             FormFor::Folder => self.store.add_folder(&value).map(|_| value.trim().to_string()),
         };
         match result {
@@ -1292,15 +1292,15 @@ impl MediaApp {
                         if self.pending.is_empty() {
                             self.say(format!("Created {name}."), true);
                         } else {
-                            self.add_pending(&name, cx);
+                            self.add_pending(&name, p);
                         }
                     }
                     FormFor::Rename(_) => self.say(format!("Renamed to {name}."), true),
                     FormFor::Folder => {
-                        let ok = cx.session.policy.allows_read(&cx.session.user, &name);
-                        cx.audit.record(&cx.session.user, "media.folder.add", &name);
+                        let ok = p.may_read(&name);
+                        p.audit("media.folder.add", &name);
                         if ok {
-                            self.start_scan(cx);
+                            self.start_scan(p);
                             self.say(format!("Added {name}; looking at it now."), true);
                         } else {
                             self.say(format!("Added {name}, but your account may not read it, so it stays empty."), false);
@@ -1311,11 +1311,11 @@ impl MediaApp {
         }
     }
 
-    fn confirmed(&mut self, cx: &AppCx) {
+    fn confirmed(&mut self, p: &dyn MediaPort) {
         match std::mem::replace(&mut self.mode, Mode::Browse) {
             Mode::DeletePlaylist(n) => match self.store.delete(&n) {
                 Ok(()) => {
-                    cx.audit.record(&cx.session.user, "media.playlist.delete", &n);
+                    p.audit("media.playlist.delete", &n);
                     self.say(format!("Deleted {n}."), true);
                     self.clamp();
                 }
@@ -1323,8 +1323,8 @@ impl MediaApp {
             },
             Mode::RemoveFolder(f) => match self.store.remove_folder(&f) {
                 Ok(()) => {
-                    cx.audit.record(&cx.session.user, "media.folder.remove", &f);
-                    self.start_scan(cx);
+                    p.audit("media.folder.remove", &f);
+                    self.start_scan(p);
                     self.say(format!("Removed {f} from the list; your files are untouched."), true);
                     self.clamp();
                 }
@@ -1356,9 +1356,9 @@ impl MediaApp {
         let _ = self.store.set_flags(self.shuffle, self.repeat);
     }
 
-    fn pick_event(&mut self, ev: &Event, cx: &AppCx) {
-        let Mode::Pick(p) = &mut self.mode else { return };
-        match p.handle_event(ev) {
+    fn pick_event(&mut self, ev: &Event, p: &dyn MediaPort) {
+        let Mode::Pick(pick) = &mut self.mode else { return };
+        match pick.handle_event(ev) {
             PickEvent::Cancel => {
                 self.mode = Mode::Browse;
                 self.pending.clear();
@@ -1368,7 +1368,7 @@ impl MediaApp {
                 if name == NEW_LIST {
                     self.mode = Mode::Form(Form::new("New playlist").text("Name", "", "e.g. Evening"), FormFor::NewPlaylist);
                 } else {
-                    self.add_pending(&name, cx);
+                    self.add_pending(&name, p);
                 }
             }
             PickEvent::None => {}
@@ -1376,18 +1376,18 @@ impl MediaApp {
     }
 
     /// A key or click in the download form: the form follows what is typed (chips, the folder line).
-    fn download_event(&mut self, ev: &Event, cx: &AppCx) {
+    fn download_event(&mut self, ev: &Event, p: &dyn MediaPort) {
         let Mode::Download(mut form, folders) = std::mem::replace(&mut self.mode, Mode::Browse) else { return };
         match form.handle_event(ev) {
             FormEvent::Cancel => return,
             FormEvent::Submit => {
                 self.mode = Mode::Download(form, folders);
-                self.submit_download(cx);
+                self.submit_download(p);
                 return;
             }
             _ => {}
         }
-        self.refresh_download_form(&mut form, &folders, cx);
+        self.refresh_download_form(&mut form, &folders, p);
         self.mode = Mode::Download(form, folders);
     }
 
@@ -1412,13 +1412,10 @@ impl App for MediaApp {
     /// Files dropped on the window (window mode) go into the first music folder the account may write to (a dropped folder
     /// can be linked read-only instead), and the library looks again.
     fn on_drop(&mut self, _paths: &[std::path::PathBuf], cx: &AppCx) -> super::DropAction {
-        match self.store.folders().into_iter().find(|f| std::path::Path::new(f).is_dir() && cx.session.policy.allows_write(&cx.session.user, f)) {
-            Some(f) => super::DropAction::Into { dest: std::path::PathBuf::from(f), label: "your music folder".into() },
-            None => super::DropAction::Uploads,
-        }
+        self.on_drop_with(_paths, &CxPort(cx))
     }
-    fn dropped_done(&mut self, _files: &[std::path::PathBuf], _cx: &AppCx) {
-        self.rescan = true;
+    fn dropped_done(&mut self, _files: &[std::path::PathBuf], cx: &AppCx) {
+        self.dropped_done_with(_files, &CxPort(cx))
     }
     fn take_host_mount_menu(&mut self) -> Option<String> {
         self.host_menu.take()
@@ -1467,11 +1464,13 @@ impl App for MediaApp {
         .collect()
     }
 
+    #[cfg(test)]
+    fn probe(&self) -> String {
+        format!("queue={:?} at={} active={}", self.queue, self.qpos, self.queue_active)
+    }
+
     fn open_item(&mut self, item: &str, cx: &AppCx) {
-        // the IYAKKI menu's Media player and other apps: `play:<path>`
-        if let Some(path) = item.strip_prefix("play:") {
-            self.start_queue(vec![path.to_string()], 0, cx);
-        }
+        self.open_item_with(item, &CxPort(cx))
     }
 
     fn wants_redraw(&mut self) -> bool {
@@ -1481,513 +1480,16 @@ impl App for MediaApp {
         self.video.as_mut().is_some_and(|v| v.full.take_redraw())
     }
 
-    fn media_key(&mut self, k: crate::fnkeys::FnKey, _cx: &AppCx) -> bool {
-        use crate::fnkeys::FnKey;
-        let Some(n) = &mut self.native else { return false };
-        let key = match k {
-            FnKey::PlayPause => Key::Char(' '),
-            FnKey::Next => Key::Up, // 30 seconds on
-            FnKey::Prev => Key::Down, // 30 seconds back
-            FnKey::Stop => Key::Esc,
-            _ => return false,
-        };
-        if n.event(&Event::Key(key)) == super::mediaplay::Out::Close {
-            self.native = None;
-        }
-        true
+    fn media_key(&mut self, k: crate::fnkeys::FnKey, cx: &AppCx) -> bool {
+        self.media_key_with(k, &CxPort(cx))
     }
 
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
-        if matches!(ev, Event::Tick) {
-            self.poll_scan();
-            // a shared host folder that was unplugged or came back (or was added or removed) means a new look, about every 5 s
-            self.host_ticks += 1;
-            if self.host_ticks % 150 == 0 && self.scanning.is_none() && self.host_available() != self.host_seen {
-                self.rescan = true;
-            }
-            self.poll_downloads();
-            if self.rescan && self.scanning.is_none() {
-                self.rescan = false;
-                self.start_scan(cx);
-            }
-            self.adopt_queue(cx);
-            if self.video.is_some() {
-                self.video_event(ev, cx);
-            }
-            if let Some(n) = &mut self.native {
-                n.event(ev);
-            }
-            if let Check::Ended { user } = self.player.check() {
-                if user == cx.session.user {
-                    self.advance(cx);
-                }
-            }
-            return Flow::Stay;
-        }
-        // IYAKKI's own player has the keys and the page area while it plays
-        if let Some(n) = &mut self.native {
-            if n.event(ev) == super::mediaplay::Out::Close {
-                self.native = None;
-            }
-            return Flow::Stay;
-        }
-        // a video has the keys and the page area while it plays
-        if self.video.is_some() {
-            self.video_event(ev, cx);
-            return Flow::Stay;
-        }
-        match &mut self.mode {
-            Mode::Form(form, _) => {
-                match form.handle_event(ev) {
-                    FormEvent::Cancel => {
-                        self.mode = Mode::Browse;
-                        self.pending.clear();
-                    }
-                    FormEvent::Submit => self.submit_form(cx),
-                    _ => {}
-                }
-                return Flow::Stay;
-            }
-            Mode::Tag(form, _) => {
-                match form.handle_event(ev) {
-                    FormEvent::Cancel => self.mode = Mode::Browse,
-                    FormEvent::Submit => self.submit_tags(cx),
-                    _ => {}
-                }
-                return Flow::Stay;
-            }
-            Mode::Download(..) => {
-                self.download_event(ev, cx);
-                return Flow::Stay;
-            }
-            Mode::Pick(_) => {
-                self.pick_event(ev, cx);
-                return Flow::Stay;
-            }
-            Mode::DeletePlaylist(_) | Mode::RemoveFolder(_) => {
-                match ev {
-                    Event::Key(Key::Char('y')) | Event::Key(Key::Enter) => self.confirmed(cx),
-                    Event::Key(Key::Esc) | Event::Key(Key::Char('n')) => self.mode = Mode::Browse,
-                    _ => {}
-                }
-                return Flow::Stay;
-            }
-            Mode::Browse => {}
-        }
-        match ev {
-            Event::Row(i) => {
-                if *i == self.sel_now() && !self.searching {
-                    self.activate(cx);
-                } else {
-                    self.set_sel(*i);
-                }
-                return Flow::Stay;
-            }
-            Event::Scroll(d) => {
-                let i = (self.sel_now() as i32 - d).max(0) as usize;
-                self.set_sel(i);
-                return Flow::Stay;
-            }
-            Event::Tab(n) if *n < PAGES.len() => {
-                self.goto(PAGES[*n].0);
-                return Flow::Stay;
-            }
-            // the Play and Show in library buttons of a finished download
-            Event::Tab(n) if (2000..7000).contains(n) => {
-                self.set_sel(*n % 1000);
-                match *n / 1000 {
-                    3 => self.download_key('f', cx),
-                    5 => self.download_key('r', cx),
-                    6 => self.download_key('x', cx),
-                    _ => self.activate_download(cx),
-                }
-                return Flow::Stay;
-            }
-            Event::Tab(100) => {
-                self.stop(cx);
-                return Flow::Stay;
-            }
-            Event::Tab(101) => {
-                self.shuffle = !self.shuffle;
-                self.flags_changed();
-                return Flow::Stay;
-            }
-            Event::Tab(102) => {
-                self.repeat = self.repeat.next();
-                self.flags_changed();
-                return Flow::Stay;
-            }
-            Event::Tab(103) => {
-                self.step_queue(-1, cx);
-                return Flow::Stay;
-            }
-            Event::Tab(104) => {
-                self.step_queue(1, cx);
-                return Flow::Stay;
-            }
-            Event::Tab(105) => {
-                self.open_download(cx);
-                return Flow::Stay;
-            }
-            Event::Tab(106) => {
-                self.cycle_sort();
-                return Flow::Stay;
-            }
-            Event::Focus(_) | Event::FocusAt(..) => {
-                self.searching = true;
-                if let Event::FocusAt(_, x) = ev {
-                    self.query.click(*x);
-                }
-                return Flow::Stay;
-            }
-            Event::Paste(t) if self.searching => {
-                self.query.paste(t);
-                self.clamp();
-                return Flow::Stay;
-            }
-            _ => {}
-        }
-        let Event::Key(k) = ev else { return Flow::Stay };
-        if self.searching {
-            match k {
-                Key::Enter => self.searching = false,
-                Key::Esc => {
-                    self.query.clear();
-                    self.searching = false;
-                    self.set_sel(0);
-                }
-                Key::Up => self.set_sel(self.sel_now().saturating_sub(1)),
-                Key::Down => self.set_sel(self.sel_now() + 1),
-                other => {
-                    self.query.handle(other);
-                    self.set_sel(0);
-                }
-            }
-            return Flow::Stay;
-        }
-        let sel = self.sel_now();
-        let on_item = self.selected_path().is_some();
-        match k {
-            Key::Esc => {
-                if self.drill.is_some() {
-                    self.drill = None;
-                    self.clamp();
-                } else if !self.query.value.is_empty() {
-                    self.query.clear();
-                    self.set_sel(0);
-                } else {
-                    return Flow::Back;
-                }
-            }
-            Key::Tab => self.step_page(1),
-            Key::BackTab => self.step_page(-1),
-            Key::Char(c @ '0'..='5') if on_item => self.rate_selected(*c as u8 - b'0', cx),
-            Key::Char(c @ '1'..='9') => self.goto(PAGES[*c as usize - '1' as usize].0),
-            Key::Char('0') => self.goto(PAGES[DOWNLOADS_PAGE].0),
-            Key::Char(c @ ('x' | 'r' | 'd' | 'c' | 'f')) if self.page == Page::Downloads => self.download_key(*c, cx),
-            Key::Up => self.set_sel(sel.saturating_sub(1)),
-            Key::Down => self.set_sel(sel + 1),
-            Key::PageUp => self.set_sel(sel.saturating_sub(10)),
-            Key::PageDown => self.set_sel(sel + 10),
-            Key::Home => self.set_sel(0),
-            Key::End => self.set_sel(usize::MAX),
-            Key::Enter => self.activate(cx),
-            Key::Char('/') => self.searching = true,
-            Key::Char('a') => self.ask_add(),
-            Key::Char('t') => self.open_tags(),
-            Key::Char('D') => self.open_download(cx),
-            Key::Char('o') => self.cycle_sort(),
-            Key::Char('s') => self.stop(cx),
-            Key::Char(' ') => {
-                if self.player.now_playing().is_some() {
-                    self.stop(cx);
-                } else {
-                    self.activate(cx);
-                }
-            }
-            Key::Char(',') => self.step_queue(-1, cx),
-            Key::Char('.') => self.step_queue(1, cx),
-            Key::Char('z') => {
-                self.shuffle = !self.shuffle;
-                self.flags_changed();
-            }
-            Key::Char('l') => {
-                self.repeat = self.repeat.next();
-                self.flags_changed();
-            }
-            Key::Char('R') => {
-                self.start_scan(cx);
-                self.say("Looking at the folders again.", true);
-            }
-            Key::Char('i') => {
-                if let Some(p) = self.selected_path() {
-                    if let Some(it) = self.item(&p) {
-                        let src = if it.source_url.is_empty() { String::new() } else { format!(" · downloaded from {}", it.source_url) };
-                        self.say(format!("{} · played {} time{}{} · {}{}", it.kind.name(), it.plays, if it.plays == 1 { "" } else { "s" }, if it.rating > 0 { format!(" · {}", it.stars()) } else { String::new() }, p, src), true);
-                    }
-                }
-            }
-            Key::Char('n') if self.page == Page::Playlists && self.drill.is_none() => {
-                self.pending.clear();
-                self.mode = Mode::Form(Form::new("New playlist").text("Name", "", "e.g. Evening"), FormFor::NewPlaylist);
-            }
-            Key::Char('n') if self.page == Page::Folders => {
-                self.mode = Mode::Form(Form::new("Add a folder").path("Folder", "", "/home/me/Music", crate::filepicker::PathKind::Folder, &[]), FormFor::Folder);
-            }
-            Key::Char('r') if self.page == Page::Playlists => {
-                let name = match (&self.drill, self.selected()) {
-                    (Some(Drill::Playlist(n)), _) => Some(n.clone()),
-                    (None, Some(Row { act: Act::Playlist(n), .. })) => Some(n),
-                    _ => None,
-                };
-                if let Some(n) = name {
-                    self.mode = Mode::Form(Form::new("Rename playlist").text("Name", &n, ""), FormFor::Rename(n));
-                }
-            }
-            Key::Char('d') if self.page == Page::Playlists && self.drill.is_none() => {
-                if let Some(Row { act: Act::Playlist(n), .. }) = self.selected() {
-                    self.mode = Mode::DeletePlaylist(n);
-                }
-            }
-            // a linked host folder: convert it to a copy, or stop sharing it (the options open over the page)
-            Key::Char('c') | Key::Char('u') if self.page == Page::Folders && matches!(self.selected(), Some(Row { act: Act::Folder(f), .. }) if self.store.host_mount_states().iter().any(|(m, _)| m.path == *f)) => {
-                if let Some(Row { act: Act::Folder(f), .. }) = self.selected() {
-                    self.host_menu = self.store.host_mount_states().into_iter().find(|(m, _)| m.path == f).map(|(m, _)| m.name);
-                }
-            }
-            Key::Char('d') if self.page == Page::Folders => {
-                if let Some(Row { act: Act::Folder(f), .. }) = self.selected() {
-                    if self.samples.as_deref().is_some_and(|d| d.to_string_lossy() == f.as_str()) {
-                        self.say("The IYAKKI samples are built in and read-only: they cannot be removed.", false);
-                    } else if self.store.host_mount_states().iter().any(|(m, _)| m.path == f) {
-                        self.say("A shared host folder is stopped under Host files in the DATA tile (it is never deleted).", false);
-                    } else {
-                        self.mode = Mode::RemoveFolder(f);
-                    }
-                }
-            }
-            Key::Char('x') => {
-                if let (Some(name), Some(Row { act: Act::Item(i, _), .. })) = (self.open_list(), self.selected()) {
-                    let _ = self.store.remove_item(&name, i);
-                    self.clamp();
-                }
-            }
-            Key::Char('[') => self.move_item(-1),
-            Key::Char(']') => self.move_item(1),
-            Key::Char('P') if self.page == Page::Playlists => {
-                let name = match (&self.drill, self.selected()) {
-                    (Some(Drill::Playlist(n)), _) => Some(n.clone()),
-                    (None, Some(Row { act: Act::Playlist(n), .. })) => Some(n),
-                    _ => None,
-                };
-                if let Some(n) = name {
-                    self.play_playlist_file(&n, cx);
-                }
-            }
-            _ => {}
-        }
-        Flow::Stay
+        self.handle_with(ev, &CxPort(cx))
     }
 
-    fn render(&mut self, g: &mut Gfx, area: R, s: f32, _cx: &AppCx, tick: u64) {
-        self.area = area;
-        self.ui_scale = s;
-        if let Some(n) = &mut self.native {
-            n.render(g, area, s);
-            return;
-        }
-        if self.video.is_some() {
-            self.render_video(g, area, s);
-            return;
-        }
-        let x = area.x + 24.0 * s;
-        let w = area.w - 48.0 * s;
-        let mut y = area.y + 10.0 * s;
-        y += self.draw_hero(g, R::new(x, y, w, 0.0), s, tick) + 14.0 * s;
-
-        // ---- pages, as glowing pills (the row slides along when the window is narrow)
-        let names: Vec<&str> = PAGES.iter().map(|p| p.1).collect();
-        let widths: Vec<f32> = names.iter().map(|n| g.text_width(14.0 * s, n, Face::Bold) + 26.0 * s).collect();
-        let cur = self.page_idx();
-        let mut first = 0;
-        while first < cur && widths[first..=cur].iter().sum::<f32>() + 8.0 * s * (cur - first) as f32 > w - 40.0 * s {
-            first += 1;
-        }
-        let mut tx = x;
-        if first > 0 {
-            g.text(tx, y + 6.0 * s, 16.0 * s, DIM, "‹", Face::Bold);
-            tx += 18.0 * s;
-        }
-        for i in first..PAGES.len() {
-            if tx + widths[i] > x + w - 14.0 * s {
-                g.text(x + w - 12.0 * s, y + 6.0 * s, 16.0 * s, DIM, "›", Face::Bold);
-                break;
-            }
-            let r = R::new(tx, y, widths[i], 30.0 * s);
-            let on = i == cur;
-            g.rrect(r.x, r.y, r.w, r.h, 15.0 * s, if on { with_alpha(ACCENT, 46) } else if g.hovered(r) { CARD_HOVER } else { rgb(18, 24, 46) });
-            if on {
-                g.rrect_outline(r.x, r.y, r.w, r.h, 15.0 * s, 1.5 * s, ACCENT);
-            }
-            g.text(r.x + 13.0 * s, r.y + 6.0 * s, 14.0 * s, if on { ACCENT } else { MUTED }, names[i], Face::Bold);
-            g.hit(r, Event::Tab(i), names[i]);
-            tx += widths[i] + 8.0 * s;
-        }
-        y += 40.0 * s;
-
-        // ---- search, what it understood, sort and download
-        let sw = (w * 0.4).clamp_safe(160.0 * s, 380.0 * s);
-        let sr = R::new(x, y, sw, 36.0 * s);
-        if self.query.value.is_empty() && !self.searching {
-            self.query.placeholder = "/ search: kutthu song, melody above 4 stars…".into();
-        } else {
-            self.query.placeholder.clear();
-        }
-        self.query.render(g, sr, self.searching, s, blink(tick), Face::Sans, 0);
-        let mut cx_ = x + sw + 12.0 * s;
-        let right_btns = g.text_width(13.0 * s, "Download (D)", Face::Bold) + 28.0 * s + g.text_width(13.0 * s, &format!("Sort: {} (o)", self.sort.label()), Face::Bold) + 28.0 * s + 8.0 * s;
-        let chip_room = (x + w - right_btns - cx_).max(0.0);
-        let mut used = 0.0;
-        for chip in self.chips() {
-            let t = chip.strip_prefix("type: ").unwrap_or(&chip).to_string();
-            let col = if chip.starts_with("type: ") { type_color(&t) } else { CYAN };
-            let cw = g.text_width(12.0 * s, &chip, Face::Bold) + 20.0 * s;
-            if used + cw > chip_room {
-                break;
-            }
-            g.rrect(cx_, y + 5.0 * s, cw, 26.0 * s, 13.0 * s, with_alpha(col, 40));
-            g.rrect_outline(cx_, y + 5.0 * s, cw, 26.0 * s, 13.0 * s, 1.0 * s, with_alpha(col, 170));
-            g.text(cx_ + 10.0 * s, y + 10.0 * s, 12.0 * s, col, &chip, Face::Bold);
-            cx_ += cw + 6.0 * s;
-            used += cw + 6.0 * s;
-        }
-        let mut bx = x + w;
-        let dw = g.text_width(13.0 * s, "Download (D)", Face::Bold) + 28.0 * s;
-        bx -= dw;
-        g.button(bx, y + 3.0 * s, 13.0 * s, "Download (D)", CYAN, Event::Tab(105));
-        let sl = format!("Sort: {} (o)", self.sort.label());
-        let sw2 = g.text_width(13.0 * s, &sl, Face::Bold) + 28.0 * s;
-        bx -= sw2 + 8.0 * s;
-        g.button(bx, y + 3.0 * s, 13.0 * s, &sl, if self.sort == Sort::Relevance { MUTED } else { AMBER }, Event::Tab(106));
-        y += 46.0 * s;
-
-        // ---- the last thing said
-        if let Some((m, ok)) = &self.status {
-            let m = g.fit(14.0 * s, m, Face::Sans, w);
-            g.text(x, y, 14.0 * s, if *ok { OK } else { ERR }, &m, Face::Sans);
-        }
-        y += 24.0 * s;
-        if let Some(d) = &self.drill {
-            let t = match d {
-                Drill::Artist(a) => format!("Artist: {a}   (Esc goes back)"),
-                Drill::Album(a, b) => format!("Album: {b} by {a}   (Esc goes back)"),
-                Drill::Playlist(n) => format!("Playlist: {n}   (x remove · [ ] move · P play it all · Esc back)"),
-                Drill::Type(t) => format!("Type: {t}   (Esc goes back)"),
-                Drill::Lang(l) => format!("Language: {l}   (Esc goes back)"),
-            };
-            let t = g.fit(14.0 * s, &t, Face::Bold, w);
-            g.text(x, y, 14.0 * s, ACCENT, &t, Face::Bold);
-            y += 24.0 * s;
-        }
-
-        // ---- the list, in dark glass cards
-        let rows = self.rows();
-        let sel = self.sel_now().min(rows.len().saturating_sub(1));
-        if rows.is_empty() {
-            let msg = if self.scanning.is_some() {
-                "Looking through your folders…".to_string()
-            } else {
-                match self.page {
-                    _ if !self.q().is_empty() => "Nothing matches the search.".to_string(),
-                    Page::Playlists if self.drill.is_none() => "No playlists yet. Press n to make one, or a on a track.".to_string(),
-                    Page::Playlists => "This playlist is empty. Add tracks with a.".to_string(),
-                    Page::Folders => "No folders. Press n to add one.".to_string(),
-                    Page::Types => "No types yet: they appear as the library is scanned. Press t on a track to choose its types.".to_string(),
-                    Page::TopRated => "Nothing is rated yet. Choose a track and press 1 to 5.".to_string(),
-                    Page::Photos => "No pictures found. They are looked for in your Pictures folder; press D to download one.".to_string(),
-                    Page::Downloads => "No downloads. Press D to add one or more addresses to the queue.".to_string(),
-                    _ => "No media files in your folders. Press 6 to see which folders are looked at, or n there to add one.".to_string(),
-                }
-            };
-            g.text(x, y + 8.0 * s, 16.0 * s, MUTED, &msg, Face::Sans);
-        } else {
-            let rh = 50.0 * s;
-            let fit = (((area.y + area.h - y - 8.0 * s) / (rh + 5.0 * s)).floor() as usize).max(1);
-            let start = sel.saturating_sub(fit - 1);
-            let now = self.queue.get(self.qpos).filter(|_| self.queue_active).cloned().or_else(|| self.player.now_target());
-            let playing_any = self.player.now_playing().is_some();
-            for (i, row) in rows.iter().enumerate().skip(start).take(fit) {
-                let r = R::new(x, y, w, rh);
-                let is_sel = i == sel;
-                let playing = matches!((&row.act, &now), (Act::Track(p) | Act::Item(_, p), Some(n)) if p == n) && playing_any;
-                let tint = row.types.first().map_or(ACCENT, |t| type_color(t));
-                g.rrect(r.x, r.y, r.w, r.h, 12.0 * s, if is_sel { CARD_SEL } else if g.hovered(r) { CARD_HOVER } else { CARD });
-                if playing {
-                    // the playing row pulses
-                    let pulse = 0.5 + 0.5 * (tick as f32 * 0.15).sin();
-                    g.rrect_outline(r.x, r.y, r.w, r.h, 12.0 * s, 1.6 * s, with_alpha(OK, (110.0 + 120.0 * pulse) as u8));
-                } else if is_sel {
-                    g.rrect_outline(r.x, r.y, r.w, r.h, 12.0 * s, 1.2 * s, with_alpha(ACCENT, 190));
-                }
-                g.rect(r.x + 3.0 * s, r.y + 9.0 * s, 3.0 * s, r.h - 18.0 * s, with_alpha(tint, if is_sel || playing { 255 } else { 110 }));
-                g.hit(r, Event::Row(i), &row.main);
-                if let Some(d) = &row.dl {
-                    draw_download_row(g, r, d, row, i, is_sel, s, tick);
-                    y += rh + 5.0 * s;
-                    continue;
-                }
-                let mut left = 18.0 * s;
-                if playing {
-                    for k in 0..4 {
-                        let hh = (6.0 + 14.0 * (0.5 + 0.5 * ((tick as f32 * 0.25) + k as f32 * 1.7).sin())) * s;
-                        g.rrect(r.x + 16.0 * s + k as f32 * 6.0 * s, r.y + rh / 2.0 + 9.0 * s - hh, 4.0 * s, hh, 1.5 * s, mix(CYAN, MAGENTA, k as f32 / 3.0));
-                    }
-                    left = 46.0 * s;
-                }
-                // right side: duration, stars, type chips (from the edge inwards)
-                let mut rx = r.x + r.w - 14.0 * s;
-                let rw = g.text_width(13.0 * s, &row.right, Face::Sans);
-                rx -= rw;
-                g.text(rx, r.y + 17.0 * s, 13.0 * s, DIM, &row.right, Face::Sans);
-                if row.rating > 0 {
-                    let st = mediaindex::stars_text(row.rating);
-                    let sw = g.text_width(13.0 * s, &st, Face::Sans);
-                    rx -= sw + 14.0 * s;
-                    g.text(rx, r.y + 17.0 * s, 13.0 * s, AMBER, &st, Face::Sans);
-                }
-                let mut chips_left = rx;
-                if r.w > 520.0 * s {
-                    for t in row.types.iter().take(2) {
-                        let cw = g.text_width(11.0 * s, t, Face::Bold) + 16.0 * s;
-                        chips_left -= cw + 6.0 * s;
-                        let col = type_color(t);
-                        g.rrect(chips_left, r.y + 14.0 * s, cw, 22.0 * s, 11.0 * s, with_alpha(col, 38));
-                        g.rrect_outline(chips_left, r.y + 14.0 * s, cw, 22.0 * s, 11.0 * s, 1.0 * s, with_alpha(col, 160));
-                        g.text(chips_left + 8.0 * s, r.y + 18.0 * s, 11.0 * s, col, t, Face::Bold);
-                    }
-                }
-                let room = (chips_left - r.x - left - 16.0 * s).max(40.0 * s);
-                let main = g.fit(16.0 * s, &row.main, Face::Bold, room);
-                if row.sub.is_empty() {
-                    g.text(r.x + left, r.y + 14.0 * s, 16.0 * s, if playing { OK } else { TEXT }, &main, Face::Bold);
-                } else {
-                    g.text(r.x + left, r.y + 6.0 * s, 16.0 * s, if playing { OK } else { TEXT }, &main, Face::Bold);
-                    let sub = g.fit(12.0 * s, &row.sub, Face::Sans, room);
-                    g.text(r.x + left, r.y + 28.0 * s, 12.0 * s, MUTED, &sub, Face::Sans);
-                }
-                y += rh + 5.0 * s;
-            }
-        }
-
-        match &self.mode {
-            Mode::Form(f, _) => f.render(g, area, s, ACCENT, blink(tick)),
-            Mode::Tag(f, _) => f.render(g, area, s, ACCENT, blink(tick)),
-            Mode::Download(f, _) => f.render(g, area, s, CYAN, blink(tick)),
-            Mode::Pick(p) => p.render(g, area, s, ACCENT),
-            Mode::DeletePlaylist(n) => render_confirm(g, area, s, &format!("Delete the playlist {n}? The files stay."), "Delete"),
-            Mode::RemoveFolder(f) => render_confirm(g, area, s, &format!("Stop looking in {f}? The files stay."), "Remove"),
-            Mode::Browse => {}
-        }
+    fn render(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx, tick: u64) {
+        self.render_with(g, area, s, &CxPort(cx), tick)
     }
 }
 
@@ -2087,9 +1589,12 @@ impl MediaApp {
         let next = round_button(g, R::new(bx, by, bd, bd), s, Glyph::Next, None);
         g.hit(next, Event::Tab(104), "Next");
         bx += bd + 16.0 * s;
-        let sl = format!("Shuffle {} (z)", if self.shuffle { "on" } else { "off" });
+        // the key hints go first when the two buttons do not fit side by side inside the card
+        let (sw, rw) = (g.text_width(13.0 * s, &format!("Shuffle {} (z)", if self.shuffle { "on" } else { "off" }), Face::Bold), g.text_width(13.0 * s, &format!("Repeat {} (l)", self.repeat.label()), Face::Bold));
+        let hints = bx + sw + rw + 2.0 * 13.0 * s * 1.7 + 8.0 * s <= card.x + card.w - 16.0 * s;
+        let sl = format!("Shuffle {}{}", if self.shuffle { "on" } else { "off" }, if hints { " (z)" } else { "" });
         bx += g.button(bx, by + 4.0 * s, 13.0 * s, &sl, if self.shuffle { ACCENT } else { MUTED }, Event::Tab(101)) + 8.0 * s;
-        let rl = format!("Repeat {} (l)", self.repeat.label());
+        let rl = format!("Repeat {}{}", self.repeat.label(), if hints { " (l)" } else { "" });
         g.button(bx, by + 4.0 * s, 13.0 * s, &rl, if self.repeat == Repeat::Off { MUTED } else { ACCENT }, Event::Tab(102));
         // a stop button is always reachable by click, also while idle
         if !playing {
@@ -2256,6 +1761,544 @@ impl MediaApp {
     }
 }
 
+impl MediaApp {
+    pub fn media_key_with(&mut self, k: crate::fnkeys::FnKey, _p: &dyn MediaPort) -> bool {
+        use crate::fnkeys::FnKey;
+        let Some(n) = &mut self.native else { return false };
+        let key = match k {
+            FnKey::PlayPause => Key::Char(' '),
+            FnKey::Next => Key::Up, // 30 seconds on
+            FnKey::Prev => Key::Down, // 30 seconds back
+            FnKey::Stop => Key::Esc,
+            _ => return false,
+        };
+        if n.event(&Event::Key(key)) == super::mediaplay::Out::Close {
+            self.native = None;
+        }
+        true
+    }
+
+    pub fn on_drop_with(&mut self, _paths: &[std::path::PathBuf], p: &dyn MediaPort) -> super::DropAction {
+        match self.store.folders().into_iter().find(|f| std::path::Path::new(f).is_dir() && p.may_write(f)) {
+            Some(f) => super::DropAction::Into { dest: std::path::PathBuf::from(f), label: "your music folder".into() },
+            None => super::DropAction::Uploads,
+        }
+    }
+
+    pub fn dropped_done_with(&mut self, _files: &[std::path::PathBuf], _p: &dyn MediaPort) {
+        self.rescan = true;
+    }
+
+    pub fn open_item_with(&mut self, item: &str, p: &dyn MediaPort) {
+        // the IYAKKI menu's Media player and other apps: `play:<path>`
+        if let Some(path) = item.strip_prefix("play:") {
+            self.start_queue(vec![path.to_string()], 0, p);
+        }
+    }
+
+    pub fn handle_with(&mut self, ev: &Event, p: &dyn MediaPort) -> Flow {
+        if matches!(ev, Event::Tick) {
+            self.poll_scan();
+            // a shared host folder that was unplugged or came back (or was added or removed) means a new look, about every 5 s
+            self.host_ticks += 1;
+            if self.host_ticks % 150 == 0 && self.scanning.is_none() && self.host_available() != self.host_seen {
+                self.rescan = true;
+            }
+            self.poll_downloads();
+            if self.rescan && self.scanning.is_none() {
+                self.rescan = false;
+                self.start_scan(p);
+            }
+            self.adopt_queue(p);
+            if self.video.is_some() {
+                self.video_event(ev, p);
+            }
+            if let Some(n) = &mut self.native {
+                n.event(ev);
+            }
+            if let Check::Ended { user } = self.player.check() {
+                if user == p.user() {
+                    self.advance(p);
+                }
+            }
+            return Flow::Stay;
+        }
+        // IYAKKI's own player has the keys and the page area while it plays
+        if let Some(n) = &mut self.native {
+            if n.event(ev) == super::mediaplay::Out::Close {
+                self.native = None;
+            }
+            return Flow::Stay;
+        }
+        // a video has the keys and the page area while it plays
+        if self.video.is_some() {
+            self.video_event(ev, p);
+            return Flow::Stay;
+        }
+        match &mut self.mode {
+            Mode::Form(form, _) => {
+                match form.handle_event(ev) {
+                    FormEvent::Cancel => {
+                        self.mode = Mode::Browse;
+                        self.pending.clear();
+                    }
+                    FormEvent::Submit => self.submit_form(p),
+                    _ => {}
+                }
+                return Flow::Stay;
+            }
+            Mode::Tag(form, _) => {
+                match form.handle_event(ev) {
+                    FormEvent::Cancel => self.mode = Mode::Browse,
+                    FormEvent::Submit => self.submit_tags(p),
+                    _ => {}
+                }
+                return Flow::Stay;
+            }
+            Mode::Download(..) => {
+                self.download_event(ev, p);
+                return Flow::Stay;
+            }
+            Mode::Pick(_) => {
+                self.pick_event(ev, p);
+                return Flow::Stay;
+            }
+            Mode::DeletePlaylist(_) | Mode::RemoveFolder(_) => {
+                match ev {
+                    Event::Key(Key::Char('y')) | Event::Key(Key::Enter) => self.confirmed(p),
+                    Event::Key(Key::Esc) | Event::Key(Key::Char('n')) => self.mode = Mode::Browse,
+                    _ => {}
+                }
+                return Flow::Stay;
+            }
+            Mode::Browse => {}
+        }
+        match ev {
+            Event::Row(i) => {
+                if *i == self.sel_now() && !self.searching {
+                    self.activate(p);
+                } else {
+                    self.set_sel(*i);
+                }
+                return Flow::Stay;
+            }
+            Event::Scroll(d) => {
+                let i = (self.sel_now() as i32 - d).max(0) as usize;
+                self.set_sel(i);
+                return Flow::Stay;
+            }
+            Event::Tab(n) if *n < PAGES.len() => {
+                self.goto(PAGES[*n].0);
+                return Flow::Stay;
+            }
+            // the Play and Show in library buttons of a finished download
+            Event::Tab(n) if (2000..7000).contains(n) => {
+                self.set_sel(*n % 1000);
+                match *n / 1000 {
+                    3 => self.download_key('f', p),
+                    5 => self.download_key('r', p),
+                    6 => self.download_key('x', p),
+                    _ => self.activate_download(p),
+                }
+                return Flow::Stay;
+            }
+            Event::Tab(100) => {
+                self.stop(p);
+                return Flow::Stay;
+            }
+            Event::Tab(101) => {
+                self.shuffle = !self.shuffle;
+                self.flags_changed();
+                return Flow::Stay;
+            }
+            Event::Tab(102) => {
+                self.repeat = self.repeat.next();
+                self.flags_changed();
+                return Flow::Stay;
+            }
+            Event::Tab(103) => {
+                self.step_queue(-1, p);
+                return Flow::Stay;
+            }
+            Event::Tab(104) => {
+                self.step_queue(1, p);
+                return Flow::Stay;
+            }
+            Event::Tab(105) => {
+                self.open_download(p);
+                return Flow::Stay;
+            }
+            Event::Tab(106) => {
+                self.cycle_sort();
+                return Flow::Stay;
+            }
+            Event::Focus(_) | Event::FocusAt(..) => {
+                self.searching = true;
+                if let Event::FocusAt(_, x) = ev {
+                    self.query.click(*x);
+                }
+                return Flow::Stay;
+            }
+            Event::Paste(t) if self.searching => {
+                self.query.paste(t);
+                self.clamp();
+                return Flow::Stay;
+            }
+            _ => {}
+        }
+        let Event::Key(k) = ev else { return Flow::Stay };
+        if self.searching {
+            match k {
+                Key::Enter => self.searching = false,
+                Key::Esc => {
+                    self.query.clear();
+                    self.searching = false;
+                    self.set_sel(0);
+                }
+                Key::Up => self.set_sel(self.sel_now().saturating_sub(1)),
+                Key::Down => self.set_sel(self.sel_now() + 1),
+                other => {
+                    self.query.handle(other);
+                    self.set_sel(0);
+                }
+            }
+            return Flow::Stay;
+        }
+        let sel = self.sel_now();
+        let on_item = self.selected_path().is_some();
+        match k {
+            Key::Esc => {
+                if self.drill.is_some() {
+                    self.drill = None;
+                    self.clamp();
+                } else if !self.query.value.is_empty() {
+                    self.query.clear();
+                    self.set_sel(0);
+                } else {
+                    return Flow::Back;
+                }
+            }
+            Key::Tab => self.step_page(1),
+            Key::BackTab => self.step_page(-1),
+            Key::Char(c @ '0'..='5') if on_item => self.rate_selected(*c as u8 - b'0', p),
+            Key::Char(c @ '1'..='9') => self.goto(PAGES[*c as usize - '1' as usize].0),
+            Key::Char('0') => self.goto(PAGES[DOWNLOADS_PAGE].0),
+            Key::Char(c @ ('x' | 'r' | 'd' | 'c' | 'f')) if self.page == Page::Downloads => self.download_key(*c, p),
+            Key::Up => self.set_sel(sel.saturating_sub(1)),
+            Key::Down => self.set_sel(sel + 1),
+            Key::PageUp => self.set_sel(sel.saturating_sub(10)),
+            Key::PageDown => self.set_sel(sel + 10),
+            Key::Home => self.set_sel(0),
+            Key::End => self.set_sel(usize::MAX),
+            Key::Enter => self.activate(p),
+            Key::Char('/') => self.searching = true,
+            Key::Char('a') => self.ask_add(),
+            Key::Char('t') => self.open_tags(),
+            Key::Char('D') => self.open_download(p),
+            Key::Char('o') => self.cycle_sort(),
+            Key::Char('s') => self.stop(p),
+            Key::Char(' ') => {
+                if self.player.now_playing().is_some() {
+                    self.stop(p);
+                } else {
+                    self.activate(p);
+                }
+            }
+            Key::Char(',') => self.step_queue(-1, p),
+            Key::Char('.') => self.step_queue(1, p),
+            Key::Char('z') => {
+                self.shuffle = !self.shuffle;
+                self.flags_changed();
+            }
+            Key::Char('l') => {
+                self.repeat = self.repeat.next();
+                self.flags_changed();
+            }
+            Key::Char('R') => {
+                self.start_scan(p);
+                self.say("Looking at the folders again.", true);
+            }
+            Key::Char('i') => {
+                if let Some(p) = self.selected_path() {
+                    if let Some(it) = self.item(&p) {
+                        let src = if it.source_url.is_empty() { String::new() } else { format!(" · downloaded from {}", it.source_url) };
+                        self.say(format!("{} · played {} time{}{} · {}{}", it.kind.name(), it.plays, if it.plays == 1 { "" } else { "s" }, if it.rating > 0 { format!(" · {}", it.stars()) } else { String::new() }, p, src), true);
+                    }
+                }
+            }
+            Key::Char('n') if self.page == Page::Playlists && self.drill.is_none() => {
+                self.pending.clear();
+                self.mode = Mode::Form(Form::new("New playlist").text("Name", "", "e.g. Evening"), FormFor::NewPlaylist);
+            }
+            Key::Char('n') if self.page == Page::Folders => {
+                self.mode = Mode::Form(Form::new("Add a folder").path("Folder", "", "/home/me/Music", crate::filepicker::PathKind::Folder, &[]), FormFor::Folder);
+            }
+            Key::Char('r') if self.page == Page::Playlists => {
+                let name = match (&self.drill, self.selected()) {
+                    (Some(Drill::Playlist(n)), _) => Some(n.clone()),
+                    (None, Some(Row { act: Act::Playlist(n), .. })) => Some(n),
+                    _ => None,
+                };
+                if let Some(n) = name {
+                    self.mode = Mode::Form(Form::new("Rename playlist").text("Name", &n, ""), FormFor::Rename(n));
+                }
+            }
+            Key::Char('d') if self.page == Page::Playlists && self.drill.is_none() => {
+                if let Some(Row { act: Act::Playlist(n), .. }) = self.selected() {
+                    self.mode = Mode::DeletePlaylist(n);
+                }
+            }
+            // a linked host folder: convert it to a copy, or stop sharing it (the options open over the page)
+            Key::Char('c') | Key::Char('u') if self.page == Page::Folders && matches!(self.selected(), Some(Row { act: Act::Folder(f), .. }) if self.store.host_mount_states().iter().any(|(m, _)| m.path == *f)) => {
+                if let Some(Row { act: Act::Folder(f), .. }) = self.selected() {
+                    self.host_menu = self.store.host_mount_states().into_iter().find(|(m, _)| m.path == f).map(|(m, _)| m.name);
+                }
+            }
+            Key::Char('d') if self.page == Page::Folders => {
+                if let Some(Row { act: Act::Folder(f), .. }) = self.selected() {
+                    if self.samples.as_deref().is_some_and(|d| d.to_string_lossy() == f.as_str()) {
+                        self.say("The IYAKKI samples are built in and read-only: they cannot be removed.", false);
+                    } else if self.store.host_mount_states().iter().any(|(m, _)| m.path == f) {
+                        self.say("A shared host folder is stopped under Host files in the DATA tile (it is never deleted).", false);
+                    } else {
+                        self.mode = Mode::RemoveFolder(f);
+                    }
+                }
+            }
+            Key::Char('x') => {
+                if let (Some(name), Some(Row { act: Act::Item(i, _), .. })) = (self.open_list(), self.selected()) {
+                    let _ = self.store.remove_item(&name, i);
+                    self.clamp();
+                }
+            }
+            Key::Char('[') => self.move_item(-1),
+            Key::Char(']') => self.move_item(1),
+            Key::Char('P') if self.page == Page::Playlists => {
+                let name = match (&self.drill, self.selected()) {
+                    (Some(Drill::Playlist(n)), _) => Some(n.clone()),
+                    (None, Some(Row { act: Act::Playlist(n), .. })) => Some(n),
+                    _ => None,
+                };
+                if let Some(n) = name {
+                    self.play_playlist_file(&n, p);
+                }
+            }
+            _ => {}
+        }
+        Flow::Stay
+    }
+
+    pub fn render_with(&mut self, g: &mut Gfx, area: R, s: f32, _p: &dyn MediaPort, tick: u64) {
+        self.area = area;
+        self.ui_scale = s;
+        if let Some(n) = &mut self.native {
+            n.render(g, area, s);
+            return;
+        }
+        if self.video.is_some() {
+            self.render_video(g, area, s);
+            return;
+        }
+        let x = area.x + 24.0 * s;
+        let w = area.w - 48.0 * s;
+        let mut y = area.y + 10.0 * s;
+        y += self.draw_hero(g, R::new(x, y, w, 0.0), s, tick) + 14.0 * s;
+
+        // ---- pages, as glowing pills (the row slides along when the window is narrow)
+        let names: Vec<&str> = PAGES.iter().map(|p| p.1).collect();
+        let widths: Vec<f32> = names.iter().map(|n| g.text_width(14.0 * s, n, Face::Bold) + 26.0 * s).collect();
+        let cur = self.page_idx();
+        let mut first = 0;
+        while first < cur && widths[first..=cur].iter().sum::<f32>() + 8.0 * s * (cur - first) as f32 > w - 40.0 * s {
+            first += 1;
+        }
+        let mut tx = x;
+        if first > 0 {
+            g.text(tx, y + 6.0 * s, 16.0 * s, DIM, "‹", Face::Bold);
+            tx += 18.0 * s;
+        }
+        for i in first..PAGES.len() {
+            if tx + widths[i] > x + w - 14.0 * s {
+                g.text(x + w - 12.0 * s, y + 6.0 * s, 16.0 * s, DIM, "›", Face::Bold);
+                break;
+            }
+            let r = R::new(tx, y, widths[i], 30.0 * s);
+            let on = i == cur;
+            g.rrect(r.x, r.y, r.w, r.h, 15.0 * s, if on { with_alpha(ACCENT, 46) } else if g.hovered(r) { CARD_HOVER } else { rgb(18, 24, 46) });
+            if on {
+                g.rrect_outline(r.x, r.y, r.w, r.h, 15.0 * s, 1.5 * s, ACCENT);
+            }
+            g.text(r.x + 13.0 * s, r.y + 6.0 * s, 14.0 * s, if on { ACCENT } else { MUTED }, names[i], Face::Bold);
+            g.hit(r, Event::Tab(i), names[i]);
+            tx += widths[i] + 8.0 * s;
+        }
+        y += 40.0 * s;
+
+        // ---- search, what it understood, sort and download
+        let sw = (w * 0.4).clamp_safe(160.0 * s, 380.0 * s);
+        // the search box and the two buttons do not fit one row in a narrow window: the buttons go to a row below, the box takes the width
+        let btns_w = g.text_width(13.0 * s, "Download (D)", Face::Bold) + 28.0 * s + g.text_width(13.0 * s, &format!("Sort: {} (o)", self.sort.label()), Face::Bold) + 28.0 * s + 8.0 * s;
+        let stacked = sw + 12.0 * s + btns_w + 40.0 * s > w;
+        let sw = if stacked { w } else { sw };
+        let sr = R::new(x, y, sw, 36.0 * s);
+        if self.query.value.is_empty() && !self.searching {
+            self.query.placeholder = "/ search: kutthu song, melody above 4 stars…".into();
+        } else {
+            self.query.placeholder.clear();
+        }
+        self.query.render(g, sr, self.searching, s, blink(tick), Face::Sans, 0);
+        let mut cx_ = x + sw + 12.0 * s;
+        let right_btns = g.text_width(13.0 * s, "Download (D)", Face::Bold) + 28.0 * s + g.text_width(13.0 * s, &format!("Sort: {} (o)", self.sort.label()), Face::Bold) + 28.0 * s + 8.0 * s;
+        let chip_room = if stacked { 0.0 } else { (x + w - right_btns - cx_).max(0.0) };
+        let by = if stacked { y + 40.0 * s } else { y };
+        let mut used = 0.0;
+        for chip in self.chips() {
+            let t = chip.strip_prefix("type: ").unwrap_or(&chip).to_string();
+            let col = if chip.starts_with("type: ") { type_color(&t) } else { CYAN };
+            let cw = g.text_width(12.0 * s, &chip, Face::Bold) + 20.0 * s;
+            if used + cw > chip_room {
+                break;
+            }
+            g.rrect(cx_, y + 5.0 * s, cw, 26.0 * s, 13.0 * s, with_alpha(col, 40));
+            g.rrect_outline(cx_, y + 5.0 * s, cw, 26.0 * s, 13.0 * s, 1.0 * s, with_alpha(col, 170));
+            g.text(cx_ + 10.0 * s, y + 10.0 * s, 12.0 * s, col, &chip, Face::Bold);
+            cx_ += cw + 6.0 * s;
+            used += cw + 6.0 * s;
+        }
+        let mut bx = x + w;
+        let dw = g.text_width(13.0 * s, "Download (D)", Face::Bold) + 28.0 * s;
+        bx -= dw;
+        g.button(bx, by + 3.0 * s, 13.0 * s, "Download (D)", CYAN, Event::Tab(105));
+        let sl = format!("Sort: {} (o)", self.sort.label());
+        let sw2 = g.text_width(13.0 * s, &sl, Face::Bold) + 28.0 * s;
+        bx -= sw2 + 8.0 * s;
+        g.button(bx, by + 3.0 * s, 13.0 * s, &sl, if self.sort == Sort::Relevance { MUTED } else { AMBER }, Event::Tab(106));
+        y += 46.0 * s + if stacked { 40.0 * s } else { 0.0 };
+
+        // ---- the last thing said
+        if let Some((m, ok)) = &self.status {
+            let m = g.fit(14.0 * s, m, Face::Sans, w);
+            g.text(x, y, 14.0 * s, if *ok { OK } else { ERR }, &m, Face::Sans);
+        }
+        y += 24.0 * s;
+        if let Some(d) = &self.drill {
+            let t = match d {
+                Drill::Artist(a) => format!("Artist: {a}   (Esc goes back)"),
+                Drill::Album(a, b) => format!("Album: {b} by {a}   (Esc goes back)"),
+                Drill::Playlist(n) => format!("Playlist: {n}   (x remove · [ ] move · P play it all · Esc back)"),
+                Drill::Type(t) => format!("Type: {t}   (Esc goes back)"),
+                Drill::Lang(l) => format!("Language: {l}   (Esc goes back)"),
+            };
+            let t = g.fit(14.0 * s, &t, Face::Bold, w);
+            g.text(x, y, 14.0 * s, ACCENT, &t, Face::Bold);
+            y += 24.0 * s;
+        }
+
+        // ---- the list, in dark glass cards
+        let rows = self.rows();
+        let sel = self.sel_now().min(rows.len().saturating_sub(1));
+        if rows.is_empty() {
+            let msg = if self.scanning.is_some() {
+                "Looking through your folders…".to_string()
+            } else {
+                match self.page {
+                    _ if !self.q().is_empty() => "Nothing matches the search.".to_string(),
+                    Page::Playlists if self.drill.is_none() => "No playlists yet. Press n to make one, or a on a track.".to_string(),
+                    Page::Playlists => "This playlist is empty. Add tracks with a.".to_string(),
+                    Page::Folders => "No folders. Press n to add one.".to_string(),
+                    Page::Types => "No types yet: they appear as the library is scanned. Press t on a track to choose its types.".to_string(),
+                    Page::TopRated => "Nothing is rated yet. Choose a track and press 1 to 5.".to_string(),
+                    Page::Photos => "No pictures found. They are looked for in your Pictures folder; press D to download one.".to_string(),
+                    Page::Downloads => "No downloads. Press D to add one or more addresses to the queue.".to_string(),
+                    _ => "No media files in your folders. Press 6 to see which folders are looked at, or n there to add one.".to_string(),
+                }
+            };
+            g.text(x, y + 8.0 * s, 16.0 * s, MUTED, &msg, Face::Sans);
+        } else {
+            let rh = 50.0 * s;
+            let fit = (((area.y + area.h - y - 8.0 * s) / (rh + 5.0 * s)).floor() as usize).max(1);
+            let start = sel.saturating_sub(fit - 1);
+            let now = self.queue.get(self.qpos).filter(|_| self.queue_active).cloned().or_else(|| self.player.now_target());
+            let playing_any = self.player.now_playing().is_some();
+            for (i, row) in rows.iter().enumerate().skip(start).take(fit) {
+                let r = R::new(x, y, w, rh);
+                let is_sel = i == sel;
+                let playing = matches!((&row.act, &now), (Act::Track(p) | Act::Item(_, p), Some(n)) if p == n) && playing_any;
+                let tint = row.types.first().map_or(ACCENT, |t| type_color(t));
+                g.rrect(r.x, r.y, r.w, r.h, 12.0 * s, if is_sel { CARD_SEL } else if g.hovered(r) { CARD_HOVER } else { CARD });
+                if playing {
+                    // the playing row pulses
+                    let pulse = 0.5 + 0.5 * (tick as f32 * 0.15).sin();
+                    g.rrect_outline(r.x, r.y, r.w, r.h, 12.0 * s, 1.6 * s, with_alpha(OK, (110.0 + 120.0 * pulse) as u8));
+                } else if is_sel {
+                    g.rrect_outline(r.x, r.y, r.w, r.h, 12.0 * s, 1.2 * s, with_alpha(ACCENT, 190));
+                }
+                g.rect(r.x + 3.0 * s, r.y + 9.0 * s, 3.0 * s, r.h - 18.0 * s, with_alpha(tint, if is_sel || playing { 255 } else { 110 }));
+                g.hit(r, Event::Row(i), &row.main);
+                if let Some(d) = &row.dl {
+                    draw_download_row(g, r, d, row, i, is_sel, s, tick);
+                    y += rh + 5.0 * s;
+                    continue;
+                }
+                let mut left = 18.0 * s;
+                if playing {
+                    for k in 0..4 {
+                        let hh = (6.0 + 14.0 * (0.5 + 0.5 * ((tick as f32 * 0.25) + k as f32 * 1.7).sin())) * s;
+                        g.rrect(r.x + 16.0 * s + k as f32 * 6.0 * s, r.y + rh / 2.0 + 9.0 * s - hh, 4.0 * s, hh, 1.5 * s, mix(CYAN, MAGENTA, k as f32 / 3.0));
+                    }
+                    left = 46.0 * s;
+                }
+                // right side: duration, stars, type chips (from the edge inwards)
+                let mut rx = r.x + r.w - 14.0 * s;
+                let rw = g.text_width(13.0 * s, &row.right, Face::Sans);
+                rx -= rw;
+                g.text(rx, r.y + 17.0 * s, 13.0 * s, DIM, &row.right, Face::Sans);
+                if row.rating > 0 {
+                    let st = mediaindex::stars_text(row.rating);
+                    let sw = g.text_width(13.0 * s, &st, Face::Sans);
+                    rx -= sw + 14.0 * s;
+                    g.text(rx, r.y + 17.0 * s, 13.0 * s, AMBER, &st, Face::Sans);
+                }
+                let mut chips_left = rx;
+                if r.w > 520.0 * s {
+                    for t in row.types.iter().take(2) {
+                        let cw = g.text_width(11.0 * s, t, Face::Bold) + 16.0 * s;
+                        chips_left -= cw + 6.0 * s;
+                        let col = type_color(t);
+                        g.rrect(chips_left, r.y + 14.0 * s, cw, 22.0 * s, 11.0 * s, with_alpha(col, 38));
+                        g.rrect_outline(chips_left, r.y + 14.0 * s, cw, 22.0 * s, 11.0 * s, 1.0 * s, with_alpha(col, 160));
+                        g.text(chips_left + 8.0 * s, r.y + 18.0 * s, 11.0 * s, col, t, Face::Bold);
+                    }
+                }
+                let room = (chips_left - r.x - left - 16.0 * s).max(40.0 * s);
+                let main = g.fit(16.0 * s, &row.main, Face::Bold, room);
+                if row.sub.is_empty() {
+                    g.text(r.x + left, r.y + 14.0 * s, 16.0 * s, if playing { OK } else { TEXT }, &main, Face::Bold);
+                } else {
+                    g.text(r.x + left, r.y + 6.0 * s, 16.0 * s, if playing { OK } else { TEXT }, &main, Face::Bold);
+                    let sub = g.fit(12.0 * s, &row.sub, Face::Sans, room);
+                    g.text(r.x + left, r.y + 28.0 * s, 12.0 * s, MUTED, &sub, Face::Sans);
+                }
+                y += rh + 5.0 * s;
+            }
+        }
+
+        match &self.mode {
+            Mode::Form(f, _) => f.render(g, area, s, ACCENT, blink(tick)),
+            Mode::Tag(f, _) => f.render(g, area, s, ACCENT, blink(tick)),
+            Mode::Download(f, _) => f.render(g, area, s, CYAN, blink(tick)),
+            Mode::Pick(p) => p.render(g, area, s, ACCENT),
+            Mode::DeletePlaylist(n) => render_confirm(g, area, s, &format!("Delete the playlist {n}? The files stay."), "Delete"),
+            Mode::RemoveFolder(f) => render_confirm(g, area, s, &format!("Stop looking in {f}? The files stay."), "Remove"),
+            Mode::Browse => {}
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "media_fake_tests.rs"]
+mod fake_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2313,6 +2356,59 @@ mod tests {
         v
     }
 
+    #[test]
+    fn media_keys_reach_the_player_that_plays_pause_resume_thirty_second_skips_and_stop_and_are_not_taken_without_one() {
+        use crate::fnkeys::FnKey;
+        let (mut a, cx, _fake, d) = setup("media-keys-playing");
+        // nothing plays in the IYAKKI player: the keys are not taken (the shell then says nothing plays)
+        for k in [FnKey::PlayPause, FnKey::Next, FnKey::Prev, FnKey::Stop] {
+            assert!(!a.media_key(k, &cx), "{k:?} without a player");
+        }
+        let (fd, cfg) = crate::apps::mediaplay::tests::fakes("media-keys-app");
+        let area = crate::ui::R::new(0.0, 0.0, 400.0, 300.0);
+        a.native = Some(crate::apps::mediaplay::NativeView::start_with(cfg, "/media/cam.avi", "Cam", area).unwrap());
+        let status = |a: &MediaApp| a.native.as_ref().unwrap().player().status();
+        let log = || std::fs::read_to_string(fd.join("ffmpeg.log")).unwrap_or_default();
+        for _ in 0..300 {
+            a.native.as_mut().unwrap().event(&Event::Tick);
+            if status(&a).position >= 0.0 && log().contains("rawvideo") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // play/pause toggles the player
+        assert!(!status(&a).paused);
+        assert!(a.media_key(FnKey::PlayPause, &cx) && status(&a).paused);
+        assert!(a.media_key(FnKey::PlayPause, &cx) && !status(&a).paused);
+        // next and previous are the thirty second skips: each restarts the decoders at the new place
+        let seeks = |l: &str| l.matches("-ss").count();
+        let before = seeks(&log());
+        assert!(a.media_key(FnKey::Next, &cx));
+        for _ in 0..300 {
+            if seeks(&log()) > before {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(seeks(&log()) > before, "the forward skip restarted the decoders: {}", log());
+        let before = seeks(&log());
+        assert!(a.media_key(FnKey::Prev, &cx));
+        for _ in 0..300 {
+            if seeks(&log()) > before {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(seeks(&log()) > before, "the backward skip restarted the decoders");
+        // a key the player does not use is not taken, and stop closes the player
+        assert!(!a.media_key(FnKey::VolumeMute, &cx) && a.native.is_some());
+        assert!(a.media_key(FnKey::Stop, &cx));
+        assert!(a.native.is_none(), "stop closes the player");
+        assert!(!a.media_key(FnKey::PlayPause, &cx), "and then the keys are not taken again");
+        let _ = std::fs::remove_dir_all(&fd);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// An app over a temp library: Ann has two tracks, Bob one, plus a video; a second folder is outside the scope.
     fn setup(tag: &str) -> (MediaApp, AppCx, Arc<Fake>, std::path::PathBuf) {
         let mut cx = cx_with_admin_store(tag);
@@ -2329,7 +2425,7 @@ mod tests {
         store.remove_folder(&format!("/home/{}/Music", cx.session.user)).unwrap();
         store.remove_folder(&format!("/home/{}/Videos", cx.session.user)).unwrap();
         let fake = Arc::new(Fake::default());
-        let app = MediaApp::with_player(&cx, Arc::new(MediaPlayer::new(fake.clone())));
+        let app = MediaApp::with_player(&CxPort(&cx), Arc::new(MediaPlayer::new(fake.clone())));
         let mut app = app;
         wait_scan(&mut app, &cx);
         (app, cx, fake, d)
@@ -2430,7 +2526,7 @@ mod tests {
         assert_eq!(fake.launched.lock().unwrap().len(), started, "a stopped queue does not restart");
         // the flags are kept for the next visit
         key(&mut a, &cx, Key::Char('z'));
-        let b = MediaApp::with_player(&cx, a.player.clone());
+        let b = MediaApp::with_player(&CxPort(&cx), a.player.clone());
         assert!(b.shuffle && b.repeat == Repeat::Off);
         // the log names the files played
         assert!(std::fs::read_to_string(cx.audit.path()).unwrap().contains("media.play"));
@@ -2555,12 +2651,12 @@ mod tests {
         iyakki_agent::hostfiles::set_enabled(true);
         iyakki_agent::hostfiles::set_host_home(Some(host.clone()));
         let before_n = a.library().audio("").len();
-        assert!(!a.may_read(&cx, &t1), "not reachable before it is shared");
+        assert!(!a.may_read(&CxPort(&cx), &t1), "not reachable before it is shared");
         let mut m = iyakki_agent::hostfiles::HostMounts::load(cx.services.dir(), &cx.session.user);
         m.add(&host, "~/Songs", Some("Songs"), false).unwrap();
         rescan(&mut a, &cx);
         assert_eq!(a.library().audio("").len(), before_n + 2, "the shared folder's songs are in the library");
-        assert!(a.may_read(&cx, &t1), "playback resolves through the mount");
+        assert!(a.may_read(&CxPort(&cx), &t1), "playback resolves through the mount");
         // the Folders page says where it is from
         a.handle(&Event::Tab(5), &cx);
         let rows = a.rows();
@@ -2610,7 +2706,7 @@ mod tests {
         m.remove("Songs").unwrap();
         rescan(&mut a, &cx);
         assert_eq!(a.library().audio("").len(), before_n);
-        assert!(!a.may_read(&cx, &t1));
+        assert!(!a.may_read(&CxPort(&cx), &t1));
         iyakki_agent::hostfiles::set_host_home(None);
         iyakki_agent::hostfiles::set_enabled(false);
     }
@@ -2674,7 +2770,7 @@ mod tests {
         // the person's rating survives a restart of the app and a rescan
         rescan(&mut a, &cx);
         assert_eq!(cur(&a).unwrap().rating, 4);
-        let b = MediaApp::with_player(&cx, a.player.clone());
+        let b = MediaApp::with_player(&CxPort(&cx), a.player.clone());
         assert_eq!(b.index.lock().unwrap().find_path(&d.join("mine/music/kuthu/k1.mp3").to_str().unwrap().to_string()).unwrap().rating, 4);
         // "melody songs above 4 stars" finds nothing yet; Top rated shows the 4-star one
         key(&mut a, &cx, Key::Esc);
@@ -2832,8 +2928,8 @@ mod tests {
         store.remove_folder(&format!("/home/{}/Music", cx.session.user)).unwrap();
         store.remove_folder(&format!("/home/{}/Videos", cx.session.user)).unwrap();
         let fake = Arc::new(Fake::default());
-        let mut app = MediaApp::with_player(&cx, Arc::new(MediaPlayer::new(fake.clone())));
-        app.set_samples_dir(None, &cx);
+        let mut app = MediaApp::with_player(&CxPort(&cx), Arc::new(MediaPlayer::new(fake.clone())));
+        app.set_samples_dir(None, &CxPort(&cx));
         wait_scan(&mut app, &cx);
         (app, cx, fake, d)
     }
@@ -3160,7 +3256,7 @@ mod tests {
         // an account whose read scope does not include the samples still sees them
         let sd = sample_dir("media-samples");
         assert!(!cx.session.policy.allows_read("root", sd.to_str().unwrap()));
-        a.set_samples_dir(Some(sd.clone()), &cx);
+        a.set_samples_dir(Some(sd.clone()), &CxPort(&cx));
         wait_scan(&mut a, &cx);
         assert_eq!(a.row_names(), vec!["IYAKKI Sample Beats", "IYAKKI Sample Melody"]);
         a.handle(&Event::Tab(3), &cx);
@@ -3189,14 +3285,14 @@ mod tests {
         let _ = draw(&mut a, &cx, 1280, 720);
         key(&mut a, &cx, Key::Enter);
         assert!(a.status_text().unwrap().contains("read-only"));
-        assert!(!a.download_folders(&cx).iter().any(|f| f.starts_with(sd.to_str().unwrap())));
+        assert!(!a.download_folders(&CxPort(&cx)).iter().any(|f| f.starts_with(sd.to_str().unwrap())));
         assert_eq!(a.store.folders().len(), 3, "the person's own list is untouched");
         // the sample tag is searchable, and without a sample folder nothing is listed
         a.handle(&Event::Tab(0), &cx);
         key(&mut a, &cx, Key::Char('/'));
         typ(&mut a, &cx, "sample");
         assert_eq!(a.row_names().len(), 3 - 1 + 0, "{:?}", a.row_names());
-        a.set_samples_dir(None, &cx);
+        a.set_samples_dir(None, &CxPort(&cx));
         wait_scan(&mut a, &cx);
         key(&mut a, &cx, Key::Esc);
         assert!(a.row_names().is_empty());
@@ -3205,7 +3301,7 @@ mod tests {
     /// The fake web engine helper of `iyakki-webview` (built on demand), as a script that starts it.
     fn fake_helper_script(tag: &str) -> std::path::PathBuf {
         let exe = std::env::current_exe().unwrap();
-        let dir = exe.parent().unwrap().parent().unwrap().to_path_buf();
+        let dir = exe.ancestors().find(|d| d.file_name().is_some_and(|n| n == "debug" || n == "release")).expect("the profile folder (target/debug) above the test program").to_path_buf();
         let bin = dir.join("iyakki-fake-webview");
         if !bin.is_file() {
             let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
@@ -3235,7 +3331,7 @@ mod tests {
         use std::io::{Read, Write};
         let (mut a, cx, fake, _d) = dsetup("media-video");
         let sd = sample_dir("media-video");
-        a.set_samples_dir(Some(sd.clone()), &cx);
+        a.set_samples_dir(Some(sd.clone()), &CxPort(&cx));
         wait_scan(&mut a, &cx);
         let helper = fake_helper_script("media-video");
         a.set_video_route(Some(VideoRoute::Embedded(helper)));
@@ -3294,7 +3390,7 @@ mod tests {
     fn without_a_player_or_the_engine_a_video_says_what_is_needed_and_an_installed_player_is_used_first() {
         let (mut a, cx, fake, _d) = dsetup("media-vnone");
         let sd = sample_dir("media-vnone");
-        a.set_samples_dir(Some(sd.clone()), &cx);
+        a.set_samples_dir(Some(sd.clone()), &CxPort(&cx));
         wait_scan(&mut a, &cx);
         a.handle(&Event::Tab(3), &cx);
         a.set_video_route(Some(VideoRoute::Missing));

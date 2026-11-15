@@ -26,6 +26,9 @@ pub const SIG_CLOSE: u8 = 8;
 pub const SIG_SUSPEND: u8 = 9;
 pub const SIG_ABORT: u8 = 10;
 pub const SIG_GET_ALL_CAPABILITIES: u8 = 12;
+pub const SIG_DELAY_REPORT: u8 = 13;
+/// The service category that says a device takes and gives delay reports (no payload).
+pub const CAT_DELAY_REPORTING: u8 = 8;
 
 pub const ERR_BAD_ACP_SEID: u8 = 0x12;
 pub const ERR_SEP_IN_USE: u8 = 0x13;
@@ -295,6 +298,13 @@ pub enum Action {
 pub struct Sink {
     state: StreamState,
     config: Option<Params>,
+    /// Delay reporting is offered and accepted in a configuration (off unless asked for with [`Sink::with_delay_reporting`]).
+    delay: bool,
+    /// The source asked for it in the configuration of the stream now set up.
+    delay_agreed: bool,
+    /// The source's endpoint, from the configuration; delay reports go to it.
+    source_seid: u8,
+    label: u8,
 }
 
 impl Default for Sink {
@@ -313,7 +323,32 @@ fn accept(m: &Msg, params: Vec<u8>) -> Msg {
 
 impl Sink {
     pub fn new() -> Sink {
-        Sink { state: StreamState::Idle, config: None }
+        Sink { state: StreamState::Idle, config: None, delay: false, delay_agreed: false, source_seid: 0, label: 0 }
+    }
+
+    /// Offers delay reporting in the capabilities and accepts it in a configuration.
+    pub fn with_delay_reporting(mut self) -> Sink {
+        self.delay = true;
+        self
+    }
+
+    /// The capabilities this endpoint answers with.
+    pub fn capabilities(&self) -> Vec<u8> {
+        let mut v = our_capabilities();
+        if self.delay {
+            v.extend_from_slice(&[CAT_DELAY_REPORTING, 0]);
+        }
+        v
+    }
+
+    /// The command that tells the phone how long this computer takes from receiving a packet to the sound coming out, in tenths of a
+    /// millisecond (the phone can then keep the picture in step). None unless delay reporting was agreed and a stream is configured.
+    pub fn delay_report(&mut self, tenths_ms: u16) -> Option<Msg> {
+        if !self.delay_agreed || self.state == StreamState::Idle {
+            return None;
+        }
+        self.label = (self.label + 1) & 0xf;
+        Some(Msg { label: self.label, kind: MsgType::Command, signal: SIG_DELAY_REPORT, params: vec![self.source_seid << 2, (tenths_ms >> 8) as u8, tenths_ms as u8] })
     }
 
     pub fn state(&self) -> StreamState {
@@ -344,7 +379,7 @@ impl Sink {
                 if !Sink::seid_ok(m.params.first()) || m.params.len() != 1 {
                     reject(m, vec![ERR_BAD_ACP_SEID])
                 } else {
-                    accept(m, our_capabilities())
+                    accept(m, self.capabilities())
                 }
             }
             SIG_SET_CONFIGURATION => self.set_configuration(m, &mut acts),
@@ -354,7 +389,7 @@ impl Sink {
                 } else if self.state == StreamState::Idle {
                     reject(m, vec![ERR_BAD_STATE])
                 } else {
-                    accept(m, our_capabilities())
+                    accept(m, self.capabilities())
                 }
             }
             SIG_OPEN => {
@@ -396,6 +431,7 @@ impl Sink {
         }
         self.state = StreamState::Idle;
         self.config = None;
+        self.delay_agreed = false;
     }
 
     /// The link went away: same as an abort.
@@ -415,7 +451,8 @@ impl Sink {
         if self.state != StreamState::Idle {
             return reject(m, vec![0, ERR_SEP_IN_USE]);
         }
-        let (transport, sbc) = match parse_capabilities(&m.params[2..]) {
+        let (caps, delay_asked) = if self.delay { strip_delay(&m.params[2..]) } else { (m.params[2..].to_vec(), false) };
+        let (transport, sbc) = match parse_capabilities(&caps) {
             Ok(x) => x,
             Err((cat, e)) => return reject(m, vec![cat, e]),
         };
@@ -423,6 +460,8 @@ impl Sink {
         match info.to_params() {
             Ok(p) => {
                 self.config = Some(p);
+                self.source_seid = m.params[1] >> 2;
+                self.delay_agreed = delay_asked;
                 self.state = StreamState::Configured;
                 acts.push(Action::Configured(p));
                 accept(m, vec![])
@@ -451,6 +490,25 @@ impl Sink {
         }
         accept(m, vec![])
     }
+}
+
+/// A list of service capability elements without the delay-reporting one, and whether it was there. A broken list is returned
+/// unchanged (the parser then refuses it).
+fn strip_delay(mut d: &[u8]) -> (Vec<u8>, bool) {
+    let (mut out, mut found) = (Vec::new(), false);
+    while !d.is_empty() {
+        if d.len() < 2 || d.len() < 2 + d[1] as usize {
+            return (d.to_vec(), found);
+        }
+        let n = 2 + d[1] as usize;
+        if d[0] == CAT_DELAY_REPORTING && d[1] == 0 {
+            found = true;
+        } else {
+            out.extend_from_slice(&d[..n]);
+        }
+        d = &d[n..];
+    }
+    (out, found)
 }
 
 /// The text for a reason the phone gave when it refused or ended something.

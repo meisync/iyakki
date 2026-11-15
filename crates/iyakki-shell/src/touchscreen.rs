@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use crate::input::{Raw, EV_ABS, EV_KEY, EV_SYN};
 use crate::touchmap::{map_point, OutRect, TouchDev};
-use crate::ui::Event;
+use crate::ui::{Event, Key, Nav};
 
 const ABS_X: u16 = 0;
 const ABS_Y: u16 = 1;
@@ -60,7 +60,22 @@ enum Mode {
     Scroll,
     /// It was held, then moved: a mouse drag; the press has been sent.
     Mouse,
+    /// A second finger came down while the first had sent nothing: a pinch or a two-finger swipe, and no click.
+    Two,
 }
+
+/// Two fingers: how far apart they were and where their middle was when they began, and whether a swipe has been sent already.
+#[derive(Clone, Copy, Debug)]
+struct Pair {
+    d0: f64,
+    mid0: (i32, i32),
+    swiped: bool,
+}
+
+/// Two fingers that move this much further apart (or closer together) than they started are a pinch.
+const PINCH_RATIO: f64 = 1.3;
+/// Two fingers whose middle moves this many desktop pixels sideways, without pinching, are a swipe.
+const SWIPE_PX: i32 = 160;
 
 #[derive(Clone, Copy, Default)]
 struct Finger {
@@ -87,6 +102,9 @@ struct One {
     start: (i32, i32),
     since: Option<Instant>,
     scroll_y: i32,
+    /// Two-finger gestures (gestures on): the pair being tracked, and whether a finger other than the first moved in this frame.
+    pair: Option<Pair>,
+    other_moved: bool,
 }
 
 pub struct Touches {
@@ -206,6 +224,8 @@ impl One {
         }
         if self.primary == Some(slot) {
             self.moved = true;
+        } else if self.fingers[slot].down {
+            self.other_moved = true;
         }
     }
 
@@ -214,6 +234,9 @@ impl One {
     fn frame_gestures(&mut self, dev: &TouchDev, target: Option<&OutRect>) -> TouchOut {
         let mut out = TouchOut::default();
         let rect = self.latched.clone().or_else(|| target.cloned());
+        if let Some(rect) = rect.as_ref().filter(|_| self.latched.is_some()) {
+            self.two_fingers(dev, rect, &mut out);
+        }
         if let (Some(p), Some(rect)) = (self.primary, rect) {
             let at = map_point(dev, &rect, self.fingers[p].x, self.fingers[p].y);
             if self.pending_down {
@@ -221,7 +244,7 @@ impl One {
                 self.start = at;
                 self.since = Some(Instant::now());
                 self.last = at;
-            } else if self.moved {
+            } else if self.moved && self.mode != Mode::Two {
                 self.last = at;
                 if self.mode == Mode::Pending {
                     let (dx, dy) = (at.0 - self.start.0, at.1 - self.start.1);
@@ -272,15 +295,54 @@ impl One {
                         }
                     }
                     Mode::Mouse => out.events.push(Event::MouseUp(self.last.0, self.last.1)),
-                    Mode::Scroll | Mode::Idle => {}
+                    Mode::Scroll | Mode::Idle | Mode::Two => {}
                 }
             }
             self.mode = Mode::Idle;
             self.since = None;
             self.primary = None;
             self.latched = None;
+            self.pair = None;
         }
+        self.other_moved = false;
         out
+    }
+
+    /// A second finger on the screen while the first has sent nothing (or only scrolled): a pinch (the distance between the fingers
+    /// changes by a third) is Ctrl+plus or Ctrl+minus, a swipe (their middle moves sideways, the distance stays) is Ctrl+Left or
+    /// Ctrl+Right; the app under the fingers decides what those mean (the PDF viewer zooms and turns pages). One gesture sends a
+    /// key once and starts measuring again from there, so a long pinch zooms step by step.
+    fn two_fingers(&mut self, dev: &TouchDev, rect: &OutRect, out: &mut TouchOut) {
+        let down: Vec<usize> = (0..SLOTS).filter(|&i| self.fingers[i].down).collect();
+        if down.len() < 2 || self.primary.is_none() {
+            return;
+        }
+        if !matches!(self.mode, Mode::Pending | Mode::Scroll | Mode::Two) {
+            return;
+        }
+        let at = |i: usize| map_point(dev, rect, self.fingers[i].x, self.fingers[i].y);
+        let (a, b) = (at(down[0]), at(down[1]));
+        let d = (((a.0 - b.0) as f64).powi(2) + ((a.1 - b.1) as f64).powi(2)).sqrt().max(1.0);
+        let mid = ((a.0 + b.0) / 2, (a.1 + b.1) / 2);
+        if self.mode != Mode::Two {
+            self.mode = Mode::Two;
+            self.pair = Some(Pair { d0: d, mid0: mid, swiped: false });
+            return;
+        }
+        if !(self.moved || self.other_moved) {
+            return;
+        }
+        let Some(p) = self.pair.as_mut() else { return };
+        let ratio = d / p.d0;
+        if ratio >= PINCH_RATIO || ratio <= 1.0 / PINCH_RATIO {
+            out.events.push(Event::Key(Key::Ctrl(if ratio > 1.0 { '+' } else { '-' })));
+            *p = Pair { d0: d, mid0: mid, swiped: false };
+        } else if !p.swiped && (mid.0 - p.mid0.0).abs() >= SWIPE_PX && (mid.0 - p.mid0.0).abs() > 2 * (mid.1 - p.mid0.1).abs() {
+            // fingers moving left turn to the next page, as a page is pulled across
+            let nav = if mid.0 < p.mid0.0 { Nav::Right } else { Nav::Left };
+            out.events.push(Event::Key(Key::Nav { nav, shift: false, ctrl: true }));
+            p.swiped = true;
+        }
     }
 
     fn frame(&mut self, dev: &TouchDev, target: Option<&OutRect>) -> TouchOut {
@@ -368,6 +430,84 @@ mod tests {
         let mut t = Touches::default();
         t.set_gestures(true);
         t
+    }
+
+    /// A second finger lands in slot 1 (the first stays where it is).
+    fn land_second(t: &mut Touches, x: i32, y: i32) -> Vec<Event> {
+        feed(t, &[(EV_ABS, SLOT, 1), (EV_ABS, TID, 6), (EV_ABS, X, x), (EV_ABS, Y, y), (EV_SYN, 0, 0)]).0
+    }
+
+    fn move_finger(t: &mut Touches, slot: i32, x: i32, y: i32) -> Vec<Event> {
+        feed(t, &[(EV_ABS, SLOT, slot), (EV_ABS, X, x), (EV_ABS, Y, y), (EV_SYN, 0, 0)]).0
+    }
+
+    fn move_both(t: &mut Touches, a: (i32, i32), b: (i32, i32)) -> Vec<Event> {
+        feed(t, &[(EV_ABS, SLOT, 0), (EV_ABS, X, a.0), (EV_ABS, Y, a.1), (EV_ABS, SLOT, 1), (EV_ABS, X, b.0), (EV_ABS, Y, b.1), (EV_SYN, 0, 0)]).0
+    }
+
+    fn lift_slot(t: &mut Touches, slot: i32) -> Vec<Event> {
+        feed(t, &[(EV_ABS, SLOT, slot), (EV_ABS, TID, -1), (EV_SYN, 0, 0)]).0
+    }
+
+    fn keys(evs: &[Event]) -> Vec<Key> {
+        evs.iter().filter_map(|e| if let Event::Key(k) = e { Some(k.clone()) } else { None }).collect()
+    }
+
+    #[test]
+    fn two_fingers_moving_apart_or_together_are_a_pinch_and_click_nothing() {
+        let mut t = gestures();
+        land(&mut t, 14000, 16384);
+        assert!(land_second(&mut t, 18000, 16384).is_empty());
+        // out: the second finger goes much further away
+        let out = move_finger(&mut t, 1, 26000, 16384);
+        assert_eq!(keys(&out), vec![Key::Ctrl('+')], "{out:?}");
+        assert!(out.iter().all(|e| !matches!(e, Event::MouseDown(..) | Event::MouseUp(..) | Event::ScrollPx(_))), "{out:?}");
+        // a small move is nothing; coming back in is the other way
+        assert!(keys(&move_finger(&mut t, 1, 27000, 16384)).is_empty());
+        let back = move_finger(&mut t, 1, 15500, 16384);
+        assert_eq!(keys(&back), vec![Key::Ctrl('-')], "{back:?}");
+        // lifting both sends no click and no menu
+        assert!(lift_slot(&mut t, 1).is_empty());
+        assert!(lift_slot(&mut t, 0).is_empty());
+        // the next single touch is a tap again
+        land(&mut t, 100, 100);
+        assert_eq!(lift(&mut t).len(), 3);
+    }
+
+    #[test]
+    fn two_fingers_sliding_sideways_together_are_a_swipe_once_per_gesture() {
+        let mut t = gestures();
+        land(&mut t, 20000, 16384);
+        land_second(&mut t, 24000, 16384);
+        // both go left by about 330 pixels of the 1920 wide screen
+        let out = move_both(&mut t, (15000, 16384), (19000, 16384));
+        assert_eq!(keys(&out), vec![Key::Nav { nav: Nav::Right, shift: false, ctrl: true }], "{out:?}");
+        assert!(keys(&move_both(&mut t, (13000, 16384), (17000, 16384))).is_empty(), "one swipe is one key");
+        lift_slot(&mut t, 1);
+        lift_slot(&mut t, 0);
+        // the other way
+        land(&mut t, 8000, 16384);
+        land_second(&mut t, 12000, 16384);
+        let out = move_both(&mut t, (15000, 16384), (19000, 16384));
+        assert_eq!(keys(&out), vec![Key::Nav { nav: Nav::Left, shift: false, ctrl: true }], "{out:?}");
+    }
+
+    #[test]
+    fn a_second_finger_after_a_scroll_began_or_down_the_page_is_not_a_scroll_and_one_finger_is_unchanged() {
+        let mut t = gestures();
+        land(&mut t, 16384, 8000);
+        slide(&mut t, 16384, 12000);
+        land_second(&mut t, 20000, 12000);
+        let out = move_finger(&mut t, 0, 16384, 16000);
+        assert_eq!(scrolled(&out), 0, "the pair does not scroll: {out:?}");
+        lift_slot(&mut t, 1);
+        lift_slot(&mut t, 0);
+        // without gestures the second finger changes nothing
+        let mut m = Touches::default();
+        m.set_gestures(false);
+        land(&mut m, 14000, 16384);
+        assert!(keys(&land_second(&mut m, 18000, 16384)).is_empty());
+        assert!(keys(&move_finger(&mut m, 1, 28000, 16384)).is_empty());
     }
 
     #[test]

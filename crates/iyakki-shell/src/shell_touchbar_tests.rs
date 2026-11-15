@@ -21,6 +21,8 @@ fn rig(tag: &str) -> (Shell, Host, std::path::PathBuf) {
     std::fs::create_dir_all(&sys).unwrap();
     sh.fnk.sys = sys.clone();
     sh.fnk.sound_probe = Some(true);
+    // a frozen clock: the strip shows the time, so a minute changing between two draws would count as a change
+    sh.clock.fixed = Some(1_767_225_600);
     let host = Host::detached(0);
     host.ready_for_test(2170, 60);
     sh.tbar_attach_for_test(host.clone());
@@ -45,7 +47,7 @@ fn a_ready_display_gets_a_picture_of_the_shell_state_and_only_changes_after() {
     let p = host.take_picture_for_test().expect("the first picture");
     assert_eq!((p.w, p.h), (2170, 60));
     ticks(&mut sh, 30);
-    assert!(host.take_picture_for_test().is_none(), "nothing changed, nothing sent (apart from the clock)");
+    assert!(host.take_picture_for_test().is_none(), "nothing changed, nothing sent (the clock is frozen)");
     sh.env.services.update_sound(|s| s.volume_pct = 20).unwrap();
     ticks(&mut sh, 6);
     assert!(host.take_picture_for_test().is_some(), "a volume change redraws");

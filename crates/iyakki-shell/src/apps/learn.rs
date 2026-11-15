@@ -40,6 +40,9 @@ pub(super) const T_REPORT: usize = 11;
 pub(super) const T_AGAIN: usize = 12;
 pub(super) const T_STOP: usize = 13;
 pub(super) const T_DISMISS: usize = 14;
+/// Export the open (or chosen) plan, quiz or lesson as a PDF, and the switch for the quiz's answer key page.
+pub(super) const T_PDF: usize = 40;
+pub(super) const T_PDF_KEY: usize = 41;
 /// Option `i` of the open question is `T_OPTION + i`.
 pub(super) const T_OPTION: usize = 100;
 pub(super) const A_LIST: usize = 61_330;
@@ -90,13 +93,15 @@ pub struct LearnApp {
     /// The picture of a lesson, scaled to the slot it is drawn in: (id, width, height, scale, pixels).
     pub(super) pic_scaled: Vec<(u64, i32, i32, i32, tiny_skia::Pixmap)>,
     pub(super) reader: Option<Reader>,
+    /// Put the answer key on its own page in a quiz PDF (off until switched on).
+    pub(super) pdf_key: bool,
     #[cfg(test)]
     pub(super) test_voice: Option<(std::sync::Arc<dyn iyakki_agent::story::Synth>, std::sync::Arc<dyn iyakki_agent::story::Sink>)>,
 }
 
 impl LearnApp {
     pub fn new(cx: &AppCx) -> LearnApp {
-        let mut a = LearnApp { user: cx.session.user.clone(), tab: Tab::Plans, view: View::List, plans: vec![], quizzes: vec![], sel: [0; 2], sel_session: 0, confirm_delete: false, msg: None, list: ScrollList::default(), loaded_at: 0, request: None, dirty: true, pic_cache: PicCache::default(), pic_scaled: Vec::new(), reader: None, #[cfg(test)] test_voice: None };
+        let mut a = LearnApp { user: cx.session.user.clone(), tab: Tab::Plans, view: View::List, plans: vec![], quizzes: vec![], sel: [0; 2], sel_session: 0, confirm_delete: false, msg: None, list: ScrollList::default(), loaded_at: 0, request: None, dirty: true, pic_cache: PicCache::default(), pic_scaled: Vec::new(), reader: None, pdf_key: false, #[cfg(test)] test_voice: None };
         a.reload(cx);
         a
     }
@@ -213,6 +218,33 @@ impl LearnApp {
         }
     }
 
+    /// Write the open plan, quiz or lesson (or the chosen one in a list) as a PDF in the person's Downloads, with the same code the chat's
+    /// `study_export_pdf` uses: nothing is replaced, other scripts are refused in words.
+    pub(super) fn export_pdf(&mut self, cx: &AppCx) {
+        use iyakki_agent::studypdf::{export, Item};
+        let item = match &self.view {
+            View::Plan(id) => Some(Item::Plan(id.clone())),
+            View::Lesson(l) if l.saved.is_some() => Some(Item::Lesson { plan: l.plan.clone(), n: l.n }),
+            View::Lesson(_) => None,
+            View::Result(id, _) => Some(Item::Quiz { id: id.clone(), key: self.pdf_key }),
+            // while a quiz is being taken the key must not leave the page
+            View::Quiz(_) => None,
+            View::List if self.tab == Tab::Plans => self.plans.get(self.sel[0]).map(|p| Item::Plan(p.id.clone())),
+            View::List => self.quizzes.get(self.sel[1]).map(|q| Item::Quiz { id: q.id.clone(), key: self.pdf_key }),
+        };
+        let Some(item) = item else {
+            self.say("There is nothing to put in a PDF here yet (a lesson must be written first).", false);
+            return;
+        };
+        match export(&cx.services.study, &cx.session.policy, &self.user, cx.services.dir(), &item, iyakki_pdf::PageSize::A4, None) {
+            Ok(m) => {
+                cx.audit.record(&cx.session.user, "learn.pdf", &format!("{item:?}"));
+                self.say(&m, true);
+            }
+            Err(e) => self.say(&e, false),
+        }
+    }
+
     fn toggle_session(&mut self, cx: &AppCx, i: usize) {
         let View::Plan(id) = &self.view else { return };
         let id = id.clone();
@@ -309,6 +341,8 @@ impl LearnApp {
                 Key::Up => self.sel[t] = self.sel[t].saturating_sub(1),
                 Key::Down => self.sel[t] = (self.sel[t] + 1).min(n_list.saturating_sub(1)),
                 Key::Enter => self.open_selected(),
+                Key::Char('p') if n_list > 0 => self.export_pdf(cx),
+                Key::Char('k') if self.tab == Tab::Quizzes => self.handle_pdf_key(),
                 Key::Char('x') if n_list > 0 => {
                     if self.confirm_delete {
                         self.delete_open(cx)
@@ -325,6 +359,7 @@ impl LearnApp {
                 Key::Up => self.sel_session = self.sel_session.saturating_sub(1),
                 Key::Down => self.sel_session = (self.sel_session + 1).min(n.saturating_sub(1)),
                 Key::Char(' ') => self.toggle_session(cx, self.sel_session),
+                Key::Char('p') => self.export_pdf(cx),
                 Key::Enter => self.open_lesson(cx, &id, self.sel_session + 1),
                 Key::Char('c') => {
                     let has = self.plan(&id).is_some_and(|p| !p.events.is_empty());
@@ -361,6 +396,8 @@ impl LearnApp {
                 Key::Up => self.set_result_sel(sel.saturating_sub(1)),
                 Key::Down => self.set_result_sel((sel + 1).min(n.saturating_sub(1))),
                 Key::Char('r') => self.report(cx, &id, sel),
+                Key::Char('p') => self.export_pdf(cx),
+                Key::Char('k') => self.handle_pdf_key(),
                 Key::Char('a') => {
                     if let Some(i) = self.quizzes.iter().position(|q| q.id == id) {
                         self.sel[1] = i;
@@ -373,6 +410,11 @@ impl LearnApp {
                 }
             },
         }
+    }
+
+    fn handle_pdf_key(&mut self) {
+        self.pdf_key = !self.pdf_key;
+        self.say(if self.pdf_key { "Quiz PDFs will have the answer key on a page of their own." } else { "Quiz PDFs will not show the answers." }, true);
     }
 
     fn set_cursor(&mut self, c: usize) {
@@ -437,7 +479,7 @@ impl App for LearnApp {
     fn help(&self) -> Vec<String> {
         [
             "LEARN holds your study plans and quizzes. Ask the assistant in the chat to make them (\"plan 21 days to learn programming basics\", \"quiz me with 10 questions on the solar system\"); they appear here, and what you tick or answer here the chat knows too.",
-            "Plans: Enter opens a plan. In a plan, Enter or a click on a day opens its lesson; Space ticks a session done. c adds the whole plan to the calendar, or takes it out again. x twice deletes it and its calendar events.",
+            "Plans: Enter opens a plan. p saves the plan (syllabus and day list) as a PDF in Downloads. In a plan, Enter or a click on a day opens its lesson; Space ticks a session done. c adds the whole plan to the calendar, or takes it out again. x twice deletes it and its calendar events.",
             "Quizzes: Enter starts. Pick an option with a to f, 1 to 6, the arrows and Enter, or a click. You see right or wrong and why, then Next. The answers are not shown before you answer.",
             "A lesson: the assistant writes the day's lesson as soon as you open it (what you will learn, an explanation, a worked example, what to do, a practice task, a recap) with pictures, and keeps it, so it opens at once next time. Left and Right move between sections, Space marks the day done, q asks a question, s makes it simpler, d goes deeper, g writes it again (it asks first), r reads it aloud, c cancels the writing, Esc goes back to the plan.",
             "The score is worked out by the program, not by the assistant. If a question or its answer looks wrong, press r (Report a wrong question): it stops counting, and the percent is worked out over the rest.",
@@ -471,6 +513,11 @@ impl App for LearnApp {
                 if !matches!(ev, Event::Tab(T_NO)) {
                     return self.back();
                 }
+            }
+            Event::Tab(T_PDF) => self.export_pdf(cx),
+            Event::Tab(T_PDF_KEY) => {
+                self.pdf_key = !self.pdf_key;
+                self.say(if self.pdf_key { "Quiz PDFs will have the answer key on a page of their own." } else { "Quiz PDFs will not show the answers." }, true);
             }
             Event::Tab(T_CAL) => self.calendar(cx, true),
             Event::Tab(T_UNCAL) => self.calendar(cx, false),

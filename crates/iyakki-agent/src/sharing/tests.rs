@@ -569,6 +569,11 @@ fn the_page_lists_name_and_state_and_says_when_wifi_is_missing() {
     assert_eq!(c.wifi_line.as_deref(), Some("Wi-Fi hotspot: not available on this build"));
     let with_ap = super::view::choices(&ifs, true);
     assert!(with_ap.wifi_line.is_none());
+    let why = super::view::choices_with(&ifs, false, Some(iyakki_hotspot::caps::no_card_reason(false)));
+    assert_eq!(why.wifi_line.as_deref(), Some("Wi-Fi hotspot: not available. No Wi-Fi card was found; plug in a Wi-Fi adapter."));
+    let blank = super::view::choices_with(&ifs, false, Some("  "));
+    assert_eq!(blank.wifi_line.as_deref(), Some("Wi-Fi hotspot: not available on this build"), "an empty reason is no reason");
+    assert!(super::view::choices_with(&ifs, true, Some("ignored")).wifi_line.is_none(), "a usable hotspot has no line");
     assert!(with_ap.downs.iter().any(|d| d.name == crate::wifi_ap::AP_IFACE && d.usable && d.label.starts_with("Wi-Fi hotspot")), "the hotspot is one entry of its own");
     assert!(!with_ap.downs.iter().any(|d| d.name == "wlan1"), "a Wi-Fi client interface is never offered as the cable");
 }
@@ -838,4 +843,30 @@ fn a_connected_phone_is_an_uplink_like_a_cable_and_never_a_cable_to_share_on() {
     let c = super::view::choices(&machine(), false);
     let p = c.uplinks.iter().find(|u| u.name == "bluetooth-panu").unwrap();
     assert!(!p.usable && !p.why.is_empty());
+}
+
+#[test]
+fn a_bridged_downstream_gets_a_bridge_table_that_drops_frames_between_its_ports() {
+    use super::rules::{bridge_table_spec, describe_in};
+    use super::BRIDGE_TABLE;
+    use iyakki_fw::nl::tablegen::{encode_apply_in, encode_remove_in, Family};
+    let mut plan = plan_for(&start_req(1));
+    // a single port, or isolation off: no bridge table
+    assert!(bridge_table_spec(&plan).is_none());
+    plan.members = vec!["bnep0".into(), "bnep1".into()];
+    let off = super::plan::Plan { isolate: false, ..plan.clone() };
+    assert!(bridge_table_spec(&off).is_none(), "devices may see each other when the person allowed it");
+    let spec = bridge_table_spec(&plan).unwrap();
+    assert_eq!(describe_in(Family::Bridge, &spec), "table bridge iyakki_share_br\n  chain forward filter hook forward priority -200 policy accept\n    iif bnep0 drop\n    iif bnep1 drop\n");
+    // it goes to the kernel through the typed writer in the bridge family, and only that table is ever removed
+    let (bytes, acks) = encode_apply_in(&spec, Family::Bridge, 1).unwrap();
+    assert!(bytes.windows(15).any(|w| w == b"iyakki_share_br"));
+    assert_eq!(acks, 3 + 1 + 2);
+    assert!(encode_remove_in(Family::Bridge, BRIDGE_TABLE, 1).is_ok());
+    assert!(encode_remove_in(Family::Bridge, "iyakki_fw", 1).is_err());
+    // an odd port name never reaches a rule
+    plan.members = vec!["a\"b".into()];
+    assert!(encode_apply_in(&bridge_table_spec(&plan).unwrap(), Family::Bridge, 1).is_err());
+    // the inet table of the same plan is the one in the golden text: the bridge table is a second, separate table
+    assert_eq!(describe(&table_spec(&plan_for(&start_req(1)))), GOLDEN);
 }

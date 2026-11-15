@@ -78,6 +78,6 @@ fn a_denied_browser_microphone_is_refused_in_the_tile() {
 fn the_camera_tile_lists_only_the_browsers_camera_in_a_browser_session() {
     let cx = cx_own_user("vb-cam");
     let (_m, _log, _r) = browser(&cx, Policy::allow_all());
-    let c = crate::apps::camera::CameraApp::new(&cx);
+    let c = crate::apps::camera::CameraApp::new(&crate::apps::camera_port::CxPort(&cx));
     assert_eq!(c.camera_names(), vec!["Browser camera".to_string()]);
 }

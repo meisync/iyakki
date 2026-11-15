@@ -47,7 +47,7 @@ for the exact permission, never work around it or press Allow on the device). St
 
 ## Versions
 
-The bridge version is 1.0 (the bridge as it ships). Within a major version only additions; see `docs/development/SDK-API.md`, section 12. New namespaces (llm, speech, markdown and others) are designed there and are not part of this `iyakki.d.ts` until they are built.
+The bridge version is 1.2 (`iyakki.version`; 1.0 was the original bridge). Within a major version only additions (`docs/development/SDK-API.md` section 12, `docs/development/SDK-BRIDGE-V2.md`): every newer namespace (llm, models, speech, markdown, embed, dash, flows, k3s, media, audio, money, speech.listen) is optional, found with `iyakki.has('name')` and `iyakki.capabilities()`, and a name an older or newer host does not know rejects with the code `Unsupported`. `iyakki.d.ts` declares all of them.
 
 ## Where to read more
 

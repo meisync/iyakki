@@ -1,6 +1,6 @@
 //! ES modules: the engine asks this plug-in to turn an import specifier into an address and to fetch a module's source.
 //! Every address is checked against the host policy of the account that opened the page, the number and size of modules
-//! is capped, and a module is fetched once. A page's `<script type="importmap">` maps bare names.
+//! is capped, a module is fetched once, and a page loaded over https gets no module over plain http.  A page's `<script type="importmap">` maps bare names.
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -75,6 +75,11 @@ impl EsmModule {
         }
         let mut url = Url::parse(name.split('#').next().unwrap_or(name))?;
         for _ in 0..5 {
+            // a secure page does not run unprotected modules: anyone on the network could swap them (F-BROW-98); never even asked for,
+            // also when a redirect ends there
+            if self.base.https && !url.https {
+                return Err("blocked: this module would load without protection (http) on a secure page".into());
+            }
             if !(self.allow)(&url.host) {
                 return Err(format!("your account may not open pages from {}", url.host));
             }

@@ -2,6 +2,7 @@
 //! drive, Minimise) and writing the RAM event list to the audit log once the drive is back. What the card looks like is
 //! `lossbar.rs`; the states and the wording are `iyakki_storage::loss`'s.
 
+use crate::stale_stats::mark_stale;
 use super::*;
 use iyakki_storage::loss;
 
@@ -10,7 +11,7 @@ impl Shell {
     pub(super) fn loss_tick(&mut self) {
         let snap = loss::snapshot();
         if self.loss.update(&snap, self.tick) {
-            self.stale = true;
+            mark_stale!(self);
         }
         if snap.state.healthy() {
             // the audit log lives on the drive: what happened while it was away is written now, once
@@ -44,7 +45,7 @@ impl Shell {
             lb::CARD_OK => self.loss.dismiss_card(),
             _ => {}
         }
-        self.stale = true;
+        mark_stale!(self);
     }
 
     /// Draw the banner over everything (every screen, signed in or not).

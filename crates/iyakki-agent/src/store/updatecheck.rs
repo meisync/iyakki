@@ -118,7 +118,16 @@ impl Update {
     pub fn needs_review(&self) -> bool {
         !self.new_permissions.is_empty()
     }
+
+    /// The oldest IYAKKI this update works with, when the running IYAKKI is older (F-CORE-26: the badge text "needs a newer IYAKKI"). The
+    /// note starts with [`NEEDS_NEWER`] for such an update.
+    pub fn needs_newer_iyakki(&self) -> Option<&str> {
+        self.note.strip_prefix(NEEDS_NEWER)?.split(' ').next().filter(|v| !v.is_empty())
+    }
 }
+
+/// How the note of an update that needs a newer IYAKKI begins: `Needs IYAKKI 0.3.0 or newer first: ...`.
+pub const NEEDS_NEWER: &str = "Needs IYAKKI ";
 
 /// The answer of the last check.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -247,7 +256,15 @@ pub fn run(store: &Store, svc: &Services, policy: &Policy, user: &str, fetch: &d
             from: it.installed_version.clone().unwrap_or_default(),
             to: to.clone(),
             source: it.source_name.clone(),
-            note: if added.is_empty() { String::new() } else { "asks for permissions the installed version did not".into() },
+            note: {
+                let min = it.entry.meta.min_version.trim();
+                let older = !min.is_empty() && crate::devmode::update::compare_versions(running, min) == std::cmp::Ordering::Less;
+                match (older, added.is_empty()) {
+                    (true, _) => format!("{NEEDS_NEWER}{min} or newer first: update IYAKKI, then this app{}", if added.is_empty() { "." } else { "; it also asks for permissions the installed version did not." }),
+                    (false, true) => String::new(),
+                    (false, false) => "asks for permissions the installed version did not".into(),
+                }
+            },
             new_permissions: added,
             driver: it.entry.meta.ext_kind == "driver",
         });

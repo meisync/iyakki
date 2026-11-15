@@ -83,7 +83,7 @@ impl RagApp {
         let base = std::path::PathBuf::from(&cx.cfg.rag_docs);
         let user = cx.session.user.clone();
         std::thread::spawn(move || {
-            let mut kb = svc.kb.lock().unwrap();
+            let mut kb = svc.kb.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let (a1, _) = kb.ingest_dir(&format!("user/{user}"), &base.join(&user));
             let (a2, _) = kb.ingest_dir("shared", &base.join("shared"));
             let docs: usize = ["shared".to_string(), format!("user/{user}")].iter().filter_map(|n| kb.stats(n)).map(|s| s.docs).sum();
@@ -103,7 +103,7 @@ impl RagApp {
 
     /// The documents of this account's own namespace and the shared one.
     fn load_docs(&mut self, cx: &AppCx) {
-        let kb = cx.services.kb.lock().unwrap();
+        let kb = cx.services.kb.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut v = Vec::new();
         for ns in Self::namespaces(cx).into_iter().rev() {
             for d in kb.docs(&ns) {
@@ -127,7 +127,7 @@ impl RagApp {
             self.status = Some(("You may not delete that document.".into(), false));
             return;
         }
-        if let Err(e) = cx.services.kb.lock().unwrap().remove_document(&d.ns, &d.id) {
+        if let Err(e) = cx.services.kb.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove_document(&d.ns, &d.id) {
             self.status = Some((format!("Could not remove it: {e}"), false));
             return;
         }
@@ -189,7 +189,7 @@ impl RagApp {
         let (svc, backend, user) = (cx.services.clone(), cx.chat.clone(), cx.session.user.clone());
         std::thread::spawn(move || {
             let access = RagAccess::for_services(&svc, &user);
-            let k = svc.settings.lock().unwrap().get().rag.top_k;
+            let k = svc.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().rag.top_k;
             let l = research(&access, Some(backend.as_ref()), &Request { question: &q, collections: &[], budget: Budget { k, ..Budget::default() } }, &std::sync::atomic::AtomicBool::new(false));
             LedgerStore::open(svc.dir(), &user).push(&l);
             let _ = tx.send(l);
@@ -233,7 +233,7 @@ impl RagApp {
         let (svc, backend, ask) = (cx.services.clone(), cx.chat.clone(), self.ask_mode);
         let nss = Self::namespaces(cx);
         std::thread::spawn(move || {
-            let k = svc.settings.lock().unwrap().get().rag.top_k;
+            let k = svc.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().rag.top_k;
             let refs: Vec<&str> = nss.iter().map(String::as_str).collect();
             let (hits, warnings) = svc.search(&refs, &q, k);
             if hits.is_empty() {
@@ -533,27 +533,50 @@ impl App for RagApp {
             return;
         }
         let mode = if self.ask_mode { if self.agentic { "Ask the model (agentic)" } else { "Ask the model" } } else { "Search" };
-        let ext = cx.services.settings.lock().unwrap().get().external_rag.iter().filter(|e| e.enabled).count();
+        let ext = cx.services.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().external_rag.iter().filter(|e| e.enabled).count();
         let info = if self.indexing.is_some() { "indexing documents…".to_string() } else { self.info.clone() };
         let info = format!("{info}{}   mode: {mode}", if ext > 0 { format!("  ·  {ext} external backend(s)") } else { String::new() });
         // the buttons of the top row sit at the right; the status text takes what is left
         let docs_x = x + w - 120.0 * s;
         let bsize = 13.0 * s;
         let bw_of = |g: &mut Gfx, label: &str| g.text_width(bsize, label, Face::Bold) + bsize * 1.7;
-        let mut left = docs_x - 8.0 * s;
         let a_label = if self.agentic { "Agentic: on" } else { "Agentic: off" };
-        let aw = bw_of(g, a_label);
-        left -= aw;
-        g.button(left, y, bsize, a_label, if self.agentic { ACCENT } else { MUTED }, Event::Tab(62));
-        let ew = bw_of(g, "Evidence");
-        left -= ew + 8.0 * s;
-        g.button(left, y, bsize, "Evidence", MUTED, Event::Tab(63));
-        let shown = g.fit(15.0 * s, &info, Face::Sans, (left - 8.0 * s - x).max(40.0 * s));
-        g.text(x, y, 15.0 * s, MUTED, &shown, Face::Sans);
-        y += 28.0 * s;
+        // in a narrow window the three buttons would run out of the left edge: they go on a row of their own below the status line
+        let narrow = {
+            let (aw, ew, dw) = (bw_of(g, a_label), bw_of(g, "Evidence"), bw_of(g, "Documents"));
+            aw + ew + dw + 16.0 * s + 160.0 * s > w
+        };
+        if narrow {
+            let shown = g.fit(15.0 * s, &info, Face::Sans, w);
+            g.text(x, y, 15.0 * s, MUTED, &shown, Face::Sans);
+            y += 30.0 * s;
+            let mut bx = x;
+            for (label, col, ev) in [("Documents", MUTED, Event::Tab(60)), ("Evidence", MUTED, Event::Tab(63)), (a_label, if self.agentic { ACCENT } else { MUTED }, Event::Tab(62))] {
+                // a button that does not fit the row goes to the next one
+                if bx > x && bx + bw_of(g, label) > x + w {
+                    bx = x;
+                    y += 36.0 * s;
+                }
+                bx += g.button(bx, y, bsize, label, col, ev) + 8.0 * s;
+            }
+            y += 36.0 * s;
+        } else {
+            let mut left = docs_x - 8.0 * s;
+            let aw = bw_of(g, a_label);
+            left -= aw;
+            g.button(left, y, bsize, a_label, if self.agentic { ACCENT } else { MUTED }, Event::Tab(62));
+            let ew = bw_of(g, "Evidence");
+            left -= ew + 8.0 * s;
+            g.button(left, y, bsize, "Evidence", MUTED, Event::Tab(63));
+            let shown = g.fit(15.0 * s, &info, Face::Sans, (left - 8.0 * s - x).max(40.0 * s));
+            g.text(x, y, 15.0 * s, MUTED, &shown, Face::Sans);
+            y += 28.0 * s;
+        }
         let bw = 120.0 * s;
         self.query.render(g, R::new(x, y, w - bw - 12.0 * s - 116.0 * s, 46.0 * s), true, s, blink(tick), Face::Sans, 0);
-        g.button(docs_x, y - 28.0 * s, 13.0 * s, "Documents", MUTED, Event::Tab(60));
+        if !narrow {
+            g.button(docs_x, y - 28.0 * s, 13.0 * s, "Documents", MUTED, Event::Tab(60));
+        }
         let (bx, by) = (x + w - bw - 116.0 * s, y + 6.0 * s);
         g.button(bx, by, 15.0 * s, if self.ask_mode { "Ask" } else { "Search" }, ACCENT, Event::Key(Key::Enter));
         g.button(bx + 112.0 * s, by, 15.0 * s, if self.ask_mode { "⇄ Search" } else { "⇄ Ask" }, MUTED, Event::Key(Key::Tab));

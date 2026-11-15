@@ -135,6 +135,12 @@ impl ToolRoutingTools {
 }
 
 impl Tools for ToolRoutingTools {
+
+    fn inner_tools(&self) -> Option<&dyn Tools> {
+
+        Some(&*self.inner)
+
+    }
     fn defs(&self) -> Vec<ToolDef> {
         let mut v = self.inner.defs();
         v.retain(|d| !is_routing_tool(&d.spec.name));

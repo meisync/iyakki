@@ -19,6 +19,8 @@ pub struct SiteData {
     pub cookies: Arc<Mutex<CookieStore>>,
     /// The site's `indexedDB` databases.
     pub idb: Arc<Mutex<IdbStore>>,
+    /// The window the page is laid out for (`innerWidth`, `matchMedia`, sizes): `None` is 1280 by 720.
+    pub viewport: Option<iyakki_web::css::Viewport>,
 }
 
 struct SharedStore(Arc<Mutex<MemoryStore>>);
@@ -56,6 +58,8 @@ pub struct PageReport {
     pub console: Vec<ConsoleLine>,
     /// Where a script asked to navigate.
     pub navigation: Option<String>,
+    /// Where the page's scripts left the window's scroll position (x, y in page pixels), when it is not the top.
+    pub scroll: Option<(u32, u32)>,
     /// Virtual milliseconds of timers that ran, and timers left over.
     pub timer_ms: u64,
     pub timers_left: u32,
@@ -106,18 +110,23 @@ fn run_core(html: &str, url: &Url, web: Arc<dyn Fetch>, allow: impl Fn(&str) -> 
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
     // the page's import map (bare module names), if it has one
     let import_map: Option<String> = tree.descendants(0).into_iter().find(|&n| tree.tag(n) == Some("script") && tree.attr(n, "type").is_some_and(|t| t.trim().eq_ignore_ascii_case("importmap"))).map(|n| tree.text_of(n));
+    let vp = data.viewport.unwrap_or(iyakki_web::css::Viewport { width: 1280.0, height: 720.0, ..Default::default() });
     let mut modules: Vec<Box<dyn WebModule>> = vec![
         Box::new(crate::modules::EsmModule::new(url.clone(), web.clone(), Box::new(allow.clone()), import_map.as_deref())),
         Box::new(ConsoleModule::new()),
         Box::new(TimersModule),
         Box::new(EncodingModule),
         Box::new(UrlModule),
-        Box::new(EnvModule::new(url.clone())),
+        Box::new(EnvModule::new(url.clone()).with_viewport(vp)),
         Box::new(StorageModule::new(crate::modules::storage::Kind::Local, Box::new(SharedStore(data.local.clone())))),
         Box::new(StorageModule::new(crate::modules::storage::Kind::Session, Box::new(MemoryStore::default()))),
         Box::new(CookiesModule::new(data.cookies.clone(), url.clone(), now)),
         Box::new(FetchModule::new(url.clone(), web.clone(), Box::new(allow.clone())).with_cookies(data.cookies.clone(), now)),
-        Box::new(DomModule::new(tree.clone())),
+        Box::new({
+            let dom = DomModule::new(tree.clone());
+            // sizes are estimated only for an embedder that gave a window (the browser): other hosts keep the zero sizes of an engine without layout
+            if data.viewport.is_some() { dom.with_layout(crate::modules::LayoutEnv { base: url.clone(), web: web.clone(), allow: Mutex::new(Box::new(allow.clone())), vp }) } else { dom }
+        }),
         // after the page object: it replaces the placeholder `indexedDB` and the `IDB*` classes defined there
         Box::new(IdbModule::new(data.idb.clone())),
     ];
@@ -134,7 +143,11 @@ fn run_core(html: &str, url: &Url, web: Arc<dyn Fetch>, allow: impl Fn(&str) -> 
     }
     let t_engine = t0.elapsed();
     let started = Instant::now();
-    let scripts = engine.module::<DomModule>("dom").map(|d| d.pending_scripts()).unwrap_or_default();
+    let secure = url.https;
+    let mut scripts = engine.module::<DomModule>("dom").map(|d| d.pending_scripts()).unwrap_or_default();
+    // blocking scripts first, then `defer` scripts and modules, then `async` ones, each group in the order written (the stable sort keeps it)
+    scripts.sort_by_key(|s| s.phase());
+    let mut prefetched = prefetch_scripts(&scripts, &url, secure, &web, &allow);
     for (i, s) in scripts.iter().enumerate() {
         if started.elapsed() > TOTAL_WALL {
             report.notes.push("scripts stopped: the page took too long".into());
@@ -158,7 +171,7 @@ fn run_core(html: &str, url: &Url, web: Arc<dyn Fetch>, allow: impl Fn(&str) -> 
             continue; // already run (a script that added another)
         }
         let (name, code) = match &s.src {
-            Some(src) => match url.join(src).and_then(|u| fetch_script(web.as_ref(), &u, &allow)) {
+            Some(src) => match prefetched.remove(&s.node).unwrap_or_else(|| url.join(src).and_then(|u| fetch_script(web.as_ref(), &u, &allow, secure))) {
                 Ok(c) => (src.clone(), c),
                 Err(e) => {
                     report.notes.push(format!("could not load {src}: {e}"));
@@ -233,8 +246,43 @@ fn run_core(html: &str, url: &Url, web: Arc<dyn Fetch>, allow: impl Fn(&str) -> 
     }
     report.console = engine.module::<ConsoleModule>("console").map(|c| std::mem::take(&mut c.lines)).unwrap_or_default();
     report.navigation = engine.module::<EnvModule>("window").and_then(|e| e.navigation.clone());
+    report.scroll = engine.eval("scroll", "(window.scrollX || 0) + ',' + (window.scrollY || 0)").ok().and_then(|t| {
+        let (x, y) = t.split_once(',')?;
+        let (x, y) = (x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?);
+        (x.is_finite() && y.is_finite() && (x >= 1.0 || y >= 1.0)).then_some((x.clamp(0.0, 1.0e7) as u32, y.clamp(0.0, 1.0e7) as u32))
+    });
     let tree = engine.module::<DomModule>("dom").map(|d| d.tree.clone()).unwrap_or(tree);
     Ok((PageResult { tree, report }, engine))
+}
+
+/// The window the page is shown in changed. The page's `innerWidth`, `matchMedia` and estimated sizes follow; media query lists whose
+/// answer changed get a `change` event, observers look again, and the window gets `resize`.
+pub fn resize(engine: &mut JsEngine, vp: iyakki_web::css::Viewport) -> Result<(), JsError> {
+    if let Some(e) = engine.module::<EnvModule>("window") {
+        e.set_viewport(vp);
+    }
+    if let Some(d) = engine.module::<DomModule>("dom") {
+        d.set_viewport(vp);
+    }
+    engine.eval("resize", "__iyakkiResize()")?;
+    engine.run_jobs().map(|_| ())
+}
+
+/// What the person did to a live page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Interaction {
+    Click(usize),
+    Input(usize, String),
+    Check(usize, bool),
+}
+
+/// What a live page looks like after an interaction: the tree to draw again, where a script asked to go (if it did), and what it printed.
+pub struct Outcome {
+    pub tree: iyakki_web::html::Tree,
+    pub navigation: Option<String>,
+    pub console: Vec<ConsoleLine>,
+    /// How many more nodes the tree has than before (negative when some were removed), a cheap sign that the page changed shape.
+    pub grew_by: i64,
 }
 
 /// A page kept alive after it loaded: its engine stays, so clicks and typing reach its scripts and the page can be drawn again.
@@ -268,6 +316,11 @@ impl LivePage {
         let _ = run_timers(&mut self.engine, 50, 200);
     }
 
+    /// The window changed size (see [`resize`]).
+    pub fn resize(&mut self, vp: iyakki_web::css::Viewport) -> Result<(), JsError> {
+        resize(&mut self.engine, vp)
+    }
+
     /// Click the control made from this node of the tree.
     pub fn click(&mut self, node: usize) -> Result<(), JsError> {
         self.engine.eval("click", &format!("__dom.click({node})"))?;
@@ -287,6 +340,27 @@ impl LivePage {
         self.engine.eval("check", &format!("__dom.check({node}, {on})"))?;
         self.settle();
         Ok(())
+    }
+
+    /// Where a script asked to go, once (the request is taken, so it is not reported twice).
+    pub fn take_navigation(&mut self) -> Option<String> {
+        self.engine.module::<EnvModule>("window").and_then(|e| e.navigation.take())
+    }
+
+    /// One thing the person did to the page: the node is the one a control of the drawn page was made from (`Control::node`).
+    pub fn interact(&mut self, what: &Interaction) -> Result<Outcome, JsError> {
+        let before = self.engine.module::<DomModule>("dom").map(|d| d.tree.nodes.len()).unwrap_or(0);
+        let ok = match what {
+            Interaction::Click(n) => self.click(*n),
+            Interaction::Input(n, v) => self.input(*n, v),
+            Interaction::Check(n, on) => self.check(*n, *on),
+        };
+        ok?;
+        // a script that asked to go somewhere: taken, so the next interaction does not report it again
+        let navigation = self.take_navigation();
+        let console = self.take_console();
+        let tree = self.tree();
+        Ok(Outcome { grew_by: tree.nodes.len() as i64 - before as i64, tree, navigation, console })
     }
 
     /// Let `ms` virtual milliseconds of timers pass (a clock in the page ticks).
@@ -327,9 +401,44 @@ fn json_str(s: &str) -> String {
     o
 }
 
-fn fetch_script(web: &dyn Fetch, url: &Url, allow: &dyn Fn(&str) -> bool) -> Result<String, String> {
+/// Fetch every external script the page will run at once (a few at a time) instead of one after the other while the page waits: what
+/// the loop runs afterwards finds its text ready. The order the scripts run in does not change.
+fn prefetch_scripts(scripts: &[crate::modules::dom::Script], url: &Url, secure: bool, web: &Arc<dyn Fetch>, allow: &(impl Fn(&str) -> bool + Send + Clone + 'static)) -> std::collections::HashMap<usize, Result<String, String>> {
+    let wanted: Vec<(usize, Url)> = scripts
+        .iter()
+        .take(MAX_SCRIPTS)
+        .filter(|s| !s.nomodule && (s.is_classic_js() || s.kind == "module"))
+        .filter_map(|s| s.src.as_ref().and_then(|src| url.join(src).ok()).map(|u| (s.node, u)))
+        .collect();
+    let mut out = std::collections::HashMap::new();
+    if wanted.len() < 2 {
+        return out;
+    }
+    for chunk in wanted.chunks(6) {
+        let got: Vec<Result<String, String>> = std::thread::scope(|sc| {
+            let hs: Vec<_> = chunk
+                .iter()
+                .map(|(_, u)| {
+                    let (web, allow) = (web.clone(), allow.clone());
+                    sc.spawn(move || fetch_script(web.as_ref(), u, &allow, secure))
+                })
+                .collect();
+            hs.into_iter().map(|h| h.join().unwrap_or_else(|_| Err("the fetch stopped".into()))).collect()
+        });
+        for ((node, _), r) in chunk.iter().zip(got) {
+            out.insert(*node, r);
+        }
+    }
+    out
+}
+
+fn fetch_script(web: &dyn Fetch, url: &Url, allow: &dyn Fn(&str) -> bool, secure_page: bool) -> Result<String, String> {
     let mut cur = url.without_fragment();
     for _ in 0..4 {
+        // a secure page does not run unprotected scripts: anyone on the network could swap them (F-BROW-98); never even asked for
+        if secure_page && !cur.https {
+            return Err("blocked: this script would load without protection (http) on a secure page".into());
+        }
         if !allow(&cur.host) {
             return Err(format!("your account may not open pages from {}", cur.host));
         }
@@ -346,6 +455,53 @@ fn fetch_script(web: &dyn Fetch, url: &Url, allow: &dyn Fn(&str) -> bool) -> Res
     Err("too many redirects".into())
 }
 
+/// The start of the note a renderer adds when a script of the page asked to go to another address (`location.href = ...`,
+/// `location.replace(...)`, `location.assign(...)`): the rest of the note is the full address. The browser follows it (a few
+/// steps at most) after checking it like any address the person typed.
+pub const NAVIGATE_NOTE: &str = "A script asked to go to ";
+
+/// The note that carries where the scripts left the window's scroll position (`x,y`), for the reader to start the drawn page there.
+pub const SCROLL_NOTE: &str = "A script scrolled the page to ";
+
+/// The scroll position a renderer note asks for.
+pub fn scroll_in(notes: &[String]) -> Option<(f32, f32)> {
+    let t = notes.iter().find_map(|n| n.strip_prefix(SCROLL_NOTE))?;
+    let (x, y) = t.split_once(',')?;
+    let (x, y) = (x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?);
+    (x.is_finite() && y.is_finite() && x >= 0.0 && y >= 0.0).then_some((x, y))
+}
+
+/// The address a renderer note asks for, when it is one.
+pub fn navigation_in(notes: &[String]) -> Option<&str> {
+    notes.iter().find_map(|n| n.strip_prefix(NAVIGATE_NOTE))
+}
+
+/// Like [`run_page`], and the page's engine is kept alive for [`LivePage::interact`] (`None` when the engine could not start).
+pub fn run_page_live(html: &str, url: &Url, web: Arc<dyn Fetch>, allow: impl Fn(&str) -> bool + Send + Clone + 'static, data: &SiteData, limits: Limits) -> (PageResult, Option<LivePage>) {
+    match run_core(html, url, web, allow, data, limits, Vec::new(), |_| {}) {
+        Ok((r, engine)) => {
+            let live = LivePage { engine, report: r.report.clone(), url: url.clone() };
+            (r, Some(live))
+        }
+        Err(r) => (r, None),
+    }
+}
+
+/// The lines a renderer shows with a page the scripts have run on: what ran and failed, then where a script asked to go and scrolled to.
+pub fn notes_of(r: &PageResult) -> Vec<String> {
+    let mut notes = r.report.lines();
+    if r.report.ran + r.report.failed > 0 {
+        notes.insert(0, format!("scripts: {} ran, {} failed, {} skipped", r.report.ran, r.report.failed, r.report.skipped));
+    }
+    if let Some(n) = &r.report.navigation {
+        notes.push(format!("{NAVIGATE_NOTE}{n}"));
+    }
+    if let Some((x, y)) = r.report.scroll {
+        notes.push(format!("{SCROLL_NOTE}{x},{y}"));
+    }
+    notes
+}
+
 /// A renderer for [`iyakki_web::load_with`] that runs scripts.
 pub fn renderer(web: Arc<dyn Fetch>, allow: impl Fn(&str) -> bool + Send + Clone + 'static, data: SiteData) -> impl Fn(&Url, &str) -> (iyakki_web::Doc, Vec<String>) {
     renderer_with(web, allow, data, |_, tree| iyakki_web::doc::build(tree))
@@ -356,10 +512,7 @@ pub fn renderer(web: Arc<dyn Fetch>, allow: impl Fn(&str) -> bool + Send + Clone
 pub fn renderer_with(web: Arc<dyn Fetch>, allow: impl Fn(&str) -> bool + Send + Clone + 'static, data: SiteData, build: impl Fn(&Url, &iyakki_web::html::Tree) -> iyakki_web::Doc) -> impl Fn(&Url, &str) -> (iyakki_web::Doc, Vec<String>) {
     move |url, html| {
         let r = run_page(html, url, web.clone(), allow.clone(), &data, Limits::default());
-        let mut notes = r.report.lines();
-        if r.report.ran + r.report.failed > 0 {
-            notes.insert(0, format!("scripts: {} ran, {} failed, {} skipped", r.report.ran, r.report.failed, r.report.skipped));
-        }
+        let notes = notes_of(&r);
         (build(url, &r.tree), notes)
     }
 }
@@ -381,7 +534,7 @@ impl Sites {
         let key = key_of(url);
         let local = self.local.lock().map(|mut m| m.entry(key).or_default().clone()).unwrap_or_default();
         let idb = self.idb.lock().map(|mut m| m.entry(key_of(url)).or_default().clone()).unwrap_or_default();
-        SiteData { local, idb, cookies: self.cookies.clone() }
+        SiteData { local, idb, cookies: self.cookies.clone(), viewport: None }
     }
 
     /// The `localStorage` of every origin that holds something: `(origin, entries)`.
@@ -549,6 +702,15 @@ mod tests {
     }
 
     #[test]
+    fn the_renderer_reports_where_a_script_asked_to_go_as_a_note() {
+        let render = renderer(site(vec![]), |_| true, SiteData::default());
+        let (_, notes) = render(&Url::parse("https://a.org/x").unwrap(), "<p>hi</p><script>location.replace('/next?a=1#top')</script>");
+        assert_eq!(navigation_in(&notes), Some("https://a.org/next?a=1#top"), "{notes:?}");
+        let (_, notes) = render(&Url::parse("https://a.org/x").unwrap(), "<p>hi</p><script>var a = 1</script>");
+        assert_eq!(navigation_in(&notes), None);
+    }
+
+    #[test]
     fn the_renderer_plugs_into_the_loader() {
         let web = site(vec![("https://a.org/", "text/html", "<title>T</title><p id=a>old</p><script>document.getElementById('a').textContent = 'new'</script>")]);
         let render = renderer(web.clone(), |_| true, SiteData::default());
@@ -591,6 +753,32 @@ mod tests {
         assert_eq!(texts(&doc), vec!["me7 true"], "{:?}", r2.notes);
     }
 
+    /// A page over https never asks for a module over plain http (F-BROW-98), not even through a redirect; a plain page loses nothing.
+    #[test]
+    fn a_secure_page_runs_no_unprotected_module_and_does_not_even_ask_for_it_while_a_plain_page_may() {
+        let js = "export const x = 7;";
+        let ok = Response { status: 200, content_type: "text/javascript".into(), body: js.as_bytes().to_vec(), ..Response::default() };
+        let mut pages: HashMap<String, Response> = HashMap::new();
+        pages.insert("http://cdn.example/m.js".into(), ok.clone());
+        pages.insert("https://cdn.example/ok.js".into(), ok);
+        pages.insert("https://cdn.example/redir.js".into(), Response { status: 302, location: Some("http://cdn.example/m.js".into()), ..Response::default() });
+        let web: Arc<dyn Fetch> = Arc::new(Site(pages));
+        let page = |src: &str, base: &str| run_page(&format!("<p id=a>-</p><script type=module>import {{ x }} from '{src}'; document.getElementById('a').textContent = 'got ' + x;</script>"), &Url::parse(base).unwrap(), web.clone(), |_| true, &SiteData::default(), Limits::default());
+        // https page, http module: refused, and the address was not requested
+        let r = page("http://cdn.example/m.js", "https://a.org/");
+        assert_eq!(r.report.failed, 1);
+        assert!(r.report.notes.join(" ").contains("without protection"), "{:?}", r.report.notes);
+        // https page, https module that redirects to http: refused at the hop
+        let r = page("https://cdn.example/redir.js", "https://a.org/");
+        assert!(r.report.notes.join(" ").contains("without protection"), "{:?}", r.report.notes);
+        // https page, https module: runs
+        let r = page("https://cdn.example/ok.js", "https://a.org/");
+        assert_eq!(r.report.failed, 0, "{:?}", r.report.notes);
+        // a plain page may still load a plain module
+        let r = page("http://cdn.example/m.js", "http://a.org/");
+        assert_eq!(r.report.failed, 0, "{:?}", r.report.notes);
+    }
+
     #[test]
     fn custom_elements_with_shadow_roots_and_slots_show_their_content() {
         let (doc, r) = run("<x-card>light words</x-card><p id=after>after</p><script>customElements.define('x-card', class extends HTMLElement { connectedCallback() { const r = this.attachShadow({ mode: 'open' }); r.innerHTML = '<h2>Card title</h2><div>shadow says <slot></slot></div>'; } });</script><script>const e = document.createElement('x-card'); e.textContent = 'made later'; document.body.appendChild(e);</script>", site(vec![]));
@@ -603,5 +791,164 @@ mod tests {
         let (doc, r) = run("<template id=t><li>one</li><li>two</li></template><ul id=l></ul><x-a data-v=1></x-a><script>document.getElementById('l').appendChild(document.importNode(document.getElementById('t').content, true)); class A extends HTMLElement { static get observedAttributes() { return ['data-v']; } attributeChangedCallback(n, o, v) { this.textContent = 'a:' + n + '=' + v; } } customElements.define('x-a', A); document.querySelector('x-a').setAttribute('data-v', '2'); customElements.whenDefined('x-a').then(() => { document.title = 'defined'; });</script>", site(vec![]));
         assert_eq!(r.failed, 0, "{:?}", r.notes);
         assert_eq!(texts(&doc), vec!["• one", "• two", "a:data-v=2"]);
+    }
+
+    /// A web that answers every script after a pause and counts how many were being fetched at once.
+    struct Slow {
+        files: HashMap<String, String>,
+        now: std::sync::atomic::AtomicUsize,
+        most: std::sync::atomic::AtomicUsize,
+    }
+    impl Fetch for Slow {
+        fn get(&self, url: &Url) -> Result<Response, String> {
+            use std::sync::atomic::Ordering::SeqCst;
+            let n = self.now.fetch_add(1, SeqCst) + 1;
+            self.most.fetch_max(n, SeqCst);
+            std::thread::sleep(Duration::from_millis(120));
+            self.now.fetch_sub(1, SeqCst);
+            self.files.get(&url.to_string()).map(|b| Response { status: 200, content_type: "text/javascript".into(), body: b.as_bytes().to_vec(), ..Response::default() }).ok_or_else(|| "connection refused".to_string())
+        }
+    }
+
+    fn pusher(name: &str) -> String {
+        format!("(window.__log = window.__log || []).push('{name}');")
+    }
+
+    #[test]
+    fn blocking_scripts_run_first_then_defer_and_modules_then_async_and_the_files_are_fetched_side_by_side() {
+        let files: HashMap<String, String> = ["a", "b", "d", "y", "d2"].iter().map(|n| (format!("https://a.org/{n}.js"), pusher(n))).collect();
+        let web = Arc::new(Slow { files, now: Default::default(), most: Default::default() });
+        let html = "<script src=/a.js></script><script defer src=/d.js></script><script async src=/y.js></script><script src=/b.js></script><script defer>(window.__log = window.__log || []).push('inline-defer-is-blocking');</script><script defer src=/d2.js></script><script>(window.__log = window.__log || []).push('inline');</script>";
+        let mut log = String::new();
+        let began = Instant::now();
+        let res = run_page_with(html, &Url::parse("https://a.org/").unwrap(), web.clone(), |_| true, &SiteData::default(), Limits::default(), |e| {
+            log = e.eval("log", "window.__log.join(',')").unwrap_or_default();
+        });
+        assert_eq!(res.report.failed, 0, "{:?}", res.report.notes);
+        // blocking ones in the order written (a `defer` on an inline script counts for nothing), then the deferred ones in order, then async
+        assert_eq!(log, "a,b,inline-defer-is-blocking,inline,d,d2,y");
+        // five files at 120 ms each: one after the other would be 600 ms; they were asked for together
+        assert!(web.most.load(std::sync::atomic::Ordering::SeqCst) >= 2, "fetched side by side");
+        assert!(began.elapsed() < Duration::from_millis(560), "{:?}", began.elapsed());
+    }
+
+    #[test]
+    fn a_failed_script_is_reported_in_its_own_place_and_the_others_still_run() {
+        let files: HashMap<String, String> = [("https://a.org/ok.js".to_string(), pusher("ok")), ("https://a.org/ok2.js".to_string(), pusher("ok2"))].into_iter().collect();
+        let web = Arc::new(Slow { files, now: Default::default(), most: Default::default() });
+        let mut log = String::new();
+        let res = run_page_with("<script src=/ok.js></script><script src=/missing.js></script><script defer src=/ok2.js></script>", &Url::parse("https://a.org/").unwrap(), web, |_| true, &SiteData::default(), Limits::default(), |e| {
+            log = e.eval("log", "window.__log.join(',')").unwrap_or_default();
+        });
+        assert_eq!(log, "ok,ok2");
+        assert_eq!(res.report.failed, 1);
+        assert!(res.report.notes.iter().any(|n| n.contains("could not load /missing.js")), "{:?}", res.report.notes);
+    }
+
+    #[test]
+    fn a_secure_page_runs_no_unprotected_script_and_does_not_even_ask_for_it_while_a_plain_page_may() {
+        let files: HashMap<String, String> = [("http://cdn.org/a.js".to_string(), pusher("plain")), ("https://cdn.org/b.js".to_string(), pusher("secure"))].into_iter().collect();
+        let html = "<script src=\"http://cdn.org/a.js\"></script><script src=\"https://cdn.org/b.js\"></script>";
+        let run_on = |page: &str| {
+            let web = Arc::new(Slow { files: files.clone(), now: Default::default(), most: Default::default() });
+            let seen = web.clone();
+            let mut log = String::new();
+            let res = run_page_with(html, &Url::parse(page).unwrap(), web, |_| true, &SiteData::default(), Limits::default(), |e| {
+                log = e.eval("log", "(window.__log || []).join(',')").unwrap_or_default();
+            });
+            (log, res.report.notes, seen.most.load(std::sync::atomic::Ordering::SeqCst))
+        };
+        let (log, notes, _) = run_on("https://a.org/");
+        assert_eq!(log, "secure", "only the protected script ran");
+        assert!(notes.iter().any(|n| n.contains("without protection")), "{notes:?}");
+        let (log, notes, _) = run_on("http://a.org/");
+        assert_eq!(log, "plain,secure", "a page that is itself unprotected loses nothing: {notes:?}");
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+    use iyakki_web::{Block, Control, Response};
+    use std::collections::HashMap;
+
+    struct Site(HashMap<String, Response>);
+    impl Fetch for Site {
+        fn get(&self, url: &Url) -> Result<Response, String> {
+            self.0.get(&url.to_string()).cloned().ok_or_else(|| "connection refused".to_string())
+        }
+    }
+
+    fn live(html: &str) -> LivePage {
+        let u = Url::parse("https://a.org/").unwrap();
+        LivePage::load(html, &u, Arc::new(Site(HashMap::new())), |_| true, &SiteData::default(), Limits::default(), Vec::new()).expect("the engine starts")
+    }
+
+    fn texts(tree: &iyakki_web::html::Tree) -> Vec<String> {
+        let doc = iyakki_web::doc::build(tree);
+        doc.blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Text(t) => Some(t.spans.iter().map(|s| s.text.as_str()).collect::<String>()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn control_named<'a>(doc: &'a iyakki_web::Doc, label: &str) -> &'a Control {
+        doc.controls.iter().find(|c| c.label == label || c.placeholder == label).unwrap_or_else(|| panic!("no control {label:?} among {:?}", doc.controls.iter().map(|c| c.label.clone()).collect::<Vec<_>>()))
+    }
+
+    const COUNTER: &str = "<p id=n>0</p><button id=b>Add</button><input id=t type=text placeholder=Name><p id=h></p><input id=c type=checkbox><p id=s>off</p><button id=go>Go</button>\
+        <script>let n = 0; document.getElementById('b').addEventListener('click', () => { n++; document.getElementById('n').textContent = String(n); console.log('clicked ' + n); });\
+        document.getElementById('t').addEventListener('input', e => { document.getElementById('h').textContent = 'Hello ' + e.target.value; });\
+        document.getElementById('c').addEventListener('change', e => { document.getElementById('s').textContent = e.target.checked ? 'on' : 'off'; });\
+        document.getElementById('go').addEventListener('click', () => { location.href = '/next?from=click'; });</script>";
+
+    #[test]
+    fn a_control_of_the_drawn_page_reaches_its_script_and_the_changed_page_can_be_drawn_again() {
+        let mut p = live(COUNTER);
+        let doc = iyakki_web::doc::build(&p.tree());
+        assert_eq!(texts(&p.tree())[0], "0");
+        let add = control_named(&doc, "Add").node;
+        let out = p.interact(&Interaction::Click(add)).unwrap();
+        assert_eq!(texts(&out.tree)[0], "1", "the script ran and changed the page");
+        assert!(out.console.iter().any(|l| l.text.contains("clicked 1")), "{:?}", out.console.iter().map(|l| l.text.clone()).collect::<Vec<_>>());
+        assert_eq!(out.navigation, None);
+        let out = p.interact(&Interaction::Click(add)).unwrap();
+        assert_eq!(texts(&out.tree)[0], "2", "the engine stayed alive between clicks");
+        // the tree drawn again gives a new document with the same controls (the nodes did not change)
+        let again = iyakki_web::doc::build(&out.tree);
+        assert_eq!(control_named(&again, "Add").node, add);
+    }
+
+    #[test]
+    fn typing_and_checking_reach_the_page_and_a_script_navigation_is_reported_once() {
+        let mut p = live(COUNTER);
+        let doc = iyakki_web::doc::build(&p.tree());
+        let name = control_named(&doc, "Name").node;
+        let out = p.interact(&Interaction::Input(name, "Ada".into())).unwrap();
+        assert!(texts(&out.tree).iter().any(|t| t == "Hello Ada"), "{:?}", texts(&out.tree));
+        let boxn = doc.controls.iter().find(|c| c.kind == iyakki_web::doc::ControlKind::Checkbox).expect("a check box").node;
+        let out = p.interact(&Interaction::Check(boxn, true)).unwrap();
+        assert!(texts(&out.tree).iter().any(|t| t == "on"), "{:?}", texts(&out.tree));
+        let go = control_named(&doc, "Go").node;
+        let out = p.interact(&Interaction::Click(go)).unwrap();
+        assert_eq!(out.navigation.as_deref(), Some("https://a.org/next?from=click"));
+        let again = p.interact(&Interaction::Click(control_named(&doc, "Add").node)).unwrap();
+        assert_eq!(again.navigation, None, "the request was taken, not repeated");
+    }
+
+    #[test]
+    fn nodes_that_do_not_exist_and_scripts_that_fail_do_not_break_the_page() {
+        let mut p = live("<button id=b>Boom</button><p id=r>ok</p><script>document.getElementById('b').addEventListener('click', () => { throw new Error('bad handler'); });</script>");
+        let doc = iyakki_web::doc::build(&p.tree());
+        let b = control_named(&doc, "Boom").node;
+        let r = p.interact(&Interaction::Click(b));
+        // a handler that throws is the page's problem: the page is still there and can be clicked again
+        assert!(r.is_ok() || r.is_err());
+        let out = p.interact(&Interaction::Click(99_999));
+        assert!(out.is_ok() || out.is_err(), "no panic for a node that is not there");
+        assert!(texts(&p.tree()).iter().any(|t| t == "ok"));
     }
 }

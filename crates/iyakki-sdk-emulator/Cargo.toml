@@ -10,6 +10,8 @@ description = "SDK emulator core (F-SDK-02): runs a WASM tile on the developer's
 [dependencies]
 iyakki-tile-abi = { path = "../iyakki-tile-abi" }
 iyakki-tile-host = { path = "../iyakki-tile-host" }
+# The bridge manifest, the Markdown analysis and the money rules are the device's own (no IO, no native parts).
+iyakki-core-api = { path = "../iyakki-core-api", default-features = false }
 serde_json = "1"
 
 [dev-dependencies]

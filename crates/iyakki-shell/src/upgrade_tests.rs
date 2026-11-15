@@ -223,6 +223,34 @@ fn fields_a_newer_release_wrote_in_the_accounts_file_survive_a_save_here() {
     assert_eq!(after["users"][2]["role"], "user");
 }
 
+#[test]
+fn the_accounts_file_is_stamped_a_newer_one_is_read_only_and_unknown_override_settings_survive() {
+    use crate::accounts::{UserStore, USERS_SCHEMA};
+    use iyakki_sec::policy::Role;
+    let d = tmp("users-stamp");
+    let p = d.join("users.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&fs::read(fixtures("alpha1").join("users.json")).unwrap()).unwrap();
+    v["users"][1]["overrides"]["quiet_hours"] = serde_json::json!({"from": 22, "to": 6});
+    fs::write(&p, serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+    // an alpha.1 file has no stamp; the first save adds it and keeps the unknown setting inside the account's overrides
+    let mut s = UserStore::open(&p).unwrap();
+    let admin = s.authenticate("admin", FIXTURE_PASS).unwrap();
+    s.create_user(&admin, "newcomer", "yet-another-pass", Role::User).unwrap();
+    let after: serde_json::Value = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
+    assert_eq!(after["schema"], USERS_SCHEMA);
+    assert_eq!(after["users"][1]["overrides"]["quiet_hours"], serde_json::json!({"from": 22, "to": 6}));
+    // a file stamped by a newer release signs people in but is never rewritten
+    let mut newer = after.clone();
+    newer["schema"] = (USERS_SCHEMA + 1).into();
+    fs::write(&p, serde_json::to_vec_pretty(&newer).unwrap()).unwrap();
+    let before = fs::read(&p).unwrap();
+    let mut s = UserStore::open(&p).unwrap();
+    let admin = s.authenticate("admin", FIXTURE_PASS).unwrap();
+    let e = s.create_user(&admin, "other", "one-more-pass-1", Role::User).unwrap_err().to_string();
+    assert!(e.contains("newer IYAKKI"), "{e}");
+    assert_eq!(fs::read(&p).unwrap(), before, "byte for byte");
+}
+
 // ------------------------------------------------------------------------------------------------ browser files
 
 fn browser_cx(tag: &str, which: &str) -> crate::apps::AppCx {

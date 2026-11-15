@@ -55,6 +55,12 @@ pub trait CameraBackend: Send + Sync {
     fn cameras(&self) -> Vec<String>;
     /// Take a photo into `dir`; the file written.
     fn photo(&self, dir: &Path) -> Result<PathBuf, String>;
+    /// Take a photo with the camera whose listed name (`cameras()`) contains `device` (any case); empty: the usual one. A backend with
+    /// several cameras overrides this; one with a single camera has nothing to choose (F-FLOW-29).
+    fn photo_from(&self, dir: &Path, device: &str) -> Result<PathBuf, String> {
+        let _ = device;
+        self.photo(dir)
+    }
     /// Start recording into `dir`; it stops by itself after `max_secs`. The file being written.
     fn record_start(&self, dir: &Path, max_secs: u32) -> Result<PathBuf, String>;
     /// Stop the recording: the files and the number of frames.

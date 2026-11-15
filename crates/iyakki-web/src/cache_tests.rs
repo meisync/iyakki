@@ -67,6 +67,25 @@ fn u(p: &str) -> Url {
 }
 
 #[test]
+fn a_ranged_request_neither_reads_nor_fills_the_cache() {
+    let (s, c, dir) = setup("ranged");
+    s.set("/f.css", page("max-age=600"));
+    c.get(&u("/f.css")).unwrap();
+    assert_eq!(s.count("/f.css"), 1);
+    let mut req = Request::get(&u("/f.css"));
+    req.range = "bytes=0-2".into();
+    c.send(&req).unwrap();
+    assert_eq!(s.count("/f.css"), 2, "a fresh copy is not handed out for a piece");
+    s.set("/g.css", page("max-age=600"));
+    let mut req = Request::get(&u("/g.css"));
+    req.range = "bytes=0-2".into();
+    c.send(&req).unwrap();
+    c.get(&u("/g.css")).unwrap();
+    assert_eq!(s.count("/g.css"), 2, "and a piece is not kept as the file");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn max_age_reads_the_header() {
     assert_eq!(max_age("public, max-age=300"), Some(300));
     assert_eq!(max_age("max-age=0"), None);

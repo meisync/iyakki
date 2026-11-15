@@ -83,6 +83,16 @@
     const dpr = () => Math.max(1, Math.min(4, Number(env.devicePixelRatio) || 1));
     const tell = (s, t) => { if (env.onState) env.onState(s, t || ""); };
 
+    // a tile that reads a service (it has capabilities) is given the passage of time, once a `tickMs`, so that it can read again
+    function tickLoop() {
+      if (state.stopped || !(env.tickMs > 0)) return;
+      state.ticker = env.setTimeout(() => {
+        state.ticker = null;
+        if (state.started && !state.inflight && !state.stopped && queue.size() === 0) { queue.push({ type: "tick", dt_ms: env.tickMs }); schedule(0); }
+        tickLoop();
+      }, env.tickMs);
+    }
+
     function schedule(ms) {
       if (state.timer !== null || state.stopped) return;
       state.timer = env.setTimeout(() => { state.timer = null; pump(); }, ms);
@@ -126,7 +136,7 @@
 
     return {
       send(e) { if (!state.stopped) { queue.push(e); schedule(0); } },
-      start() { state.stopped = false; tell("starting"); schedule(0); },
+      start() { state.stopped = false; tell("starting"); schedule(0); tickLoop(); },
       // a new surface size, in logical pixels
       resize(w, h) {
         w = Math.min(MAX_DIM, Math.max(1, Math.round(w))); h = Math.min(MAX_DIM, Math.max(1, Math.round(h)));
@@ -140,7 +150,7 @@
         tell("starting");
         schedule(0);
       },
-      stop() { state.stopped = true; if (state.timer !== null) { env.clearTimeout(state.timer); state.timer = null; } },
+      stop() { state.stopped = true; if (state.timer !== null) { env.clearTimeout(state.timer); state.timer = null; } if (state.ticker) { env.clearTimeout(state.ticker); state.ticker = null; } },
       size: () => state.size,
       frame: () => state.frame,
       queued: () => queue.size(),
@@ -183,7 +193,7 @@
       stage.appendChild(reloadBtn);
       const width = Math.min(1200, Math.max(200, Math.floor((stage.clientWidth || tile.width) - 24)));
       const t = openTile({
-        api, canvas, tile: tile.id, width: Math.min(tile.width || 320, width), height: tile.height || 200,
+        api, canvas, tile: tile.id, width: Math.min(tile.width || 320, width), height: tile.height || 200, tickMs: tile.ticks ? 1000 : 0,
         setTimeout: win.setTimeout.bind(win), clearTimeout: win.clearTimeout.bind(win), devicePixelRatio: win.devicePixelRatio, matchMedia: win.matchMedia ? win.matchMedia.bind(win) : null,
         onState(s, text) {
           note.textContent = s === "live" || s === "starting" ? "" : text;
@@ -233,7 +243,8 @@
       };
       input.addEventListener("keydown", keyEvent(true));
       input.addEventListener("keyup", keyEvent(false));
-      canvas.addEventListener("keydown", () => input.focus({ preventScroll: true }));
+      // Tab is not a typed key: moving the focus to the text box on Tab made Shift+Tab bounce between the two (a keyboard trap)
+      canvas.addEventListener("keydown", (e) => { if (e.key !== "Tab") input.focus({ preventScroll: true }); });
       input.addEventListener("compositionstart", () => { composing = true; });
       input.addEventListener("compositionend", (e) => {
         composing = false;

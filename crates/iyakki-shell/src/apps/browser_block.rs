@@ -172,6 +172,8 @@ pub fn now_secs() -> u64 {
 pub enum Job {
     /// The lists EasyList and EasyPrivacy (the ones listed with their licences in Settings).
     DownloadStandard,
+    /// One list of the program's table (`KNOWN`, by id: `easylist`, `easyprivacy`, `ublock-filters`).
+    AddKnown(String),
     /// A list from an address the person typed.
     AddUrl(String),
     /// A file the person chose.
@@ -212,6 +214,13 @@ pub fn run_job(store: &ListStore, src: &dyn iyakki_web::blocker_lists::ListSourc
             }
             summary(&done, &failed)
         }
+        Job::AddKnown(id) => match KNOWN.iter().find(|k| k.id == id) {
+            Some(k) => match store.add_known(k, src, now) {
+                Ok(m) => format!("added {} ({} rules)", m.name, m.rules),
+                Err(e) => format!("not added: {}: {e}", k.name),
+            },
+            None => format!("not added: there is no list called {id}"),
+        },
         Job::AddUrl(u) => match store.add_url(u, src, now) {
             Ok(m) => format!("added {} ({} rules)", m.name, m.rules),
             Err(e) => format!("not added: {e}"),

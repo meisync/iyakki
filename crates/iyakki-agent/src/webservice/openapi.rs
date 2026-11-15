@@ -28,6 +28,7 @@ pub fn schemas() -> Map<String, Value> {
     put("LoginRequest", obj(json!({"name": s, "password": s}), &["name", "password"]));
     put("LoginResponse", obj(json!({"token": s, "expires_in": i, "user": s, "role": s}), &["token", "expires_in", "user", "role"]));
     put("OpenApi", json!({"type": "object"}));
+    put("Text", json!({"type": "string"}));
     put("Whoami", obj(json!({"user": s, "role": s, "admin": b, "profile": s, "tools": strs}), &["user", "role", "admin", "profile", "tools"]));
     put("Models", obj(json!({"models": any_arr}), &["models"]));
     put("Tools", obj(json!({"tools": strs}), &["tools"]));
@@ -47,6 +48,7 @@ pub fn schemas() -> Map<String, Value> {
     put("TenantSwitch", obj(json!({"tenant": s}), &["tenant"]));
     put("TenantSwitched", obj(json!({"switched": b, "tenant": {"type": "object"}, "previous": s, "runs_stopped": i, "vault_locked": b, "url": s}), &["switched", "tenant", "previous"]));
     put("TenantView", obj(json!({"user": s, "tenant_role": s, "members": any_arr, "namespaces": any_arr}), &["user", "tenant_role", "members", "namespaces"]));
+    put("TenantAudit", obj(json!({"lines": any_arr, "total": json!({"type": "integer"}), "offset": json!({"type": "integer"}), "limit": json!({"type": "integer"}), "more": json!({"type": "boolean"})}), &["lines", "total", "more"]));
     put("TenantMemberChange", obj(json!({"name": s, "role": {"type": "string", "enum": ["member", "admin", "owner", "remove"]}}), &["name", "role"]));
     put("NamespaceChange", obj(json!({"name": s, "action": {"type": "string", "enum": ["create", "delete"]}}), &["name", "action"]));
     put("NsMembers", obj(json!({"name": s, "role": s, "members": any_arr}), &["name", "role", "members"]));
@@ -81,6 +83,10 @@ pub fn schemas() -> Map<String, Value> {
     put("ScheduleSave", obj(json!({"flow": s, "team": s, "environment": s, "run_as": {"type": "string", "enum": ["owner", "team-service"]}, "trigger": {"type": "object"}}), &["flow", "team", "trigger"]));
     put("ScheduleSaved", json!({"type": "object"}));
     put("FlowRun", obj(json!({"draft": b, "inputs": {"type": "object"}}), &[]));
+    put("FlowImport", obj(json!({"flow": {"type": "object"}}), &["flow"]));
+    put("FlowImported", obj(json!({"id": s, "name": s}), &["id", "name"]));
+    put("FlowValidate", obj(json!({"id": s, "flow": {"type": "object"}}), &[]));
+    put("FlowIssues", obj(json!({"ok": b, "issues": any_arr}), &["ok", "issues"]));
     put("FlowRunStarted", obj(json!({"run": s, "flow": s}), &["run", "flow"]));
     put("FlowRunList", obj(json!({"runs": any_arr, "page": i, "per": i, "more": b}), &["runs", "page", "per", "more"]));
     put("FlowRunView", obj(json!({"id": s, "flow": s, "status": s, "nodes": any_arr}), &["id", "flow", "status"]));
@@ -169,5 +175,8 @@ mod drift_tests {
     fn the_checked_in_openapi_documents_are_the_generated_ones() {
         checked_in(Profile::AgentApi, "openapi-agent-api.json");
         checked_in(Profile::Cloud, "openapi-cloud.json");
+        checked_in(Profile::FlowsRunner, "openapi-flows-runner.json");
+        checked_in(Profile::DataApi, "openapi-data-api.json");
+        checked_in(Profile::TileHost, "openapi-tile-host.json");
     }
 }

@@ -165,6 +165,9 @@ fn shared() -> Result<&'static (Engine, Module), String> {
 
 /// Scripts at least this long keep their compiled form on disk ([`JsEngine::eval_cached`]).
 const SCRIPT_CACHE_MIN: usize = 128 << 10;
+/// The scripts of the platform itself (the page object, the window, the extra members: tens of kilobytes each) keep their compiled
+/// form from this length on, so a new page does not parse them again: the bytecode snapshot of the platform scripts.
+const PRELUDE_CACHE_MIN: usize = 2 << 10;
 /// The compiled scripts may take this much disk before the oldest go.
 const SCRIPT_CACHE_MAX: u64 = 512 << 20;
 
@@ -399,7 +402,7 @@ impl JsEngine {
         let preludes: Vec<(&'static str, &'static str)> = e.store.data().modules.iter().map(|m| (m.name(), m.prelude())).collect();
         for (name, src) in preludes {
             if !src.is_empty() {
-                e.eval(&format!("<{name}>"), src).map_err(|err| format!("the {name} module failed to start: {err}"))?;
+                e.eval_cached_min(&format!("<{name}>"), src, PRELUDE_CACHE_MIN).map_err(|err| format!("the {name} module failed to start: {err}"))?;
             }
         }
         Ok(e)
@@ -492,7 +495,12 @@ impl JsEngine {
     /// run (the same page again, another page using the same file) it is not parsed again. Parsing is the main cost of
     /// a megabyte-sized bundle. The file is named by a SHA-256 of the engine build, the script's name and its text.
     pub fn eval_cached(&mut self, name: &str, source: &str) -> Result<String, JsError> {
-        let dir = if source.len() >= SCRIPT_CACHE_MIN { cache::dir() } else { None };
+        self.eval_cached_min(name, source, SCRIPT_CACHE_MIN)
+    }
+
+    /// [`JsEngine::eval_cached`] for scripts of at least `min` bytes.
+    fn eval_cached_min(&mut self, name: &str, source: &str, min: usize) -> Result<String, JsError> {
+        let dir = if source.len() >= min { cache::dir() } else { None };
         let Some(dir) = dir else { return self.eval(name, source) };
         let digest = match shared() {
             Ok((e, _)) => engine_digest(e),
@@ -752,6 +760,7 @@ mod tests {
 
     #[test]
     fn a_big_script_is_parsed_once_and_runs_from_its_compiled_form_after_that() {
+        let _private = cache::use_private_dir_for_this_test();
         if cache::dir().is_none() {
             return; // no safe place for a cache here
         }
@@ -791,6 +800,49 @@ mod tests {
         assert_eq!(engine().eval_cached("small.js", "6 * 7").unwrap(), "42");
         assert_eq!(qbc_files().len(), n);
         for p in qbc_files().into_iter().filter(|p| !before.contains(p)) {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[test]
+    fn the_platform_scripts_of_a_new_engine_come_from_their_compiled_form() {
+        let _private = cache::use_private_dir_for_this_test();
+        if cache::dir().is_none() {
+            return;
+        }
+        struct Big(&'static str, &'static str);
+        impl WebModule for Big {
+            fn name(&self) -> &'static str {
+                self.0
+            }
+            fn prelude(&self) -> &'static str {
+                self.1
+            }
+            fn call(&mut self, _: &str, _: &serde_json::Value) -> Result<serde_json::Value, String> {
+                Ok(serde_json::Value::Null)
+            }
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
+        }
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let name: &'static str = Box::leak(format!("snap{stamp}").into_boxed_str());
+        // longer than PRELUDE_CACHE_MIN, so the first engine stores it
+        let src: &'static str = Box::leak(format!("globalThis.platformStamp = 'ok'; /* {} */", "padding ".repeat(PRELUDE_CACHE_MIN / 4)).into_boxed_str());
+        let before = qbc_files();
+        let mut a = JsEngine::new(Limits::default(), vec![Box::new(Big(name, src))]).unwrap();
+        assert_eq!(a.eval("t", "platformStamp").unwrap(), "ok");
+        let new: Vec<_> = qbc_files().into_iter().filter(|p| !before.contains(p)).collect();
+        assert_eq!(new.len(), 1, "the prelude is stored: {new:?}");
+        let stored = std::fs::metadata(&new[0]).unwrap().modified().unwrap();
+        let mut b = JsEngine::new(Limits::default(), vec![Box::new(Big(name, src))]).unwrap();
+        assert_eq!(b.eval("t", "platformStamp").unwrap(), "ok", "the second engine runs it from the stored form");
+        assert_eq!(std::fs::metadata(&new[0]).unwrap().modified().unwrap(), stored, "and does not store it again");
+        // a damaged stored form falls back to the text
+        cache::write(&new[0], b"not bytecode");
+        let mut c = JsEngine::new(Limits::default(), vec![Box::new(Big(name, src))]).unwrap();
+        assert_eq!(c.eval("t", "platformStamp").unwrap(), "ok");
+        for p in new {
             let _ = std::fs::remove_file(p);
         }
     }

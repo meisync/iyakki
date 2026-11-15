@@ -209,9 +209,27 @@ pub struct Known {
     pub hidden: bool,
     #[serde(default)]
     pub added: i64,
+    /// A WPA enterprise login (kept in this owner-only file because the network has to come up before anyone signs in).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enterprise: Option<crate::wifi_ext::Enterprise>,
+    /// A WEP key as typed (WEP is broken: joined only after a plain warning).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wep_key: Option<String>,
 }
 
 impl Known {
+    /// The entry for a WPA enterprise network (checked the way the supplicant block is).
+    pub fn new_enterprise(ssid: &str, hidden: bool, e: crate::wifi_ext::Enterprise, now: i64) -> Result<Known, String> {
+        crate::wifi_ext::enterprise_block(ssid, hidden, 1, &e)?;
+        Ok(Known { ssid: ssid.to_string(), psk: None, passphrase: None, hidden, added: now, enterprise: Some(e), wep_key: None })
+    }
+
+    /// The entry for a WEP network.
+    pub fn new_wep(ssid: &str, key: &str, hidden: bool, now: i64) -> Result<Known, String> {
+        crate::wifi_ext::wep_block(ssid, hidden, 1, key)?;
+        Ok(Known { ssid: ssid.to_string(), psk: None, passphrase: None, hidden, added: now, enterprise: None, wep_key: Some(key.to_string()) })
+    }
+
     /// Build the entry for joining `ssid` with `passphrase` (empty for an open network) given what the network offers.
     pub fn new(ssid: &str, passphrase: &str, security: Security, hidden: bool, now: i64) -> Result<Known, String> {
         if !valid_ssid(ssid) {
@@ -235,8 +253,27 @@ impl Known {
                 (Some(iyakki_sec::wpa::wpa_psk_hex(passphrase, ssid)), None)
             }
         };
-        Ok(Known { ssid: ssid.to_string(), psk, passphrase: pass, hidden, added: now })
+        Ok(Known { ssid: ssid.to_string(), psk, passphrase: pass, hidden, added: now, enterprise: None, wep_key: None })
     }
+}
+
+/// Join `k` now and remember it: the one path the Network page and the assistant's `wifi_join` share. Writes the entry (newest first),
+/// applies the private MAC address when one is chosen for this network, writes the supplicant's file and starts it with the address
+/// request. Returns the sentence to show.
+pub fn join_now(w: &Wifi, store: &KnownStore, mac: &crate::mac::MacEnv, iface: &str, k: Known) -> Result<String, String> {
+    let ssid = k.ssid.clone();
+    store.add(k)?;
+    // the private address for this network (when one is chosen) before anything is sent from the adapter
+    let mode = mac.config().mode_for(crate::LinkKind::Wifi, iface, Some(&ssid));
+    let (mut changed, mut note) = (false, String::new());
+    if !mac.host_managed && (mode.is_private() || mac.infos().iter().any(|i| i.iface == iface && i.private)) {
+        match mac.apply_now(iface, Some(&ssid), true) {
+            Ok(m) => changed = !m.contains("already has"),
+            Err(e) => note = format!(" Private MAC address not applied ({e}); the adapter keeps the address it has."),
+        }
+    }
+    w.apply_with(iface, &store.list(), mode, changed)?;
+    Ok(format!("Joining {ssid}. It is remembered and tried first the next time.{note}"))
 }
 
 /// The networks a person has joined, kept in one file (owner-only, in the data folder).
@@ -294,6 +331,18 @@ pub fn wpa_conf_for_mode(known: &[Known], mode: crate::mac::MacMode) -> String {
     s.push_str(crate::mac::supplicant_lines(mode));
     for (i, k) in known.iter().enumerate() {
         if !valid_ssid(&k.ssid) {
+            continue;
+        }
+        if let Some(e) = &k.enterprise {
+            if let Ok(b) = crate::wifi_ext::enterprise_block(&k.ssid, k.hidden, known.len() - i, e) {
+                s.push_str(&b);
+            }
+            continue;
+        }
+        if let Some(w) = &k.wep_key {
+            if let Ok(b) = crate::wifi_ext::wep_block(&k.ssid, k.hidden, known.len() - i, w) {
+                s.push_str(&b);
+            }
             continue;
         }
         s.push_str(&format!("network={{\n    ssid=\"{}\"\n    priority={}\n", k.ssid, known.len() - i));
@@ -407,6 +456,14 @@ impl Wifi {
             run(self, "udhcpc", &args).map_err(|e| format!("could not ask for an address: {e}"))?;
         }
         Ok(())
+    }
+
+    /// The text of `iw dev X link` (None for an odd interface name or when the program fails).
+    pub fn link_text(&self, iface: &str) -> Option<String> {
+        if iface.is_empty() || !iface.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.') {
+            return None;
+        }
+        run(self, "iw", &["dev", iface, "link"]).ok()
     }
 
     /// The network the adapter is associated with now (`iw dev X link`).
@@ -546,7 +603,7 @@ BSS aa:bb:cc:00:00:08(on wlan0)
         assert!(store.forget("Modern3").unwrap() && !store.forget("Modern3").unwrap());
         assert_eq!(store.list().len(), 2);
         // a damaged entry never breaks the file
-        assert!(!wpa_conf_for(&[Known { ssid: "x\"y".into(), psk: None, passphrase: None, hidden: false, added: 0 }]).contains("network"));
+        assert!(!wpa_conf_for(&[Known { ssid: "x\"y".into(), psk: None, passphrase: None, hidden: false, added: 0, enterprise: None, wep_key: None }]).contains("network"));
         let _ = std::fs::remove_dir_all(&d);
     }
 

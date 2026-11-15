@@ -343,3 +343,162 @@ fn every_clickable_region_of_the_main_screens_is_reachable_by_the_keyboard_walk(
     assert!(out.is_empty(), "{report:?}");
     eprintln!("{}", report.join("\n"));
 }
+
+#[test]
+fn volume_and_brightness_changes_are_spoken_in_words_and_a_muted_output_says_muted() {
+    use crate::fnkeys::{Osd, OsdKind};
+    use iyakki_agent::audioout::SoundSettings;
+    assert_eq!(Osd::volume(&SoundSettings { volume_pct: 65, ..Default::default() }, 1).spoken(), "Volume 65 percent");
+    assert_eq!(Osd::volume(&SoundSettings { volume_pct: 65, muted: true, ..Default::default() }, 1).spoken(), "Volume muted");
+    assert_eq!(Osd { kind: OsdKind::Brightness, text: "100%".into(), fraction: Some(1.0), muted: false, until: 1 }.spoken(), "Brightness 100 percent");
+    assert_eq!(Osd { kind: OsdKind::KbdLight, text: "Off".into(), fraction: Some(0.0), muted: false, until: 1 }.spoken(), "Keyboard light off");
+    assert_eq!(Osd { kind: OsdKind::Notice, text: "No brightness control on this display".into(), fraction: None, muted: false, until: 1 }.spoken(), "No brightness control on this display");
+    // and the shell speaks it when the key is pressed
+    let mut sh = signed_in("acc-osd");
+    let mut g = Gfx::new(1280, 720);
+    let log = voiced(&mut sh);
+    chord(&mut sh, FnKey::ScreenReader);
+    settle(&mut sh, &mut g);
+    chord(&mut sh, FnKey::VolumeDown);
+    settle(&mut sh, &mut g);
+    assert!(said(&log).iter().any(|s| s.starts_with("Volume ") && s.ends_with(" percent") || s == "Volume muted"), "{:?}", said(&log));
+}
+
+/// F-A11Y-01: which tiles speak. Each tile is opened and drawn once at 1280x720; a tile whose picture registers no labelled control is
+/// silent to the reader. The tiles listed here are the ones known to be silent (or to need hardware to draw anything); the list may only
+/// shrink: a tile that gains controls must leave it, and a tile that goes silent fails the test.
+#[test]
+fn tiles_that_draw_without_labelled_controls_are_a_known_shrinking_list() {
+    use iyakki_sec::policy::App as PApp;
+    const SILENT: &[&str] = &[];
+    let mut sh = signed_in("acc-tiles");
+    let mut g = Gfx::new(1280, 720);
+    let mut silent = Vec::new();
+    let mut opened_n = 0;
+    for app in PApp::ALL {
+        let id = app.id();
+        let opened = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sh.open_for_test(app);
+            sh.render(&mut g);
+            sh.render(&mut g);
+            (sh.screen_name().starts_with("app:"), sh.access_controls().len())
+        }));
+        match opened {
+            Ok((true, 0)) => {
+                opened_n += 1;
+                silent.push(id.to_string())
+            }
+            Ok((false, _)) => {} // refused for this role, or it opens something else: not a tile drawing
+            Ok(_) => opened_n += 1,
+            Err(_) => silent.push(format!("{id} (panicked while drawing)")),
+        }
+        sh.launcher_for_test();
+    }
+    silent.sort();
+    eprintln!("{opened_n} tiles opened, silent: {silent:?}");
+    assert!(opened_n >= 20, "the test must really open tiles, it opened {opened_n}");
+    let known: Vec<String> = SILENT.iter().map(|s| s.to_string()).collect();
+    for s in &silent {
+        assert!(known.contains(s), "{s} draws no labelled control: give its controls labels (g.hit(.., label)) or list it, with a reason, in SILENT");
+    }
+    for k in &known {
+        assert!(silent.contains(k), "{k} speaks now: remove it from SILENT");
+    }
+}
+
+/// F-A11Y-01: walk the tiles and list the controls that a reader could not name: drawn with no label, or a bare symbol (fewer than two letters or digits).
+/// A control that is clicked like a button but registers no label (`access::unnamed`) fails at once; thin names are a list that only shrinks.
+#[test]
+fn tiles_with_a_control_that_has_no_usable_name_are_a_known_shrinking_list() {
+    use iyakki_sec::policy::App as PApp;
+    const THIN: &[&str] = &[];
+    let mut sh = signed_in("acc-unnamed");
+    let mut g = Gfx::new(1280, 720);
+    let mut found: Vec<String> = Vec::new();
+    let mut unlabelled: Vec<String> = Vec::new();
+    for app in PApp::ALL {
+        let id = app.id();
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sh.open_for_test(app);
+            sh.render(&mut g);
+            sh.render(&mut g);
+            assert_eq!(crate::access::generic_dialog(&sh.hits, "x"), None, "{id}: no modal frame is on the screen when the tile has just opened");
+            (sh.unnamed_controls_for_test(), sh.thin_names_for_test())
+        }));
+        if let Ok((u, t)) = r {
+            unlabelled.extend(u.into_iter().map(|(_, ev)| format!("{id}: {ev}")));
+            found.extend(t.into_iter().map(|n| format!("{id}: {n}")));
+        }
+        sh.launcher_for_test();
+    }
+    found.sort();
+    found.dedup();
+    eprintln!("thin names: {found:#?}");
+    assert!(unlabelled.is_empty(), "controls with no label at all: {unlabelled:?}");
+    for f in &found {
+        assert!(THIN.contains(&f.as_str()), "{f}: give the control a name (access::describe or a label), or list it, with a reason, in THIN");
+    }
+    for k in THIN {
+        assert!(found.iter().any(|f| f == k), "{k} has a name now: remove it from THIN");
+    }
+}
+
+#[test]
+fn typing_into_a_text_field_is_echoed_character_by_character_and_a_password_is_not() {
+    let (mut sh, _) = shell_with_users("acc-echo");
+    let mut g = Gfx::new(1280, 720);
+    let log = voiced(&mut sh);
+    chord(&mut sh, FnKey::ScreenReader);
+    settle(&mut sh, &mut g);
+    // walk to a plain text field (the name box of the sign-in screen)
+    let mut found = false;
+    for _ in 0..20 {
+        chord(&mut sh, FnKey::AccessNext);
+        beats(&mut sh, 2);
+        if said(&log).last().is_some_and(|s| s.contains(", edit")) {
+            found = true;
+            break;
+        }
+    }
+    assert!(found, "the walk reaches a text field: {:?}", said(&log));
+    chord(&mut sh, FnKey::AccessActivate);
+    let before = said(&log).len();
+    for c in "xq".chars() {
+        sh.handle(&Event::Key(Key::Char(c)));
+        settle(&mut sh, &mut g);
+    }
+    let after: Vec<String> = said(&log)[before..].to_vec();
+    assert!(after.iter().any(|s| s == "x") && after.iter().any(|s| s == "q"), "each typed character is spoken: {after:?}");
+    // a deletion is said too
+    sh.handle(&Event::Key(Key::Backspace));
+    settle(&mut sh, &mut g);
+    assert_eq!(said(&log).last().unwrap(), "deleted q");
+}
+
+#[test]
+fn the_typing_echo_switch_silences_the_letters_and_nothing_else() {
+    let (mut sh, _) = shell_with_users("acc-echo-off");
+    let mut g = Gfx::new(1280, 720);
+    let log = voiced(&mut sh);
+    chord(&mut sh, FnKey::ScreenReader);
+    settle(&mut sh, &mut g);
+    sh.acc.cfg.typing_echo = false;
+    let mut found = false;
+    for _ in 0..20 {
+        chord(&mut sh, FnKey::AccessNext);
+        beats(&mut sh, 2);
+        if said(&log).last().is_some_and(|s| s.contains(", edit")) {
+            found = true;
+            break;
+        }
+    }
+    assert!(found, "the walk still reaches a text field: {:?}", said(&log));
+    chord(&mut sh, FnKey::AccessActivate);
+    let before = said(&log).len();
+    for c in "xq".chars() {
+        sh.handle(&Event::Key(Key::Char(c)));
+        settle(&mut sh, &mut g);
+    }
+    let after: Vec<String> = said(&log)[before..].to_vec();
+    assert!(!after.iter().any(|s| s == "x" || s == "q"), "no letter is echoed with the switch off: {after:?}");
+}

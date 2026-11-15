@@ -248,3 +248,55 @@ fn the_last_finished_session_is_the_newest_line_of_the_history() {
     assert!(!last_finished(&d).unwrap().unclean(), "damaged lines are skipped; errors in a clean session are still clean");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn a_kept_log_is_copied_to_a_private_new_file_in_the_persons_folder_and_nothing_is_overwritten() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = tmp("copy");
+    let (log, home) = (d.join("log"), d.join("home"));
+    std::fs::create_dir_all(&log).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(log.join("kmsg-crash-aaaa1111.log"), "line one\nline two\nBUG: the last words\n").unwrap();
+    let t = 1_793_981_000;
+    let a = copy_to_folder(&log, "kmsg-crash-aaaa1111.log", &home, t).unwrap();
+    assert_eq!(a.parent().unwrap(), home.as_path());
+    assert!(a.file_name().unwrap().to_string_lossy().starts_with("iyakki-session-log-2026") && a.to_string_lossy().ends_with(".log"), "{a:?}");
+    assert_eq!(std::fs::read_to_string(&a).unwrap(), "line one\nline two\nBUG: the last words\n");
+    assert_eq!(std::fs::metadata(&a).unwrap().permissions().mode() & 0o777, 0o600, "private to its owner");
+    // a second copy in the same second gets its own name; the first is untouched
+    let b = copy_to_folder(&log, "kmsg-crash-aaaa1111.log", &home, t).unwrap();
+    assert_ne!(a, b);
+    assert!(std::fs::read_to_string(&a).unwrap().contains("last words"));
+    // names that are not a kept log, a missing log and a missing folder are refused in words
+    for bad in ["", "../x.log", "kmsg-../../etc/passwd.log", "session.json", "unclean.json", "kmsg-a/b.log"] {
+        assert!(copy_to_folder(&log, bad, &home, t).is_err(), "{bad}");
+    }
+    assert!(copy_to_folder(&log, "kmsg-crash-gone.log", &home, t).unwrap_err().contains("not there"));
+    assert!(copy_to_folder(&log, "kmsg-crash-aaaa1111.log", &d.join("nowhere"), t).unwrap_err().contains("does not exist"));
+    // a log bigger than the cap is cut at the start of a line and keeps its end
+    let big: String = (0..COPY_BYTES / 9 + 5000).map(|i| format!("l{i:07}\n")).collect();
+    assert!(big.len() as u64 > COPY_BYTES);
+    std::fs::write(log.join("kmsg-big.log"), &big).unwrap();
+    let c = copy_to_folder(&log, "kmsg-big.log", &home, t).unwrap();
+    let got = std::fs::read_to_string(&c).unwrap();
+    assert!(got.len() as u64 <= COPY_BYTES && got.starts_with('l') && got.ends_with(&format!("l{:07}\n", COPY_BYTES / 9 + 4999)), "{} bytes", got.len());
+    assert!(got.lines().all(|l| l.len() == 8), "every kept line is whole");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn the_session_record_is_written_whole_and_durably_and_a_longer_old_file_does_not_leave_a_tail() {
+    let d = std::env::temp_dir().join(format!("iyakki-crashlog-sync-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let f = d.join("session.json");
+    std::fs::write(&f, "x".repeat(500)).unwrap();
+    write_synced(&f, "{\"a\":1}").unwrap();
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), "{\"a\":1}");
+    // a new file is made too, and nothing else is left behind in the folder
+    let g = d.join("new.json");
+    write_synced(&g, "{}").unwrap();
+    assert_eq!(std::fs::read_to_string(&g).unwrap(), "{}");
+    assert_eq!(std::fs::read_dir(&d).unwrap().count(), 2);
+    let _ = std::fs::remove_dir_all(&d);
+}

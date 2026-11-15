@@ -583,7 +583,10 @@ impl HlsReader {
                 }
                 std::thread::sleep(Duration::from_millis(5));
             }
-            if self.last_new.elapsed() > Duration::from_secs_f64((self.target * 6.0).max(45.0)) / self.net.timing.scale.max(1) {
+            // a scaled-down test clock still gets a real-time floor: at a scale of 2000 the limit alone is 22 ms, which a busy machine
+            // exceeds between two looks at a playlist that is in fact moving (no effect in real use: the limit there is 45 s or more)
+            let stall = (Duration::from_secs_f64((self.target * 6.0).max(45.0)) / self.net.timing.scale.max(1)).max(Duration::from_millis(1500));
+            if self.last_new.elapsed() > stall {
                 return Err(io_err("the playlist stopped moving"));
             }
             match self.net.get(&self.media_url.clone(), MAX_PLAYLIST) {

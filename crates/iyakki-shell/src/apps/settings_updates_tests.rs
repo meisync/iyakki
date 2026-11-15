@@ -497,3 +497,293 @@ fn the_channel_button_cycles_stable_beta_nightly_is_kept_and_clears_a_review_of_
     press(&mut b, &ucx, 'g');
     assert_eq!(iyakki_agent::store::compapply::channel(ucx.services.dir()), "stable");
 }
+
+// ---- F-CORE-24: the pending setup wizards on the System update page
+
+fn queue_wizard(cx: &AppCx, user: &str) {
+    let dir = cx.services.dir().join("wizards");
+    std::fs::create_dir_all(&dir).unwrap();
+    let body = serde_json::json!({"schema": 1, "pending": [{"app": "notes", "wizard": "setup", "title": "Set up Notes", "trigger": "on_install", "from_version": null, "queued_at": 5}]});
+    std::fs::write(dir.join(format!("{user}.json")), body.to_string()).unwrap();
+}
+
+#[test]
+fn the_page_lists_pending_setup_wizards_the_overview_mentions_them_and_a_opens_the_assistant() {
+    let r = rig("wiz-page");
+    let cx = cx_with_admin_store("wiz-page");
+    let mut a = app(&r, &cx);
+    a.go_to(Tab::Updates);
+    let g = draw(&mut a, &cx, 1280, 800);
+    assert!(!g.text_log.iter().any(|(_, _, t)| t.contains("Setup steps waiting")), "nothing queued: no section");
+    assert!(!a.attention(&cx).iter().any(|x| x.title.contains("setup wizard")));
+    queue_wizard(&cx, &cx.session.user);
+    let g = draw(&mut a, &cx, 1280, 800);
+    let all: Vec<String> = g.text_log.iter().map(|(_, _, t)| t.clone()).collect();
+    assert!(all.iter().any(|t| t == "Setup steps waiting") && all.iter().any(|t| t.contains("notes - Set up Notes (on_install)")), "{all:?}");
+    assert!(a.attention(&cx).iter().any(|x| x.tab == Tab::Updates && x.title == "1 setup wizard waiting"));
+    a.handle(&Event::Key(Key::Char('a')), &cx);
+    assert_eq!(a.take_request(), Some(("chat".into(), String::new())), "the assistant opens; it holds the steps and asks before it runs them");
+}
+
+/// A signed system update file for `version`/`variant` on the "stick": the folder of files, `release.json`, the packed `.tgz` and its `.sig`.
+fn bundle_file(r: &Rig, version: &str, variant: &str, sign_with_the_release_key: bool) -> std::path::PathBuf {
+    let src = r.stick.join(format!("src-{version}"));
+    put(&src, "boot/bzImage", &bytes((1 << 20) + 300, 21));
+    put(&src, "boot/initrd", &bytes(2 << 20, 22));
+    put(&src, "boot/grub/grub.cfg", MENU.replace("quiet", "quiet splash").as_bytes());
+    let files: Vec<serde_json::Value> = ["boot/bzImage", "boot/initrd", "boot/grub/grub.cfg"].iter().map(|p| serde_json::json!({"path": p, "size": std::fs::metadata(src.join(p)).unwrap().len(), "sha256": iyakki_agent::devmode::files::sha256_file(&src.join(p)).unwrap()})).collect();
+    put(&src, "release.json", serde_json::json!({"schema": 1, "version": version, "variant": variant, "min_base": "", "notes": "Sound fixes.", "files": files}).to_string().as_bytes());
+    let out = r.stick.join(format!("iyakki-{version}.tgz"));
+    iyakki_agent::sysupdate::pack(&src, &out).unwrap();
+    let signer = if sign_with_the_release_key { key!() } else { iyakki_agent::pkg::signing_key_from_hex(&"07".repeat(32)).unwrap() };
+    std::fs::write(format!("{}.sig", out.display()), iyakki_agent::sysupdate::sign(&out, &signer).unwrap()).unwrap();
+    out
+}
+
+fn open_file(a: &mut SettingsApp, cx: &AppCx, path: &std::path::Path) -> Result<String, String> {
+    let mut f = Form::new("x").text("File", "", "");
+    f.set_value(0, &path.display().to_string());
+    a.upd_bundle_submit(&f, cx)
+}
+
+#[test]
+fn a_signed_update_file_is_opened_from_the_page_listed_and_selected_and_nothing_is_installed() {
+    let r = rig("bundle-ok");
+    let cx = cx_with_admin_store("upd-bundle-ok");
+    let mut a = app(&r, &cx);
+    let before = boot_initrd(&r);
+    press(&mut a, &cx, 'b');
+    assert!(a.modal.is_some(), "the key opens the form");
+    a.modal = None;
+    let file = bundle_file(&r, "0.1.0-alpha.2", "pc", true);
+    let said = open_file(&mut a, &cx, &file).unwrap();
+    assert!(said.contains("signature is good") && said.contains("0.1.0-alpha.2") && said.contains("nothing is installed"), "{said}");
+    assert_eq!(a.upd.found.len(), 1, "the page lists the opened update");
+    assert!(a.upd.found[0].dir.starts_with(iyakki_agent::sysupdate::staged_root(&r.data)));
+    let pv = a.upd.preview.clone().unwrap().unwrap();
+    assert_eq!((pv.from.as_str(), pv.to.as_str()), ("0.1.0-alpha.1", "0.1.0-alpha.2"));
+    assert_eq!(boot_initrd(&r), before, "opening writes nothing to the boot partition");
+    assert!(cx.audit.recent(10).iter().any(|l| l.contains("system.update.bundle") && l.contains("0.1.0-alpha.2")));
+    // the usual install flow takes it from here: Install asks first
+    press(&mut a, &cx, 'i');
+    assert_eq!(a.upd.ask, crate::apps::settings::updates_page::UpdAsk::Install);
+    press(&mut a, &cx, 'n');
+    assert_eq!(boot_initrd(&r), before);
+    // the button is on the page at the five sizes
+    for (w, h) in [(360, 740), (800, 480), (1280, 720), (1920, 1080), (2560, 1600)] {
+        let g = draw(&mut a, &cx, w, h);
+        assert!(g.hits.iter().any(|x| x.ev == Event::Key(Key::Char('b'))), "{w}x{h}: no Open update file button");
+    }
+}
+
+#[test]
+fn an_update_file_with_a_wrong_signature_no_sig_file_the_wrong_edition_or_an_ordinary_user_is_refused_and_nothing_is_listed() {
+    let r = rig("bundle-no");
+    let cx = cx_with_admin_store("upd-bundle-no");
+    let mut a = app(&r, &cx);
+    let wrong_key = bundle_file(&r, "0.1.0-alpha.3", "pc", false);
+    assert!(open_file(&mut a, &cx, &wrong_key).unwrap_err().contains("Nothing was unpacked"));
+    let no_sig = bundle_file(&r, "0.1.0-alpha.4", "pc", true);
+    std::fs::remove_file(format!("{}.sig", no_sig.display())).unwrap();
+    assert!(open_file(&mut a, &cx, &no_sig).unwrap_err().contains(".sig"));
+    let other_edition = bundle_file(&r, "0.1.0-alpha.5", "mac", true);
+    assert!(open_file(&mut a, &cx, &other_edition).unwrap_err().contains("edition"));
+    assert!(open_file(&mut a, &cx, &r.stick.join("missing.tgz")).is_err());
+    assert!(a.upd.found.is_empty(), "nothing was listed: {:?}", a.upd.found.len());
+    // an ordinary user cannot open one
+    let mut ucx = cx_with_admin_store("upd-bundle-user");
+    ucx.session.user = "amy".into();
+    ucx.session.role = iyakki_sec::policy::Role::User;
+    ucx.session.policy = iyakki_sec::policy::Role::User.template();
+    let good = bundle_file(&r, "0.1.0-alpha.6", "pc", true);
+    let mut b = app(&r, &ucx);
+    assert!(open_file(&mut b, &ucx, &good).unwrap_err().contains("administrator"));
+    assert!(!iyakki_agent::sysupdate::staged_root(&r.data).join("x").exists());
+}
+
+// ---- F-CORE-24: the setup wizard of an app on a screen
+
+mod wizard_screen {
+    use super::*;
+    use iyakki_agent::wizardrun::{Env, Run};
+    use iyakki_agent::wizardtools::Backend;
+    use iyakki_core_api::wizard::WizardSpec;
+    use serde_json::{json, Value};
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
+    struct FakeEnv {
+        log: Mutex<Vec<String>>,
+        fail_check: bool,
+    }
+    impl Env for FakeEnv {
+        fn check(&self, check: &str, param: &str) -> Result<(), String> {
+            self.log.lock().unwrap().push(format!("check {check} {param}"));
+            if self.fail_check {
+                Err("cannot reach the server".into())
+            } else {
+                Ok(())
+            }
+        }
+        fn migrate(&self, r: &str, _: Option<&str>, _: Option<&str>, a: &BTreeMap<String, Value>) -> Result<String, String> {
+            self.log.lock().unwrap().push(format!("migrate {r} keys={}", a.keys().cloned().collect::<Vec<_>>().join(",")));
+            Ok("moved".into())
+        }
+    }
+
+    struct Fake {
+        spec: WizardSpec,
+        pending: Mutex<Vec<(String, String, String, String)>>,
+        run: Arc<Mutex<Option<(String, Run)>>>,
+        env: Arc<FakeEnv>,
+        audit: Mutex<Vec<String>>,
+    }
+    impl Backend for Fake {
+        fn installed(&self) -> Vec<(String, String, WizardSpec)> {
+            vec![("notes".into(), "1.0.0".into(), self.spec.clone())]
+        }
+        fn pending(&self) -> Vec<(String, String, String, String)> {
+            self.pending.lock().unwrap().clone()
+        }
+        fn clear_pending(&self, app: &str, wizard: &str) {
+            self.pending.lock().unwrap().retain(|p| !(p.0 == app && p.1 == wizard));
+        }
+        fn env(&self) -> Arc<dyn Env> {
+            self.env.clone()
+        }
+        fn run(&self) -> Arc<Mutex<Option<(String, Run)>>> {
+            self.run.clone()
+        }
+        fn audit(&self, what: &str, detail: &str) {
+            self.audit.lock().unwrap().push(format!("{what} {detail}"));
+        }
+    }
+
+    fn fake(fail_check: bool) -> Arc<Fake> {
+        let spec: WizardSpec = serde_json::from_value(json!({
+            "id": "setup", "title": "Setup", "trigger": {"on": "on_install"},
+            "steps": [
+                {"kind": "form", "id": "who", "title": "Who", "fields": [
+                    {"id": "name", "label": "Name", "kind": "text", "required": true, "rules": [{"rule": "min_len", "value": 3}]},
+                    {"id": "token", "label": "Token", "kind": "secret"},
+                    {"id": "mode", "label": "Mode", "kind": "choice", "required": true, "choices": [{"value": "fast", "label": "Fast"}, {"value": "safe", "label": "Safe"}], "default": "fast"},
+                    {"id": "sync", "label": "Sync", "kind": "toggle"}]},
+                {"kind": "check", "id": "net", "title": "Server reachable", "check": "net.reach", "param": "example.com:443"},
+                {"kind": "migration", "id": "mig", "title": "Move data", "migration": "m1"},
+                {"kind": "summary", "id": "done", "title": "Ready", "text": "All set."}]
+        }))
+        .unwrap();
+        Arc::new(Fake { spec, pending: Mutex::new(vec![("notes".into(), "setup".into(), "on_install".into(), "Set up Notes".into())]), run: Arc::new(Mutex::new(None)), env: Arc::new(FakeEnv { log: Mutex::new(vec![]), fail_check }), audit: Mutex::new(vec![]) })
+    }
+
+    fn with(tag: &str, be: &Arc<Fake>) -> (SettingsApp, AppCx) {
+        let r = rig(tag);
+        let cx = cx_with_admin_store(tag);
+        let mut a = app(&r, &cx);
+        a.go_to(Tab::Updates);
+        queue_wizard(&cx, &cx.session.user);
+        a.upd.wiz_be = Some(be.clone());
+        (a, cx)
+    }
+
+    fn form_title(a: &SettingsApp) -> Option<String> {
+        match &a.modal {
+            Some(Modal::Form(FormKind::BundleWizard, f)) => Some(f.title.clone()),
+            _ => None,
+        }
+    }
+
+    fn type_in(a: &mut SettingsApp, cx: &AppCx, s: &str) {
+        for c in s.chars() {
+            a.handle(&Event::Key(Key::Char(c)), cx);
+        }
+    }
+
+    #[test]
+    fn w_opens_the_first_question_as_a_form_a_refused_answer_stays_with_the_reason_and_the_secret_is_typed_here() {
+        let be = fake(false);
+        let (mut a, cx) = with("wiz-s1", &be);
+        press(&mut a, &cx, 'w');
+        assert_eq!(form_title(&a).as_deref(), Some("Setup of notes: Who"));
+        // too short a name: the form stays, with the field and the reason
+        type_in(&mut a, &cx, "ab");
+        a.handle(&Event::Key(Key::Ctrl('s')), &cx);
+        match &a.modal {
+            Some(Modal::Form(FormKind::BundleWizard, f)) => assert_eq!(f.error.as_deref(), Some("Name: at least 3 characters"), "{:?}", f.error),
+            other => panic!("the form should stay open: {}", other.is_some()),
+        }
+        assert!(be.env.log.lock().unwrap().is_empty(), "nothing ran");
+        // fix the name, type the secret, leave the choice and the toggle as they are
+        type_in(&mut a, &cx, "y");
+        a.handle(&Event::Key(Key::Enter), &cx);
+        type_in(&mut a, &cx, "s3cret-token");
+        a.handle(&Event::Key(Key::Ctrl('s')), &cx);
+        // the next step runs checks: the card lists them and nothing has run yet
+        match &a.modal {
+            Some(Modal::Confirm(ConfirmKind::WizardRun, t)) => assert!(t.contains("check net.reach example.com:443") && t.contains("migration m1") && t.contains("Press y"), "{t}"),
+            _ => panic!("the card of the steps that will run was expected"),
+        }
+        assert!(be.env.log.lock().unwrap().is_empty(), "nothing ran before y");
+        assert_eq!(be.pending.lock().unwrap().len(), 1, "it stays waiting until it is over");
+        // y runs them on the worker thread, then the summary asks for y
+        press(&mut a, &cx, 'y');
+        settle(&mut a, &cx);
+        assert_eq!(*be.env.log.lock().unwrap(), vec!["check net.reach example.com:443".to_string(), "migrate m1 keys=mode,name,sync".to_string()], "the secret never reached the migration");
+        match &a.modal {
+            Some(Modal::Confirm(ConfirmKind::WizardFinish, t)) => assert!(t.contains("All set.")),
+            _ => panic!("the summary was expected"),
+        }
+        press(&mut a, &cx, 'y');
+        assert!(a.modal.is_none());
+        assert!(status(&a).starts_with("The setup of notes is finished."), "{}", status(&a));
+        assert!(be.pending.lock().unwrap().is_empty(), "it is off the waiting list now");
+        let audit = be.audit.lock().unwrap().join("\n");
+        assert!(audit.contains("wizard.start notes/setup") && audit.contains("wizard.answer") && audit.contains("wizard.run") && audit.contains("wizard.finish"), "{audit}");
+        assert!(!audit.contains("s3cret-token") && !status(&a).contains("s3cret-token"), "the secret is in no line");
+    }
+
+    #[test]
+    fn esc_cancels_the_run_and_it_stays_waiting_and_a_failed_check_says_why_and_can_be_tried_again() {
+        let be = fake(false);
+        let (mut a, cx) = with("wiz-s2", &be);
+        press(&mut a, &cx, 'w');
+        a.handle(&Event::Key(Key::Esc), &cx);
+        assert!(a.modal.is_none() && status(&a).contains("cancelled") && status(&a).contains("stays waiting"), "{}", status(&a));
+        assert_eq!(be.pending.lock().unwrap().len(), 1);
+        // a check that fails
+        let bad = fake(true);
+        let (mut b, cx2) = with("wiz-s3", &bad);
+        press(&mut b, &cx2, 'w');
+        type_in(&mut b, &cx2, "amy");
+        b.handle(&Event::Key(Key::Ctrl('s')), &cx2);
+        press(&mut b, &cx2, 'y');
+        settle(&mut b, &cx2);
+        assert!(b.modal.is_none(), "no summary after a failure");
+        assert!(status(&b).contains("stopped") && status(&b).contains("cannot reach the server") && status(&b).contains("press w"), "{}", status(&b));
+        assert_eq!(bad.pending.lock().unwrap().len(), 1, "a failed setup stays waiting");
+        assert_eq!(*bad.env.log.lock().unwrap(), vec!["check net.reach example.com:443".to_string()], "the move did not run after the failed check");
+        // w tries again from the first question
+        press(&mut b, &cx2, 'w');
+        assert_eq!(form_title(&b).as_deref(), Some("Setup of notes: Who"));
+    }
+
+    #[test]
+    fn a_wizard_started_in_the_chat_is_picked_up_by_w_and_the_other_way_round_and_a_is_the_assistant() {
+        use iyakki_agent::wizardtools::screen;
+        let be = fake(false);
+        let (mut a, cx) = with("wiz-s4", &be);
+        // started by the assistant's tool (the same call it makes), the page's waiting list is not what `w` needs now
+        screen::open(&*be, "notes", "setup", None).unwrap();
+        press(&mut a, &cx, 'w');
+        assert_eq!(form_title(&a).as_deref(), Some("Setup of notes: Who"), "the open run is shown, not a second one started");
+        type_in(&mut a, &cx, "amy");
+        a.handle(&Event::Key(Key::Ctrl('s')), &cx);
+        // the assistant sees the same run at the same step
+        let seen = screen::shown(&*be).unwrap();
+        assert!(matches!(seen.view, iyakki_agent::wizardrun::View::Working { .. }), "{:?}", seen.view);
+        // `a` still goes to the assistant
+        a.handle(&Event::Key(Key::Esc), &cx);
+        press(&mut a, &cx, 'a');
+        assert_eq!(a.take_request(), Some(("chat".into(), String::new())));
+    }
+}

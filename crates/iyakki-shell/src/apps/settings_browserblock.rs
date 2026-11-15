@@ -6,7 +6,7 @@
 use super::*;
 use super::super::browser_block as bb;
 
-const KEYS_HINT: &str = "Ads and trackers: b switches blocking, l downloads EasyList and EasyPrivacy, u adds a list address, o a list file, n updates, r removes the lists.";
+const KEYS_HINT: &str = "Ads and trackers: b switches blocking, l downloads EasyList and EasyPrivacy, u adds a list address, o a list file, v adds uBlock filters, n updates, r removes the lists.";
 
 impl SettingsApp {
     /// The section; returns the height it used.
@@ -55,7 +55,7 @@ impl SettingsApp {
             y += 70.0 * s;
         }
         // buttons, wrapped to the width
-        let labels = [("Download lists (l)", 'l'), ("Update (n)", 'n'), ("Add address (u)", 'u'), ("Add file (o)", 'o'), ("Remove lists (r)", 'r')];
+        let labels = [("Download lists (l)", 'l'), ("uBlock filters (v)", 'v'), ("Update (n)", 'n'), ("Add address (u)", 'u'), ("Add file (o)", 'o'), ("Remove lists (r)", 'r')];
         let (mut x, size) = (a.x, 14.0 * s);
         let mut by = y;
         for (label, key) in labels {
@@ -92,6 +92,10 @@ impl SettingsApp {
             }
             Key::Char('l') => {
                 let _ = self.start_block_job(cx, bb::Job::DownloadStandard, "Downloading EasyList and EasyPrivacy from easylist.to…");
+                true
+            }
+            Key::Char('v') => {
+                let _ = self.start_block_job(cx, bb::Job::AddKnown("ublock-filters".into()), "Downloading uBlock filters from raw.githubusercontent.com…");
                 true
             }
             Key::Char('n') => {

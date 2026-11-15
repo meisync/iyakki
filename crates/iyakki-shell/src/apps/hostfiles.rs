@@ -746,7 +746,7 @@ pub fn drop_overlay(g: &mut Gfx, w: f32, h: f32, s: f32, destination: &str, acce
     g.rect(0.0, 0.0, w, h, [3, 5, 14, 170]);
     let (bw, bh) = ((w - 80.0 * s).min(760.0 * s), 150.0 * s);
     let (x, y) = ((w - bw) / 2.0, (h - bh) / 2.0);
-    g.rrect(x, y, bw, bh, 22.0 * s, [17, 22, 42, 235]);
+    g.rrect(x, y, bw, bh, 22.0 * s, crate::fx::panel_alpha(235));
     g.rrect_outline(x, y, bw, bh, 22.0 * s, 3.0 * s, accent);
     // a dashed look: short ticks along the border
     let mut dx = x + 24.0 * s;

@@ -2,6 +2,7 @@
 //! A pure state machine (events in, pixels out), so it is driven identically by the Linux
 //! framebuffer backend, by tests, and by the screenshot tool.
 
+use crate::stale_stats::mark_stale;
 use std::sync::{Arc, Mutex};
 
 use iyakki_agent::chat::ChatBackend;
@@ -53,11 +54,14 @@ pub struct ShellPaths {
     pub data: String,
     /// Start in the hardware check.
     pub hwcheck: bool,
+    /// This process is a headless web service (`iyakki serve --profile NAME`): no screen, no sound, no camera, so nothing here may set up
+    /// or probe sound hardware ([`sound_boot_plan`]).
+    pub headless: bool,
 }
 
 impl Default for ShellPaths {
     fn default() -> Self {
-        Self { users: "/var/lib/iyakki/users.json".into(), audit: "/var/lib/iyakki/audit.log".into(), ai_conf: "/etc/iyakki/ai.conf".into(), data: "/var/lib/iyakki".into(), hwcheck: false }
+        Self { users: "/var/lib/iyakki/users.json".into(), audit: "/var/lib/iyakki/audit.log".into(), ai_conf: "/etc/iyakki/ai.conf".into(), data: "/var/lib/iyakki".into(), hwcheck: false, headless: false }
     }
 }
 
@@ -105,7 +109,7 @@ impl ShellEnv {
         // cloud mode without sound hardware: no audio probes, no soft volume, no device watcher
         // (the sound card may appear after the shell started: the MacBookPro14,1's does, about 11 s after boot; then the
         // output is set up as soon as it is there, whoever is signed in)
-        match sound_boot_plan(services.cloud_setting(), &iyakki_agent::cloudmode::detect(services.cloud_setting())) {
+        match sound_boot_plan(p.headless, services.cloud_setting(), &iyakki_agent::cloudmode::detect(services.cloud_setting())) {
             SoundBoot::Now => services.start_sound_output(),
             SoundBoot::WhenReady => services.start_sound_output_when_ready(),
             SoundBoot::Never => {}
@@ -160,9 +164,12 @@ pub(crate) enum SoundBoot {
 }
 
 /// Cloud mode without sound hardware skips the sound-output probe and the soft-volume setup at boot; a forced setting never
-/// starts the watcher either.
-pub(crate) fn sound_boot_plan(setting: iyakki_agent::cloudmode::Setting, mode: &iyakki_agent::cloudmode::CloudMode) -> SoundBoot {
-    if mode.audio_services {
+/// starts the watcher either. A headless web service (`--profile`) never touches sound whatever the machine has: the first run of
+/// the cloud profile on a PC set a real card's volume and asked its devices for their formats.
+pub(crate) fn sound_boot_plan(headless: bool, setting: iyakki_agent::cloudmode::Setting, mode: &iyakki_agent::cloudmode::CloudMode) -> SoundBoot {
+    if headless {
+        SoundBoot::Never
+    } else if mode.audio_services {
         SoundBoot::Now
     } else if setting == iyakki_agent::cloudmode::Setting::On {
         SoundBoot::Never
@@ -192,7 +199,8 @@ fn browser_web(data: &std::path::Path) -> Arc<dyn iyakki_web::Fetch> {
     let old = caches.clone();
     let _ = std::thread::Builder::new().name("iyakki-cache-tidy".into()).spawn(move || old.remove_legacy_files());
     // the person's ad and tracker filter sits outside the cache: a blocked request is never sent and never cached
-    Arc::new(iyakki_web::blocker_state::FilteredFetch::new(caches, iyakki_web::blocker_state::Filter::global()))
+    // the known-bad site list sits outside everything: a listed site is never asked, never cached
+    Arc::new(iyakki_web::badsites::BadSiteFetch::new(Arc::new(iyakki_web::blocker_state::FilteredFetch::new(caches, iyakki_web::blocker_state::Filter::global())), iyakki_web::badsites::Guard::global()))
 }
 
 /// Older installs configured chat in ai.conf (`chat.url`, `chat.model`, `chat.key_*`). Carry that over
@@ -343,6 +351,8 @@ fn remember_user(env: &ShellEnv, name: &str) {
 
 pub struct Shell {
     env: ShellEnv,
+    /// The one raw machine handle and the broker: apps get a `GuardedOs` made from it, never the raw one (`shell_osguard.rs`).
+    osguard: osguard_impl::OsGuard,
     /// Accessibility: the screen reader, the keyboard walk and the saved options (`shell_access.rs`).
     acc: access_impl::AccessUi,
     /// Hit regions from the last rendered frame (clicks are resolved against these).
@@ -445,6 +455,8 @@ pub struct Shell {
     battery: crate::batterybar::BatteryBar,
     /// The banner shown while the drive the data lives on is lost or failing (`lossbar.rs`, `shell_loss.rs`).
     loss: crate::lossbar::LossBar,
+    /// "<app> stopped because of an internal error" with a button that opens it again (`crashcard.rs`, `shell_crashcard.rs`).
+    crash: Option<crate::crashcard::CrashCard>,
     /// Replaces the program Quick install runs as its jobs (tests).
     quick_launch: Option<iyakki_agent::quickinstall::Launch>,
     /// "DEV" (or "DEV · pairing") while Developer mode is on, read every second.
@@ -475,10 +487,16 @@ pub struct Shell {
     cloud: iyakki_agent::cloudmode::CloudMode,
     /// Panes: several apps side by side on one display (`shell_panes.rs`).
     panes: panes_impl::PanesUi,
+    /// Desktop views: the person's named views and the live apps of each (`shell_views.rs`).
+    views: views_impl::ViewsUi,
+    /// The scheduled backup (`shell_backup_sched.rs`).
+    bksched: bksched_impl::BackupSched,
     /// The screen saver and screen off (`shell_saver.rs`, `saver.rs`).
     saver: saver_impl::SaverUi,
     /// The lock screen (`shell_lock.rs`).
     lockui: lock_impl::LockUi,
+    /// The sign-out confirm card and the "You signed out" line (`shell_signout.rs`).
+    signout: signout_impl::SignoutUi,
     /// The part of a wheel notch left over when pixel scrolling is turned into whole notches (`shell_scroll.rs`), and when.
     scroll_rem: f32,
     scroll_rem_at: u64,
@@ -579,7 +597,8 @@ impl Shell {
         };
         // tests run as a desktop unless one asks for cloud mode (`set_cloud_for_test`)
         let cloud = if cfg!(test) { iyakki_agent::cloudmode::CloudMode::desktop() } else { iyakki_agent::cloudmode::detect(env.services.cloud_setting()) };
-        let mut sh = Shell { env, acc: Default::default(), hits: Vec::new(), clip: None, hostdlg: None, permpop: None, login: None, clipscan: None, scan_src: None, drag_over: false, ctx: None, fields: Vec::new(), last_click: None, press: None, click_run: (0, 0, 0, 0), screen, custom: Vec::new(), custom_at: 0, custom_open: None, session: None, sel: 0, group: Group::Home, cgroup: None, layout: Default::default(), lay: Default::default(), mouse: (0, 0), tick: 0, toast: None, size: (1280, 720), probes: Vec::new(), stale: true, live: false, live_paint: false, live_rects: Vec::new(), live_every_ms: 100, live_until: 0, want_host_paste: false, host_sync_until: 0, clip_note: ClipNote::None, help: false, shot: Shot::Off, ring: None, last_alarm_check: 0, snoozed: Vec::new(), stash: None, badge: Badge::default(), update_count: 0, cues: Default::default(), clock: Default::default(), clock_tip: None, clock_text: String::new(), clock_ready: false, devpop: Default::default(), devprobe: None, brand: Default::default(), installs: Default::default(), battery: Default::default(), loss: Default::default(), quick_launch: None, dev_sign: None, devask: Default::default(), tzask: Default::default(), camera: if wants_system_camera(cfg!(test), &cloud) { crate::camera::Presence::system() } else { crate::camera::Presence::none() }, cam_sign: false, fnk: Default::default(), vol: Default::default(), startup: startup_impl::StartupUi::new(), tbar: Default::default(), osk: Default::default(), tenants: Default::default(), lbar: Default::default(), cloud: cloud.clone(), panes: Default::default(), saver: Default::default(), lockui: Default::default(), wake: Default::default(), scroll_rem: 0.0, scroll_rem_at: 0 };
+        let osguard = osguard_impl::OsGuard::new(env.services.dir());
+        let mut sh = Shell { env, osguard, acc: Default::default(), hits: Vec::new(), clip: None, hostdlg: None, permpop: None, login: None, clipscan: None, scan_src: None, drag_over: false, ctx: None, fields: Vec::new(), last_click: None, press: None, click_run: (0, 0, 0, 0), screen, custom: Vec::new(), custom_at: 0, custom_open: None, session: None, sel: 0, group: Group::Home, cgroup: None, layout: Default::default(), lay: Default::default(), mouse: (0, 0), tick: 0, toast: None, size: (1280, 720), probes: Vec::new(), stale: true, live: false, live_paint: false, live_rects: Vec::new(), live_every_ms: 100, live_until: 0, want_host_paste: false, host_sync_until: 0, clip_note: ClipNote::None, help: false, shot: Shot::Off, ring: None, last_alarm_check: 0, snoozed: Vec::new(), stash: None, badge: Badge::default(), update_count: 0, cues: Default::default(), clock: Default::default(), clock_tip: None, clock_text: String::new(), clock_ready: false, devpop: Default::default(), devprobe: None, brand: Default::default(), installs: Default::default(), battery: Default::default(), loss: Default::default(), crash: None, quick_launch: None, dev_sign: None, devask: Default::default(), tzask: Default::default(), camera: if wants_system_camera(cfg!(test), &cloud) { crate::camera::Presence::system() } else { crate::camera::Presence::none() }, cam_sign: false, fnk: Default::default(), vol: Default::default(), startup: startup_impl::StartupUi::new(), tbar: Default::default(), osk: Default::default(), tenants: Default::default(), lbar: Default::default(), cloud: cloud.clone(), panes: Default::default(), views: Default::default(), bksched: Default::default(), saver: Default::default(), lockui: Default::default(), signout: Default::default(), wake: Default::default(), scroll_rem: 0.0, scroll_rem_at: 0 };
         if cloud.on {
             sh.apply_cloud(cloud);
         }
@@ -656,6 +675,15 @@ impl Shell {
         }
     }
 
+    /// The words a `wasm` tile drew, or why it does not run (tests).
+    #[cfg(test)]
+    pub(crate) fn wasm_tile_text_for_test(&mut self) -> String {
+        match &mut self.screen {
+            Screen::App(app, _) => app.wasm_tile_text(),
+            _ => String::new(),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn tile_card_text_for_test(&mut self) -> String {
         match &mut self.screen {
@@ -683,7 +711,7 @@ impl Shell {
     #[cfg(test)]
     pub(crate) fn resize_for_test(&mut self, w: u32, h: u32) {
         self.size = (w, h);
-        self.stale = true;
+        mark_stale!(self);
     }
 
     /// Open an app the way a tile does (tests and the monkey test).
@@ -776,7 +804,7 @@ impl Shell {
             self.camera = crate::camera::Presence::system();
         }
         self.cloud = c;
-        self.stale = true;
+        mark_stale!(self);
     }
 
     /// Cloud mode as decided for this machine.
@@ -917,16 +945,19 @@ impl Shell {
             mcp_servers,
             services: self.env.services.clone(),
             web: self.env.web.clone(),
+            // the app gets the machine through the broker, for its own identity; the raw handle stays in `osguard`
+            os: self.osguard.os_for(match &self.screen { Screen::App(_, a) => a.id(), _ => "shell" }, &session.user),
         })
     }
 
     /// An app panicked (the panic was caught): tell the person, keep the note of where in the audit log, and leave everything
     /// else running. Opening the app again starts it afresh.
-    pub(crate) fn app_crashed(&mut self, name: &str) {
+    /// `app` is the tile the app was opened from, so the card can open it again with one press.
+    pub(crate) fn app_crashed_with(&mut self, name: &str, app: Option<PApp>) {
         let note = crate::crashlog::take_last();
         let user = self.session.as_ref().map(|s| s.user.clone()).unwrap_or_default();
         self.env.audit.record(&user, "app.crash", &format!("{name}: {note}"));
-        self.say(format!("{name} stopped because of an internal error. Details are in the system log. Open it again to restart it."));
+        self.raise_crash_card(name, app);
     }
 
     fn say(&mut self, s: impl Into<String>) {
@@ -945,6 +976,8 @@ impl Shell {
             self.refresh_cloud(c);
         }
         self.env.audit.record(&s.user, "login", s.role.name());
+        // the machine's sound belongs to the person signed in last (it may go to their client device, EXPERIMENTAL)
+        crate::soundowner::signed_in(&s.user);
         // a local model is loaded in the background now, so the first question is not the slow one
         if s.policy.agent {
             self.env.services.warm_up_chat();
@@ -966,6 +999,9 @@ impl Shell {
         // kubeconfigs held in this person's vaults can be used by cluster commands while they are signed in; the dev cluster's
         // background events (restarts, exits) are audited
         iyakki_agent::kubeprofiles::set_resolver(Some(iyakki_agent::kubeprofiles::resolver_for(&self.env.services, &s.user)));
+        // the volume and play keys of a connected phone or headset act on IYAKKI's player while somebody is signed in (F-NET-27)
+        let audit = self.env.audit.clone();
+        iyakki_agent::btaudiotools::install_remote(&self.env.services, &s.user, move |who, what| audit.record(who, "bluetooth.remote", what));
         {
             let audit = self.env.audit.clone();
             self.env.services.k3sdev.set_audit(Arc::new(move |u, a, d| audit.record(u, a, d)));
@@ -1026,7 +1062,7 @@ impl Shell {
         // examples to try (once, for administrators): an MCP server, documents and skills
         crate::samples::seed(&self.env, &s.user, &s.policy);
         crate::uisize::apply(Some(crate::uisize::load(self.env.services.dir(), &s.user)));
-        crate::theme::apply(Some(crate::theme::load(self.env.services.dir(), &s.user)));
+        crate::theme::apply_for(self.env.services.dir(), &s.user);
         crate::filepicker::set_session(Some((&s.user, &s.policy, self.env.services.dir())));
         self.session = Some(s);
         self.load_clipboard_limit();
@@ -1037,6 +1073,7 @@ impl Shell {
         self.screen = Screen::Launcher;
         self.panes_reset();
         self.refresh_gate();
+        self.views_sign_in();
         self.cues.badge_seen = false;
         self.refresh_badge();
         // the sign-in sound plays by itself while the home screen appears
@@ -1049,6 +1086,8 @@ impl Shell {
     }
 
     fn sign_out(&mut self) {
+        let had_session = self.session.is_some();
+        self.crash = None;
         // a lock does not outlive the session it protects (a sign-out from elsewhere, a browser session ending)
         self.lock_clear();
         // the sign-out sound starts first and plays while the rest is done; the screen changes when it is over, or after
@@ -1057,9 +1096,11 @@ impl Shell {
         crate::uisize::apply(None);
         crate::theme::apply(None);
         crate::filepicker::set_session(None);
+        self.views_remember_live();
         self.lay_sign_out();
         self.tenants_sign_out();
         self.panes_reset();
+        self.views_sign_out();
         self.stash = None;
         self.badge = Badge::default();
         self.brand = Default::default();
@@ -1074,6 +1115,7 @@ impl Shell {
         }
         if let Some(s) = self.session.take() {
             self.env.audit.record(&s.user, "logout", "");
+            crate::soundowner::signed_out(&s.user);
             iyakki_agent::flows::FlowEnv::stop_for_logout(&self.env.services, &s.user);
             iyakki_agent::sharedfolder::on_logout(&s.user);
             iyakki_agent::sshtunnel_mgr::on_logout(&self.env.services, &s.user);
@@ -1081,9 +1123,11 @@ impl Shell {
             iyakki_agent::domains::on_logout(&self.env.services, &s.user);
             self.env.services.on_logout(&s.user, s.policy.manage_settings);
             iyakki_agent::kubeprofiles::set_resolver(None);
+            iyakki_agent::btaudiotools::clear_remote();
             // the assistant's browser tab goes with the session (jobs still running are answered)
             crate::apps::web_agent::close(&self.env.services, &s.user);
             // protected browser data is written back and the decrypted copy wiped (a failure keeps it and is audited)
+            iyakki_agent::profilepolicy::timer_reset(self.env.services.dir(), &s.user);
             match iyakki_agent::profilestore::on_sign_out(self.env.services.dir(), &s.user) {
                 Ok(true) => self.env.audit.record(&s.user, "browser.data.sealed", ""),
                 Ok(false) => {}
@@ -1095,6 +1139,7 @@ impl Shell {
             let _ = c.wait(iyakki_agent::syssounds::LOGOUT_WAIT);
         }
         self.screen = Screen::Login(Form::login_for(last_user(&self.env).as_deref()));
+        self.signout_started(had_session);
         if let Some(m) = drives_note {
             self.say(m);
         }
@@ -1134,6 +1179,9 @@ impl Shell {
             self.say(format!("Your role ({}) can't open {}", cx.session.role.name(), app.id().to_uppercase()));
             return;
         }
+        if self.views_single_hit(app) {
+            return;
+        }
         if self.ws_active() && !self.panes_room_for(app) {
             self.say("Low memory: close an app or use a smaller layout");
             return;
@@ -1141,7 +1189,7 @@ impl Shell {
         let boxed: Box<dyn App> = match app {
             PApp::Chat => Box::new(ChatApp::new().with_agent(cx.session.policy.agent).resumed(&cx)),
             PApp::Rag => Box::new(RagApp::new(&cx)),
-            PApp::Mcp => Box::new(McpApp::new(&cx)),
+            PApp::Mcp => Box::new(McpApp::new(&crate::apps::mcp_port::CxPort(&cx))),
             PApp::Cli => Box::new(CliApp::new(&cx)),
             PApp::Users => Box::new(UsersApp::new()),
             PApp::Settings => Box::new(SettingsApp::new(&cx).with_cloud(self.cloud.clone())),
@@ -1149,19 +1197,19 @@ impl Shell {
             PApp::Edit => Box::new(EditApp::new(&cx)),
             PApp::Browser => Box::new(crate::apps::browser::BrowserApp::new(&cx)),
             PApp::Mesh => Box::new(crate::apps::mesh::MeshApp::new(&cx)),
-            PApp::Radio => Box::new(crate::apps::radio::RadioApp::new(&cx)),
+            PApp::Radio => Box::new(crate::apps::radio::RadioApp::new(&crate::apps::radio_port::CxPort(&cx))),
             PApp::Scan => Box::new(crate::apps::scan::ScanApp::new(&cx)),
-            PApp::Skills => Box::new(crate::apps::skills::SkillsApp::new(&cx)),
+            PApp::Skills => Box::new(crate::apps::skills::SkillsApp::new(&crate::apps::skills_port::CxPort(&cx))),
             PApp::Usage => Box::new(crate::apps::usage::UsageApp::new(&cx)),
             PApp::System => Box::new(crate::apps::system::SystemApp::new(&cx)),
             PApp::Calendar => Box::new(crate::apps::calendar::CalendarApp::new(&cx)),
-            PApp::Media => Box::new(crate::apps::media::MediaApp::new(&cx)),
+            PApp::Media => Box::new(crate::apps::media::MediaApp::new(&crate::apps::media_port::CxPort(&cx))),
             PApp::Ide => Box::new(crate::apps::ide::IdeApp::new(&cx)),
-            PApp::Data => Box::new(crate::apps::data::DataApp::new(&cx)),
+            PApp::Data => Box::new(crate::apps::data::DataApp::new(&crate::apps::data_port::CxPort(&cx))),
             PApp::Store => Box::new(crate::apps::store::StoreApp::new(&cx)),
             PApp::Dash => Box::new(crate::apps::dash::DashApp::new(&cx)),
             PApp::Flows => Box::new(crate::apps::flows::FlowsApp::new(&cx)),
-            PApp::Camera => Box::new(crate::apps::camera::CameraApp::new(&cx)),
+            PApp::Camera => Box::new(crate::apps::camera::CameraApp::new(&crate::apps::camera_port::CxPort(&cx))),
             PApp::Voice => Box::new(crate::apps::voice::VoiceApp::new(&cx)),
             PApp::K8s => Box::new(crate::apps::k8s_tile::K8sApp::new(&cx)),
             PApp::Disks => Box::new(crate::apps::disks_tile::DisksApp::new(&cx)),
@@ -1173,7 +1221,7 @@ impl Shell {
             PApp::Checkup => Box::new(crate::apps::checkup::CheckupApp::new(&cx)),
             PApp::Learn => Box::new(crate::apps::learn::LearnApp::new(&cx)),
             PApp::DevTools => Box::new(crate::apps::devtools::DevToolsApp::new(&cx)),
-            PApp::Auth => Box::new(crate::apps::auth::AuthApp::new(&cx)),
+            PApp::Auth => Box::new(crate::apps::auth::AuthApp::new(&crate::apps::auth::CxPort(&cx))),
             PApp::Remote => Box::new(crate::apps::remotefiles::RemoteFilesApp::new(&cx)),
             PApp::Cameras => Box::new(crate::apps::cameras::CamerasApp::new(&cx)),
             PApp::Pdf => Box::new(crate::apps::pdfview::PdfApp::new(&cx)),
@@ -1193,7 +1241,7 @@ impl Shell {
         self.brand.close();
         self.installs.close();
         self.devpop.toggle();
-        self.stale = true;
+        mark_stale!(self);
     }
 
     /// What the popover looks at: this machine (a made-up one in tests).
@@ -1275,7 +1323,7 @@ impl Shell {
                 self.devpop.invalidate();
             }
         }
-        self.stale = true;
+        mark_stale!(self);
     }
 
     /// Open or close the IYAKKI menu (F10, a click on the name in the launcher's top bar).
@@ -1295,7 +1343,7 @@ impl Shell {
         };
         self.brand.admin = self.session.as_ref().is_some_and(|x| x.policy.manage_settings);
         self.brand.toggle();
-        self.stale = true;
+        mark_stale!(self);
     }
 
     /// Open or close the list of installs (the indicator beside the clock).
@@ -1310,7 +1358,7 @@ impl Shell {
         if let Some(cx) = self.cx() {
             self.installs.poll(&cx, true);
         }
-        self.stale = true;
+        mark_stale!(self);
     }
 
     /// The facts a page of the IYAKKI menu needs, read when it opens.
@@ -1384,7 +1432,7 @@ impl Shell {
                 }
             }
         }
-        self.stale = true;
+        mark_stale!(self);
     }
 
     /// What the Mac drivers page shows about the firmware job: the last result and whether one is running.
@@ -1565,7 +1613,7 @@ impl Shell {
                 self.jump_to("runs", "jobs");
             }
         }
-        self.stale = true;
+        mark_stale!(self);
     }
 
     /// Open an app and ask it to show one thing (`tab:network` in Settings, `drivers` in the Store).
@@ -1614,6 +1662,8 @@ impl Shell {
         self.ctx = None;
         // Settings → Home layout may have changed the layout
         self.lay_reload();
+        // Settings → Desktop views may have changed the views
+        self.views_reload();
         self.custom_open = None;
         self.custom_at = 0;
         self.screen = match self.stash.take() {
@@ -1695,10 +1745,12 @@ impl Shell {
             }
             return;
         }
-        if (app == "data" || app == "browser" || app == "runs") && self.stash.is_none() {
+        if (app == "data" || app == "browser" || app == "runs" || app == "edit" || app == "media") && self.stash.is_none() {
             let target = match app {
                 "data" => PApp::Data,
                 "runs" => PApp::Runs,
+                "edit" => PApp::Edit,
+                "media" => PApp::Media,
                 _ => PApp::Browser,
             };
             let prev = std::mem::replace(&mut self.screen, Screen::Launcher);
@@ -1736,9 +1788,17 @@ impl Shell {
     /// Open an app by its id and say whether it is the screen now (the screens tool and the render smoke tests).
     /// Put a ready-made app on screen (tests that drive an app through the shell's real mouse handling).
     #[cfg(test)]
+    pub(crate) fn probe_for_test(&self) -> String {
+        match &self.screen {
+            Screen::App(a, _) => a.probe(),
+            _ => String::new(),
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn show_app_for_test(&mut self, app: Box<dyn crate::apps::App>, id: PApp) {
         self.screen = Screen::App(app, id);
-        self.stale = true;
+        mark_stale!(self);
     }
 
     /// Run Quick install's jobs with another program (the screenshot tool uses a stand-in script).
@@ -1785,12 +1845,12 @@ impl Shell {
         }
         if b != self.badge {
             self.badge = b;
-            self.stale = true;
+            mark_stale!(self);
         }
         let updates = if self.session.is_some() { iyakki_agent::store::updatecheck::Report::load(self.env.services.dir()).map_or(0, |r| r.count()) } else { 0 };
         if updates != self.update_count {
             self.update_count = updates;
-            self.stale = true;
+            mark_stale!(self);
         }
     }
 
@@ -1818,7 +1878,7 @@ impl Shell {
             };
             let _ = self.env.services.notify(&user, kind, &format!("Job “{}” {word}", j.label), &iyakki_agent::jobs::Jobs::finish_line(&j), Some(iyakki_agent::inbox::Link::new("runs", "jobs")));
             self.refresh_badge();
-            self.stale = true;
+            mark_stale!(self);
         }
         self.cues.quiet = false;
         if any {
@@ -1847,7 +1907,7 @@ impl Shell {
     fn submit_login(&mut self) {
         let Screen::Login(f) = &mut self.screen else { return };
         let (name, pw) = (f.fields[0].value.trim().to_string(), f.fields[1].value.clone());
-        let r = self.env.store.lock().map_err(|_| AccountError::Storage("lock".into())).and_then(|mut s| s.authenticate(&name, &pw));
+        let r = Ok::<_, AccountError>(self.env.store.lock().unwrap_or_else(std::sync::PoisonError::into_inner)).and_then(|mut s| s.authenticate(&name, &pw));
         match r {
             Ok(sess) => self.sign_in(sess, &pw),
             Err(e) => {
@@ -1869,7 +1929,7 @@ impl Shell {
             f.fields[2].clear();
             return;
         }
-        let r = self.env.store.lock().map_err(|_| AccountError::Storage("lock".into())).and_then(|mut s| {
+        let r = Ok::<_, AccountError>(self.env.store.lock().unwrap_or_else(std::sync::PoisonError::into_inner)).and_then(|mut s| {
             s.create_first_admin(&name, &pw)?;
             s.authenticate(&name, &pw)
         });
@@ -1888,6 +1948,21 @@ impl Shell {
 
     /// Entry point for every input event.
     pub fn handle(&mut self, ev: &Event) {
+        if matches!(ev, Event::Key(_) | Event::MouseDown(..) | Event::MouseUp(..)) {
+            // the person's own press answers a hard-ask card (swap, compressed memory) for the work this event starts, and only for that
+            let card = self.osguard.card();
+            return card.dispatch(|| self.handle_event(ev));
+        }
+        self.handle_event(ev)
+    }
+
+    /// An approval, permission or power card is up: the shell/reboot/update ask of developer mode, the power cards (signed in and the
+    /// sign-in screen) or a flow's permission ask. Nothing a paired computer sends (`dev input`) may reach one of these.
+    pub(crate) fn approval_card_open(&self) -> bool {
+        self.devask.pending.is_some() || self.devask.open || self.fnk.power_card || matches!(self.screen, Screen::PowerMenu) || self.lbar.card.is_some() || self.permpop.is_some()
+    }
+
+    fn handle_event(&mut self, ev: &Event) {
         if let Event::ScrollPx(px) = ev {
             return self.scroll_px(*px); // the scroll engine's pixel steps (`shell_scroll.rs`)
         }
@@ -1895,6 +1970,29 @@ impl Shell {
             self.handle_awake(ev);
         }
         self.saver_after();
+        self.cameras_sync();
+    }
+
+    /// Whether the CAMERAS tile is drawn on the screen now: signed in, not locked, no saver, and the tile is the shown app or in a pane.
+    /// An app kept aside (`stash`) or in another desktop view is not on the screen.
+    pub(crate) fn cameras_on_screen(&self) -> bool {
+        if self.session.is_none() || self.lockui.active || self.saver_covers_desktop() {
+            return false;
+        }
+        match &self.screen {
+            Screen::App(_, PApp::Cameras) => true,
+            Screen::Launcher | Screen::App(..) => self.panes_hold(PApp::Cameras),
+            _ => false,
+        }
+    }
+
+    /// Every way off the CAMERAS tile ends here (Esc or q, Back, Home, F11, a view switch, a pane or layout change, the lock, the sign-out,
+    /// another tile, the saver, a quit from elsewhere): when the tile is not on the screen, this computer's own cameras close within
+    /// the heartbeat that follows (KI-093). The tile itself lets go of the cameras it does not draw while it is shown.
+    fn cameras_sync(&mut self) {
+        if !self.cameras_on_screen() {
+            iyakki_agent::cameras::release_screen_at(self.env.services.dir(), &[]);
+        }
     }
 
     /// The event for a screen that is on (the saver has already seen it).
@@ -1911,6 +2009,10 @@ impl Shell {
         if self.lock_intercept(ev) {
             return;
         }
+        // the sign-out confirm card takes every key and click while it is up
+        if self.signout_intercept(ev) {
+            return;
+        }
         let (prev_mouse, prev_sel) = (self.mouse, self.sel);
         if !matches!(ev, Event::Tick | Event::MouseMove(..)) {
             crate::filepicker::clear_path_field_note(); // drawn again with the next frame if a path field is still there
@@ -1918,10 +2020,22 @@ impl Shell {
         if let Some((agent, logout)) = crate::agent_login::take_request() {
             self.login_request(agent, logout);
         }
+        // the assistant asked (and the person approved) to open a saved download in the tile that suits it: the same hand-over as a
+        // click in the browser's Downloads list, the screen the person is on is kept aside
+        if let Some(user) = self.session.as_ref().map(|s| s.user.clone()) {
+            if let Some((tile, path)) = crate::apps::download_open::take_chat(&user) {
+                let item = crate::apps::download_open::item_for(&tile, &path);
+                self.open_linked_from_app(&tile);
+                if let (Some(cx), Screen::App(a, _)) = (self.cx(), &mut self.screen) {
+                    a.open_item(&item, &cx);
+                }
+                mark_stale!(self);
+            }
+        }
         // the click on the red sign "a page is using your camera / microphone / screen" stops it (the browser obeys at its next beat)
         if matches!(ev, Event::Tab(913)) {
             crate::apps::browser_media::ask_stop();
-            self.stale = true;
+            mark_stale!(self);
             return;
         }
         // the click on the red sign "listening for My IYAKKI" switches the wake phrase off (and audits it)
@@ -1934,7 +2048,7 @@ impl Shell {
             if let Some(s) = &self.session {
                 crate::apps::cameras::stop_all_signs(self.env.services.dir(), &s.user);
             }
-            self.stale = true;
+            mark_stale!(self);
             return;
         }
         // the click on the sign "your browser's microphone / camera is on" switches both off (and audits it)
@@ -1942,7 +2056,7 @@ impl Shell {
             if let Some(m) = self.browser_media() {
                 m.stop_capture();
             }
-            self.stale = true;
+            mark_stale!(self);
             return;
         }
         if let Event::MouseMove(x, y) = ev {
@@ -1953,7 +2067,7 @@ impl Shell {
         if self.devpop.open {
             self.devpop.tip_event(ev);
             if self.devpop.tip_changed() {
-                self.stale = true;
+                mark_stale!(self);
             }
         }
         if let Screen::HwCheck(h) = &mut self.screen {
@@ -1968,16 +2082,17 @@ impl Shell {
         }
         // the tenant dialogs, the strip and the shown tenant's window (`shell_tenant.rs`)
         if self.tenant_intercept(ev) {
-            self.stale = true;
+            mark_stale!(self);
             return;
         }
         if matches!(ev, Event::Tick) {
             self.tick += 1;
             // the galaxy behind the sign-in form turns: a frame about 15 times a second (the heartbeat is every 33 ms)
             if self.tick % 2 == 0 && matches!(self.screen, Screen::Login(_) | Screen::Setup(_)) && self.session.is_none() && !crate::fx::reduced_motion() {
-                self.stale = true;
+                mark_stale!(self);
             }
             self.access_tick();
+            self.crash_card_tick();
             self.fn_tick();
             self.tbar_tick();
             self.check_alarms(iyakki_agent::clock::now_unix());
@@ -1987,7 +2102,16 @@ impl Shell {
             if self.tick % 10 == 3 && self.session.is_some() {
                 for name in iyakki_agent::devmode::take_open(self.env.services.dir()) {
                     if self.open_custom_by_name(&name) {
-                        self.stale = true;
+                        mark_stale!(self);
+                    }
+                }
+            }
+            // the assistant asked for an SSH login (the person approved the card): the CLI tile comes up and opens it
+            if self.tick % 5 == 2 {
+                if let Some(sess) = &self.session {
+                    if iyakki_agent::sshsessiontools::pending(self.env.services.dir(), &sess.user) && !matches!(self.screen, Screen::App(_, PApp::Cli)) {
+                        self.open(PApp::Cli);
+                        mark_stale!(self);
                     }
                 }
             }
@@ -1997,16 +2121,25 @@ impl Shell {
                 let dd = self.env.services.dir().to_path_buf();
                 iyakki_agent::devmode::input::set_secret_focus(&dd, self.fields.iter().any(|f| f.focused && f.secret));
                 self.dev_state_tick();
+                iyakki_agent::devmode::input::set_approval_card(&dd, self.approval_card_open());
                 for e in iyakki_agent::devmode::input::take(&dd) {
                     self.saver.injecting = true; // it wakes the screen and still reaches the app
                     // a permission is the person's own: developer-mode input cannot answer a flow's permission request
                     self.env.services.browser.consent.set_synthetic(true);
                     for ev in crate::devinput::events(&e) {
-                        self.handle(&ev);
+                        // an approval or power card is answered by a person at the screen: a paired computer's key or tap never
+                        // reaches it (checked per event: an earlier key of the same batch may have opened one)
+                        if self.approval_card_open() {
+                            self.env.audit.record(self.session.as_ref().map_or("", |s| s.user.as_str()), "devmode.input", "dropped: an approval or power card is open");
+                            self.say(iyakki_agent::devmode::input::APPROVAL_SENTENCE.to_string());
+                            continue;
+                        }
+                        // not `handle`: that would let this press answer a hard-ask card (the Auto-mode ticket is for a person's own press)
+                        self.handle_event(&ev);
                     }
                     self.env.services.browser.consent.set_synthetic(false);
                     self.saver.injecting = false;
-                    self.stale = true;
+                    mark_stale!(self);
                 }
             }
             // the assistant's browser tab (the engine behind the browser_* tools) is serviced whichever app is open
@@ -2027,6 +2160,9 @@ impl Shell {
             if self.tick % 15 == 11 {
                 self.sharing_notice_tick();
             }
+            if self.tick % 15 == 13 {
+                self.mirror_tick();
+            }
             if self.tick % 15 == 3 {
                 self.loss_tick();
             }
@@ -2039,7 +2175,7 @@ impl Shell {
                     let t = clock_time_text(&self.clock);
                     if t != self.clock_text {
                         self.clock_text = t;
-                        self.stale = true;
+                        mark_stale!(self);
                     }
                 }
             }
@@ -2049,7 +2185,7 @@ impl Shell {
                     self.devpop.refresh_in_background(&p);
                 }
                 if self.devpop.take_fresh() {
-                    self.stale = true;
+                    mark_stale!(self);
                     if self.brand.open && self.brand.page == crate::brandmenu::Page::Mac {
                         self.refresh_mac_firmware();
                         self.brand.mac = self.devpop.snapshot();
@@ -2061,7 +2197,7 @@ impl Shell {
                     if let Some(cx) = self.cx() {
                         let before = self.installs.badge();
                         if self.installs.poll(&cx, false) {
-                            self.stale = true;
+                            mark_stale!(self);
                         }
                         // an install that was running has ended: the "done" sound
                         let ended = match (before, self.installs.badge()) {
@@ -2075,7 +2211,7 @@ impl Shell {
                     }
                 }
                 if self.installs.frame_due() {
-                    self.stale = true;
+                    mark_stale!(self);
                 }
                 // Linux apps: answers of the cluster actions and the jobs' count while the page is open
                 if self.brand.open && self.brand.page == crate::brandmenu::Page::Linux && self.tick % 15 == 5 {
@@ -2093,7 +2229,7 @@ impl Shell {
                     let sign = if iyakki_agent::devmode::update::interrupted(self.env.services.dir()).is_some() { Some("UPDATE INTERRUPTED \u{00b7} choose \"previous version\" at boot".to_string()) } else { sign };
                     if sign != self.dev_sign {
                         self.dev_sign = sign;
-                        self.stale = true;
+                        mark_stale!(self);
                     }
                 }
                 // Settings → Time "Detect automatically": looked up again when due (only while it is switched on)
@@ -2102,6 +2238,12 @@ impl Shell {
                 }
             }
             // a Quick install job installed k3s, Ollama or Lemonade: start (and connect) it here, where the supervisors live
+            // the start-up page shows what Quick install is doing
+            if self.tick % 30 == 5 {
+                if let Some(u) = self.session.as_ref().map(|s| s.user.clone()) {
+                    iyakki_agent::installstartup::report(iyakki_agent::startup::global(), &iyakki_agent::quickinstall::install_jobs(&self.env.services.jobs, &u));
+                }
+            }
             if self.tick % 90 == 45 {
                 for r in iyakki_agent::quickinstall::service_requests(&self.env.services) {
                     match r {
@@ -2142,7 +2284,7 @@ impl Shell {
                     if let Some(m) = self.login.as_mut() {
                         m.show_again(&cx);
                     }
-                    self.stale = true;
+                    mark_stale!(self);
                 }
             }
             if self.login.as_ref().is_some_and(|m| !m.hidden()) && self.tick % 15 == 7 {
@@ -2152,12 +2294,12 @@ impl Shell {
             }
             crate::ui::clipboard::tick();
             if self.clipscan.as_mut().is_some_and(|c| self.tick % 3 == 0 && c.tick()) {
-                self.stale = true;
+                mark_stale!(self);
             }
             if self.login.is_some() && self.tick % 3 == 0 {
                 if let Some(cx) = self.cx() {
                     if self.login.as_mut().is_some_and(|m| m.tick(&cx)) {
-                        self.stale = true;
+                        mark_stale!(self);
                     }
                 }
             }
@@ -2172,7 +2314,7 @@ impl Shell {
             }
         }
         if self.panes_intercept(ev) {
-            self.stale = true;
+            mark_stale!(self);
             return;
         }
         match ev {
@@ -2194,7 +2336,7 @@ impl Shell {
                 crate::ui::set_dragging(true);
                 self.dispatch(&e);
                 crate::ui::set_dragging(false);
-                self.stale = true;
+                mark_stale!(self);
             }
         }
         if matches!(ev, Event::Key(_)) {
@@ -2223,40 +2365,40 @@ impl Shell {
                 }
                 // a camera plugged in or pulled out changes the CAMERA tile within two seconds
                 if matches!(self.screen, Screen::Launcher) && self.cloud.camera_watch && (self.tick % 60 == 0 || !self.camera.scanned()) && self.camera.scan() {
-                    self.stale = true;
+                    mark_stale!(self);
                 }
                 // the "camera in use by the assistant" sign comes and goes (and its time moves) on every screen
                 if self.tick % 15 == 0 {
                     let on = self.env.services.camera.in_use().is_some();
                     if on || on != self.cam_sign {
                         self.cam_sign = on;
-                        self.stale = true;
+                        mark_stale!(self);
                     }
                 }
                 // the wake phrase listener follows the settings; its red sign comes and goes on every screen
                 self.wake_tick();
                 // the red REC sign of a camera that records comes and goes on every screen
                 if self.tick % 15 == 0 && crate::apps::cameras::rec_sign_changed(self.env.services.dir()) {
-                    self.stale = true;
+                    mark_stale!(self);
                 }
                 if matches!(self.screen, Screen::App(_, PApp::Radio)) && self.env.services.radio.is_active() {
-                    self.stale = true;
+                    mark_stale!(self);
                 }
                 // a tool being downloaded shows its progress
                 if matches!(self.screen, Screen::App(_, PApp::Cli)) && self.tick % 6 == 0 && (self.env.services.clis.running() || self.env.services.cluster.state() == iyakki_agent::cluster::ClusterState::Starting) {
-                    self.stale = true;
+                    mark_stale!(self);
                 }
                 // live camera pictures arrive about ten times a second
                 if matches!(self.screen, Screen::App(_, PApp::Cameras)) && self.tick % 3 == 0 {
-                    self.stale = true;
+                    mark_stale!(self);
                 }
                 // the clock moves every second
                 if matches!(self.screen, Screen::App(_, PApp::Calendar | PApp::Media | PApp::Remote)) && self.tick % 10 == 0 {
-                    self.stale = true;
+                    mark_stale!(self);
                 }
                 // the level display and the pulse of the MEDIA player move ten times a second, only while something plays
                 if matches!(self.screen, Screen::App(_, PApp::Media)) && self.tick % 3 == 0 && iyakki_agent::media::shared().now_playing().is_some() {
-                    self.stale = true;
+                    mark_stale!(self);
                 }
                 // an app that shows live pictures (the browser's full engine) says when a new one has arrived
                 self.app_redraw();
@@ -2265,10 +2407,10 @@ impl Shell {
             Event::MouseMove(..) => {
                 let (a, b) = (prev_mouse, self.mouse);
                 if matches!(self.screen, Screen::HwCheck(_)) || self.sel != prev_sel || self.probes.iter().any(|r| r.contains(a.0, a.1) != r.contains(b.0, b.1)) {
-                    self.stale = true;
+                    mark_stale!(self);
                 }
             }
-            _ => self.stale = true,
+            _ => mark_stale!(self),
         }
         self.panes_after(ev, prev_mouse);
     }
@@ -2282,14 +2424,14 @@ impl Shell {
         }
         if let Screen::App(app, _) = &mut self.screen {
             match app.redraw_kind() {
-                crate::apps::browser_full::Redraw::Full => self.stale = true,
+                crate::apps::browser_full::Redraw::Full => mark_stale!(self),
                 crate::apps::browser_full::Redraw::Live if self.live_paint => {
                     self.live = true;
                     // an app that repaints small rectangles may ask for the whole scene less often (see `redraw_interval_ms`)
                     self.live_every_ms = app.live_full_every_ms().max(100);
                     self.live_until = self.tick + 15;
                 }
-                crate::apps::browser_full::Redraw::Live => self.stale = true,
+                crate::apps::browser_full::Redraw::Live => mark_stale!(self),
                 crate::apps::browser_full::Redraw::None => {}
             }
         }
@@ -2320,6 +2462,12 @@ impl Shell {
 
     /// Clipboard shortcuts first, then the overlay, then the current screen.
     fn dispatch(&mut self, ev: &Event) {
+        self.dispatch_event(ev);
+        // the next key is read with what the open tile wants: Alt+key as its own key only for a tile that shows another computer's program
+        crate::input::set_alt_passthrough(self.app_wants_alt());
+    }
+
+    fn dispatch_event(&mut self, ev: &Event) {
         use crate::ui::clipboard;
         match ev {
             // a ringing alarm takes every key and click until it is dismissed or snoozed
@@ -2362,6 +2510,8 @@ impl Shell {
                 self.help = false;
                 self.jump_to("settings", "tab:time");
             }
+            // the crash card's buttons (Open <app> again, Dismiss)
+            Event::Tab(n @ (crate::crashcard::OPEN | crate::crashcard::DISMISS)) if self.crash.is_some() => self.crash_card_event(*n),
             // F10 (or a click on the name in the launcher's top bar) opens the IYAKKI menu; the indicator beside the clock the installs
             Event::Key(Key::F(10)) if self.session.is_some() && self.clip.is_none() => self.toggle_brand(),
             Event::Tab(crate::installpop::INDICATOR) if self.session.is_some() && self.clip.is_none() => self.toggle_installs(),
@@ -2372,8 +2522,11 @@ impl Shell {
             // the Home icon and F11: back to the tiles from any app; the gear: Settings (the app you were in is kept aside)
             Event::Tab(volbar_impl::HOME_TAB) | Event::Key(Key::F(11)) if self.session.is_some() && self.clip.is_none() => self.go_home(),
             Event::Tab(volbar_impl::GEAR_TAB) if self.session.is_some() && self.clip.is_none() => self.open_settings_from_bar(),
+            Event::Tab(volbar_impl::MIC_TAB) if self.session.is_some() && self.clip.is_none() => self.open(PApp::Voice),
             // the startup strip and its list
             Event::Tab(n) if startup_impl::is_tab(*n) && self.session.is_some() && self.clip.is_none() => self.startup_tab(*n),
+            // the menu's lists (About, Linux apps): the pointer (so the wheel knows where it is), the scroll bar and a drag on the body
+            Event::MouseMove(..) | Event::MouseUp(..) | Event::AreaAt(..) if self.brand.open && self.session.is_some() && self.clip.is_none() && !self.help && self.brand.pointer_event(ev) => {}
             // the menu takes its keys, clicks, pasted text and the wheel while it is open
             Event::Key(_) | Event::Tab(_) | Event::Scroll(_) | Event::Paste(_) | Event::FocusAt(..) if self.brand.open && self.session.is_some() && self.clip.is_none() && !self.help => self.handle_brand(ev),
             Event::Key(_) | Event::Tab(_) | Event::Scroll(_) | Event::AreaAt(..) | Event::MouseUp(..) if self.installs.open && self.session.is_some() && self.clip.is_none() && !self.help => self.handle_installs(ev),
@@ -2394,6 +2547,7 @@ impl Shell {
             // panes: the Ctrl+Alt chords, the buttons of the pane strips and the bar, the memory card and the layout picker
             Event::Layout(k) if self.session.is_some() && self.clip.is_none() => self.panes_key(*k),
             Event::Tab(n) if self.panes.card.is_none() && self.panes_owns_tab(*n) => self.panes_tab(*n),
+            Event::Tab(n) if self.views_owns_tab(*n) && self.clip.is_none() => self.views_tab(*n),
             Event::Key(_) | Event::Tab(_) | Event::Scroll(_) if self.panes.card.is_some() && self.session.is_some() => self.panes_card_event(ev),
             Event::Key(_) | Event::Tab(_) | Event::Scroll(_) if self.panes.picker.is_some() && self.session.is_some() && self.clip.is_none() => self.panes_picker_key(ev),
             // the speaker icon of an app's header: click, wheel, drag and its slider (the home screen handles these itself)
@@ -2503,7 +2657,7 @@ impl Shell {
                     Some(r) => r.items.extend(items),
                     None => self.ring = Some(Ring { items, since: now, player: None, next_sound: 0 }),
                 }
-                self.stale = true;
+                mark_stale!(self);
             }
         }
         // the sound repeats until the alarm is dismissed (and gives up after five minutes)
@@ -2519,7 +2673,7 @@ impl Shell {
                 r.player = iyakki_agent::calendar::ring(&cmd).ok();
                 r.next_sound = self.tick + 60;
             }
-            self.stale = true;
+            mark_stale!(self);
         }
     }
 
@@ -2528,23 +2682,23 @@ impl Shell {
     fn permpop_tick(&mut self) {
         let Some(user) = self.session.as_ref().map(|s| s.user.clone()) else {
             if self.permpop.take().is_some() {
-                self.stale = true;
+                mark_stale!(self);
             }
             return;
         };
         let now = iyakki_agent::clock::now_unix();
         let consent = &self.env.services.browser.consent;
-        let fresh = |r: &iyakki_agent::browserconsent::ConsentRequest| r.kind == iyakki_agent::browserconsent::ConsentKind::Permission && !r.quiet && now - r.since < iyakki_agent::flows::permission::POPUP_SECS;
+        let fresh = |r: &iyakki_agent::browserconsent::ConsentRequest| permpop_fresh(r, now);
         if let Some(d) = &self.permpop {
             if !consent.get(&user, &d.req.id).is_some_and(|r| fresh(&r)) {
                 self.permpop = None;
-                self.stale = true;
+                mark_stale!(self);
             }
             return;
         }
         if let Some(r) = consent.pending(&user).into_iter().find(|r| fresh(r)) {
             self.permpop = Some(crate::apps::browser_consent::ConsentDialog::new(r));
-            self.stale = true;
+            mark_stale!(self);
         }
     }
 
@@ -2560,12 +2714,14 @@ impl Shell {
                     iyakki_agent::browserconsent::Answer::AllowOnce => "Allowed for this run",
                     iyakki_agent::browserconsent::Answer::AlwaysAllow => "Allowed for this flow",
                     iyakki_agent::browserconsent::Answer::Block => "Blocked: the flow will not ask again",
+                    iyakki_agent::browserconsent::Answer::Allow => "Allowed this time",
+                    iyakki_agent::browserconsent::Answer::Deny => "Denied",
                     _ => "Not now. The request stays in the INBOX.",
                 });
             }
             Err(e) => self.say(e),
         }
-        self.stale = true;
+        mark_stale!(self);
     }
 
     fn handle_ring(&mut self, ev: &Event) {
@@ -2652,7 +2808,7 @@ impl Shell {
         self.clip = None;
         let src = self.scan_src.clone().unwrap_or_else(crate::scan_core::CamSource::desktop);
         self.clipscan = Some(Box::new(crate::clip_scan::ClipScan::open(src)));
-        self.stale = true;
+        mark_stale!(self);
     }
 
     /// Use made-up cameras for the clipboard scan (tests).
@@ -2682,7 +2838,7 @@ impl Shell {
                 }
             }
         }
-        self.stale = true;
+        mark_stale!(self);
     }
 
     fn handle_clip_overlay(&mut self, ev: &Event) {
@@ -2741,7 +2897,7 @@ impl Shell {
         }
         let Some(cx) = self.cx() else { return };
         self.hostdlg = Some(Box::new(crate::apps::hostfiles::HostDialog::mount_menu(crate::apps::hostfiles::HostEnv::for_cx(&cx), rgb(238, 226, 112), name)));
-        self.stale = true;
+        mark_stale!(self);
     }
 
     /// An app asked to save a file on the host computer: the save dialog (window mode only).
@@ -2752,7 +2908,7 @@ impl Shell {
         }
         let Some(cx) = self.cx() else { return };
         self.hostdlg = Some(Box::new(crate::apps::hostfiles::HostDialog::save_bytes(crate::apps::hostfiles::HostEnv::for_cx(&cx), rgb(238, 226, 112), name, bytes)));
-        self.stale = true;
+        mark_stale!(self);
     }
 
     /// Tell the app on screen what a drop brought in (the IDE opens it, the media library looks again).
@@ -2779,7 +2935,7 @@ impl Shell {
             }
             self.login = Some(m);
         }
-        self.stale = true;
+        mark_stale!(self);
     }
 
     fn handle_login(&mut self, ev: &Event) {
@@ -2797,7 +2953,7 @@ impl Shell {
                 crate::agent_login::Out::Stay => {}
             }
         }
-        self.stale = true;
+        mark_stale!(self);
     }
 
     /// Show an address in the browser tile, in a new tab, keeping the screen it was opened from aside (Back returns to it). The sign-in
@@ -2845,14 +3001,14 @@ impl Shell {
             Out::Unlinked(n) => self.say_info(format!("host:{n} is no longer shared")),
             Out::Stay => {}
         }
-        self.stale = true;
+        mark_stale!(self);
     }
 
     /// Files are being dragged over the window (window mode): show where a drop would go.
     pub fn set_drag_hover(&mut self, on: bool) {
         if self.drag_over != on {
             self.drag_over = on;
-            self.stale = true;
+            mark_stale!(self);
         }
     }
 
@@ -2860,7 +3016,7 @@ impl Shell {
     /// offers to import them into the Uploads folder. Only in window mode, after sign-in.
     pub fn drop_files(&mut self, paths: Vec<std::path::PathBuf>) {
         self.drag_over = false;
-        self.stale = true;
+        mark_stale!(self);
         if self.session.is_none() || paths.is_empty() {
             return;
         }
@@ -2872,7 +3028,7 @@ impl Shell {
         if crate::filepicker::path_field_on_screen() {
             if let Some(ev) = crate::filepicker::drop_event(&paths) {
                 self.dispatch(&ev);
-                self.stale = true;
+                mark_stale!(self);
                 return;
             }
         }
@@ -2974,7 +3130,7 @@ impl Shell {
                 Some(h) => self.dispatch(&h.ev),
                 None => self.battery.close(),
             }
-            self.stale = true;
+            mark_stale!(self);
             return;
         }
         // the IYAKKI menu and the installs list: their own regions answer, a click outside closes them
@@ -2993,7 +3149,7 @@ impl Shell {
                     self.installs.close();
                 }
             }
-            self.stale = true;
+            mark_stale!(self);
             return;
         }
         if self.clip.is_some() {
@@ -3016,9 +3172,11 @@ impl Shell {
                     }
                 }
             }
-            self.stale = true;
+            mark_stale!(self);
             return;
         }
+        // the speaker's dropdown: a press anywhere outside it closes it, then goes on to the region it hit
+        self.vol_press_outside(x, y);
         // the header's Back button always leaves the app, even with a dialog open
         if matches!(self.screen, Screen::App(..)) && self.panes.ws.is_none() && back_rect(w, s).contains(x, y) {
             self.leave_app();
@@ -3149,7 +3307,7 @@ impl Shell {
                 let mut host_save = None;
                 let mut mount_menu = None;
                 let flow = match (&mut self.screen, cx) {
-                    (Screen::App(app, _), Some(cx)) => match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (app.handle(ev, &cx), app.take_request(), app.take_host_save(), app.take_host_mount_menu()))) {
+                    (Screen::App(app, pa), Some(cx)) => match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (app.handle(ev, &cx), app.take_request(), app.take_host_save(), app.take_host_mount_menu()))) {
                         Ok((f, r, save, menu)) => {
                             request = r;
                             host_save = save;
@@ -3157,20 +3315,28 @@ impl Shell {
                             f
                         }
                         Err(_) => {
-                            crashed = Some(app.title());
+                            crashed = Some((app.title(), *pa));
                             Flow::Back
                         }
                     },
                     _ => Flow::Back,
                 };
-                if let Some(name) = crashed {
-                    self.app_crashed(name);
+                if let Some((name, pa)) = crashed {
+                    self.app_crashed_with(name, Some(pa));
                 }
                 if let Some((name, bytes)) = host_save {
                     self.host_save(&name, &bytes);
                 }
                 if let Some(name) = mount_menu {
                     self.host_mount_menu(&name);
+                }
+                // an app that has a question before it closes (the IDE with tasks still working) keeps the click
+                let mut back_click = back_click;
+                if back_click && !matches!(flow, Flow::Back) {
+                    let cx2 = self.cx();
+                    if let (Screen::App(app, _), Some(cx2)) = (&mut self.screen, cx2) {
+                        back_click = app.leave_guard(&cx2);
+                    }
                 }
                 if back_click || matches!(flow, Flow::Back) {
                     self.leave_app();
@@ -3282,12 +3448,12 @@ impl Shell {
                     }
                 }
                 's' => self.open_settings_from_bar(),
-                'o' | 'q' => self.sign_out(),
+                'o' | 'q' => self.signout_ask(),
                 'p' if power => self.screen = Screen::PowerMenu,
                 // m, g, u, [ and ]: move the tile, the group's menu, undo, reorder (`shell_layout.rs`; handled before this point)
                 _ => {}
             },
-            Event::Key(Key::Esc) => self.sign_out(),
+            Event::Key(Key::Esc) => self.signout_ask(),
             Event::MouseMove(x, y) => {
                 if let Some(i) = rects.iter().position(|r| r.contains(*x, *y)) {
                     self.sel = first + i;
@@ -3372,7 +3538,7 @@ impl Shell {
         }
         let tick = self.tick;
         let auth_lift = self.osk_auth_lift(w, h, s);
-        let mut crashed_title: Option<&'static str> = None;
+        let mut crashed_title: Option<(&'static str, PApp)> = None;
         // several panes: the bar, the panes and the dividers take the place of the one screen
         let panes_drawn = self.ws_active() && {
             self.draw_panes(g, w, h, s);
@@ -3400,7 +3566,7 @@ impl Shell {
                     let hh = HEADER_H * s;
                     let area = R::new(0.0, hh, w as f32, h as f32 - hh);
                     if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.render(g, area, s, &cx, tick))).is_err() {
-                        crashed_title = Some(app.title());
+                        crashed_title = Some((app.title(), *pa));
                     }
                     // header drawn last so content scrolled above the area never shows through
                     let sub = if self.custom_open.is_some() { "Custom app" } else { TILES.iter().find(|t| t.app == *pa).map_or("", |t| t.sub) };
@@ -3417,7 +3583,9 @@ impl Shell {
                     let bar_left = bat_plan.as_ref().map_or(clock_left, |p| p.rect.x);
                     let ind_w = self.installs.indicator_width(g, s);
                     let title_limit = if ind_w > 0.0 && bar_left - ind_w - 6.0 * s > 300.0 * s { bar_left - ind_w - 6.0 * s } else { bar_left };
-                    crate::fx::app_header(g, w as f32, hh, s, app.title(), sub, app.icon(), app.accent(), tick, title_limit - 12.0 * s);
+                    // the title and its subtitle stop before the icons that stand left of the clock (Home, the speaker, Settings)
+                    let extras_left = extras.iter().map(|e| e.1).fold(f32::MAX, f32::min);
+                    crate::fx::app_header(g, w as f32, hh, s, app.title(), sub, app.icon(), app.accent(), tick, (title_limit - 12.0 * s).min(extras_left - 8.0 * s));
                     if clock_box.is_some() {
                         app_clock(g, w, s, &self.clock, bar_edge);
                     }
@@ -3448,36 +3616,46 @@ impl Shell {
                         draw_dev_sign(g, dev_right, 8.0 * s + 15.0 * s, s, sign, 300.0 * s, self.devask.pulse(self.tick));
                     }
                     let acc = app.accent();
-                    let cr = clip_rect(w, s);
-                    let hot = g.hovered(cr);
-                    crate::fx::chrome_button(g, cr, s, hot, acc);
-                    g.icon(Icon::Clipboard, cr.x + cr.w / 2.0, cr.y + cr.h / 2.0, 20.0 * s, MUTED);
-                    g.hit(cr, Event::Key(Key::Ctrl('V')), "clipboard history");
+                    // the icons that do not fit beside the title in a narrow window are not drawn (they keep their keys)
+                    let shown = bar_shown(w, s);
+                    if shown.clip {
+                        let cr = clip_rect(w, s);
+                        let hot = g.hovered(cr);
+                        crate::fx::chrome_button(g, cr, s, hot, acc);
+                        g.icon(Icon::Clipboard, cr.x + cr.w / 2.0, cr.y + cr.h / 2.0, 20.0 * s, MUTED);
+                        g.hit(cr, Event::Key(Key::Ctrl('V')), "clipboard history");
+                    }
                     if self.session.as_ref().is_some_and(|x| x.policy.allows_app(PApp::Inbox)) {
                         draw_bell(g, bell_rect(w, s), 8.0 * s, s, self.badge, matches!(self.screen, Screen::App(_, PApp::Inbox)));
                     }
                     if self.panes_button() {
                         panes_impl::draw_layout_button(g, panes_impl::layout_btn_rect(w, s), s, acc);
                     }
-                    let sr = shot_rect(w, s);
-                    let hot = g.hovered(sr);
-                    crate::fx::chrome_button(g, sr, s, hot, acc);
-                    g.icon(Icon::Camera, sr.x + sr.w / 2.0, sr.y + sr.h / 2.0, 20.0 * s, MUTED);
-                    g.hit(sr, Event::Key(Key::F(12)), "screenshot");
-                    let dr = dev_rect(w, s);
-                    let hot = g.hovered(dr) || self.devpop.open;
-                    crate::fx::chrome_button(g, dr, s, hot, acc);
-                    g.icon(Icon::Devices, dr.x + dr.w / 2.0, dr.y + dr.h / 2.0, 20.0 * s, MUTED);
-                    // the firewall is wanted but not in force: a red dot on the Devices button (its popover says why)
-                    if iyakki_fw::service::alert() {
-                        g.rrect(dr.x + dr.w - 11.0 * s, dr.y - 2.0 * s, 12.0 * s, 12.0 * s, 6.0 * s, rgb(214, 48, 64));
+                    if shown.shot {
+                        let sr = shot_rect(w, s);
+                        let hot = g.hovered(sr);
+                        crate::fx::chrome_button(g, sr, s, hot, acc);
+                        g.icon(Icon::Camera, sr.x + sr.w / 2.0, sr.y + sr.h / 2.0, 20.0 * s, MUTED);
+                        g.hit(sr, Event::Key(Key::F(12)), "screenshot");
                     }
-                    g.hit(dr, Event::Key(Key::F(8)), "devices");
-                    let hr = help_rect(w, s);
-                    let hot = g.hovered(hr);
-                    crate::fx::chrome_button(g, hr, s, hot, acc);
-                    g.text(hr.x + 12.0 * s, hr.y + 6.0 * s, 14.0 * s, MUTED, "F1  Help", Face::Sans);
-                    g.hit(hr, Event::Key(Key::F(1)), "help");
+                    if shown.dev {
+                        let dr = dev_rect(w, s);
+                        let hot = g.hovered(dr) || self.devpop.open;
+                        crate::fx::chrome_button(g, dr, s, hot, acc);
+                        g.icon(Icon::Devices, dr.x + dr.w / 2.0, dr.y + dr.h / 2.0, 20.0 * s, MUTED);
+                        // the firewall is wanted but not in force: a red dot on the Devices button (its popover says why)
+                        if iyakki_fw::service::alert() {
+                            g.rrect(dr.x + dr.w - 11.0 * s, dr.y - 2.0 * s, 12.0 * s, 12.0 * s, 6.0 * s, rgb(214, 48, 64));
+                        }
+                        g.hit(dr, Event::Key(Key::F(8)), "devices");
+                    }
+                    if shown.help {
+                        let hr = help_rect(w, s);
+                        let hot = g.hovered(hr);
+                        crate::fx::chrome_button(g, hr, s, hot, acc);
+                        g.text(hr.x + 12.0 * s, hr.y + 6.0 * s, 14.0 * s, MUTED, "F1  Help", Face::Sans);
+                        g.hit(hr, Event::Key(Key::F(1)), "help");
+                    }
                     let br = back_rect(w, s);
                     let hot = g.hovered(br);
                     crate::fx::chrome_button(g, br, s, hot, acc);
@@ -3508,32 +3686,11 @@ impl Shell {
         if !matches!(self.screen, Screen::Login(_) | Screen::Setup(_)) {
             self.startup.login_line = None;
         }
-        if let Some(name) = crashed_title {
+        if let Some((name, pa)) = crashed_title {
             self.screen = Screen::Launcher;
-            self.app_crashed(name);
+            self.app_crashed_with(name, Some(pa));
         }
         self.draw_tenants(g, w, h, s);
-        if matches!(self.shot, Shot::Snap) {
-            self.shot = Shot::Select { snap: g.pm.clone(), first: None };
-        }
-        // the assistant's `screen_capture`: this frame is "the person's screen" (answered here because only the shell can see it)
-        {
-            let svc = &self.env.services;
-            svc.screen.set_present(true);
-            // the assistant's camera tools use the CAMERA app's code through this one backend
-            if !cfg!(test) && !svc.camera.present() {
-                svc.camera.set_backend(Some(Arc::new(crate::camera::agentcam::AgentCamera::system())));
-            }
-            if let Some(sess) = &self.session {
-                if svc.screen.wanted(&sess.user) {
-                    svc.screen.serve(&sess.user, || Some(iyakki_agent::screencap::Frame { w: g.pm.width(), h: g.pm.height(), rgba: g.pm.data().to_vec() }));
-                }
-            }
-            // developer mode's `iyakki dev screenshot` (only reachable from a paired computer while developer mode is on): whatever is drawn
-            if svc.screen.wanted(iyakki_agent::devmode::SCREEN_ANY) {
-                svc.screen.serve(iyakki_agent::devmode::SCREEN_ANY, || Some(iyakki_agent::screencap::Frame { w: g.pm.width(), h: g.pm.height(), rgba: g.pm.data().to_vec() }));
-            }
-        }
         if let Some(d) = self.hostdlg.as_mut() {
             d.render(g, R::new(0.0, 0.0, w as f32, h as f32), s, tick);
         }
@@ -3571,6 +3728,9 @@ impl Shell {
         if let Some((t, _, info)) = &self.toast {
             crate::fx::toast(g, w as f32, h as f32, s, t, *info);
         }
+        if let Some(c) = &self.crash {
+            c.render(g, w as f32, h as f32, s);
+        }
         if let Some(o) = &self.fnk.osd {
             crate::fnkeys::draw_osd(g, w as f32, h as f32, s, o);
         }
@@ -3592,10 +3752,13 @@ impl Shell {
         }
         // a camera records (F-CAM-03): a red REC sign on every screen while the signed-in person's recording runs, a click stops it
         let mut stacked = usize::from(self.cam_sign) + usize::from(cap != 0 && !in_browser);
-        if self.session.is_some() {
-            let names = crate::apps::cameras::sign_names(self.env.services.dir());
-            if !names.is_empty() {
-                let r = draw_rec_sign(g, h, s, &names, stacked);
+        {
+            // the same sign also says when a client's camera or microphone streams to this machine (EXPERIMENTAL, clientmedia)
+            let names = if self.session.is_some() { crate::apps::cameras::sign_names(self.env.services.dir()) } else { Vec::new() };
+            let client = iyakki_agent::clientmedia::indicator().text();
+            if !names.is_empty() || client.is_some() {
+                let text = crate::apps::cameras::sign_text(&names, client.as_deref());
+                let r = draw_rec_sign(g, h, s, &text, stacked);
                 g.hit(r, Event::Tab(915), "Stop recording");
                 stacked += 1;
             }
@@ -3633,7 +3796,7 @@ impl Shell {
             let bx = px + pw - 26.0 * s - 100.0 * s - 28.0 * s - lw - 2.0 * 40.0 * s;
             g.button(px + 26.0 * s, by, 14.0 * s, "Scan QR  (Ctrl+K)", ACCENT_QR, Event::Tab(912));
             if let Some((n, secs)) = crate::ui::clipboard::secret_waiting() {
-                let t = format!("a secret is waiting ({n} characters): Ctrl+V pastes it once, gone in {secs} s");
+                let t = format!("a secret is waiting ({n} characters): {} pastes it once, gone in {secs} s", iyakki_uikit::platform::paste_key());
                 let t = g.fit(12.0 * s, &t, Face::Sans, pw - 52.0 * s);
                 g.text(px + 26.0 * s, by - 20.0 * s, 12.0 * s, OK, &t, Face::Sans);
             }
@@ -3655,7 +3818,9 @@ impl Shell {
             c.render(g, R::new(0.0, 0.0, w as f32, h as f32), s, self.tick);
         }
         self.draw_layout_ui(g, w, h, s);
+        self.draw_signout(g, w, h, s);
         self.draw_panes_overlays(g, w, h, s);
+        self.draw_views_strip(g, w, h, s);
         if let Some(m) = &self.ctx {
             let accent = match &self.screen {
                 Screen::App(app, _) => app.accent(),
@@ -3669,8 +3834,39 @@ impl Shell {
         self.probes = g.probes();
         self.access_observe(true);
         self.access_draw(g);
+        self.capture_final_frame(g);
         if dev_state {
             self.dev_state_end(g);
+        }
+    }
+
+    /// The picture of the screen, taken from the FINISHED frame (every overlay is in it: views strip, sign-out card, toasts, ...): the
+    /// user's screenshot, the assistant's `screen_capture` and developer mode's `iyakki dev screenshot` all read it here, never mid-render.
+    pub(super) fn capture_final_frame(&mut self, g: &mut Gfx) {
+        if matches!(self.shot, Shot::Snap) {
+            self.shot = Shot::Select { snap: g.pm.clone(), first: None };
+        }
+        // the assistant's `screen_capture`: this frame is "the person's screen" (answered here because only the shell can see it)
+        {
+            let svc = &self.env.services;
+            svc.screen.set_present(true);
+            // the assistant's camera tools use the CAMERA app's code through this one backend
+            if !cfg!(test) && !svc.camera.present() {
+                svc.camera.set_backend(Some(Arc::new(crate::camera::agentcam::AgentCamera::system())));
+            }
+            // model-judged checks of waiting work (`wait_for` with `judge:`) ask the person's chat model (F-AI-16)
+            if !cfg!(test) && !iyakki_agent::pendingplus::has_judge() {
+                iyakki_agent::pendingplus::set_judge(Some(Arc::new(iyakki_agent::pendingplus::ChatJudge::new(svc.chat_backend()))));
+            }
+            if let Some(sess) = &self.session {
+                if svc.screen.wanted(&sess.user) {
+                    svc.screen.serve(&sess.user, || Some(iyakki_agent::screencap::Frame { w: g.pm.width(), h: g.pm.height(), rgba: g.pm.data().to_vec() }));
+                }
+            }
+            // developer mode's `iyakki dev screenshot` (only reachable from a paired computer while developer mode is on): whatever is drawn
+            if svc.screen.wanted(iyakki_agent::devmode::SCREEN_ANY) {
+                svc.screen.serve(iyakki_agent::devmode::SCREEN_ANY, || Some(iyakki_agent::screencap::Frame { w: g.pm.width(), h: g.pm.height(), rgba: g.pm.data().to_vec() }));
+            }
         }
     }
 
@@ -3692,7 +3888,7 @@ impl Shell {
             let sel = f.has_selection && !f.secret;
             items.push(Item::new(CUT, "Cut", "Ctrl+X").enabled(sel));
             items.push(Item::new(COPY, "Copy", "Ctrl+C").enabled(sel));
-            items.push(Item::new(PASTE, "Paste", "Ctrl+V").needs_clip());
+            items.push(Item::new(PASTE, "Paste", iyakki_uikit::platform::paste_key()).needs_clip());
             items.push(Item::new(SELECT_ALL, "Select all", "Ctrl+A").enabled(!f.empty));
         }
         crate::ctxmenu::set_under(self.hits.iter().rev().filter(|h| h.rect.contains(x, y)).cloned().collect());
@@ -3739,13 +3935,13 @@ impl Shell {
             _ => Outcome::Stay,
         };
         if m.sel != before {
-            self.stale = true;
+            mark_stale!(self);
         }
         match out {
             Outcome::Stay => {}
             Outcome::Close => {
                 self.ctx = None;
-                self.stale = true;
+                mark_stale!(self);
                 // a key that is not the menu's own (Ctrl+C, a letter…) still does what it would have done
                 if matches!(ev, Event::Key(k) if *k != Key::Esc) {
                     self.dispatch(ev);
@@ -3753,7 +3949,7 @@ impl Shell {
             }
             Outcome::Pick(id) => {
                 self.ctx = None;
-                self.stale = true;
+                mark_stale!(self);
                 self.run_context_entry(&id);
             }
         }
@@ -3871,7 +4067,7 @@ impl Shell {
             Screen::App(app, _) => (app.title().to_string(), app.help()),
             _ => (
                 "Home".to_string(),
-                vec!["← → ↑ ↓ · choose an app (moving past the last one on a page turns it)".to_string(), "Tab / Shift+Tab or click a chip · switch group (Ask & Create, Build, Media, Data, Devices & System, Apps, and any group you made)".to_string(), "m · move the selected tile to another group (or right-click it); g · this group's menu (new, rename, delete); + chip · new group; u · undo the last move; [ and ] · move the tile earlier or later in its group".to_string(), "PageUp / PageDown, mouse wheel or the dots · turn the page".to_string(), "1-9 · open the Nth app of the All list (the order of the tile table, whichever group you moved it to)".to_string(), "Enter or click · open it".to_string(), "o · sign out".to_string(), "p · power menu (if your role allows it)".to_string()],
+                vec!["← → ↑ ↓ · choose an app (moving past the last one on a page turns it)".to_string(), "Tab / Shift+Tab or click a chip · switch group (Ask & Create, Build, Media, Data, Devices & System, Apps, and any group you made)".to_string(), "m · move the selected tile to another group (or right-click it); g · this group's menu (new, rename, delete); + chip · new group; u · undo the last move; [ and ] · move the tile earlier or later in its group".to_string(), "PageUp / PageDown, mouse wheel or the dots · turn the page".to_string(), "1-9 · open the Nth app of the All list (the order of the tile table, whichever group you moved it to)".to_string(), "Enter or click · open it".to_string(), "o, q or Esc · sign out (asks first: Enter or y signs out, Esc or n stays)".to_string(), "Ctrl+Cmd+Q (Mac profile) or Ctrl+Windows+Q (PC profile) · sign out, from any screen (asks first); Ctrl+Cmd+L or Super+L · lock the screen".to_string(), "p · power menu (if your role allows it)".to_string()],
             ),
         };
         lines.push(String::new());
@@ -4035,13 +4231,15 @@ impl Shell {
             }
             for (r, glyph, to) in [(nav.prev, "<", page.checked_sub(1)), (nav.next, ">", Some(page + 1).filter(|p| *p < pages))] {
                 let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
-                let gw = g.text_width(20.0 * s, glyph, Face::Bold);
-                g.text(cx - gw / 2.0, cy - 11.0 * s, 20.0 * s, if to.is_some() { if g.hovered(r) { TEXT } else { MUTED } } else { DIM }, glyph, Face::Bold);
+                // the glyph shrinks with the button when the buttons were squeezed to fit a narrow window
+                let gs = 20.0 * s * (r.w / (26.0 * s)).min(1.0);
+                let gw = g.text_width(gs, glyph, Face::Bold);
+                g.text(cx - gw / 2.0, cy - gs * 0.55, gs, if to.is_some() { if g.hovered(r) { TEXT } else { MUTED } } else { DIM }, glyph, Face::Bold);
                 g.hit(r, Event::MouseDown(cx as i32, cy as i32), if glyph == "<" { "previous page" } else { "next page" });
             }
         }
         if top_bar {
-        let hint = "←/→ choose · Tab group · m move · PgUp/PgDn page · Enter open · s settings · v volume · o sign out".to_string() + if power { " · p power" } else { "" };
+        let hint = format!("←/→ choose · Tab group · m move · PgUp/PgDn page · Enter open{} · s settings · v volume · o sign out", if self.views.model.views.len() > 1 { " · click a view (bottom right) to switch" } else { "" }) + if power { " · p power" } else { "" } + if crate::inputprofile::resolved() == iyakki_agent::inputprofile::Resolved::Mac { " · Ctrl+Cmd+Q sign out · Ctrl+Cmd+L lock" } else { " · Super+L lock · Ctrl+Win+Q sign out" };
         let host = format!("{}  ·  {}", self.env.hostname, self.env.host.detect_env());
         let host_w = g.text_width(14.0 * s, &host, Face::Sans);
         // the key hint sits in the middle when there is room between the host name and the right edge, otherwise it is shortened to the room
@@ -4211,7 +4409,7 @@ fn header_button(w: u32, s: f32, i: usize) -> R {
 
 /// The bell, left of the clipboard queue button.
 fn bell_rect(w: u32, s: f32) -> R {
-    R::new(w as f32 - 226.0 * s - 160.0 * s, 8.0 * s, 32.0 * s, 30.0 * s)
+    bar_rects(w, s).bell
 }
 
 /// The bell with its count: red when something waits for an answer, amber for errors and warnings. Routine items (information,
@@ -4239,26 +4437,87 @@ fn draw_bell(g: &mut Gfx, r: R, radius: f32, s: f32, b: Badge, open: bool) {
     g.hit(r, Event::Key(Key::F(9)), "inbox");
 }
 
+/// Which of the optional icons of the app header fit beside the title: the Help chip goes first, then the camera and the clipboard
+/// buttons, then Devices (all of them have their keys: F1, F12, Ctrl+V, F8). Back and the bell always stay. The icons stand from the right
+/// edge; what is dropped leaves its room to the others and to the title, so nothing runs over the title or out of the window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BarShown {
+    help: bool,
+    shot: bool,
+    clip: bool,
+    dev: bool,
+}
+
+/// The width (before scaling) of the cluster at each level, and the room the title and the icons beside it need.
+const BAR_FULL: f32 = 418.0;
+const BAR_TITLE_ROOM: f32 = 180.0;
+
+fn bar_shown(w: u32, s: f32) -> BarShown {
+    let fits = |units: f32| (units + BAR_TITLE_ROOM) * s <= w as f32;
+    if fits(BAR_FULL) {
+        BarShown { help: true, shot: true, clip: true, dev: true }
+    } else if fits(BAR_FULL - 112.0) {
+        BarShown { help: false, shot: true, clip: true, dev: true }
+    } else if fits(BAR_FULL - 112.0 - 80.0) {
+        BarShown { help: false, shot: false, clip: false, dev: true }
+    } else {
+        BarShown { help: false, shot: false, clip: false, dev: false }
+    }
+}
+
+/// The rectangles of the cluster, right to left: Back, Help, camera, Devices, clipboard, bell. A dropped icon gets the place its next
+/// neighbour would take (it is not drawn).
+struct BarRects {
+    /// Read by the header tests (the header draws Back itself).
+    #[cfg_attr(not(test), allow(dead_code))]
+    back: R,
+    help: R,
+    shot: R,
+    dev: R,
+    clip: R,
+    bell: R,
+}
+
+fn bar_rects(w: u32, s: f32) -> BarRects {
+    let shown = bar_shown(w, s);
+    let (top, h) = (8.0 * s, 30.0 * s);
+    let mut cursor = w as f32 - 20.0 * s;
+    let mut put = |width: f32, on: bool| -> R {
+        let r = R::new(cursor - width * s, top, width * s, h);
+        if on {
+            cursor = r.x - 8.0 * s;
+        }
+        r
+    };
+    let back = put(94.0, true);
+    let help = put(104.0, shown.help);
+    let shot = put(32.0, shown.shot);
+    let dev = put(32.0, shown.dev);
+    let clip = put(32.0, shown.clip);
+    let bell = put(32.0, true);
+    BarRects { back, help, shot, dev, clip, bell }
+}
+
 /// The Devices button, left of the camera.
 fn dev_rect(w: u32, s: f32) -> R {
-    R::new(w as f32 - 226.0 * s - 80.0 * s, 8.0 * s, 32.0 * s, 30.0 * s)
+    bar_rects(w, s).dev
 }
 
 /// The clipboard queue button, left of the Devices button.
 const ACCENT_QR: [u8; 4] = rgb(255, 184, 77);
 
 fn clip_rect(w: u32, s: f32) -> R {
-    R::new(w as f32 - 226.0 * s - 120.0 * s, 8.0 * s, 32.0 * s, 30.0 * s)
+    bar_rects(w, s).clip
 }
 
 /// The camera button, left of the "F1 Help" chip.
 fn shot_rect(w: u32, s: f32) -> R {
-    R::new(w as f32 - 226.0 * s - 40.0 * s, 8.0 * s, 32.0 * s, 30.0 * s)
+    bar_rects(w, s).shot
 }
 
 /// The "F1 Help" chip, left of the Back button.
 fn help_rect(w: u32, s: f32) -> R {
-    R::new(w as f32 - 226.0 * s, 8.0 * s, 104.0 * s, 30.0 * s)
+    bar_rects(w, s).help
 }
 
 /// Height of the strip with the app's name, in units before scaling.
@@ -4275,6 +4534,20 @@ pub(crate) fn custom_accent(name: &str) -> [u8; 4] {
     PALETTE[h as usize % PALETTE.len()]
 }
 
+/// The decoded `.png` icon of a custom app (`None` for an emoji or a .svg icon, or a picture that does not decode: the tile then shows the
+/// first letter). Decoded once per app version and kept (the launcher draws every frame).
+pub(crate) fn custom_icon_picture(e: &iyakki_agent::store::tilehub::TileEntry) -> Option<std::sync::Arc<tiny_skia::Pixmap>> {
+    type Cache = std::sync::Mutex<std::collections::HashMap<String, Option<std::sync::Arc<tiny_skia::Pixmap>>>>;
+    static CACHE: std::sync::OnceLock<Cache> = std::sync::OnceLock::new();
+    let (path, bytes) = e.icon_picture.as_ref().filter(|(p, _)| p.to_ascii_lowercase().ends_with(".png"))?;
+    let key = format!("{}|{}|{}|{}", e.key, e.version, path, bytes.len());
+    let mut c = CACHE.get_or_init(Default::default).lock().unwrap_or_else(|x| x.into_inner());
+    if c.len() > 64 {
+        c.clear();
+    }
+    c.entry(key).or_insert_with(|| tiny_skia::Pixmap::decode_png(bytes).ok().map(std::sync::Arc::new)).clone()
+}
+
 /// A custom app's tile: a round badge with the first letter of its title in the app's colour, the title, the group, and the
 /// "custom app" mark (an unsigned dev app says so instead).
 fn draw_custom_tile(g: &mut Gfx, e: &iyakki_agent::store::tilehub::TileEntry, r: R, s: f32, selected: bool, allowed: bool) {
@@ -4285,10 +4558,19 @@ fn draw_custom_tile(g: &mut Gfx, e: &iyakki_agent::store::tilehub::TileEntry, r:
     crate::fx::tile(g, R::new(x, y, r.w, r.h), s, accent, selected, hover, allowed);
     let badge = r.w * 0.52;
     g.rrect(x + (r.w - badge) / 2.0, y + 26.0 * s, badge, badge, 22.0 * s, if allowed { with_alpha(accent, 40) } else { rgb(38, 42, 58) });
-    let letter: String = e.title.chars().find(|c| c.is_alphanumeric()).map(|c| c.to_uppercase().collect()).unwrap_or_else(|| "?".into());
-    let ls = badge * 0.62;
-    let lw = g.text_width(ls, &letter, Face::Bold);
-    g.text(x + (r.w - lw) / 2.0, y + 26.0 * s + (badge - g.line_height(ls, Face::Bold)) / 2.0, ls, if allowed { accent } else { DIM }, &letter, Face::Bold);
+    if let Some(pic) = custom_icon_picture(e) {
+        // a picture icon (a .png in the app): fitted inside the badge
+        let side = badge * 0.72;
+        let k = side / pic.width().max(pic.height()) as f32;
+        let (ox, oy) = (x + (r.w - pic.width() as f32 * k) / 2.0, y + 26.0 * s + (badge - pic.height() as f32 * k) / 2.0);
+        let paint = tiny_skia::PixmapPaint { opacity: if allowed { 1.0 } else { 0.4 }, quality: tiny_skia::FilterQuality::Bilinear, ..tiny_skia::PixmapPaint::default() };
+        g.pm.draw_pixmap(0, 0, pic.as_ref().as_ref(), &paint, tiny_skia::Transform::from_translate(ox, oy).pre_scale(k, k), None);
+    } else {
+        let letter: String = e.title.chars().find(|c| c.is_alphanumeric()).map(|c| c.to_uppercase().collect()).unwrap_or_else(|| "?".into());
+        let ls = badge * 0.62;
+        let lw = g.text_width(ls, &letter, Face::Bold);
+        g.text(x + (r.w - lw) / 2.0, y + 26.0 * s + (badge - g.line_height(ls, Face::Bold)) / 2.0, ls, if allowed { accent } else { DIM }, &letter, Face::Bold);
+    }
     let fit = r.w - 24.0 * s;
     let mut ls = 22.0 * s;
     while ls > 10.0 * s && g.text_width(ls, &e.title, Face::Bold) > fit {
@@ -4374,7 +4656,8 @@ fn draw_auth(g: &mut Gfx, w: u32, h: u32, s: f32, f: &Form, setup: bool, tick: u
         let e = g.fit(15.0 * s, e, Face::Sans, c.w - 64.0 * s);
         g.text(c.x + 32.0 * s, c.y + c.h - 40.0 * s, 15.0 * s, ERR, &e, Face::Sans);
     } else {
-        let hint = "Click a field or press Tab · Ctrl+V pastes";
+        let hint = iyakki_uikit::platform::keys("Click a field or press Tab · Ctrl+V pastes");
+        let hint = hint.as_str();
         let hw = g.text_width(13.0 * s, hint, Face::Sans);
         g.text(c.x + (c.w - hw) / 2.0, c.y + c.h - 36.0 * s, 13.0 * s, DIM, hint, Face::Sans);
     }
@@ -4592,8 +4875,14 @@ pub(crate) mod tests {
             sh.handle(&Event::Key(Key::Char(c)));
         }
     }
+    /// A key press. The keys that sign out on Home (o, q, Esc) now ask first; most tests only want the person signed out, so when
+    /// one of them opened the confirm card it is answered Enter here. The tests of the card itself (`shell_signout_tests.rs`) press
+    /// with `Shell::handle` directly.
     pub(super) fn key(sh: &mut Shell, k: Key) {
         sh.handle(&Event::Key(k));
+        if sh.signout_card_open() {
+            sh.handle(&Event::Key(Key::Enter));
+        }
     }
 
     pub(super) fn setup_admin(sh: &mut Shell) {
@@ -4707,6 +4996,35 @@ pub(crate) mod tests {
             st.create_user(&admin, "oscar", "operpass12", Role::Operator).unwrap();
         }
         (Shell::new(e), h)
+    }
+
+    #[test]
+    fn a_poisoned_account_store_lock_does_not_lock_everyone_out_of_signing_in_or_changing_a_password() {
+        let (mut sh, _) = shell_with_users("poisoned-store");
+        let store = sh.env.store.clone();
+        let died = std::thread::spawn(move || {
+            let _held = store.lock().unwrap(); // poison-ok: the test makes the lock poisoned on purpose
+            panic!("a thread of an app died while it held the account store");
+        })
+        .join();
+        assert!(died.is_err() && sh.env.store.is_poisoned(), "the lock is poisoned");
+        // a person can still sign in (a poisoned lock used to answer every sign-in with a 'lock' storage error)
+        login(&mut sh, "alice", "alicepass1");
+        assert_ne!(sh.screen_name(), "login", "signed in: {}", sh.screen_name());
+        assert_eq!(sh.session.as_ref().map(|s| s.user.as_str()), Some("alice"));
+        // and a wrong password is still refused for the right reason
+        let (mut sh2, _) = shell_with_users("poisoned-store-2");
+        let store = sh2.env.store.clone();
+        let _ = std::thread::spawn(move || {
+            let _held = store.lock().unwrap(); // poison-ok: the test makes the lock poisoned on purpose
+            panic!("again");
+        })
+        .join();
+        login(&mut sh2, "alice", "not-her-password");
+        assert_eq!(sh2.screen_name(), "login");
+        if let Screen::Login(f) = &sh2.screen {
+            assert!(f.error.as_deref().is_some_and(|e| !e.contains("lock")), "{:?}", f.error);
+        }
     }
 
     #[test]
@@ -4841,7 +5159,7 @@ pub(crate) mod tests {
         sh.screen = Screen::Login(Form::login());
         login(&mut sh, "alice", "alicepass1");
         assert_eq!(std::fs::read_to_string(dir.join("last-user")).unwrap().trim(), "alice");
-        sh.handle(&Event::Key(Key::Char('o')));
+        key(&mut sh, Key::Char('o'));
         let Screen::Login(f) = &sh.screen else { panic!("signed out") };
         assert_eq!((f.fields[0].value.as_str(), f.focus, f.fields[1].value.as_str()), ("alice", 1, ""), "the password is never filled in");
         // typing goes straight into the password, and Enter signs in
@@ -4868,7 +5186,7 @@ pub(crate) mod tests {
         // an ordinary user signing in first changes nothing
         login(&mut sh, "alice", "alicepass1");
         assert!(svc.mcp.list().is_empty() && svc.skills.list("alice").is_empty() && !docs.join("shared").exists());
-        sh.handle(&Event::Key(Key::Esc));
+        key(&mut sh, Key::Esc);
         // the administrator's first sign-in puts the examples in place
         login(&mut sh, "root", "rootpass12");
         let mcp = svc.mcp.list();
@@ -4904,7 +5222,7 @@ pub(crate) mod tests {
             svc.skills.remove(&iyakki_agent::skills::Scope::Shared, n, true, true).unwrap();
         }
         std::fs::remove_file(docs.join("shared/sample-iyakki-quick-start.md")).unwrap();
-        sh.handle(&Event::Key(Key::Esc));
+        key(&mut sh, Key::Esc);
         login(&mut sh, "root", "rootpass12");
         assert!(svc.mcp.list().is_empty() && svc.skills.list("root").is_empty());
         assert!(!docs.join("shared/sample-iyakki-quick-start.md").exists());
@@ -4958,7 +5276,7 @@ pub(crate) mod tests {
         assert!(log.contains("calendar.reminder") && log.contains("alarm.ring"), "{log}");
         sh.render(&mut g);
         // nobody is signed in: nothing rings and the clock restarts
-        sh.handle(&Event::Key(Key::Esc));
+        key(&mut sh, Key::Esc);
         // an unanswered alarm gives up after five minutes
         sh.check_alarms(at + 400);
         assert!(sh.ringing().is_none(), "no one answered for five minutes");
@@ -5910,19 +6228,19 @@ pub(crate) mod tests {
         let mut g = Gfx::new(1280, 720);
         ctx_history(&mut sh, 100, 100);
         assert!(sh.clipboard_picker_open(), "an empty queue still opens; it explains itself and asks the system clipboard");
-        sh.handle(&Event::Key(Key::Esc));
+        key(&mut sh, Key::Esc);
         assert!(!sh.clipboard_picker_open());
         crate::ui::clipboard::remember("alice");
         ctx_history(&mut sh, 100, 100);
         assert!(sh.clipboard_picker_open());
-        sh.handle(&Event::Key(Key::Esc));
+        key(&mut sh, Key::Esc);
         assert!(!sh.clipboard_picker_open());
         ctx_history(&mut sh, 100, 100);
         sh.render(&mut g);
         sh.handle(&Event::MouseDown(2, 2)); // outside the dialog (top-left corner is the backdrop of the picker)
         assert!(sh.clipboard_picker_open() || !sh.clipboard_picker_open());
         // picking pastes into the focused login field
-        sh.handle(&Event::Key(Key::Esc));
+        key(&mut sh, Key::Esc);
         click_field(&mut sh, &mut g, 0);
         ctx_history(&mut sh, 100, 100);
         sh.render(&mut g);
@@ -6038,6 +6356,36 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn lock_is_audited_with_who_and_where_a_guest_is_signed_out_by_it_and_the_power_key_card_takes_l() {
+        let (mut sh, _host) = shell_with_users("pwr-lock-audit");
+        let mut g = Gfx::new(1280, 720);
+        let audit = |sh: &Shell| std::fs::read_to_string(sh.env.audit.path()).unwrap_or_default();
+        // an operator presses Lock in the dropdown: locked, still signed in, one audit line naming the person and the menu
+        login(&mut sh, "oscar", "operpass12");
+        sh.screen = Screen::PowerMenu;
+        sh.render(&mut g);
+        click(&mut sh, &mut g, "Lock");
+        assert!(sh.session.is_some() && sh.screen_name() == "locked");
+        let log = audit(&sh);
+        assert!(log.lines().any(|l| l.contains("power.lock") && l.contains("oscar")), "{log}");
+        // a guest has no password to lock with: Lock signs them out (and says so in the audit)
+        sh.sign_out();
+        login(&mut sh, "gus", "guestpass1");
+        assert!(sh.session.is_some());
+        sh.screen = Screen::PowerMenu;
+        sh.render(&mut g);
+        click(&mut sh, &mut g, "Lock");
+        assert!(sh.session.is_none() && sh.screen_name() == "login", "a guest is signed out: {}", sh.screen_name());
+        assert!(audit(&sh).lines().any(|l| l.contains("power.lock") && l.contains("gus")));
+        // the power key's card takes l as well
+        login(&mut sh, "alice", "alicepass1");
+        sh.fnk.power_card = true;
+        sh.handle(&Event::Key(Key::Char('l')));
+        assert!(!sh.fnk.power_card && sh.screen_name() == "locked", "{}", sh.screen_name());
+        assert!(audit(&sh).lines().any(|l| l.contains("power.lock") && l.contains("alice") && l.contains("power key")));
+    }
+
+    #[test]
     fn power_menu_sleep_is_hidden_when_impossible_and_locks_the_session_first() {
         let sign_in = |tag: &str, can: bool| {
             let (mut sh, host) = shell_with_users(tag);
@@ -6063,7 +6411,7 @@ pub(crate) mod tests {
         sh.screen = Screen::PowerMenu;
         sh.render(&mut g);
         assert!(sh.hits().iter().any(|h| h.label == "Sleep"));
-        sh.handle(&Event::Key(Key::Esc));
+        key(&mut sh, Key::Esc);
         assert_eq!(*host.slept.lock().unwrap(), 0);
         assert!(sh.session.is_some() && sh.screen_name() == "launcher");
         sh.screen = Screen::PowerMenu;
@@ -6361,7 +6709,7 @@ pub(crate) mod tests {
         // the dialog takes the keys: a letter does not reach the screen behind
         sh.handle(&Event::Key(Key::Char('x')));
         assert!(sh.login.is_some());
-        sh.handle(&Event::Key(Key::Esc));
+        key(&mut sh, Key::Esc);
         assert!(sh.login.is_none());
         // a screen asking through the request slot gets the same dialog
         crate::agent_login::request("claude-code", false);
@@ -6516,7 +6864,7 @@ pub(crate) mod tests {
         // it is remembered for this person: reset the state, sign out and in again
         crate::ui::clipboard::clear();
         assert_eq!(crate::ui::clipboard::limit(), 10);
-        sh.handle(&Event::Key(Key::Esc));
+        key(&mut sh, Key::Esc);
         key(&mut sh, Key::Char('o'));
         login(&mut sh, "alice", "alicepass1");
         assert_eq!(crate::ui::clipboard::limit(), 12, "alice's choice came back");
@@ -6549,12 +6897,12 @@ pub(crate) mod tests {
         assert!(sh.clipboard_picker_open());
         assert!(crate::ui::clipboard::take_host_copy().is_none(), "it is not sent back out to the system");
         // an answer that comes long after is an ordinary paste, not a queue update
-        sh.handle(&Event::Key(Key::Esc));
+        key(&mut sh, Key::Esc);
         for _ in 0..200 {
             sh.handle(&Event::Tick);
         }
         ctx_history(&mut sh, 10, 10);
-        sh.handle(&Event::Key(Key::Esc));
+        key(&mut sh, Key::Esc);
         for _ in 0..200 {
             sh.handle(&Event::Tick);
         }
@@ -6626,6 +6974,10 @@ pub(crate) mod tests {
 mod ctx_tests;
 
 #[cfg(test)]
+#[path = "shell_downloads_open_tests.rs"]
+mod downloads_open_tests;
+
+#[cfg(test)]
 #[path = "shell_cluster_tests.rs"]
 mod cluster_tests;
 
@@ -6640,6 +6992,10 @@ mod tile_tests;
 #[cfg(test)]
 #[path = "shell_tile_sdk_tests.rs"]
 mod tile_sdk_tests;
+
+#[cfg(test)]
+#[path = "shell_tile_wasm_tests.rs"]
+mod tile_wasm_tests;
 
 #[cfg(test)]
 #[path = "shell_camera_tests.rs"]
@@ -6715,9 +7071,15 @@ mod startup_tests;
 #[cfg(test)]
 #[path = "shell_volbar_tests.rs"]
 mod volbar_tests;
+#[cfg(test)]
+#[path = "shell_popups_tests.rs"]
+mod popups_tests;
 
 #[path = "shell_scroll.rs"]
 mod scroll_impl;
+
+#[path = "shell_osguard.rs"]
+mod osguard_impl;
 
 #[path = "shell_touchbar.rs"]
 mod touchbar_impl;
@@ -6743,6 +7105,11 @@ mod saver_impl;
 mod wake_impl;
 #[path = "shell_lock.rs"]
 mod lock_impl;
+#[path = "shell_signout.rs"]
+mod signout_impl;
+#[cfg(test)]
+#[path = "shell_signout_tests.rs"]
+mod signout_tests;
 #[path = "shell_access.rs"]
 mod access_impl;
 #[path = "shell_power.rs"]
@@ -6754,10 +7121,15 @@ mod power_tests;
 mod devstate_impl;
 #[path = "shell_loss.rs"]
 mod loss_impl;
+#[path = "shell_crashcard.rs"]
+mod crashcard_impl;
 #[path = "shell_devask.rs"]
 mod devask_impl;
 #[path = "shell_tzask.rs"]
 mod shell_tzask;
+#[cfg(test)]
+#[path = "shell_devinput_guard_tests.rs"]
+mod devinput_guard_tests;
 #[cfg(test)]
 #[path = "shell_tzask_tests.rs"]
 mod tzask_tests;
@@ -6770,6 +7142,9 @@ mod live_impl;
 #[cfg(test)]
 #[path = "shell_live_tests.rs"]
 mod live_tests;
+#[cfg(test)]
+#[path = "shell_idle_tests.rs"]
+mod idle_tests;
 
 #[path = "shell_linux.rs"]
 mod linux_impl;
@@ -6780,6 +7155,18 @@ mod linux_tests;
 
 #[path = "shell_panes.rs"]
 mod panes_impl;
+
+#[path = "shell_views.rs"]
+mod views_impl;
+#[path = "shell_backup_sched.rs"]
+mod bksched_impl;
+#[cfg(test)]
+#[path = "shell_backup_sched_tests.rs"]
+mod bksched_tests;
+
+#[cfg(test)]
+#[path = "shell_views_tests.rs"]
+mod views_tests;
 
 #[path = "shell_layout.rs"]
 mod layout_impl;
@@ -6854,9 +7241,14 @@ pub(crate) fn draw_camera_sign(g: &mut Gfx, h: u32, s: f32, what: &str) -> R {
 
 /// The red "REC" sign of cameras that record, bottom left of every screen above the other camera signs (`rows_below` of them).
 /// Returns its rectangle (the click target).
-pub(crate) fn draw_rec_sign(g: &mut Gfx, h: u32, s: f32, names: &[String], rows_below: usize) -> R {
-    let list = names.join(", ");
-    let text = format!("REC: {list}. Click to stop.");
+/// Is this question one to show over the screen: a flow's permission request that is fresh and not dismissed, or a client device's
+/// question (a hard ask: it stays until answered, and the store withdraws it when it times out).
+pub(crate) fn permpop_fresh(r: &iyakki_agent::browserconsent::ConsentRequest, now: i64) -> bool {
+    use iyakki_agent::browserconsent::{ConsentKind, DEVICE_PAYLOAD};
+    (r.kind == ConsentKind::Step && r.payload == DEVICE_PAYLOAD) || (r.kind == ConsentKind::Permission && !r.quiet && now - r.since < iyakki_agent::flows::permission::POPUP_SECS)
+}
+
+pub(crate) fn draw_rec_sign(g: &mut Gfx, h: u32, s: f32, text: &str, rows_below: usize) -> R {
     let tw = g.text_width(15.0 * s, &text, Face::Bold) + 48.0 * s;
     let y = h as f32 - 64.0 * s - rows_below as f32 * 44.0 * s;
     let r = R::new(16.0 * s, y, tw, 34.0 * s);

@@ -6,8 +6,8 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 OUT="${1:-${IYAKKI_WORK:-$HOME/iyakki-work}/public-export}"
-NAME="${IYAKKI_PUBLIC_NAME:-IYAKKI Project}"
-EMAIL="${IYAKKI_PUBLIC_EMAIL:-noreply@users.noreply.github.com}"
+NAME="${IYAKKI_PUBLIC_NAME:-akash-meisync}"
+EMAIL="${IYAKKI_PUBLIC_EMAIL:-355019820+akash-meisync@users.noreply.github.com}"
 VER="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 MSG="${IYAKKI_PUBLIC_MESSAGE:-IYAKKI $VER}"
 fail() { echo "export-public: REFUSED: $*" >&2; exit 1; }

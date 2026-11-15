@@ -34,6 +34,8 @@ pub(super) const T_SEL: usize = 13;
 pub(super) const T_PASTE: usize = 14;
 pub(super) const T_LOAD: usize = 15;
 pub(super) const T_CLEAR: usize = 16;
+/// Browse next to the box that opens a text file.
+pub(super) const T_BROWSE: usize = 49_921;
 pub(super) const T_VOICE: usize = 17;
 pub(super) const T_SPEED_DN: usize = 18;
 pub(super) const T_SPEED_UP: usize = 19;
@@ -155,6 +157,7 @@ pub struct VoiceApp {
     pub(super) text: MultiLine,
     pub(super) transcript: MultiLine,
     pub(super) path: TextField,
+    pub(super) path_pick: crate::pathpick::PathPick,
     pub(super) focus: Focus,
     pub(super) voices: Vec<ReadVoice>,
     pub(super) voice_i: usize,
@@ -227,6 +230,7 @@ impl VoiceApp {
             text: new_box(),
             transcript: new_box(),
             path: TextField::new("path of a text file", false),
+            path_pick: Default::default(),
             focus: Focus::Text,
             voices: Vec::new(),
             voice_i: 0,
@@ -746,6 +750,11 @@ impl VoiceApp {
             T_LOAD => {
                 self.focus = Focus::Path;
             }
+            T_BROWSE => {
+                self.focus = Focus::Path;
+                let start = self.path.value.clone();
+                self.path_pick.open(crate::filepicker::PathKind::File, &["txt", "md", "text"], "Choose a text file", &start);
+            }
             T_CLEAR => {
                 self.stop_reading();
                 self.text.take();
@@ -769,7 +778,7 @@ impl VoiceApp {
             }
             T_KEEP => {
                 let on = !cx.services.voice_settings().keep_listening;
-                match cx.services.settings.lock().unwrap().update(|s| s.voice.keep_listening = on) {
+                match cx.services.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| s.voice.keep_listening = on) {
                     Ok(()) => {
                         cx.audit.record(&cx.session.user, "settings.voice.keep_listening", if on { "on" } else { "off" });
                         self.say(if on { "Keep listening is on: after each pause the text is written and it listens again until you press Stop." } else { "Keep listening is off: each dictation ends on its pause." }, true);
@@ -1123,6 +1132,16 @@ impl App for VoiceApp {
             self.on_tick(cx);
             return Flow::Stay;
         }
+        // the file picker, when Browse opened it, takes every event until it answers
+        match self.path_pick.event(ev) {
+            crate::pathpick::Picked::NotOpen => {}
+            crate::pathpick::Picked::Taken => return Flow::Stay,
+            crate::pathpick::Picked::Chosen(p) => {
+                self.path.set(&p.display().to_string());
+                self.focus = Focus::Path;
+                return Flow::Stay;
+            }
+        }
         if self.modal.is_some() {
             self.modal_event(ev, cx);
             return Flow::Stay;
@@ -1142,7 +1161,7 @@ impl App for VoiceApp {
         match ev {
             Event::Key(k) => return self.key(k, cx),
             Event::Tab(n) => {
-                if matches!(*n, T_PASTE | T_LOAD | T_CLEAR) || *n == T_T_CLEAR {
+                if matches!(*n, T_PASTE | T_LOAD | T_CLEAR | T_BROWSE) || *n == T_T_CLEAR {
                     // these keep or take the keyboard themselves
                 } else if self.focus == Focus::Path {
                     self.focus = Focus::Text;

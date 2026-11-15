@@ -1,0 +1,7 @@
+# Settings pages without a chat tool. Format: Tab | reason. A reason starts with "permanent:" (it should never have a tool) or "todo:" (a tool is owed).
+# The list only shrinks: the gate test fails when a page listed here has a tool, and when a page has neither a tool nor a line here.
+Overview | permanent: the start page only links to other pages; each of them has its own tools
+Account | todo: list the people and roles (read); passwords and recovery keys are typed by the person and never go through the chat
+HostAccess | todo: list the host folders and their allowed actions (window mode only)
+Displays | todo: list displays, main display, arrangement (the keep-these-settings timer applies)
+CloudRoles | todo: roles manager of a cloud tenant (changes ask)

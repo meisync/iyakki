@@ -169,6 +169,113 @@ impl Read for Watched {
     }
 }
 
+// ------------------------------------------------------------------------------------------------ the quick network check
+
+/// Every message of a failed reachability check starts with this, so a retry loop can tell "there is no network" (stop at once,
+/// nothing will change in a few seconds) from a hiccup worth another try. See [`is_no_network`].
+pub const NO_NETWORK: &str = "No network:";
+
+/// Does this error come from the quick reachability check ([`Preflight`])?
+pub fn is_no_network(err: &str) -> bool {
+    err.contains(NO_NETWORK)
+}
+
+/// Can `host:port` be reached at all? Looks the name up and opens a TCP connection, each bounded so the whole check ends within
+/// about `limit`. Sends nothing. On failure the answer is a plain sentence that starts with [`NO_NETWORK`] and says what to do.
+pub fn check_reachable(host: &str, port: u16, limit: Duration) -> Result<(), String> {
+    use std::net::{TcpStream, ToSocketAddrs};
+    let began = std::time::Instant::now();
+    let name = host.to_string();
+    let (tx, rx) = sync_channel(1);
+    std::thread::spawn(move || {
+        let _ = tx.send((name.as_str(), port).to_socket_addrs().map(|i| i.collect::<Vec<_>>()).map_err(|e| e.to_string()));
+    });
+    let hint = "Nothing was downloaded. Check the network cable, Wi-Fi or proxy, then press Retry (or Cancel).";
+    let addrs = match rx.recv_timeout(limit) {
+        Ok(Ok(a)) if !a.is_empty() => a,
+        Ok(_) => return Err(format!("{NO_NETWORK} the address of {host} cannot be looked up, so the computer is probably offline. {hint}")),
+        Err(_) => return Err(format!("{NO_NETWORK} looking up {host} got no answer within {} s, so the computer is probably offline. {hint}", limit.as_secs().max(1))),
+    };
+    let mut last = String::new();
+    for a in addrs.iter().take(4) {
+        let left = limit.saturating_sub(began.elapsed());
+        if left.is_zero() {
+            break;
+        }
+        match TcpStream::connect_timeout(a, left.min(Duration::from_secs(5))) {
+            Ok(_) => return Ok(()),
+            Err(e) => last = e.to_string(),
+        }
+    }
+    let l = last.to_ascii_lowercase();
+    let why = if l.contains("refused") {
+        format!("{host}:{port} refused the connection")
+    } else if l.contains("unreachable") {
+        format!("there is no route to {host}")
+    } else {
+        format!("{host} did not answer within {} s", limit.as_secs().max(1))
+    };
+    Err(format!("{NO_NETWORK} {why}. {hint}"))
+}
+
+/// Wraps a [`Streamer`] so that a download starts with a quick reachability check of the host: with no network the person gets
+/// the answer within [`Preflight::limit`] instead of after the long connect and retry times. A host that was reachable a moment ago is
+/// not checked again for 20 s. When a proxy is set in the environment the check is skipped (the proxy, not the host, is what must be reached).
+pub struct Preflight<S: Streamer> {
+    inner: S,
+    pub limit: Duration,
+    seen: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    skip: bool,
+}
+
+impl<S: Streamer> Preflight<S> {
+    pub fn new(inner: S, limit: Duration) -> Preflight<S> {
+        let skip = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"].iter().any(|k| std::env::var(k).is_ok_and(|v| !v.is_empty()));
+        Preflight { inner, limit, seen: std::sync::Mutex::new(std::collections::HashMap::new()), skip }
+    }
+
+    fn check(&self, url: &str) -> Result<(), String> {
+        if self.skip {
+            return Ok(());
+        }
+        let https = url.starts_with("https://");
+        let hostport = host_of(url);
+        let (host, port) = match hostport.rsplit_once(':') {
+            Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty() => (h.to_string(), p.parse().unwrap_or(80)),
+            _ => (hostport.clone(), if https { 443 } else { 80 }),
+        };
+        let key = format!("{host}:{port}");
+        if let Some(t) = self.seen.lock().ok().and_then(|m| m.get(&key).copied()) {
+            if t.elapsed() < Duration::from_secs(20) {
+                return Ok(());
+            }
+        }
+        check_reachable(host.trim_matches(['[', ']']), port, self.limit)?;
+        if let Ok(mut m) = self.seen.lock() {
+            m.insert(key, std::time::Instant::now());
+        }
+        Ok(())
+    }
+}
+
+impl<S: Streamer> Streamer for Preflight<S> {
+    fn open(&self, url: &str, headers: &[(String, String)]) -> Result<StreamHead, String> {
+        self.check(url)?;
+        self.inner.open(url, headers)
+    }
+    fn post(&self, url: &str, headers: &[(String, String)], body: &[u8]) -> Result<StreamHead, String> {
+        self.check(url)?;
+        self.inner.post(url, headers, body)
+    }
+    fn open_tls(&self, url: &str, headers: &[(String, String)], mode: &TlsMode) -> Result<StreamHead, String> {
+        self.check(url)?;
+        self.inner.open_tls(url, headers, mode)
+    }
+    fn peer_chain(&self, host: &str, port: u16) -> Result<Vec<Vec<u8>>, String> {
+        self.inner.peer_chain(host, port)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,5 +388,65 @@ mod tests {
         h.body.read_to_end(&mut v).unwrap();
         t.join().unwrap();
         assert_eq!(v, [1, 1, 1, 1, 1, 2, 2, 2, 2, 2]);
+    }
+
+    fn closed_port() -> u16 {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    }
+
+    #[test]
+    fn a_closed_port_fails_at_once_with_a_plain_message() {
+        let p = Preflight::new(fake(std::io::Cursor::new(vec![1u8])), Duration::from_secs(3));
+        let t = std::time::Instant::now();
+        let e = p.open(&format!("http://127.0.0.1:{}/a.bin", closed_port()), &[]).err().expect("refused");
+        assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+        assert!(is_no_network(&e) && e.contains("refused the connection") && e.contains("Retry") && e.contains("Cancel"), "{e}");
+    }
+
+    #[test]
+    fn a_name_that_cannot_be_looked_up_fails_within_the_limit() {
+        let t = std::time::Instant::now();
+        let e = check_reachable("no-such-host.invalid", 443, Duration::from_secs(4)).unwrap_err();
+        assert!(t.elapsed() < Duration::from_secs(6), "{:?}", t.elapsed());
+        assert!(is_no_network(&e) && e.contains("no-such-host.invalid"), "{e}");
+    }
+
+    /// A listener whose queue is full drops further connection attempts without an answer, which is what an address that
+    /// swallows packets does: the check must give up at its limit and say so.
+    #[test]
+    fn an_address_that_swallows_packets_fails_at_the_limit() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        // fill the accept queue (never accepted)
+        let mut held = Vec::new();
+        for _ in 0..300 {
+            match std::net::TcpStream::connect_timeout(&format!("127.0.0.1:{port}").parse().unwrap(), Duration::from_millis(100)) {
+                Ok(s) => held.push(s),
+                Err(_) => break,
+            }
+        }
+        if held.len() >= 300 {
+            return; // this kernel never fills the queue; nothing to test here
+        }
+        let t = std::time::Instant::now();
+        let e = check_reachable("127.0.0.1", port, Duration::from_secs(2)).unwrap_err();
+        assert!(t.elapsed() < Duration::from_secs(4), "{:?}", t.elapsed());
+        assert!(is_no_network(&e) && e.contains("did not answer within 2 s"), "{e}");
+        drop(held);
+        drop(l);
+    }
+
+    #[test]
+    fn a_reachable_host_passes_and_is_remembered() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let p = Preflight::new(fake(std::io::Cursor::new(vec![9u8; 10])), Duration::from_secs(3));
+        let mut h = p.open(&format!("http://127.0.0.1:{port}/x"), &[]).unwrap();
+        let mut v = Vec::new();
+        h.body.read_to_end(&mut v).unwrap();
+        assert_eq!(v.len(), 10);
+        drop(l); // now closed, but the answer is remembered for a few seconds
+        assert!(p.check(&format!("http://127.0.0.1:{port}/y")).is_ok());
     }
 }

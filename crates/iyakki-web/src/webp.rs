@@ -1,14 +1,14 @@
-//! WebP pictures, decoded from scratch: the RIFF container (plain, extended `VP8X`, and the first frame of an animation
-//! that covers the whole canvas), lossy pictures (`VP8 `, the key frame of VP8 as in RFC 6386, with the loop filter
+//! WebP pictures, decoded from scratch: the RIFF container (plain, extended `VP8X`, and animations: [`decode`] gives the
+//! first frame on the canvas, [`decode_animated`] every frame composed with its blend and dispose methods), lossy pictures (`VP8 `, the key frame of VP8 as in RFC 6386, with the loop filter
 //! and the smooth "fancy" chroma upsampling libwebp uses), lossless pictures (`VP8L`) and the `ALPH` alpha plane (raw or
 //! lossless, with the horizontal, vertical and gradient filters).
 //!
-//! Not supported: animations whose first frame does not cover the whole canvas (the decoder then says so), and
-//! anything with a size beyond the same caps the JPEG decoder uses. The code never panics on bad input; every
+//! Not supported: anything with a size beyond the same caps the JPEG decoder uses. The code never panics on bad input; every
 //! allocation is bounded by the declared picture size, which is capped.
 //!
 //! The probability and quantiser tables in the lossy decoder are the constants fixed by the VP8 specification.
 
+use crate::gif::{Animation, Frame as AFrame};
 use crate::image::Bitmap;
 
 const MAX_PIXELS: u64 = 16_000_000;
@@ -73,13 +73,8 @@ fn find_image<'a>(chunks: &'a [u8]) -> Result<(Option<Image<'a>>, Option<(u32, u
                 if body.len() < 16 {
                     return Err("this WebP file is damaged".into());
                 }
-                let (fx, fy) = (2 * le24(&body[0..]), 2 * le24(&body[3..]));
-                let (fw, fh) = (1 + le24(&body[6..]), 1 + le24(&body[9..]));
                 let (inner, _) = find_image(&body[16..])?;
                 let inner = inner.ok_or("this animated WebP has no picture data")?;
-                if fx != 0 || fy != 0 || canvas.map(|c| (c.0, c.1)) != Some((fw, fh)) {
-                    return Err("animated WebP pictures whose first frame is smaller than the canvas are not supported".into());
-                }
                 return Ok((Some(inner), canvas));
             }
             _ => {}
@@ -89,20 +84,9 @@ fn find_image<'a>(chunks: &'a [u8]) -> Result<(Option<Image<'a>>, Option<(u32, u
     Ok((None, canvas))
 }
 
-/// Decode a WebP picture (the first frame, for an animation) to straight RGBA.
-pub fn decode(data: &[u8]) -> Result<Bitmap, String> {
-    if data.len() < 12 || &data[..4] != b"RIFF" || &data[8..12] != b"WEBP" {
-        return Err("this is not a WebP picture".into());
-    }
-    let riff = le32(&data[4..]) as usize;
-    if riff < 4 {
-        return Err("this WebP file is damaged".into());
-    }
-    let end = (8 + riff).min(data.len());
-    let (img, canvas) = find_image(&data[12..end])?;
-    let img = img.ok_or("this WebP file holds no picture")?;
-    let animated = canvas.map_or(false, |c| c.2 & 2 != 0);
-    let bm = match img.codec {
+/// Decode the picture chunks of one still image or one animation frame to straight RGBA.
+fn decode_image(img: &Image) -> Result<Bitmap, String> {
+    Ok(match img.codec {
         Codec::Lossless => {
             let (w, h, px, has_alpha) = decode_vp8l(img.data)?;
             let mut rgba = Vec::with_capacity(px.len() * 4);
@@ -120,13 +104,132 @@ pub fn decode(data: &[u8]) -> Result<Bitmap, String> {
             };
             yuv_to_rgba(&f, alpha.as_deref())
         }
-    };
+    })
+}
+
+fn riff_body(data: &[u8]) -> Result<&[u8], String> {
+    if data.len() < 12 || &data[..4] != b"RIFF" || &data[8..12] != b"WEBP" {
+        return Err("this is not a WebP picture".into());
+    }
+    let riff = le32(&data[4..]) as usize;
+    if riff < 4 {
+        return Err("this WebP file is damaged".into());
+    }
+    let end = (8 + riff).min(data.len());
+    Ok(&data[12..end])
+}
+
+/// Decode a WebP picture (the first frame, for an animation) to straight RGBA. The first frame of an animation is
+/// placed on the transparent canvas, as [`decode_animated`] does for the first step.
+pub fn decode(data: &[u8]) -> Result<Bitmap, String> {
+    let body = riff_body(data)?;
+    let (img, canvas) = find_image(body)?;
+    if canvas.map_or(false, |c| c.2 & 2 != 0) {
+        let a = decode_frames(body, 1)?;
+        let f = a.frames.into_iter().next().ok_or("this animated WebP has no picture data")?;
+        return Ok(Bitmap { width: a.width, height: a.height, rgba: f.rgba });
+    }
+    let img = img.ok_or("this WebP file holds no picture")?;
+    let bm = decode_image(&img)?;
     if let Some((cw, ch, _)) = canvas {
-        if (cw, ch) != (bm.width, bm.height) && !animated {
+        if (cw, ch) != (bm.width, bm.height) {
             return Err("this WebP file's sizes disagree".into());
         }
     }
     Ok(bm)
+}
+
+/// Every frame of a WebP picture, composed on the canvas with the frame offsets, the blend method (alpha blending or
+/// overwrite) and the dispose method (leave, or clear the frame's rectangle to transparent) of the format, each with its
+/// delay. A picture that is not animated gives one frame. At most [`MAX_FRAMES`](crate::gif::MAX_FRAMES) frames and
+/// [`MAX_ANIMATION_PIXELS`](crate::gif::MAX_ANIMATION_PIXELS) pixels in all are decoded; a file that breaks after some
+/// frames gives the frames before the break, one that breaks before the first is an error. The loop count and the
+/// background colour in `ANIM` are ignored (it loops, on a transparent canvas, as browsers do).
+pub fn decode_animated(data: &[u8]) -> Result<Animation, String> {
+    decode_frames(riff_body(data)?, crate::gif::MAX_FRAMES)
+}
+
+fn decode_frames(chunks: &[u8], max_frames: usize) -> Result<Animation, String> {
+    let (first, canvas) = find_image(chunks)?;
+    let animated = canvas.map_or(false, |c| c.2 & 2 != 0);
+    if !animated {
+        let img = first.ok_or("this WebP file holds no picture")?;
+        let bm = decode_image(&img)?;
+        return Ok(Animation { width: bm.width, height: bm.height, frames: vec![AFrame { rgba: bm.rgba, delay_ms: 100 }], loops: Some(0) });
+    }
+    let (cw, ch, _) = canvas.ok_or("this WebP file is damaged")?;
+    check_size(cw, ch)?;
+    let max_frames = max_frames.min((crate::gif::MAX_ANIMATION_PIXELS / (cw as u64 * ch as u64)).max(1) as usize);
+    let (cwu, chu) = (cw as usize, ch as usize);
+    let mut canvas_px = vec![0u8; cwu * chu * 4];
+    let mut frames: Vec<AFrame> = Vec::new();
+    let mut pos = 0usize;
+    let mut first_error: Option<String> = None;
+    while pos + 8 <= chunks.len() && frames.len() < max_frames {
+        let size = le32(&chunks[pos + 4..]) as usize;
+        let start = pos + 8;
+        let Some(end) = start.checked_add(size).filter(|e| *e <= chunks.len()) else {
+            first_error.get_or_insert_with(|| "this animated WebP file is cut short".to_string());
+            break;
+        };
+        let tag = &chunks[pos..pos + 4];
+        let body = &chunks[start..end];
+        pos = end + (size & 1);
+        if tag != b"ANMF" {
+            continue;
+        }
+        let step = (|| -> Result<(), String> {
+            if body.len() < 16 {
+                return Err("this WebP file is damaged".into());
+            }
+            let (fx, fy) = (2 * le24(&body[0..]) as usize, 2 * le24(&body[3..]) as usize);
+            let (fw, fh) = (1 + le24(&body[6..]) as usize, 1 + le24(&body[9..]) as usize);
+            let delay = le24(&body[12..]);
+            let (no_blend, dispose_bg) = (body[15] & 2 != 0, body[15] & 1 != 0);
+            if fx + fw > cwu || fy + fh > chu {
+                return Err("an animation frame lies outside the WebP canvas".into());
+            }
+            let (inner, _) = find_image(&body[16..])?;
+            let bm = decode_image(&inner.ok_or("this animated WebP has no picture data")?)?;
+            if (bm.width as usize, bm.height as usize) != (fw, fh) {
+                return Err("an animation frame's size disagrees with its picture".into());
+            }
+            for y in 0..fh {
+                for x in 0..fw {
+                    let s = &bm.rgba[(y * fw + x) * 4..][..4];
+                    let d = &mut canvas_px[((fy + y) * cwu + fx + x) * 4..][..4];
+                    if no_blend || s[3] == 255 {
+                        d.copy_from_slice(s);
+                    } else if s[3] != 0 {
+                        // straight-alpha "over": out = s + d * (1 - sa)
+                        let (sa, da) = (s[3] as u32, d[3] as u32);
+                        let oa = sa * 255 + da * (255 - sa); // times 255
+                        for c in 0..3 {
+                            d[c] = ((s[c] as u32 * sa * 255 + d[c] as u32 * da * (255 - sa)) / oa) as u8;
+                        }
+                        d[3] = (oa / 255) as u8;
+                    }
+                }
+            }
+            // browsers show a frame for at least 20 ms (0 and 10 ms count as 100 ms)
+            let delay_ms = if delay <= 10 { 100 } else { delay.max(20) };
+            frames.push(AFrame { rgba: canvas_px.clone(), delay_ms });
+            if dispose_bg {
+                for y in 0..fh {
+                    canvas_px[((fy + y) * cwu + fx) * 4..][..fw * 4].fill(0);
+                }
+            }
+            Ok(())
+        })();
+        if let Err(e) = step {
+            first_error.get_or_insert(e);
+            break;
+        }
+    }
+    if frames.is_empty() {
+        return Err(first_error.unwrap_or_else(|| "this animated WebP has no frames".into()));
+    }
+    Ok(Animation { width: cw, height: ch, frames, loops: Some(0) })
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -2237,5 +2340,138 @@ mod tests {
         assert_eq!(plane_to_dist(100, 2), 1); // directly to the left
         assert_eq!(plane_to_dist(100, 121), 1);
         assert_eq!(plane_to_dist(100, 130), 10);
+    }
+
+    /// An animated file built from stills: `frames` are (x, y, flags, still file, delay in ms); the canvas is `cw` x `ch`.
+    fn animated(cw: u32, ch: u32, frames: &[(u32, u32, u8, &[u8], u32)]) -> Vec<u8> {
+        let still_chunks = |f: &[u8]| -> Vec<u8> { f[12..].to_vec() };
+        let mut body = b"WEBP".to_vec();
+        body.extend_from_slice(b"VP8X");
+        body.extend_from_slice(&10u32.to_le_bytes());
+        body.extend_from_slice(&[0x12, 0, 0, 0]);
+        body.extend_from_slice(&(cw - 1).to_le_bytes()[..3]);
+        body.extend_from_slice(&(ch - 1).to_le_bytes()[..3]);
+        body.extend_from_slice(b"ANIM");
+        body.extend_from_slice(&6u32.to_le_bytes());
+        body.extend_from_slice(&[0; 6]);
+        for (x, y, flags, still, delay) in frames {
+            let (w, h) = {
+                let b = decode(still).unwrap();
+                (b.width, b.height)
+            };
+            let mut f = Vec::new();
+            f.extend_from_slice(&(x / 2).to_le_bytes()[..3]);
+            f.extend_from_slice(&(y / 2).to_le_bytes()[..3]);
+            f.extend_from_slice(&(w - 1).to_le_bytes()[..3]);
+            f.extend_from_slice(&(h - 1).to_le_bytes()[..3]);
+            f.extend_from_slice(&delay.to_le_bytes()[..3]);
+            f.push(*flags);
+            f.extend_from_slice(&still_chunks(still));
+            body.extend_from_slice(b"ANMF");
+            body.extend_from_slice(&(f.len() as u32).to_le_bytes());
+            body.extend_from_slice(&f);
+            if f.len() & 1 == 1 {
+                body.push(0);
+            }
+        }
+        let mut out = b"RIFF".to_vec();
+        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&body);
+        out
+    }
+
+    #[test]
+    fn the_fixture_animation_gives_its_frames_with_delays_and_the_first_frame_matches_decode() {
+        let f = include_bytes!("../tests/data/webp_anim.webp");
+        let a = decode_animated(f).unwrap();
+        assert_eq!((a.width, a.height, a.frames.len()), (40, 30, 2));
+        assert!(a.frames.iter().all(|fr| fr.delay_ms == 100 && fr.rgba.len() == 40 * 30 * 4));
+        assert_eq!(decode(f).unwrap().rgba, a.frames[0].rgba);
+        assert_ne!(a.frames[0].rgba, a.frames[1].rgba, "the two frames differ");
+    }
+
+    #[test]
+    fn a_still_picture_is_one_frame() {
+        let f = include_bytes!("../tests/data/webp_lossless_opaque.webp");
+        let a = decode_animated(f).unwrap();
+        assert_eq!(a.frames.len(), 1);
+        assert_eq!(a.frames[0].rgba, decode(f).unwrap().rgba);
+    }
+
+    #[test]
+    fn frames_are_placed_at_their_offsets_and_dispose_and_blend_follow_the_format() {
+        let still = include_bytes!("../tests/data/webp_lossless_opaque.webp");
+        let (w, h) = {
+            let b = decode(still).unwrap();
+            (b.width, b.height)
+        };
+        let (cw, ch) = (w + 20, h + 10);
+        // frame 1 at (4, 2), kept; frame 2 at (0, 0), cleared afterwards (flag 1); frame 3 at (10, 6) overwrites
+        let f = animated(cw, ch, &[(4, 2, 2, still, 40), (0, 0, 3, still, 5), (10, 6, 2, still, 60)]);
+        let a = decode_animated(&f).unwrap();
+        assert_eq!((a.width, a.height, a.frames.len()), (cw, ch, 3));
+        assert_eq!(a.frames.iter().map(|x| x.delay_ms).collect::<Vec<_>>(), [40, 100, 60], "a delay under 20 ms of 0 to 10 is read as 100 ms");
+        let px = |fr: &AFrame, x: u32, y: u32| -> [u8; 4] { fr.rgba[((y * cw + x) * 4) as usize..][..4].try_into().unwrap() };
+        let pic = decode(still).unwrap();
+        let src = |x: u32, y: u32| -> [u8; 4] { pic.rgba[((y * w + x) * 4) as usize..][..4].try_into().unwrap() };
+        // frame 1: transparent outside, the picture inside at the offset
+        assert_eq!(px(&a.frames[0], 0, 0), [0, 0, 0, 0]);
+        assert_eq!(px(&a.frames[0], 4, 2), src(0, 0));
+        assert_eq!(px(&a.frames[0], 4 + w - 1, 2 + h - 1), src(w - 1, h - 1));
+        // frame 2 shows frame 1's leftovers outside its own rectangle and its own pixels inside (opaque, so overwritten)
+        assert_eq!(px(&a.frames[1], 0, 0), src(0, 0));
+        assert_eq!(px(&a.frames[1], 4 + w - 1, 2 + h - 1), src(w - 1, h - 1));
+        // frame 2 was disposed to transparent in its rectangle: frame 3 starts from frame 1's pixels outside that rectangle, none inside
+        assert_eq!(px(&a.frames[2], 2, 1), [0, 0, 0, 0], "inside frame 2's rectangle after the clear, outside frame 3's");
+        assert_eq!(px(&a.frames[2], 10, 6), src(0, 0));
+    }
+
+    #[test]
+    fn bad_animations_give_the_frames_before_the_break_or_an_error() {
+        let still = include_bytes!("../tests/data/webp_lossless_opaque.webp");
+        let (w, h) = {
+            let b = decode(still).unwrap();
+            (b.width, b.height)
+        };
+        // the second frame does not fit the canvas
+        let f = animated(w, h, &[(0, 0, 2, still, 50), (2, 2, 2, still, 50)]);
+        assert_eq!(decode_animated(&f).unwrap().frames.len(), 1);
+        // the first frame does not fit
+        let f = animated(w, h, &[(2, 2, 2, still, 50)]);
+        assert!(decode_animated(&f).unwrap_err().contains("outside"));
+        // no frames at all
+        assert!(decode_animated(&animated(w, h, &[])).is_err());
+        // cut anywhere: an error or fewer frames, never a panic
+        let f = animated(w + 4, h + 4, &[(0, 0, 2, still, 50), (4, 4, 0, still, 50), (2, 2, 3, still, 50)]);
+        for len in 0..f.len() {
+            let _ = decode_animated(&f[..len]);
+        }
+    }
+
+    #[test]
+    fn a_translucent_frame_is_blended_over_the_canvas() {
+        let alpha = include_bytes!("../tests/data/webp_lossless.webp");
+        let opaque = include_bytes!("../tests/data/webp_lossless_opaque.webp");
+        let (a_pic, o_pic) = (decode(alpha).unwrap(), decode(opaque).unwrap());
+        let (cw, ch) = (a_pic.width.max(o_pic.width), a_pic.height.max(o_pic.height));
+        let blended = decode_animated(&animated(cw, ch, &[(0, 0, 0, opaque, 50), (0, 0, 0, alpha, 50)])).unwrap();
+        let overwritten = decode_animated(&animated(cw, ch, &[(0, 0, 0, opaque, 50), (0, 0, 2, alpha, 50)])).unwrap();
+        let w = cw as usize;
+        for y in 0..a_pic.height as usize {
+            for x in 0..a_pic.width as usize {
+                let s = &a_pic.rgba[(y * a_pic.width as usize + x) * 4..][..4];
+                let b = &blended.frames[1].rgba[(y * w + x) * 4..][..4];
+                let o = &overwritten.frames[1].rgba[(y * w + x) * 4..][..4];
+                assert_eq!(o, s, "no blend: the frame replaces the canvas");
+                if s[3] == 0 {
+                    // fully transparent source: the earlier frame (opaque, where it covers) stays
+                    if x < o_pic.width as usize && y < o_pic.height as usize {
+                        assert_eq!(b, &blended.frames[0].rgba[(y * w + x) * 4..][..4], "transparent pixel leaves the canvas as it was");
+                    }
+                } else if s[3] == 255 {
+                    assert_eq!(b, s);
+                }
+            }
+        }
     }
 }

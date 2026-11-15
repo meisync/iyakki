@@ -33,6 +33,10 @@ struct Rig {
 }
 
 fn rig(tag: &str, wait_ms: u64) -> Rig {
+    rig_usb(tag, wait_ms, Arc::new(NoUsb))
+}
+
+fn rig_usb(tag: &str, wait_ms: u64, usb: Arc<dyn crate::cameras::UsbProvider>) -> Rig {
     let dir = std::fs::canonicalize(crate::testdir::unique("camtools", tag)).unwrap();
     let svc = Services::open(&dir.join("svc"), Arc::new(Dead), Arc::new(Dead)).unwrap();
     svc.on_login("amy", "amy-pass-123", false);
@@ -42,7 +46,7 @@ fn rig(tag: &str, wait_ms: u64) -> Rig {
         data: dir.join("data"),
         secrets: Arc::new(VaultCamSecrets(svc.clone())),
         people: Arc::new(|| vec!["amy".into(), "bob".into()]),
-        usb: Arc::new(NoUsb),
+        usb,
         h264: Arc::new(NoH264),
         encode: Arc::new(|_, _, _| vec![0xFF, 0xD8, 0, 0, 0]),
         after_save: Arc::new(|_| {}),
@@ -517,4 +521,101 @@ mod motion_tests {
         m.motion.shutdown();
         t.hub.stop_all();
     }
+}
+
+struct OneWebcam;
+impl crate::cameras::UsbProvider for OneWebcam {
+    fn list(&self) -> Vec<crate::cameras::UsbCam> {
+        vec![crate::cameras::UsbCam { id: "video0".into(), name: "HD Webcam".into(), builtin: false }]
+    }
+    fn open(&self, _: &str) -> Result<Box<dyn crate::cameras::Feed>, crate::cameras::FeedErr> {
+        Err(crate::cameras::FeedErr::Lost("not opened in this test".into()))
+    }
+}
+
+/// A USB camera whose opens and releases are counted: the red "in use" sign of the shell follows the device being open.
+struct CountingUsb {
+    opened: Arc<std::sync::atomic::AtomicUsize>,
+    open_now: Arc<std::sync::atomic::AtomicIsize>,
+}
+
+struct CountingFeed(Arc<std::sync::atomic::AtomicIsize>);
+
+impl Drop for CountingFeed {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl crate::cameras::Feed for CountingFeed {
+    fn next(&mut self) -> Result<crate::cameras::Picture, crate::cameras::FeedErr> {
+        std::thread::sleep(Duration::from_millis(10));
+        Ok(crate::cameras::Picture::Jpeg(JPG.to_vec()))
+    }
+}
+
+impl crate::cameras::UsbProvider for CountingUsb {
+    fn list(&self) -> Vec<crate::cameras::UsbCam> {
+        vec![crate::cameras::UsbCam { id: "usb:video0".into(), name: "Built-in camera".into(), builtin: true }]
+    }
+    fn open(&self, _: &str) -> Result<Box<dyn crate::cameras::Feed>, crate::cameras::FeedErr> {
+        self.opened.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.open_now.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Box::new(CountingFeed(self.open_now.clone())))
+    }
+}
+
+#[test]
+fn the_card_for_a_snapshot_from_this_computers_camera_says_a_red_sign_shows_and_one_for_a_network_camera_does_not() {
+    let cam = FakeCamera::rtsp(cfg(None));
+    let r = rig_usb("usbcard", 50, Arc::new(OneWebcam));
+    let amy = Who { user: "amy".into(), manage: false, usb_ok: true, home: r.dir.join("home/amy"), may_write: Arc::new(|_| true) };
+    let id = r.tools.hub.save(&amy, None, &crate::cameras::NewSpec { name: "Porch".into(), address: format!("rtsp://127.0.0.1:{}/live", cam.port), user: String::new(), allowed: vec![] }, None).unwrap();
+    let usb = r.tools.preview("camera_snapshot", &json!({"camera": "HD Webcam"})).expect("a card for the USB camera");
+    assert!(usb.contains("HD Webcam") && usb.contains("red sign shows"), "{usb}");
+    let net = r.tools.preview("camera_snapshot", &json!({"camera": id})).expect("a card for the network camera");
+    assert!(net.contains("Porch") && !net.contains("red sign"), "{net}");
+}
+
+#[test]
+fn a_usb_snapshot_says_on_its_card_that_the_red_sign_shows_and_the_camera_is_open_only_while_it_works() {
+    use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
+    let dir = std::fs::canonicalize(crate::testdir::unique("camtools", "usbsign")).unwrap();
+    let svc = Services::open(&dir.join("svc"), Arc::new(Dead), Arc::new(Dead)).unwrap();
+    svc.on_login("amy", "amy-pass-123", false);
+    let (opened, open_now) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicIsize::new(0)));
+    let env = Env {
+        data: dir.join("data"),
+        secrets: Arc::new(VaultCamSecrets(svc.clone())),
+        people: Arc::new(|| vec!["amy".into()]),
+        usb: Arc::new(CountingUsb { opened: opened.clone(), open_now: open_now.clone() }),
+        h264: Arc::new(NoH264),
+        encode: Arc::new(|_, _, _| vec![0xFF, 0xD8, 0, 0, 0]),
+        after_save: Arc::new(|_| {}),
+        audit: Arc::new(|_, _, _| {}),
+        backoff_ms: 30,
+        idle: Duration::from_millis(300),
+    };
+    let hub = Arc::new(Hub::new(env));
+    let who = Who { user: "amy".into(), manage: false, usb_ok: true, home: dir.join("home/amy"), may_write: Arc::new(|_| true) };
+    let tools = CameraViewTools::new(Arc::new(NoTools), hub.clone(), who, svc.clone());
+    // the card says it: a red sign shows while the computer's own camera works
+    let card = tools.preview("camera_snapshot", &json!({"camera": "Built-in camera"})).unwrap_or_else(|| panic!("no card: {}", tools.describe("camera_snapshot", &json!({"camera": "Built-in camera"}))));
+    assert!(card.contains("Built-in camera") && card.contains("This uses this computer's camera; a red sign shows while it works."), "{card}");
+    assert_eq!(opened.load(Ordering::SeqCst), 0, "the card alone never opens the camera");
+    // a network camera's card has no such sentence
+    let cam = FakeCamera::rtsp(cfg(None));
+    tools.call("cameras_add", &json!({"name": "Yard", "address": format!("rtsp://127.0.0.1:{}/live", cam.port)})).unwrap();
+    assert!(!tools.preview("camera_snapshot", &json!({"camera": "Yard"})).unwrap().contains("red sign"));
+    // the snapshot opens the device (the sign is on), saves one picture, and the device is let go of again (the sign goes out)
+    let out = tools.call("camera_snapshot", &json!({"camera": "Built-in camera"})).unwrap();
+    assert!(out.contains("IMAGE: ") && out.contains("/Pictures/camera-"), "{out}");
+    assert!(opened.load(Ordering::SeqCst) >= 1);
+    let t = Instant::now();
+    while open_now.load(Ordering::SeqCst) > 0 {
+        assert!(t.elapsed() < Duration::from_secs(10), "the camera is still open after the idle time");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    hub.stop_all();
+    assert_eq!(open_now.load(Ordering::SeqCst), 0);
 }

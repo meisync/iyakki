@@ -109,7 +109,7 @@ pub fn glyph_unicode(name: &str) -> Option<char> {
         ("Ydieresis", 'Ÿ'), ("florin", 'ƒ'), ("circumflex", 'ˆ'), ("tilde", '˜'), ("dotlessi", 'ı'), ("Lslash", 'Ł'), ("lslash", 'ł'),
         ("fraction", '\u{2044}'), ("summation", '∑'), ("product", '∏'), ("radical", '√'), ("infinity", '∞'), ("notequal", '≠'),
         ("lessequal", '≤'), ("greaterequal", '≥'), ("approxequal", '≈'), ("partialdiff", '∂'), ("integral", '∫'), ("Omega", 'Ω'), ("pi", 'π'),
-        ("arrowright", '→'), ("arrowleft", '←'), ("arrowup", '↑'), ("arrowdown", '↓'), ("checkmark", '✓'),
+        ("alpha", 'α'), ("beta", 'β'), ("gamma", 'γ'), ("delta", 'δ'), ("epsilon", 'ε'), ("zeta", 'ζ'), ("eta", 'η'), ("theta", 'θ'), ("iota", 'ι'), ("kappa", 'κ'), ("lambda", 'λ'), ("nu", 'ν'), ("xi", 'ξ'), ("omicron", 'ο'), ("rho", 'ρ'), ("sigma", 'σ'), ("tau", 'τ'), ("upsilon", 'υ'), ("phi", 'φ'), ("chi", 'χ'), ("psi", 'ψ'), ("omega", 'ω'), ("Gamma", 'Γ'), ("Delta", 'Δ'), ("Theta", 'Θ'), ("Lambda", 'Λ'), ("Xi", 'Ξ'), ("Pi", 'Π'), ("Sigma", 'Σ'), ("Phi", 'Φ'), ("Psi", 'Ψ'), ("arrowright", '→'), ("arrowleft", '←'), ("arrowup", '↑'), ("arrowdown", '↓'), ("checkmark", '✓'),
     ];
     T.iter().find(|(n, _)| *n == name).map(|(_, c)| *c)
 }
@@ -269,6 +269,14 @@ impl Font {
                 _ => {}
             }
             let mut table = base_table(base);
+            // an embedded Type 1 program with no /Encoding of its own in the PDF (or a dictionary with only differences) uses the encoding the
+            // program carries (F-PDF-08): its names are read from the program's plain-text head
+            let explicit_base = matches!(&encobj, Obj::Name(_)) || matches!(&encobj, Obj::Dict(d) if file.get(d, "BaseEncoding").name().is_some());
+            if sub == "Type1" && !explicit_base && depth < 4 {
+                if let Some(t) = fdesc.dict().and_then(|d| type1_builtin_encoding(file, d)) {
+                    table = t;
+                }
+            }
             if let Some(Obj::Arr(a)) = diffs {
                 let mut code = 0usize;
                 for x in a.iter().take(2000) {
@@ -293,6 +301,14 @@ impl Font {
                     f.to_unicode = parse_cmap(&d.data);
                     f.has_to_unicode = !f.to_unicode.is_empty();
                 }
+            }
+        }
+        // a font with no Unicode map of its own (F-PDF-08): an embedded TrueType font read with the glyph number as the code (Identity-H,
+        // CIDFontType2): what the font's own cmap table says each glyph is
+        if f.two_byte && !f.has_to_unicode && depth < 4 {
+            if let Some(m) = glyph_unicode_from_font_file(file, fd) {
+                f.to_unicode = m;
+                f.has_to_unicode = true;
             }
         }
         f
@@ -342,6 +358,80 @@ impl Font {
     pub fn can_extract(&self) -> bool {
         self.has_to_unicode || !self.two_byte
     }
+}
+
+/// The glyph number -> text table of an embedded TrueType font, from its cmap table turned around. Only for a Type 0 font whose codes ARE
+/// the glyph numbers (Identity encoding, CIDFontType2, no CIDToGIDMap or the identity one). Where several characters share a glyph the
+/// lowest printable one is taken. None for any other font.
+fn glyph_unicode_from_font_file(file: &File, fd: &Dict) -> Option<HashMap<u32, String>> {
+    if !file.get(fd, "Encoding").name().is_some_and(|n| n.starts_with("Identity")) {
+        return None;
+    }
+    let desc = file.get(fd, "DescendantFonts");
+    let dd = desc.arr().and_then(|a| a.first().cloned()).map(|x| file.resolve(&x)).and_then(|x| x.dict().cloned())?;
+    if file.get(&dd, "Subtype").name() != Some("CIDFontType2") {
+        return None;
+    }
+    match file.get(&dd, "CIDToGIDMap") {
+        Obj::Name(n) if &*n != "Identity" => return None,
+        Obj::Stream(..) => return None,
+        _ => {}
+    }
+    let fdesc = file.get(&dd, "FontDescriptor");
+    let d = fdesc.dict()?;
+    let s = file.get(d, "FontFile2");
+    let data = file.stream_data(&s).ok()?;
+    let ttf = crate::ttf::Ttf::parse(&data.data)?;
+    let mut best: HashMap<u16, u32> = HashMap::new();
+    for (cp, gid) in ttf.cmap_map() {
+        let printable = char::from_u32(cp).is_some_and(|c| !c.is_control()) && !(0xE000..=0xF8FF).contains(&cp);
+        match best.get(&gid) {
+            Some(old) if *old <= cp && (printable || !char::from_u32(*old).is_some_and(|c| !c.is_control())) => {}
+            Some(old) if !printable && char::from_u32(*old).is_some_and(|c| !c.is_control()) => {}
+            _ => {
+                best.insert(gid, cp);
+            }
+        }
+    }
+    let out: HashMap<u32, String> = best.into_iter().filter_map(|(g, cp)| char::from_u32(cp).map(|c| (g as u32, c.to_string()))).collect();
+    (!out.is_empty()).then_some(out)
+}
+
+/// The encoding an embedded Type 1 font program carries: `dup 65 /A put` lines in its plain-text head (before `eexec`). None for a program that says
+/// `StandardEncoding`, has no encoding array, or is not a Type 1 program in `FontFile`.
+fn type1_builtin_encoding(file: &File, fdesc: &Dict) -> Option<Vec<Option<char>>> {
+    let s = file.get(fdesc, "FontFile");
+    if !matches!(s, Obj::Stream(..)) {
+        return None;
+    }
+    let data = file.stream_data(&s).ok()?.data;
+    let head = &data[..data.len().min(1 << 16)];
+    let end = head.windows(5).position(|w| w == b"eexec").unwrap_or(head.len());
+    let text = String::from_utf8_lossy(&head[..end]);
+    let at = text.find("/Encoding")?;
+    let rest = &text[at + "/Encoding".len()..];
+    if rest.trim_start().starts_with("StandardEncoding") {
+        return None;
+    }
+    let mut table: Vec<Option<char>> = vec![None; 256];
+    let mut found = 0;
+    let mut toks = rest.split_whitespace();
+    while let Some(t) = toks.next() {
+        if t == "def" {
+            break;
+        }
+        if t != "dup" {
+            continue;
+        }
+        let (Some(code), Some(name), Some("put")) = (toks.next(), toks.next(), toks.next()) else { break };
+        if let (Ok(c), Some(n)) = (code.parse::<usize>(), name.strip_prefix('/')) {
+            if c < 256 {
+                table[c] = glyph_unicode(n);
+                found += 1;
+            }
+        }
+    }
+    (found > 0).then_some(table)
 }
 
 fn base_from_name(n: &str, dflt: Base) -> Base {

@@ -93,7 +93,16 @@ fn write_var(dir: &Path, base: &str, data: &[u8]) -> Result<(), String> {
     let mut bytes = ATTRS.to_le_bytes().to_vec();
     bytes.extend_from_slice(data);
     // efivarfs takes the attributes and the value in one write
-    std::fs::write(&path, bytes).map_err(|e| format!("writing the firmware variable {base}: {e}"))
+    std::fs::write(&path, bytes).map_err(|e| write_error(base, &e))
+}
+
+/// What a person reads when a firmware variable cannot be written: a read-only `efivarfs` and a variable that stays immutable get their own words.
+pub fn write_error(base: &str, e: &std::io::Error) -> String {
+    match e.raw_os_error() {
+        Some(30) => format!("the firmware variables are read-only here (efivarfs is mounted read-only), so {base} was not written; nothing was changed"),
+        Some(1) | Some(13) => format!("the firmware refused to write {base} ({e}): the variable is protected or this needs administrator rights; nothing was changed"),
+        _ => format!("writing the firmware variable {base}: {e}"),
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -211,6 +220,35 @@ pub fn own_disk_first(dir: &Path, backup_dir: &Path) -> Result<Option<String>, S
     Ok(Some(format!("Boot{mine:04X} is first in the boot order now")))
 }
 
+/// Save the order as it is now, unless a copy is already kept (the first copy is the one `revert` puts back).
+pub fn save_order_backup(dir: &Path, backup_dir: &Path) -> Result<(), String> {
+    let backup = backup_dir.join(ORDER_BACKUP);
+    if backup.exists() {
+        return Ok(());
+    }
+    let order = read_var(dir, "BootOrder").map(|v| u16s(&v)).unwrap_or_default();
+    std::fs::write(&backup, order.iter().map(|n| format!("{n:04X}")).collect::<Vec<_>>().join(",")).map_err(|e| format!("saving the old boot order: {e}"))
+}
+
+/// Remove `BootNext` when it points at our own entry (a one-time start that was asked for and not used). Other values are left alone.
+pub fn clear_own_boot_next(dir: &Path) -> bool {
+    let (Some(n), Some(mine)) = (boot_next(dir), own_entry(dir)) else { return false };
+    if n != mine {
+        return false;
+    }
+    let path = dir.join(var_name("BootNext"));
+    clear_immutable(&path);
+    std::fs::remove_file(&path).is_ok()
+}
+
+/// Is the firmware variable folder mounted read-only, in this `/proc/mounts` text?
+pub fn efivarfs_read_only(mounts: &str) -> bool {
+    mounts.lines().any(|l| {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        f.get(2) == Some(&"efivarfs") && f.get(3).is_some_and(|o| o.split(',').any(|x| x == "ro"))
+    })
+}
+
 /// Put the saved order back (and forget the copy). `Ok(false)`: there was nothing saved.
 pub fn revert_boot_order(dir: &Path, backup_dir: &Path) -> Result<bool, String> {
     let backup = backup_dir.join(ORDER_BACKUP);
@@ -220,6 +258,23 @@ pub fn revert_boot_order(dir: &Path, backup_dir: &Path) -> Result<bool, String> 
     write_var(dir, "BootOrder", &bytes)?;
     let _ = std::fs::remove_file(&backup);
     Ok(true)
+}
+
+/// The number of our own entry (the first one described "IYAKKI"), if there is one.
+pub fn own_entry(dir: &Path) -> Option<u16> {
+    list_entries(dir).into_iter().find(|(_, d, _)| d == DESCRIPTION).map(|(n, _, _)| n)
+}
+
+/// The entry the firmware will try once at the next start (`BootNext`), if one is set.
+pub fn boot_next(dir: &Path) -> Option<u16> {
+    read_var(dir, "BootNext").and_then(|v| u16s(&v).first().copied())
+}
+
+/// Set `BootNext` to our own entry: the next restart (only that one) starts IYAKKI, the order is not changed. `Ok(None)`: no entry of ours.
+pub fn set_boot_next_to_own(dir: &Path) -> Result<Option<String>, String> {
+    let Some(mine) = own_entry(dir) else { return Ok(None) };
+    write_var(dir, "BootNext", &mine.to_le_bytes())?;
+    Ok(Some(format!("Boot{mine:04X}")))
 }
 
 /// Create (or, when an entry described "IYAKKI" is already there, replace) our boot entry and append it to `BootOrder`.

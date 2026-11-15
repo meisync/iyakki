@@ -60,8 +60,8 @@ fn the_voice_tile_opens_for_a_user_not_for_a_guest_and_is_hidden_in_cloud_mode_w
     let mut g = Gfx::new(1280, 720);
     sh.render(&mut g);
     assert!(sh.hits().iter().any(|h| h.label == "READ ALOUD") && sh.hits().iter().any(|h| h.label == "DICTATE"));
-    sh.handle(&Event::Key(Key::Esc)); // leaves the box
-    sh.handle(&Event::Key(Key::Esc)); // and goes back
+    key(&mut sh, Key::Esc); // leaves the box
+    key(&mut sh, Key::Esc); // and goes back
     assert_eq!(sh.screen_name(), "launcher");
     // cloud mode: hidden when there is no sound output, kept when the machine has one
     sh.set_cloud_for_test(cloudmode::cloud_mode(Setting::Auto, &Facts { audio: false, ..Facts::full() }));
@@ -97,7 +97,7 @@ fn signing_in_plays_the_login_sound_and_signing_out_the_logout_sound() {
     assert!(fake::played().is_empty(), "the login form is silent");
     login(&mut sh, "root", "rootpass12");
     assert_eq!(played(1), vec![wav_len(Cue::Login)]);
-    sh.handle(&Event::Key(Key::Esc)); // sign out
+    key(&mut sh, Key::Esc); // sign out
     assert_eq!(sh.screen_name(), "login");
     assert_eq!(played(2), vec![wav_len(Cue::Login), wav_len(Cue::Logout)]);
     // the same lengths mean different sounds
@@ -110,7 +110,7 @@ fn a_slow_output_never_holds_sign_out_back_and_a_quick_one_finishes_before_the_s
     let slow = fake::reset(3000);
     let mut sh = signed_in("cue-slow");
     let t = Instant::now();
-    sh.handle(&Event::Key(Key::Esc));
+    key(&mut sh, Key::Esc);
     let took = t.elapsed();
     assert_eq!(sh.screen_name(), "login");
     assert!(took < ss::LOGOUT_WAIT + Duration::from_millis(500), "sign-out took {took:?}");
@@ -121,7 +121,7 @@ fn a_slow_output_never_holds_sign_out_back_and_a_quick_one_finishes_before_the_s
     let mut sh = signed_in("cue-quick");
     quick.played.lock().unwrap().clear();
     let t = Instant::now();
-    sh.handle(&Event::Key(Key::Esc));
+    key(&mut sh, Key::Esc);
     assert!(t.elapsed() < Duration::from_millis(600), "{:?}", t.elapsed());
     assert!(quick.played.lock().unwrap().contains(&wav_len(Cue::Logout)), "the logout sound was over before the screen changed");
 }
@@ -133,7 +133,7 @@ fn nothing_plays_when_the_switch_is_off_muted_without_an_output_or_in_cloud_mode
     let (mut sh, _) = shell_with_users("cue-off");
     sh.services_for_demo().update_system_sounds(|s| s.enabled = false).unwrap();
     login(&mut sh, "root", "rootpass12");
-    sh.handle(&Event::Key(Key::Esc));
+    key(&mut sh, Key::Esc);
     std::thread::sleep(Duration::from_millis(100));
     assert!(out.played.lock().unwrap().is_empty());
     // one cue off, the others on
@@ -141,7 +141,7 @@ fn nothing_plays_when_the_switch_is_off_muted_without_an_output_or_in_cloud_mode
     let (mut sh, _) = shell_with_users("cue-one");
     sh.services_for_demo().update_system_sounds(|s| s.logout = false).unwrap();
     login(&mut sh, "root", "rootpass12");
-    sh.handle(&Event::Key(Key::Esc));
+    key(&mut sh, Key::Esc);
     assert_eq!(played(1), vec![wav_len(Cue::Login)]);
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(out.played.lock().unwrap().len(), 1, "no logout sound");
@@ -157,7 +157,7 @@ fn nothing_plays_when_the_switch_is_off_muted_without_an_output_or_in_cloud_mode
     *out.ready.lock().unwrap() = Err("no sound output".into());
     let (mut sh, _) = shell_with_users("cue-nooutput");
     login(&mut sh, "root", "rootpass12");
-    sh.handle(&Event::Key(Key::Esc));
+    key(&mut sh, Key::Esc);
     std::thread::sleep(Duration::from_millis(100));
     assert!(out.played.lock().unwrap().is_empty());
     // cloud mode without sound hardware

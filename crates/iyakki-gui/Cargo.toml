@@ -4,7 +4,7 @@
 
 [package]
 name = "iyakki-gui"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -28,7 +28,7 @@ path = "src/installer.rs"
 iyakki-usb = { path = "../iyakki-usb" }
 iyakki-sdk-emulator = { path = "../iyakki-sdk-emulator" }
 iyakki-proxy = { path = "../iyakki-proxy" }
-iyakki-ui = { path = "../iyakki-ui" }
+iyakki-edit = { path = "../iyakki-edit" }
 iyakki-shell = { path = "../iyakki-shell" }
 iyakki-agent = { path = "../iyakki-agent" }
 iyakki-storage = { path = "../iyakki-storage" }

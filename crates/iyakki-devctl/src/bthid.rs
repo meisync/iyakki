@@ -25,6 +25,8 @@ pub const PSM_HID_CONTROL: u16 = 0x0011;
 pub const PSM_HID_INTERRUPT: u16 = 0x0013;
 /// SDP: the HID service class.
 pub const UUID_HID: u16 = 0x1124;
+/// The Device ID (PnP information) service: vendor and product numbers.
+pub const UUID_PNP: u16 = 0x1200;
 
 // ------------------------------------------------------------------------------------------------ channels and errors
 
@@ -215,9 +217,14 @@ pub const MAX_DESCRIPTOR: usize = 4096;
 
 /// Service Search Attribute Request for every attribute of the HID service records.
 pub fn sdp_request(tid: u16, continuation: &[u8]) -> Vec<u8> {
+    sdp_request_for(UUID_HID, tid, continuation)
+}
+
+/// The same request for the service records of another 16-bit service class.
+pub fn sdp_request_for(uuid: u16, tid: u16, continuation: &[u8]) -> Vec<u8> {
     let mut p = Vec::new();
     p.extend_from_slice(&[0x35, 0x03]);
-    p.extend_from_slice(&elem_uuid16(UUID_HID));
+    p.extend_from_slice(&elem_uuid16(uuid));
     p.extend_from_slice(&0xffffu16.to_be_bytes()); // maximum attribute byte count
     p.extend_from_slice(&[0x35, 0x05, 0x0a, 0x00, 0x00, 0xff, 0xff]); // attribute id range 0x0000..0xffff
     p.push(continuation.len() as u8);
@@ -281,11 +288,46 @@ pub fn parse_hid_record(lists: &[u8]) -> Result<HidRecord, HidError> {
 
 /// Reads the HID record over an SDP channel, following continuation fragments.
 pub fn fetch_hid_record<C: Channel>(ch: &mut C, timeout: Duration) -> Result<HidRecord, HidError> {
+    parse_hid_record(&fetch_lists(ch, UUID_HID, timeout)?)
+}
+
+/// The vendor and product numbers a device states in its Device ID record (UUID 0x1200).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PnpRecord {
+    pub vendor: u16,
+    pub product: u16,
+    pub version: u16,
+    /// 1: the vendor number was given out by the Bluetooth SIG, 2: by the USB Implementers Forum.
+    pub source: u16,
+}
+
+/// The first usable Device ID record in the assembled attribute lists: vendor id (0x0201), product id (0x0202), version (0x0203) and
+/// the source of the vendor number (0x0205, 1 or 2). A record without a vendor, with a vendor of 0, or with another source is skipped.
+pub fn parse_pnp_record(lists: &[u8]) -> Option<PnpRecord> {
+    let (top, _) = parse_elem(lists).ok()?;
+    for rec in top.seq().unwrap_or(&[]) {
+        let attrs = rec.seq().unwrap_or(&[]);
+        let get = |id: u64| attrs.chunks_exact(2).find(|c| c[0].uint() == Some(id)).and_then(|c| c[1].uint());
+        let (Some(vendor), Some(product), Some(source)) = (get(0x0201), get(0x0202), get(0x0205)) else { continue };
+        if vendor == 0 || vendor > 0xffff || product > 0xffff || !matches!(source, 1 | 2) {
+            continue;
+        }
+        return Some(PnpRecord { vendor: vendor as u16, product: product as u16, version: get(0x0203).unwrap_or(0).min(0xffff) as u16, source: source as u16 });
+    }
+    None
+}
+
+/// Reads the Device ID record over an SDP channel. `Ok(None)`: the device has none (most keyboards say nothing here, and that is fine).
+pub fn fetch_pnp_record<C: Channel>(ch: &mut C, timeout: Duration) -> Result<Option<PnpRecord>, HidError> {
+    Ok(parse_pnp_record(&fetch_lists(ch, UUID_PNP, timeout)?))
+}
+
+fn fetch_lists<C: Channel>(ch: &mut C, uuid: u16, timeout: Duration) -> Result<Vec<u8>, HidError> {
     let deadline = Instant::now() + timeout;
     let mut all = Vec::new();
     let mut cont: Vec<u8> = Vec::new();
     for tid in 1u16..=64 {
-        ch.send(&sdp_request(tid, &cont))?;
+        ch.send(&sdp_request_for(uuid, tid, &cont))?;
         let pdu = loop {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
@@ -303,7 +345,7 @@ pub fn fetch_hid_record<C: Channel>(ch: &mut C, timeout: Duration) -> Result<Hid
             return Err(HidError::Sdp("the answer is far too long".into()));
         }
         if next.is_empty() {
-            return parse_hid_record(&all);
+            return Ok(all);
         }
         cont = next;
     }

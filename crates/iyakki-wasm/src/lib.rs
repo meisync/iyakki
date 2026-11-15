@@ -9,6 +9,7 @@
 //! - `token_get(index, out_ptr) -> i32`           copy granted token #index (16 bytes)
 //! - `fs_read(tok_ptr, path_ptr, path_len, buf_ptr, buf_cap) -> i32`  bytes read, or <0
 //! - `fs_write(tok_ptr, path_ptr, path_len, data_ptr, data_len) -> i32`  0, or <0
+//! - `stdin_read(buf_ptr, buf_cap) -> i32`      next bytes of the input the host gave this run (0 at the end; needs `with_stdin`)
 //! - `http_fetch(tok_ptr, url_ptr, url_len, body_ptr, body_len, out_ptr, out_cap) -> i32`  response bytes, or <0
 //!   (GET if `body_len == 0`, else POST; needs a `NetConnect(host)` token and a configured [`NetBackend`])
 //!
@@ -45,6 +46,8 @@ pub enum WasmError {
     OutOfFuel,
     #[error("wall-clock limit hit (the guest ran longer than its time budget)")]
     Timeout,
+    #[error("stopped: the person asked the run to stop")]
+    Cancelled,
     #[error("guest trapped: {0}")]
     Trap(String),
     #[error("failed to load module: {0}")]
@@ -84,6 +87,8 @@ struct HostState {
     log: Vec<u8>,
     host_calls: Vec<Event>,
     net: Option<Arc<dyn NetBackend>>,
+    stdin: Arc<Vec<u8>>,
+    stdin_pos: usize,
 }
 
 /// Frozen state of a guest between calls: linear memory, exported mutable
@@ -167,6 +172,8 @@ pub struct Sandbox {
     linker: Arc<Linker<HostState>>,
     net: Option<Arc<dyn NetBackend>>,
     wall: Option<std::time::Duration>,
+    stdin: Arc<Vec<u8>>,
+    cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Sandbox {
@@ -177,7 +184,7 @@ impl Sandbox {
         let engine = Engine::new(&c).map_err(|e| WasmError::Load(e.to_string()))?;
         let mut linker = Linker::new(&engine);
         register_host(&mut linker).map_err(|e| WasmError::Load(e.to_string()))?;
-        Ok(Self { engine, cfg, linker: Arc::new(linker), net: None, wall: None })
+        Ok(Self { engine, cfg, linker: Arc::new(linker), net: None, wall: None, stdin: Arc::new(Vec::new()), cancel: None })
     }
 
     /// Route guest `iyakki.http_fetch` calls through `net`. Without one, they fail with `errno::NET`.
@@ -191,6 +198,22 @@ impl Sandbox {
     /// every clone of this sandbox shares, so give each time-limited sandbox its own `Sandbox::new`.
     pub fn with_wall_time(mut self, d: std::time::Duration) -> Self {
         self.wall = Some(d);
+        self
+    }
+
+    /// Input for the guest: it reads it with `iyakki.stdin_read` (at most 1 MiB is kept; nothing else is ever readable this way).
+    pub fn with_stdin(mut self, input: Vec<u8>) -> Self {
+        let mut input = input;
+        input.truncate(1 << 20);
+        self.stdin = Arc::new(input);
+        self
+    }
+
+    /// Stop a call as soon as `flag` becomes true (checked every 20 ms, also while the guest is inside a host function that returns
+    /// later). The call then ends with [`WasmError::Cancelled`]. Like the wall time it uses the engine's epoch: give each cancellable
+    /// sandbox its own `Sandbox::new`.
+    pub fn with_cancel(mut self, flag: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.cancel = Some(flag);
         self
     }
 
@@ -250,7 +273,7 @@ impl Sandbox {
             .build();
         let mut store = Store::new(
             &self.engine,
-            HostState { vfs, caps, tokens, limits, log: Vec::new(), host_calls: Vec::new(), net: self.net.clone() },
+            HostState { vfs, caps, tokens, limits, log: Vec::new(), host_calls: Vec::new(), net: self.net.clone(), stdin: self.stdin.clone(), stdin_pos: 0 },
         );
         store.limiter(|s| &mut s.limits);
         store.set_fuel(self.cfg.fuel).map_err(|e| WasmError::Load(e.to_string()))?;
@@ -355,12 +378,20 @@ impl Session {
         let n = usize::from(has_result);
         // the watchdog bumps the engine's epoch when the time is up; dropping `_done` ends it early
         let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
-        if let Some(d) = self.sandbox.wall {
+        if self.sandbox.wall.is_some() || self.sandbox.cancel.is_some() {
             self.store.set_epoch_deadline(1);
             let engine = self.sandbox.engine.clone();
+            let (wall, cancel) = (self.sandbox.wall, self.sandbox.cancel.clone());
             std::thread::spawn(move || {
-                if done_rx.recv_timeout(d) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
-                    engine.increment_epoch();
+                let start = std::time::Instant::now();
+                loop {
+                    if done_rx.recv_timeout(std::time::Duration::from_millis(20)) != Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+                        return;
+                    }
+                    if cancel.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::SeqCst)) || wall.is_some_and(|d| start.elapsed() >= d) {
+                        engine.increment_epoch();
+                        return;
+                    }
                 }
             });
         }
@@ -370,7 +401,11 @@ impl Session {
         let remaining = self.store.get_fuel().unwrap_or(0);
         let host_calls = std::mem::take(&mut self.store.data_mut().host_calls);
         let log = std::mem::take(&mut self.store.data_mut().log);
-        call_res.map_err(classify)?;
+        let cancelled = self.sandbox.cancel.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::SeqCst));
+        call_res.map_err(|e| match classify(e) {
+            WasmError::Timeout if cancelled => WasmError::Cancelled,
+            other => other,
+        })?;
         let result = match (has_result, &results[0]) {
             (true, wasmtime::Val::I32(v)) => Some(*v),
             (true, _) => return Err(WasmError::NoEntry(entry.into())),
@@ -574,6 +609,15 @@ fn register_host(l: &mut Linker<HostState>) -> wasmtime::Result<()> {
         }
     })?;
 
+    l.func_wrap("iyakki", "stdin_read", |mut c: Caller<'_, HostState>, ptr: i32, cap: i32| -> i32 {
+        let Some((b, st)) = mem_slice(&mut c, ptr, cap) else { return errno::BAD_MEMORY };
+        let rest = st.stdin.get(st.stdin_pos..).unwrap_or(&[]);
+        let n = rest.len().min(b.len());
+        b[..n].copy_from_slice(&rest[..n]);
+        st.stdin_pos += n;
+        n as i32
+    })?;
+
     l.func_wrap("iyakki", "token_get", |mut c: Caller<'_, HostState>, idx: i32, out: i32| -> i32 {
         let tok = match usize::try_from(idx).ok().and_then(|i| c.data().tokens.get(i).copied()) {
             Some(t) => t,
@@ -721,6 +765,50 @@ mod tests {
         let sb = Sandbox::new(SandboxConfig { fuel: 10_000, ..Default::default() }).unwrap();
         let wat = r#"(module (func (export "main") (loop br 0)))"#;
         assert!(matches!(sb.run(wat.as_bytes(), "main", fs, caps, vec![]), Err(WasmError::OutOfFuel)));
+    }
+
+    #[test]
+    fn the_guest_reads_its_input_in_pieces_and_gets_zero_at_the_end() {
+        let (fs, caps) = setup();
+        let wat = r#"(module
+          (import "iyakki" "stdin_read" (func $rd (param i32 i32) (result i32)))
+          (import "iyakki" "log" (func $log (param i32 i32)))
+          (memory (export "memory") 1)
+          (func (export "main") (result i32) (local $n i32) (local $total i32)
+            (block $done (loop $again
+              (local.set $n (call $rd (i32.const 0) (i32.const 4)))
+              (br_if $done (i32.eqz (local.get $n)))
+              (call $log (i32.const 0) (local.get $n))
+              (local.set $total (i32.add (local.get $total) (local.get $n)))
+              (br $again)))
+            (local.get $total)))"#;
+        let sb = Sandbox::new(SandboxConfig::default()).unwrap().with_stdin(b"hello world\n".to_vec());
+        let out = sb.run(wat.as_bytes(), "main", fs.clone(), caps.clone(), vec![]).unwrap();
+        assert_eq!(out.log, b"hello world\n");
+        assert_eq!(out.result, Some(12));
+        // no input given: the first read is already the end
+        let none = Sandbox::new(SandboxConfig::default()).unwrap();
+        assert_eq!(none.run(wat.as_bytes(), "main", fs, caps, vec![]).unwrap().result, Some(0));
+    }
+
+    #[test]
+    fn a_cancel_flag_really_stops_a_running_guest_and_is_told_apart_from_the_time_limit() {
+        let (fs, caps) = setup();
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sb = Sandbox::new(SandboxConfig { fuel: u64::MAX / 2, ..Default::default() }).unwrap().with_cancel(flag.clone());
+        let wat = r#"(module (func (export "main") (loop br 0)))"#;
+        let f2 = flag.clone();
+        let t = std::time::Instant::now();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            f2.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        assert!(matches!(sb.run(wat.as_bytes(), "main", fs.clone(), caps.clone(), vec![]), Err(WasmError::Cancelled)));
+        assert!(t.elapsed() < std::time::Duration::from_secs(5), "the loop was interrupted, not waited out");
+        // a flag that is never raised changes nothing
+        let calm = Sandbox::new(SandboxConfig::default()).unwrap().with_cancel(Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        let quick = r#"(module (func (export "main") (result i32) i32.const 7))"#;
+        assert_eq!(calm.run(quick.as_bytes(), "main", fs, caps, vec![]).unwrap().result, Some(7));
     }
 
     #[test]

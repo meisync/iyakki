@@ -263,3 +263,13 @@ fn the_probe_sees_a_source_with_nothing_to_play_a_blank_picture_a_refused_play_a
     let ok = "var ms = new MediaSource(); posts.push(JSON.stringify(ms.addSourceBuffer('audio/webm; codecs=\"opus\"')));";
     assert_eq!(run_probe(false, true, ok), r#"["{\"ok\":\"audio/webm; codecs=\\\"opus\\\"\"}"]"#);
 }
+
+#[test]
+fn the_settings_text_says_each_state_in_words_and_names_where_to_install() {
+    for a in [Addon::NotInImage, Addon::Absent, Addon::Incomplete(vec!["libavcodec.so.61".into()]), Addon::Ready] {
+        let (t, h) = settings_text(&a);
+        assert!(t.starts_with("Audio and video add-on") && !h.is_empty(), "{a:?}");
+    }
+    assert!(settings_text(&Addon::Absent).1.contains("Store, Setup, Browser audio and video") && settings_text(&Addon::Absent).1.contains("does not ship or host"));
+    assert!(settings_text(&Addon::Incomplete(vec!["libavcodec.so.61".into()])).1.contains("libavcodec.so.61"));
+}

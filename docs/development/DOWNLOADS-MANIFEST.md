@@ -162,6 +162,13 @@ Done (2026-10-28):
 2. Two paths wired as proof: the **version** lookup of `cli:kubectl` and `cli:helm` (`clis::latest_version`). A fetched manifest that names a version replaces the
    `stable.txt` lookup; with no manifest, or a damaged one, the old lookup runs. The checksum is still the vendor's file from the code's address.
 
+Done (2026-11-12, M22): the version lookups of every float+sum tool that has a vendor lookup (`dlmanifest::WIRED`: kubectl, helm, k3s,
+terraform, opentofu, gh, arduino-cli, nodejs, uv, claude-code, github-copilot, ollama, grpcurl) take the version from a fetched manifest when it names one
+(and it looks like a version: a digit, or `v` and a digit); step 5 below, the gate check, as `iyakki-relcheck licence-check` step 3a
+(`crates/iyakki-relcheck/src/manifest.rs`: the file against the rows of `legal/downloads.txt`; it does not check the signature, which needs the key);
+the assistant tools `cli_download_list` (free) and `cli_download_list_check` (asks first). Still open: the second half of step 2 (the download and
+checksum addresses stay in the code), step 4, and a first published manifest.
+
 Backlog, in this order (each step is small and has its own test):
 
 1. ~~**Fetch and apply**~~ done 2026-10-28, see section 9. (Was: the Store (or a background job) downloads `downloads.json` and `.sig` from the configured address (size limit 1 MiB, https

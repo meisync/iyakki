@@ -575,3 +575,56 @@ fn live_whole_image_downloads_and_verifies() {
     let _ = std::fs::remove_dir_all(&dir);
     assert!(r.is_ok(), "{r:?}");
 }
+
+// ------------------------------------------------------------------------------------------------ KI-083: no network
+
+/// The real transport (not a fake) with short limits, pointed at local servers only.
+fn real_streamer(limit_s: u64) -> impl Streamer {
+    use iyakki_proxy::guard::{Guarded, Limits, Preflight};
+    use iyakki_proxy::https::UreqStreamer;
+    let one = std::time::Duration::from_secs(limit_s);
+    Preflight::new(Guarded::new(UreqStreamer::with_response_timeout(one), Limits { start: one, first_byte: one, stall: one }), std::time::Duration::from_secs(3))
+}
+
+fn local_policy() -> Policy {
+    // the default pause between tries (3 s times the attempt) is kept on purpose: the test proves it is not waited for
+    Policy { hosts: vec!["127.0.0.1".into()], ..Policy::default() }
+}
+
+#[test]
+fn a_download_with_nothing_listening_fails_within_seconds_without_the_retry_pauses() {
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port(); // closed again at once
+    let dir = tmp("closedport");
+    let t = std::time::Instant::now();
+    let e = download(&real_streamer(2), &local_policy(), &format!("http://127.0.0.1:{port}/BaseSystem.dmg"), "tok", &dir.join("a.dmg"), MAX_IMAGE, 5, &mut |_, _| {}, &|| false).unwrap_err();
+    assert!(t.elapsed() < std::time::Duration::from_secs(4), "took {:?}: {e}", t.elapsed());
+    assert!(e.starts_with("No network:") && e.contains("Retry") && e.contains("Cancel") && !e.contains("did not finish"), "{e}");
+    // the session step says the same, without a second layer of wording
+    let e = get_session(&real_streamer(2), &format!("http://127.0.0.1:{port}")).unwrap_err();
+    assert!(e.starts_with("No network:"), "{e}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_server_that_accepts_and_never_answers_ends_as_a_network_problem_at_the_limit() {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    let keep = std::thread::spawn(move || {
+        let mut held = Vec::new();
+        l.set_nonblocking(false).unwrap();
+        while let Ok((s, _)) = l.accept() {
+            held.push(s); // read nothing, send nothing
+            if held.len() >= 2 {
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(8));
+    });
+    let dir = tmp("stalled");
+    let t = std::time::Instant::now();
+    let e = download(&real_streamer(1), &local_policy(), &format!("http://127.0.0.1:{port}/BaseSystem.dmg"), "tok", &dir.join("a.dmg"), MAX_IMAGE, 1, &mut |_, _| {}, &|| false).unwrap_err();
+    assert!(t.elapsed() < std::time::Duration::from_secs(8), "took {:?}: {e}", t.elapsed());
+    assert!(e.contains("network problem") && e.contains("did not finish"), "{e}");
+    drop(keep);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

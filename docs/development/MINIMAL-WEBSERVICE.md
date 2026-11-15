@@ -287,6 +287,7 @@ certificate kept with a private key, own certificate used); a client signs in, c
 readiness 503 without a reason in the body; graceful shutdown; token store hashed, 0600, restart, expiry, revoke; strict route matching.
 
 **Not built** (still the plan above): `flows-runner` write side, `data-api` and `tile-host` profiles, `/metrics`, the WebSocket
+(2026-11-14: a first slice of `tile-host` is built: `--profile tile-host` lists and runs the built-in WASM tiles and nothing else; the web-bundle tile runtime in the row above is still not built.)
 stream, developer-mode pairing and `api:*` scopes, MCP bridge, the SSRF refusal suite for the service's web tools (the tools use the
 existing egress policy; the hostile-host tests of section 4 were not written for this route), structured JSON logs, a `headless`
 feature, container manifests, a Helm chart, per-request token budgets beyond the role's `AgentBudget`.
@@ -296,3 +297,32 @@ feature, container manifests, a Helm chart, per-request token budgets beyond the
 `Services`, and the firewall rule was built as data but not applied to a kernel. No run with a real model provider, no container run, no
 load test, no browser client. The `boundary` test currently fails on `crates/iyakki-agent/src/clis.rs` (a row in BOUNDARY.md for a
 file that no longer spawns), which is another change and not this one; the new files add no process spawn or system call.
+
+## 10. Programs that sign in with a paired key (F-WEBSVC-06, 2026-11-12)
+
+A program on a computer that is paired through developer mode can sign in to the service without a password: it sends
+`POST /api/v1/login` with the four signed-request headers of developer mode (`x-iyakki-dev-key`, `-time`, `-nonce`, `-sig`; built by
+`devmode::auth::sign_headers` with the service's certificate fingerprint, the one it pins). The signature covers the method, path, query,
+body hash, time, a fresh nonce and the fingerprint, so a copy cannot be replayed or sent to another service. The answer is a bearer token
+for the account the computer acts as, plus `computer` and `scopes`.
+
+What that token may call is decided by the **`api:*` scopes** an administrator granted that computer on the device
+(`devmode::apiscopes`): `api:status`, `api:chat`, `api:flows`, `api:schedules`, `api:files`, `api:git`, `api:data`, `api:tenant`,
+`api:notify`, `api:tiles`, each also as `:read` (GET only). A new computer holds none (the sign-in is refused with 403 until one is
+granted). The scopes are read again at every request, so a revoke or an unpairing applies at once. The administrator routes and the
+sign-in routes are in no grantable family, so no scope reaches them; ending its own token (`logout`) is always allowed. The account's own
+role and policy still apply on top. A program token is never written to the token file. The embedded desktop service has no certificate of
+its own and answers 501 to a signed sign-in. Chat: `devmode_api_scopes` and `devmode_api_scope_set`. Settings -> Developer mode lists the families for the
+selected computer (tap a line, or i and m). Client: `iyakki_agent::devmode::webclient::ApiClient::new(&home, host, port, fingerprint)?`, then
+`sign_in()` (the signed login; returns the user, the computer and the scopes) and `call(method, path, query, body)` (a refusal comes back as
+its status, 403 when the scopes do not allow the route); the certificate is pinned by the fingerprint. Not built: rate limits per computer
+beyond the usual per-account ones.
+
+
+
+## Status 2026-11-13 (P-C, round 5)
+
+* `iyakki-core` has a `headless` cargo feature: the service without the shell (`dist/release/headless-check.sh` proves it on a Mac; size 43.3 MB against 93.1 MB with the shell in the `fast` profile). The service runs over a `ServiceEnv`.
+* First profile after `agent-api` and `cloud`: `flows-runner` (sign-in and the person's flows: list, read, start, follow runs). Not yet: import, validate, stop, schedules, answering steps, `data-api`, `tile-host`.
+
+* Round 6: `flows-runner` has import, validate, stop and the schedules routes; `data-api` exists (sign-in and the three read-only data tools). `build-cloud.sh docker --headless` is the container recipe for the headless program (checked by `headless-check.sh`, not built).

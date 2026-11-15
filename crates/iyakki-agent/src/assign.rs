@@ -156,6 +156,8 @@ pub struct AgentRun {
     pub progress: u32,
     /// The latest run log of the agent (`runs::RunLog` id): what RUNS opens.
     pub run_id: String,
+    /// The person pressed Stop on the board for an Autopilot of the chat: the run reads this at its next step, stops and clears it.
+    pub stop_requested: bool,
 }
 
 impl AgentRun {
@@ -248,7 +250,7 @@ impl Doc {
         }
         let number = self.agents.iter().map(|a| a.number).max().unwrap_or(0) + 1;
         let name = format!("Agent {number}");
-        self.agents.push(AgentRun { key: key.into(), name: name.clone(), custom_name: false, number, engine: engine.into(), kind: kind.into(), rows: rows.to_vec(), state: AState::Working, started: now, updated: now, ended: 0, steps: vec![], files: vec![], tokens: 0, cost_cents: 0.0, notes: vec![], last: String::new(), run_ref: run_ref.into(), progress: 0, run_id: String::new() });
+        self.agents.push(AgentRun { key: key.into(), name: name.clone(), custom_name: false, number, engine: engine.into(), kind: kind.into(), rows: rows.to_vec(), state: AState::Working, started: now, updated: now, ended: 0, steps: vec![], files: vec![], tokens: 0, cost_cents: 0.0, notes: vec![], last: String::new(), run_ref: run_ref.into(), progress: 0, run_id: String::new(), stop_requested: false });
         self.prune();
         name
     }
@@ -282,6 +284,31 @@ impl Doc {
             a.custom_name = true;
         }
         Ok(())
+    }
+
+    /// Stop on the board for an Autopilot of the chat (its run lives in the chat, so the board leaves it a request that the run reads at
+    /// its next step). Only an Autopilot that is going on can be asked; a task is stopped by its own manager.
+    pub fn request_stop(&mut self, key: &str) -> Result<(), String> {
+        let a = self.at(key).ok_or("there is no such agent")?;
+        if a.kind != "autopilot" {
+            return Err("only an Autopilot of the chat is stopped this way".into());
+        }
+        if !a.state.active() {
+            return Err("this Autopilot is not running".into());
+        }
+        a.stop_requested = true;
+        Ok(())
+    }
+
+    /// Was a stop asked for on the board? (Read by the Autopilot's own run.)
+    pub fn stop_asked(&self, key: &str) -> bool {
+        self.get(key).is_some_and(|a| a.stop_requested)
+    }
+
+    pub fn clear_stop(&mut self, key: &str) {
+        if let Some(a) = self.at(key) {
+            a.stop_requested = false;
+        }
     }
 
     pub fn set_state(&mut self, key: &str, st: AState, why: &str, now: i64) {
@@ -461,6 +488,7 @@ fn to_json(d: &Doc) -> Value {
             "key": a.key, "name": a.name, "custom_name": a.custom_name, "number": a.number, "engine": a.engine, "kind": a.kind, "rows": a.rows,
             "state": a.state.key(), "started": a.started, "updated": a.updated, "ended": a.ended, "tokens": a.tokens, "cost_cents": a.cost_cents,
             "notes": a.notes, "last": a.last, "run_ref": a.run_ref, "progress": a.progress, "run_id": a.run_id,
+            "stop": a.stop_requested,
             "steps": a.steps.iter().map(|s| json!({"at": s.at, "kind": s.kind.key(), "text": s.text})).collect::<Vec<_>>(),
             "files": a.files.iter().map(|f| json!({"path": f.path, "adds": f.adds, "dels": f.dels})).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
@@ -499,6 +527,7 @@ fn from_json(v: &Value) -> Doc {
             run_ref: s(a, "run_ref"),
             progress: n(a, "progress").clamp(0, 100) as u32,
             run_id: s(a, "run_id"),
+            stop_requested: a.get("stop").and_then(Value::as_bool).unwrap_or(false),
         });
     }
     for c in v.get("conflicts").and_then(Value::as_array).into_iter().flatten().take(100) {

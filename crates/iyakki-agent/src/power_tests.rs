@@ -95,7 +95,7 @@ fn a_file_the_kernel_will_not_take_is_reported_in_words() {
 fn what_the_machine_can_do_is_read_from_sys() {
     let d = pstate("caps");
     let c = caps(&PowerEnv::at(&d));
-    assert_eq!(c, Caps { profiles: true, energy_preference: true, sleep: true, t2: false, laptop: false });
+    assert_eq!(c, Caps { profiles: true, energy_preference: true, sleep: true, t2: false, laptop: false, lid: false });
     put(&d, "class/dmi/id/sys_vendor", "Apple Inc.");
     put(&d, "class/dmi/id/product_name", "Macmini8,1");
     assert!(caps(&PowerEnv::at(&d)).t2);
@@ -105,13 +105,13 @@ fn what_the_machine_can_do_is_read_from_sys() {
     assert!(!caps(&PowerEnv::at(&d)).sleep, "hibernate alone is not sleep");
     let lim = limits(&caps(&PowerEnv::at(&d)));
     assert!(lim.iter().any(|l| l.starts_with("Sleep: not available")));
-    assert!(lim.iter().any(|l| l.starts_with("Lid and power button: not supported")), "said plainly, always");
-    assert!(!caps(&PowerEnv::at(&d)).lid_and_button());
+    assert!(!caps(&PowerEnv::at(&d)).lid, "no lid switch on this made-up machine");
+    assert!(lim.iter().all(|l| !l.starts_with("Lid and power button: not supported")), "the old 'not supported' line is gone");
 }
 
 #[test]
 fn sleep_after_idle_is_off_by_default_waits_for_the_time_and_for_work_to_end() {
-    let c = Caps { profiles: true, energy_preference: true, sleep: true, t2: false, laptop: true };
+    let c = Caps { profiles: true, energy_preference: true, sleep: true, t2: false, laptop: true, lid: false };
     let s = PowerSettings::default();
     assert_eq!((s.sleep_after_min, s.profile), (0, Profile::Balanced));
     assert_eq!(idle_action(&s, &c, 99_999, &[]), Idle::Nothing, "off by default");
@@ -126,7 +126,7 @@ fn sleep_after_idle_is_off_by_default_waits_for_the_time_and_for_work_to_end() {
 
 #[test]
 fn on_a_t2_mac_the_safe_fallback_is_the_power_saver_profile_unless_the_experiment_is_on() {
-    let t2 = Caps { profiles: true, energy_preference: true, sleep: true, t2: true, laptop: false };
+    let t2 = Caps { profiles: true, energy_preference: true, sleep: true, t2: true, laptop: false, lid: false };
     let s = PowerSettings { sleep_after_min: 5, ..Default::default() };
     assert_eq!(idle_action(&s, &t2, 300, &[]), Idle::SaverProfile);
     assert_eq!(idle_action(&PowerSettings { sleep_experimental: true, ..s.clone() }, &t2, 300, &[]), Idle::Sleep);
@@ -159,4 +159,84 @@ fn the_saved_profile_is_applied_once_and_left_alone_when_already_set() {
     assert!(apply_saved(&env, &s).unwrap().contains("set (4 values)"));
     assert!(apply_saved(&env, &s).unwrap().contains("already set"));
     assert!(apply_saved(&PowerEnv::at(dir("saved-vm")), &s).is_err());
+}
+
+#[test]
+fn the_lid_is_read_from_the_acpi_button_files_and_only_the_closing_moment_acts() {
+    let d = pstate("lid");
+    let env = PowerEnv::at(&d);
+    assert_eq!(lid_state(&env.proc), None, "no lid switch");
+    assert!(!caps(&env).lid);
+    put(&d, "proc/acpi/button/lid/LID0/state", "state:      open");
+    assert_eq!(lid_state(&env.proc), Some(Lid::Open));
+    assert!(caps(&env).lid);
+    put(&d, "proc/acpi/button/lid/LID0/state", "state:      closed");
+    assert_eq!(lid_state(&env.proc), Some(Lid::Closed));
+    put(&d, "proc/acpi/button/lid/LID0/state", "garbage");
+    assert_eq!(lid_state(&env.proc), None, "an unreadable state is no state");
+    let c = Caps { profiles: true, energy_preference: true, sleep: true, t2: false, laptop: true, lid: true };
+    let sleep = PowerSettings { lid: LidAction::Sleep, ..Default::default() };
+    let lock = PowerSettings { lid: LidAction::Lock, ..Default::default() };
+    let (o, x) = (Some(Lid::Open), Some(Lid::Closed));
+    assert_eq!(lid_step(o, x, &PowerSettings::default(), &c, &[], false), Do::Nothing, "off by default");
+    assert_eq!(lid_step(o, x, &lock, &c, &[], false), Do::Lock);
+    assert_eq!(lid_step(o, x, &sleep, &c, &[], false), Do::Sleep);
+    // not an edge: already closed at start, still closed, opening, no switch
+    assert_eq!(lid_step(None, x, &sleep, &c, &[], false), Do::Nothing, "a lid shut when the shell started does nothing");
+    assert_eq!(lid_step(x, x, &sleep, &c, &[], false), Do::Nothing);
+    assert_eq!(lid_step(x, o, &sleep, &c, &[], false), Do::Nothing);
+    assert_eq!(lid_step(None, None, &sleep, &c, &[], false), Do::Nothing);
+    // a sleep that cannot happen is a lock, never a silent nothing
+    assert_eq!(lid_step(o, x, &sleep, &Caps { sleep: false, ..c.clone() }, &[], false), Do::Lock, "no sleep state");
+    assert_eq!(lid_step(o, x, &sleep, &Caps { t2: true, ..c.clone() }, &[], false), Do::Lock, "a T2 Mac without the experiment");
+    assert_eq!(lid_step(o, x, &PowerSettings { sleep_experimental: true, ..sleep.clone() }, &Caps { t2: true, ..c.clone() }, &[], false), Do::Sleep);
+    assert_eq!(lid_step(o, x, &sleep, &c, &["an install".into()], false), Do::Lock, "work in progress");
+    assert_eq!(lid_step(o, x, &PowerSettings { sleep_when_busy: true, ..sleep.clone() }, &c, &["an install".into()], false), Do::Sleep, "unless the person allowed it");
+    assert_eq!(lid_step(o, x, &sleep, &c, &[], true), Do::Lock, "another screen is connected: the person is still working, so it only locks");
+    assert_eq!(lid_step(o, x, &lock, &c, &[], true), Do::Lock);
+}
+
+#[test]
+fn another_screen_is_found_from_the_drm_connectors_and_the_laptops_own_does_not_count() {
+    let d = pstate("docked");
+    assert!(!external_display(&d), "no display folder at all");
+    put(&d, "class/drm/card0-eDP-1/status", "connected");
+    put(&d, "class/drm/card0-DP-1/status", "disconnected");
+    put(&d, "class/drm/card0/uevent", "x");
+    assert!(!external_display(&d), "only the built-in screen is connected");
+    put(&d, "class/drm/card0-HDMI-A-1/status", "connected");
+    assert!(external_display(&d));
+    put(&d, "class/drm/card0-HDMI-A-1/status", "disconnected");
+    assert!(!external_display(&d));
+    put(&d, "class/drm/card1-DP-2/status", "connected");
+    assert!(external_display(&d), "a second graphics card's connector counts too");
+}
+
+#[test]
+fn the_power_button_opens_the_card_by_default_and_a_sleep_that_cannot_happen_falls_back_to_the_card() {
+    let c = Caps { profiles: true, energy_preference: true, sleep: true, t2: false, laptop: false, lid: false };
+    let with = |b: ButtonAction| PowerSettings { button: b, ..Default::default() };
+    assert_eq!(button_press(&PowerSettings::default(), &c, &[]), Do::Card, "as before");
+    assert_eq!(button_press(&with(ButtonAction::Lock), &c, &[]), Do::Lock);
+    assert_eq!(button_press(&with(ButtonAction::Nothing), &c, &[]), Do::Nothing);
+    assert_eq!(button_press(&with(ButtonAction::Sleep), &c, &[]), Do::Sleep);
+    assert_eq!(button_press(&with(ButtonAction::Sleep), &Caps { sleep: false, ..c.clone() }, &[]), Do::Card);
+    assert_eq!(button_press(&with(ButtonAction::Sleep), &c, &["a job".into()]), Do::Card, "not while a job runs");
+}
+
+#[test]
+fn the_lid_and_button_choices_cycle_parse_and_an_old_settings_file_keeps_the_defaults() {
+    assert_eq!([LidAction::Nothing.next(), LidAction::Lock.next(), LidAction::Sleep.next()], [LidAction::Lock, LidAction::Sleep, LidAction::Nothing]);
+    assert_eq!(ButtonAction::Nothing.next(), ButtonAction::Card);
+    assert_eq!((LidAction::parse("sleep"), LidAction::parse("lock"), LidAction::parse("x")), (Some(LidAction::Sleep), Some(LidAction::Lock), None));
+    assert_eq!((ButtonAction::parse("card"), ButtonAction::parse("nothing"), ButtonAction::parse("off")), (Some(ButtonAction::Card), Some(ButtonAction::Nothing), None));
+    let old: PowerSettings = serde_json::from_str(r#"{"profile":"balanced","sleep_after_min":10}"#).unwrap();
+    assert_eq!((old.lid, old.button, old.sleep_after_min), (LidAction::Nothing, ButtonAction::Card, 10));
+    let new: PowerSettings = serde_json::from_str(r#"{"lid":"sleep","button":"lock"}"#).unwrap();
+    assert_eq!((new.lid, new.button), (LidAction::Sleep, ButtonAction::Lock));
+    // a laptop whose kernel shows no lid switch is told so
+    let laptop = Caps { laptop: true, ..Default::default() };
+    assert!(limits(&laptop).iter().any(|l| l.starts_with("Lid:") && l.contains("no lid switch")));
+    assert!(limits(&Caps { laptop: true, lid: true, ..Default::default() }).iter().all(|l| !l.starts_with("Lid:")));
+    assert!(limits(&Caps::default()).iter().all(|l| !l.starts_with("Lid:")), "a desktop has no lid to talk about");
 }

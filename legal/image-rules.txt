@@ -99,6 +99,9 @@ own | boot/grub/themes/iyakki/* | IYAKKI boot menu theme (background listed in l
 
 # ---- generated at build time from licensed inputs
 generated | dev/console | device node made by the image build
+generated | boot.catalog | El Torito boot catalog written by xorriso when the ISO is made (no licensed content)
+generated | boot/fat.efi | the FAT image holding the UEFI GRUB program, made from the grub2 package (GPL-3.0-or-later) by the ISO step; the same GRUB files are listed under the grub2 package in the root
+generated | boot/grub/grub-eltorito.img | GRUB BIOS El Torito boot image made by grub-mkimage from the grub2 package (GPL-3.0-or-later)
 generated | etc/machine-id | placeholder written by the image build
 generated | etc/ssl/certs/ca-certificates.crt | bundle made from the ca-certificates package (MPL-2.0 data)
 generated | lib/udev/hwdb.bin | udev hardware database compiled from hwdata (GPL-2.0+)
@@ -127,6 +130,7 @@ own | efi/iyakki-boot/loader.efi | IYAKKI's own boot loader, built from the iyak
 own | efi/iyakki-boot/boot.cfg | the boot loader's menu, written by dist/buildroot/boot-loader-stage.sh (reviewed 2026-11-10)
 own | efi/iyakki-boot/install-media | marker file written by boot-loader-stage.sh (install media only) (reviewed 2026-11-10)
 own | etc/modprobe.d/iyakki-mt7921.conf | IYAKKI's modprobe setting for MediaTek MT7921 cards (dist/buildroot/board/iyakki/overlay), Apache-2.0 (reviewed 2026-11-10)
+own | etc/modprobe.d/iyakki-broadcom-unsupported.conf | IYAKKI's modprobe setting that keeps the b43, b43legacy, brcmsmac, bcma and ssb drivers from loading on their own (dist/buildroot/board/iyakki/overlay), Apache-2.0 (reviewed 2026-11-11)
 generated | lib/modules/*/updates/nvidia*.ko | NVIDIA open GPU kernel modules (MIT / GPL-2.0, source github.com/NVIDIA/open-gpu-kernel-modules) built by the nvidia-open package of the Mac/PC kernel build and copied from the kernel donor tree; licence text and source are in legal/extra-licences/nvidia-open and legal-info (reviewed 2026-11-10)
 generated | usr/share/gst-plugins-base/1.0/license-translations.dict | data file of gst1-plugins-base (LGPL-2.1+): source gst-libs/gst/tag/license-translations.dict in the package; absent from the web tree's package file list (reviewed 2026-11-10)
 generated | usr/share/gstreamer-1.0/encoding-profiles/* | encoding profile files installed by gst1-plugins-bad (data/meson.build; LGPL-2.1+, the package has a reviewed row); absent from the web tree's package file list (reviewed 2026-11-10)

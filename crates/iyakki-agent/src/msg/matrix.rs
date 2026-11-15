@@ -220,11 +220,11 @@ impl MatrixChannel {
         self
     }
     pub fn with_since(self, since: Option<String>) -> MatrixChannel {
-        self.st.lock().unwrap().since = since;
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).since = since;
         self
     }
     pub fn with_known_user(self, user_id: &str) -> MatrixChannel {
-        self.st.lock().unwrap().user_id = user_id.into();
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).user_id = user_id.into();
         self
     }
     /// Use this add-on for encrypted rooms (tests, and the loader of the real add-on).
@@ -234,7 +234,7 @@ impl MatrixChannel {
     }
     /// The sync position to keep for the next start.
     pub fn since(&self) -> Option<String> {
-        self.st.lock().unwrap().since.clone()
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).since.clone()
     }
 
     fn t(&self) -> &str {
@@ -242,7 +242,7 @@ impl MatrixChannel {
     }
 
     fn note(&self, r: &Result<(), &ChannelError>) {
-        let mut s = self.st.lock().unwrap();
+        let mut s = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         s.health = match r {
             Ok(()) => Health::ok(),
             Err(ChannelError::Auth(m)) => Health { state: HealthState::AuthFailed, reason: m.clone() },
@@ -268,7 +268,7 @@ impl MatrixChannel {
 
     fn count_waits(&self, r: &Reply) {
         if r.waited > 0 {
-            self.st.lock().unwrap().rate.limited_count += r.waited;
+            self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).rate.limited_count += r.waited;
         }
     }
 
@@ -281,7 +281,7 @@ impl MatrixChannel {
         if id.is_empty() {
             return Err(ChannelError::Rejected("the homeserver did not say who we are".into()));
         }
-        self.st.lock().unwrap().user_id = id.clone();
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).user_id = id.clone();
         Ok(id)
     }
 
@@ -395,13 +395,13 @@ impl Channel for MatrixChannel {
     }
 
     fn identity(&self) -> Result<ChannelIdentity, ChannelError> {
-        let known = self.st.lock().unwrap().user_id.clone();
+        let known = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).user_id.clone();
         let id = if known.is_empty() { self.whoami()? } else { known };
         Ok(ChannelIdentity { display: id.split(':').next().unwrap_or(&id).trim_start_matches('@').to_string(), id })
     }
 
     fn health(&self) -> Health {
-        self.st.lock().unwrap().health.clone()
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).health.clone()
     }
 
     fn send(&self, m: &OutMessage) -> Result<Delivery, ChannelError> {
@@ -452,9 +452,9 @@ impl Channel for MatrixChannel {
     }
 
     fn poll(&self, wait: Duration) -> Result<Vec<InMessage>, ChannelError> {
-        let since = self.st.lock().unwrap().since.clone();
+        let since = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).since.clone();
         let own = {
-            let known = self.st.lock().unwrap().user_id.clone();
+            let known = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).user_id.clone();
             if known.is_empty() { self.whoami().unwrap_or_default() } else { known }
         };
         let filter = json!({"room": {"timeline": {"limit": if since.is_some() { 20 } else { 1 }}, "state": {"lazy_load_members": true}, "ephemeral": {"types": []}, "account_data": {"types": []}}, "presence": {"types": []}, "account_data": {"types": []}});
@@ -484,7 +484,7 @@ impl Channel for MatrixChannel {
             }
         }
         if let Some(n) = next {
-            self.st.lock().unwrap().since = Some(n);
+            self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).since = Some(n);
         }
         Ok(out)
     }
@@ -494,6 +494,6 @@ impl Channel for MatrixChannel {
     }
 
     fn rate_info(&self) -> RateInfo {
-        self.st.lock().unwrap().rate
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).rate
     }
 }

@@ -71,6 +71,11 @@ impl PortGate for FirewallGate {
         Ok(())
     }
 
+    fn clear_stale(&self) {
+        // the gate rules are the listener's own (REASON_GATE); the person's rules are never touched. A failure leaves them for the next change.
+        let _ = (self.apply)(&BTreeSet::new(), self.reach);
+    }
+
     fn close(&self, port: u16) {
         let mut set = self.ports.lock().unwrap_or_else(|e| e.into_inner());
         let mut next = set.clone();

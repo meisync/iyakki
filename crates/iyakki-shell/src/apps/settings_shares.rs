@@ -152,7 +152,7 @@ impl SettingsApp {
     }
 
     pub(super) fn shares_buttons(&self) -> Vec<Btn> {
-        vec![("New share…", ACCENT, 'n'), ("Receive a package", TEXT, 'r'), ("Start/Stop", TEXT, 's'), ("Copy link", TEXT, 'c'), ("QR", TEXT, 'q'), ("Edit", TEXT, 'e'), ("New secret", TEXT, 't'), ("Delete", ERR, 'd'), ("Stop all", ERR, 'x'), ("Firewall", TEXT, 'f')]
+        vec![("New share…", ACCENT, 'n'), ("Receive a package", TEXT, 'r'), ("Start/Stop", TEXT, 's'), ("Copy link", TEXT, 'c'), ("QR", TEXT, 'q'), ("Edit", TEXT, 'e'), ("New secret", TEXT, 't'), ("Delete", ERR, 'd'), ("Stop all", ERR, 'x'), ("Media server", TEXT, 'm'), ("Firewall", TEXT, 'f')]
     }
 
     /// Open the form for a new share with `folder` filled in ("Share this folder…" in the IDE and EDIT).
@@ -225,6 +225,7 @@ impl SettingsApp {
             },
             Key::Char('r') => self.shares_package_drop(cx),
             Key::Char('f') => self.fw_open_shares(cx),
+            Key::Char('m') => self.media_server_toggle(cx),
             Key::Char('x') => {
                 let n = sf::running_total();
                 if n == 0 {
@@ -235,6 +236,61 @@ impl SettingsApp {
             }
             _ => {}
         }
+    }
+
+    /// `m`: the media server (UPnP/DLNA) of the person's shared folders. Off at once; on asks first, because every player on the local
+    /// network can then list and play the files without a password. The same switch is the chat tool `media_server_set`.
+    fn media_server_toggle(&mut self, cx: &AppCx) {
+        if iyakki_agent::upnp_serve::status_for(&cx.session.user).is_some() {
+            let was = iyakki_agent::upnp_serve::stop_user(&cx.session.user);
+            cx.audit.record(&cx.session.user, "settings.media_server", "off");
+            self.ok(if was { "The media server is off. Players can no longer see or play your files." } else { "The media server was already off." });
+            return;
+        }
+        let n = iyakki_agent::upnp_serve::share_folders(cx.services.dir(), &cx.session.user).len();
+        if n == 0 {
+            self.fail("There is no folder shared as Files to offer: make a share first (n). Websites and package drops are not offered.");
+            return;
+        }
+        self.modal = Some(Modal::Confirm(ConfirmKind::MediaServerOn, format!("Switch the media server on? TVs, phones and speakers on your local network will be able to list and play the audio and video files in {n} shared folder(s), without a password. Hidden files are not offered. It stops when you sign out. Press y to switch it on, or any other key to keep it off.")));
+    }
+
+    pub(super) fn media_server_start(&mut self, cx: &AppCx) {
+        let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+        let log: Arc<dyn Fn(&str, &str) + Send + Sync> = Arc::new(move |ev, d| audit.record(&user, ev, d));
+        match iyakki_agent::upnp_serve::start_for(cx.services.dir(), &cx.session.user, log) {
+            Ok(m) => {
+                cx.audit.record(&cx.session.user, "settings.media_server", "on");
+                self.ok(m);
+            }
+            Err(e) => self.fail(e),
+        }
+    }
+
+    /// The band at the top of the page: whether the media server is on, and who follows it for changes. Returns the height used.
+    fn render_media_band(&self, g: &mut Gfx, a: R, y: f32, s: f32, cx: &AppCx) -> f32 {
+        let on = iyakki_agent::upnp_serve::status_for(&cx.session.user);
+        let mut h = 0.0;
+        let (txt, col) = match on {
+            Some((port, n)) => (format!("Media server: on (port {port}, {n} audio and video files). m switches it off."), OK),
+            None => ("Media server: off. m offers the audio and video of your shared folders to TVs and players on this network.".to_string(), DIM),
+        };
+        for l in g.wrap(13.0 * s, &txt, Face::Bold, a.w).iter().take(2) {
+            g.text(a.x, y + h, 13.0 * s, col, l, Face::Bold);
+            h += 18.0 * s;
+        }
+        if on.is_some() {
+            let list = iyakki_agent::upnp_serve::subscriptions_for(&cx.session.user);
+            for l in g.wrap(12.0 * s, &iyakki_agent::upnp_serve::subscribers_text(&list), Face::Sans, a.w).iter().take(2) {
+                g.text(a.x, y + h, 12.0 * s, MUTED, l, Face::Sans);
+                h += 16.0 * s;
+            }
+            for sub in list.iter().take(4) {
+                g.text(a.x + 12.0 * s, y + h, 12.0 * s, MUTED, &format!("{} follows {} ({} min left)", sub.peer, sub.service, (sub.left_secs + 59) / 60), Face::Sans);
+                h += 16.0 * s;
+            }
+        }
+        h + 6.0 * s
     }
 
     pub(super) fn shares_stop_all(&mut self) {
@@ -321,6 +377,7 @@ impl SettingsApp {
             }
             y += 4.0 * s;
         }
+        y += self.render_media_band(g, a, y, s, cx);
         if running > 0 {
             g.text(a.x, y, 13.0 * s, rgb(255, 196, 94), &format!("{running} share(s) running now. 'Stop all sharing' (x) closes them at once."), Face::Bold);
             y += 22.0 * s;

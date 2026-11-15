@@ -165,6 +165,48 @@ pub fn scope_of(r: &SecretRef) -> Result<(crate::cloudvaultd::Scope, String), St
     Ok((Scope::Tenant, name))
 }
 
+/// The words of the refusal when a secret would go to a vault whose certificate is not pinned (same sentence as
+/// `VaultTarget::secret_client`). `LinkVault` hands this one on to the person; every other failure reads as "locked".
+pub const UNPINNED: &str = "secrets are only sent to a pinned vault: set IYAKKI_VAULT_FINGERPRINT";
+
+/// Operations that carry a secret (write, read, remove, make a scope for one) are refused unless the vault's certificate is pinned;
+/// the list of names, which carries no secret, is allowed so the configuration still shows what exists. This is the tenant
+/// configuration's side of the same rule as `VaultTarget::secret_client` (F-CLOUD-33).
+pub struct PinGuard<C: VaultOps> {
+    pub inner: C,
+    pub pinned: bool,
+}
+
+impl<C: VaultOps> VaultOps for PinGuard<C> {
+    fn list(&self, s: &crate::cloudvaultd::Scope) -> Result<Vec<String>, String> {
+        self.inner.list(s)
+    }
+    fn put(&self, s: &crate::cloudvaultd::Scope, name: &str, value: &[u8]) -> Result<(), String> {
+        if !self.pinned {
+            return Err(UNPINNED.into());
+        }
+        self.inner.put(s, name, value)
+    }
+    fn get(&self, s: &crate::cloudvaultd::Scope, name: &str) -> Result<Vec<u8>, String> {
+        if !self.pinned {
+            return Err(UNPINNED.into());
+        }
+        self.inner.get(s, name)
+    }
+    fn delete(&self, s: &crate::cloudvaultd::Scope, name: &str) -> Result<(), String> {
+        if !self.pinned {
+            return Err(UNPINNED.into());
+        }
+        self.inner.delete(s, name)
+    }
+    fn create_scope(&self, s: &crate::cloudvaultd::Scope) -> Result<(), String> {
+        if !self.pinned {
+            return Err(UNPINNED.into());
+        }
+        self.inner.create_scope(s)
+    }
+}
+
 /// The tenant vault as seen by ONE member (the person whose request is being served), over the vault service. It reads as unlocked
 /// exactly when this member holds a key on this volume and the service answers for them; otherwise (no key, no link, no answer, no
 /// right to the scope) `Locked`. Existence is read from the secret LIST (no value is opened); values are opened only inside
@@ -192,6 +234,7 @@ impl<C: VaultOps> SecretStore for LinkVault<C> {
         let (scope, name) = scope_of(r)?;
         match self.ops.put(&scope, &name, value.as_bytes()) {
             Ok(()) => Ok(()),
+            Err(e) if e == UNPINNED => Err(e),
             Err(e) if e.starts_with("404") => {
                 self.ops.create_scope(&scope).map_err(|_| "the tenant vault is locked".to_string())?;
                 self.ops.put(&scope, &name, value.as_bytes()).map_err(|_| "the tenant vault is locked".to_string())
@@ -201,11 +244,11 @@ impl<C: VaultOps> SecretStore for LinkVault<C> {
     }
     fn remove(&self, r: &SecretRef) -> Result<(), String> {
         let (scope, name) = scope_of(r)?;
-        self.ops.delete(&scope, &name).map_err(|_| "the tenant vault is locked or the secret is not there".to_string())
+        self.ops.delete(&scope, &name).map_err(|e| if e == UNPINNED { e } else { "the tenant vault is locked or the secret is not there".to_string() })
     }
     fn use_secret(&self, r: &SecretRef, _action: &str, f: &mut dyn FnMut(&str) -> Result<String, String>) -> Result<String, String> {
         let (scope, name) = scope_of(r)?;
-        let bytes = self.ops.get(&scope, &name).map_err(|e| if e.starts_with("404") { "secret not set".to_string() } else { "the tenant vault is locked".to_string() })?;
+        let bytes = self.ops.get(&scope, &name).map_err(|e| if e == UNPINNED { e } else if e.starts_with("404") { "secret not set".to_string() } else { "the tenant vault is locked".to_string() })?;
         let v = String::from_utf8(bytes).map_err(|_| "the secret is not text".to_string())?;
         f(&v)
     }
@@ -225,8 +268,9 @@ pub fn for_user_with(data_dir: &Path, user: &str, link: &crate::cloudvaultlink::
     }
     let crate::cloudvaultlink::Link::Target(t) = link else { return Arc::new(NoVault) };
     let Some(keys) = crate::cloudrotate::actor_keys(data_dir, user) else { return Arc::new(NoVault) };
+    // the secrets of the configuration go through the pin rule of the link: no pinned certificate, no secret leaves the pod
     match t.client(user, keys) {
-        Ok(c) => Arc::new(LinkVault { ops: c }),
+        Ok(c) => Arc::new(LinkVault { ops: PinGuard { inner: c, pinned: t.fingerprint.is_some() } }),
         Err(_) => Arc::new(NoVault),
     }
 }

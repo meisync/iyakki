@@ -113,3 +113,6 @@ chmod 1777 "$TARGET_DIR/var/tmp"
 # engine (webengine.rs force_software_gl) instead of letting EGL fail on a render node without a driver.
 mkdir -p "$TARGET_DIR/usr/share/iyakki"
 if [ "${IYAKKI_WEB_INTEL_GL:-0}" = 1 ]; then echo intel; else echo software; fi > "$TARGET_DIR/usr/share/iyakki/web-gl-drivers"
+
+# the builder's home folder must not ship (see board/iyakki/scrub-paths.sh): last step of the last hook
+sh "${BR2_EXTERNAL_IYAKKI_PATH}/board/iyakki/scrub-paths.sh" "$TARGET_DIR"

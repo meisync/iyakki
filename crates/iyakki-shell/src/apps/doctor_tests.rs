@@ -71,6 +71,7 @@ fn parts(facts: Facts, slow: SlowOut, home: PathBuf) -> Parts {
             boot_log: "booted".into(),
             switches: vec![],
             checkup: vec![],
+            compat: vec![],
         }),
         home: Arc::new(move |_| home.clone()),
         now: Arc::new(|| 1_800_000_000),
@@ -481,8 +482,23 @@ fn the_real_readers_run_on_this_computer_without_panicking() {
     a.open_share(&cx);
     let t = a.preview.as_ref().unwrap().text.clone();
     assert!(t.starts_with("IYAKKI diagnostics.") && t.contains("=== Version"));
-    let home = std::env::var("HOME").unwrap_or_default();
+    let home = std::env::var("HOME").unwrap_or_default(); // home-ok: read only
     if home.len() > 1 {
         assert!(!t.contains(&format!("{home}/")), "the home path is not in the bundle");
     }
+}
+
+#[test]
+fn the_harness_drives_the_tile_by_label_and_no_two_controls_collide_at_the_four_standard_sizes() {
+    use super::tile_harness::TileHarness;
+    let mut cx = cx_with_admin_store("doctor-harness");
+    cx.session.role = Role::Admin;
+    cx.session.policy = Policy::resolve(Role::Admin, &Default::default());
+    let app = DoctorApp::with_parts(&cx, parts(sick(), SlowOut::default(), tmp("harness")));
+    let mut t = TileHarness::new(app, cx);
+    assert!(t.has_button("Check again"), "{:?}", t.texts());
+    let before = t.app.rounds;
+    t.click_label("Check again");
+    assert_eq!(t.app.rounds, before + 1, "the click ran another round of checks");
+    t.assert_no_overlap_at_standard_sizes();
 }

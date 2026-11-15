@@ -1,5 +1,12 @@
 name: ci
-on: [push, pull_request]
+# Not on every push: the private repository has 3,000 free minutes a month and our own gate (./run.sh alpha-check) runs the same checks locally.
+# Weekly, by hand, and on release tags. Public repositories run Actions free, so this can go back to push and pull_request then.
+on:
+  schedule:
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+  push:
+    tags: ['v*']
 jobs:
   test:
     runs-on: ubuntu-latest

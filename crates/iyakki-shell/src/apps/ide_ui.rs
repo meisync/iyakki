@@ -80,6 +80,26 @@ pub fn activity_text(a: Activity) -> &'static str {
 }
 
 impl IdeApp {
+    /// The title, the words under it and the yes button of a question over the IDE (what the screen draws and the screen reader says).
+    pub(super) fn confirm_words(&self, c: &Confirm) -> (String, String, &'static str) {
+            match c {
+                Confirm::DeleteFile(rel) => (format!("Delete {rel}?"), "The file or folder (with everything in it) is deleted from the disk. This cannot be undone.".to_string(), "Delete"),
+                Confirm::MergeTask(id, what) => {
+                    let t = self.active_ws().and_then(|w| w.tasks.mgr.get(id)).map_or(id.clone(), |t| t.title);
+                    (format!("Merge \"{t}\"?"), format!("{what}. The task's branch is merged into the branch you have checked out (git merge --no-ff), or its patch is applied. Nothing is deployed."), "Merge")
+                }
+                Confirm::DiscardTask(id) => {
+                    let t = self.active_ws().and_then(|w| w.tasks.mgr.get(id)).map_or(id.clone(), |t| t.title);
+                    (format!("Discard \"{t}\"?"), "The task's folder and branch are deleted with everything it changed. Your workspace is not touched. This cannot be undone.".to_string(), "Discard")
+                }
+                Confirm::CloseIde(q) => ("Close the IDE?".to_string(), q.clone(), "Close"),
+                Confirm::RemoveWs(id) => {
+                    let n = self.reg.get(id).map_or(id.clone(), |w| w.name.clone());
+                    (format!("Remove \"{n}\" from the list?"), "Only the entry is removed. The folder and its files are not touched.".to_string(), "Remove")
+                }
+            }
+    }
+
     pub(super) fn render_ide(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx, tick: u64) {
         // the IDE draws at the window scale times its density; the embedded chat has its own, larger type
         let m = Metrics::of(self.density);
@@ -103,7 +123,8 @@ impl IdeApp {
             (w.board_full, w.compact_pane)
         };
         let prefs = self.ws[ai].prefs;
-        let l = lay::compute(area, s, &prefs, shown);
+        let mut l = lay::compute(area, s, &prefs, shown);
+        self.carve_preview(&mut l, s);
         self.layout = Some(l.clone());
         let accent = self.ws[ai].meta.color();
         self.draw_top(g, &l, s, ai, accent);
@@ -135,6 +156,7 @@ impl IdeApp {
             if let Some(c) = l.chat {
                 self.draw_chat(g, c, s, cx, tick, ai, accent);
             }
+            self.draw_preview(g, s, cx, tick, accent);
             // the dividers
             for (i, (d, r)) in l.dividers.iter().enumerate() {
                 let idx = match d {
@@ -717,21 +739,7 @@ impl IdeApp {
                 g.button(p.x + p.w - 26.0 * s - 70.0 * s, p.y + p.h - 52.0 * s, 14.0 * s, "OK", accent, Event::Sub(SUB, Key::Enter));
             }
             Modal::Confirm(c) => {
-                let (title, detail, yes) = match c {
-                    Confirm::DeleteFile(rel) => (format!("Delete {rel}?"), "The file or folder (with everything in it) is deleted from the disk. This cannot be undone.".to_string(), "Delete"),
-                    Confirm::MergeTask(id, what) => {
-                        let t = self.active_ws().and_then(|w| w.tasks.mgr.get(id)).map_or(id.clone(), |t| t.title);
-                        (format!("Merge \"{t}\"?"), format!("{what}. The task's branch is merged into the branch you have checked out (git merge --no-ff), or its patch is applied. Nothing is deployed."), "Merge")
-                    }
-                    Confirm::DiscardTask(id) => {
-                        let t = self.active_ws().and_then(|w| w.tasks.mgr.get(id)).map_or(id.clone(), |t| t.title);
-                        (format!("Discard \"{t}\"?"), "The task's folder and branch are deleted with everything it changed. Your workspace is not touched. This cannot be undone.".to_string(), "Discard")
-                    }
-                    Confirm::RemoveWs(id) => {
-                        let n = self.reg.get(id).map_or(id.clone(), |w| w.name.clone());
-                        (format!("Remove \"{n}\" from the list?"), "Only the entry is removed. The folder and its files are not touched.".to_string(), "Remove")
-                    }
-                };
+                let (title, detail, yes) = self.confirm_words(c);
                 let p = fx::modal(g, area, s, 560.0 * s, 180.0 * s, ERR, true);
                 let t = g.fit(19.0 * s, &title, Face::Bold, p.w - 48.0 * s);
                 g.text(p.x + 24.0 * s, p.y + 24.0 * s, 19.0 * s, TEXT, &t, Face::Bold);

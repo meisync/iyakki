@@ -87,6 +87,8 @@ impl Server {
             None => crate::devicekeys::Replay::new(),
         };
         let shared = Arc::new(Shared { gate, sessions: Sessions::new(), logins: RateLimit::new(10), replay, tls: cfg.tls, open: AtomicUsize::new(0), stop: AtomicBool::new(false) });
+        // the device's domain listener may ask this server who a `members` route's cookie belongs to (F-DOMAIN-05)
+        iyakki_agent::cloudmembers::register(Arc::new(DesktopSessions(Arc::downgrade(&shared))));
         let s = shared.clone();
         std::thread::Builder::new().name("iyakki-web-accept".into()).spawn(move || accept_loop(listener, s))?;
         Ok(Server { shared, addr })
@@ -102,6 +104,23 @@ impl Server {
 
     pub fn stop(&self) {
         self.shared.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Lets the domain listener ask the desktop's browser server whose session cookie a request carried (`iyakki_agent::cloudmembers`).
+/// Holds the server weakly: once it is dropped or stopped the listener stops accepting its cookies. A desktop session belongs to the
+/// person who signed in on this computer and to no cloud tenant, so a tenant route never accepts it.
+struct DesktopSessions(std::sync::Weak<Shared>);
+
+impl iyakki_agent::cloudmembers::SessionLookup for DesktopSessions {
+    fn user_of(&self, token: &str) -> Option<String> {
+        self.0.upgrade()?.sessions.find(token).map(|f| f.user)
+    }
+    fn tenant_of(&self, _token: &str) -> Option<String> {
+        None
+    }
+    fn alive(&self) -> bool {
+        self.0.upgrade().is_some_and(|s| !s.stop.load(Ordering::Relaxed))
     }
 }
 
@@ -158,6 +177,8 @@ fn read_request(conn: &mut Conn) -> Result<Request, Option<Response>> {
 }
 
 fn connection(stream: TcpStream, peer: SocketAddr, shared: &Shared) {
+    // a socket accepted from a non-blocking listener is non-blocking too on macOS and the BSDs (not on Linux): the TLS code below expects to block
+    let _ = stream.set_nonblocking(false);
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(FIRST_BYTES_TIMEOUT));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
@@ -177,7 +198,7 @@ fn connection(stream: TcpStream, peer: SocketAddr, shared: &Shared) {
         Err(None) => return,
     };
     if req.wants_websocket() {
-        websocket(conn, &req, shared);
+        websocket(conn, &req, peer, shared);
         return;
     }
     let resp = route(&req, peer, shared);
@@ -211,6 +232,11 @@ fn route(req: &Request, peer: SocketAddr, sh: &Shared) -> Response {
         ("GET", "/decoder.js") => Response::new(200, "text/javascript; charset=utf-8", page::DECODER_JS),
         ("GET", "/media.js") => Response::new(200, "text/javascript; charset=utf-8", page::MEDIA_JS),
         ("GET", "/healthz") => Response::new(200, "text/plain", "ok"),
+        // the page behind a client's one-time link (experimental): 404 while the setting is off
+        ("GET", p) if p == "/connect" || p.starts_with("/connect/") => match sh.gate.client_endpoint().filter(|e| e.enabled()) {
+            Some(_) => crate::clientpage::serve(p).unwrap_or_else(|| Response::error(404, "not found")),
+            None => Response::error(404, "not found"),
+        },
         ("GET", "/api/session") => match session {
             Some(s) => Response::json(200, &serde_json::json!({ "user": s.user, "csrf": s.csrf })),
             None => Response::error(401, "not signed in"),
@@ -327,10 +353,14 @@ fn route(req: &Request, peer: SocketAddr, sh: &Shared) -> Response {
     }
 }
 
-fn websocket(mut conn: Conn, req: &Request, sh: &Shared) {
+fn websocket(mut conn: Conn, req: &Request, peer: SocketAddr, sh: &Shared) {
     let refuse = |conn: &mut Conn, r: Response| {
         let _ = conn.write_all(&r.to_bytes());
     };
+    // clients (experimental, clientsession.rs): their own sign-in, not the page's cookie
+    if req.path == iyakki_core_api::client::WS_PATH {
+        return client_socket(conn, req, peer, sh);
+    }
     if req.method != "GET" || !same_origin(req) {
         return refuse(&mut conn, Response::error(403, "not allowed from here"));
     }
@@ -368,6 +398,28 @@ fn websocket(mut conn: Conn, req: &Request, sh: &Shared) {
             sh.sessions.end(t);
         }
     }
+}
+
+/// The WebSocket of a client: a plain 404 while the setting is off, then the endpoint's own checks (device, then person).
+fn client_socket(mut conn: Conn, req: &Request, peer: SocketAddr, sh: &Shared) {
+    let Some(ep) = sh.gate.client_endpoint().filter(|e| e.enabled()) else {
+        let _ = conn.write_all(&Response::error(404, "not found").to_bytes());
+        return;
+    };
+    let refuse = |conn: &mut Conn, r: Response| {
+        let _ = conn.write_all(&r.to_bytes());
+    };
+    if req.method != "GET" || !same_origin(req) {
+        return refuse(&mut conn, Response::error(403, "not allowed from here"));
+    }
+    let Some(key) = req.header("sec-websocket-key") else { return refuse(&mut conn, Response::error(400, "no key")) };
+    let hello = format!("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n", ws::accept_key(key));
+    if conn.write_all(hello.as_bytes()).is_err() {
+        return;
+    }
+    let _ = conn.tcp().set_read_timeout(Some(Duration::from_millis(5)));
+    let _ = conn.tcp().set_write_timeout(Some(Duration::from_secs(5)));
+    ep.serve(&mut conn, &*sh.gate, &peer.ip().to_string(), &|| sh.stop.load(Ordering::Relaxed));
 }
 
 /// Protocol version 2 state of one connection (present once the page said `hello`).

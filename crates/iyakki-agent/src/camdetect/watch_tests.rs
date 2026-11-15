@@ -539,9 +539,12 @@ fn recorder(r: &Rig) -> Arc<Recorder> {
 
 fn record_a_moment(r: &Rig, rec: &Arc<Recorder>) -> Vec<Vec<u8>> {
     let amy = r.amy();
+    let base = rec.entries(&r.id).len();
     rec.set(&amy, &r.id, &camrec::Change { mode: Some(Mode::Continuous), ..Default::default() }).unwrap();
+    // wait for entries that THIS recording adds (the earlier calls of a test left theirs behind: waiting for "two entries in all" returned
+    // at once on the second and third call, before the new recorder had written anything, and a loaded machine then showed no fresh picture)
     let t = Instant::now();
-    while rec.entries(&r.id).len() < 2 && t.elapsed() < Duration::from_secs(10) {
+    while rec.entries(&r.id).len() < base + 2 && t.elapsed() < Duration::from_secs(20) {
         std::thread::sleep(Duration::from_millis(30));
     }
     rec.set(&amy, &r.id, &camrec::Change { mode: Some(Mode::Off), ..Default::default() }).unwrap();

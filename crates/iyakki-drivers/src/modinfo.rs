@@ -23,6 +23,28 @@ impl Modinfo {
     }
 }
 
+/// The marker the kernel's signing tool appends after a module's signature.
+pub const SIGNATURE_MARKER: &[u8] = b"~Module signature appended~\n";
+
+/// Does the module end with an appended signature (it says nothing about who signed it)?
+pub fn is_signed(ko: &[u8]) -> bool {
+    ko.ends_with(SIGNATURE_MARKER)
+}
+
+/// The mode a `/sys/kernel/security/lockdown` text has selected (`none [integrity] confidentiality` selects integrity).
+pub fn lockdown_mode(text: &str) -> &str {
+    text.split_whitespace().find_map(|w| w.strip_prefix('[').and_then(|w| w.strip_suffix(']'))).unwrap_or("none")
+}
+
+/// A locked-down kernel (Secure Boot) loads only modules signed by a key it trusts, and the kernel gives only "operation not
+/// permitted" when it refuses one. Refuse an unsigned module first, with the reason and the way out in plain words.
+pub fn refuse_unsigned_under_lockdown(name: &str, ko: &[u8], lockdown_text: &str) -> Result<(), String> {
+    if lockdown_mode(lockdown_text) != "none" && !is_signed(ko) {
+        return Err(format!("module {name} is not signed, and this computer starts with Secure Boot, which refuses unsigned kernel modules. Ask the publisher for a signed module, or switch Secure Boot off in the firmware settings."));
+    }
+    Ok(())
+}
+
 fn u16le(b: &[u8], o: usize) -> Option<usize> {
     b.get(o..o + 2).map(|s| u16::from_le_bytes([s[0], s[1]]) as usize)
 }
@@ -137,6 +159,24 @@ pub fn synthetic_module_with(name: &str, vermagic: &str, license: &str, depends:
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_unsigned_module_is_refused_under_lockdown_in_plain_words_and_a_signed_one_is_not() {
+        use super::*;
+        let ko = synthetic_module("wl", "6.12.112 SMP mod_unload ", "MIXED/Proprietary");
+        let mut signed = ko.clone();
+        signed.extend_from_slice(b"SIGNATUREBYTES");
+        signed.extend_from_slice(SIGNATURE_MARKER);
+        assert!(!is_signed(&ko) && is_signed(&signed));
+        assert_eq!(lockdown_mode("none [integrity] confidentiality\n"), "integrity");
+        assert_eq!(lockdown_mode("[none] integrity confidentiality"), "none");
+        assert_eq!(lockdown_mode(""), "none");
+        assert!(refuse_unsigned_under_lockdown("wl", &ko, "[none] integrity confidentiality").is_ok());
+        assert!(refuse_unsigned_under_lockdown("wl", &ko, "").is_ok(), "no lockdown file: the kernel decides");
+        assert!(refuse_unsigned_under_lockdown("wl", &signed, "none [integrity] confidentiality").is_ok());
+        let e = refuse_unsigned_under_lockdown("wl", &ko, "none [integrity] confidentiality").unwrap_err();
+        assert!(e.contains("wl") && e.contains("not signed") && e.contains("Secure Boot"), "{e}");
+    }
+
     use super::*;
 
     #[test]

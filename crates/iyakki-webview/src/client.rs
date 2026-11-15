@@ -66,6 +66,8 @@ pub enum Event {
     PermissionRequest { id: u32, kinds: u8, origin: String },
     /// Which devices the page captures now (`proto::media_kind` bits).
     CaptureState(u8),
+    /// The page's response headers as the engine received them (see `FromHelper::ResponseHeaders`).
+    ResponseHeaders { url: String, status: u32, headers: String },
     /// The helper says its engine failed (it may recover by itself).
     Crashed(String),
     Log(String),
@@ -137,6 +139,8 @@ pub struct WebView {
     want_size: (u32, u32),
     url: String,
     zoom: u32,
+    /// The last extension snapshot, handed again to a restarted helper.
+    ext: Option<crate::ext::ExtBlob>,
     focus: bool,
     visible: bool,
 }
@@ -169,6 +173,7 @@ impl WebView {
             want_size: (w, h),
             url: String::new(),
             zoom: 100,
+            ext: None,
             focus: false,
             visible: true,
             cfg,
@@ -221,6 +226,10 @@ impl WebView {
                 self.zoom = z;
                 ToHelper::Zoom(z)
             }
+            ToHelper::Extensions(b) => {
+                self.ext = Some(b.clone());
+                ToHelper::Extensions(b)
+            }
             ToHelper::Focus(f) => {
                 self.focus = f;
                 ToHelper::Focus(f)
@@ -267,6 +276,7 @@ impl WebView {
                     FromHelper::DevEvent(s) => out.push(Event::DevEvent(s)),
                     FromHelper::PermissionRequest { id, kinds, origin } => out.push(Event::PermissionRequest { id, kinds, origin }),
                     FromHelper::CaptureState(k) => out.push(Event::CaptureState(k)),
+                    FromHelper::ResponseHeaders { url, status, headers } => out.push(Event::ResponseHeaders { url, status, headers }),
                     FromHelper::Crashed(s) => out.push(Event::Crashed(s)),
                     FromHelper::Log(s) => out.push(Event::Log(s)),
                 },
@@ -483,6 +493,9 @@ impl WebView {
         self.raw_send(&ToHelper::Hello(self.cfg.hello.clone()));
         if self.zoom != 100 {
             self.raw_send(&ToHelper::Zoom(self.zoom));
+        }
+        if let Some(b) = self.ext.clone() {
+            self.raw_send(&ToHelper::Extensions(b));
         }
         if !self.url.is_empty() {
             self.raw_send(&ToHelper::Navigate(self.url.clone()));

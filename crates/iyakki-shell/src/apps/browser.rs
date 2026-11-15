@@ -14,12 +14,16 @@ use super::browser_av;
 use super::browser_chrome as chrome;
 use super::browser_groups::{self, Groups};
 use super::browser_assist;
+use super::browser_badsites;
 use super::browser_block;
+use super::browser_live;
+use iyakki_js::Interaction;
 use super::browser_headers;
 use super::browser_config::{self, BrowserConfig};
 use super::browser_dark;
 use super::browser_devpanel::{self, Act as DevAct};
 use super::browser_devtools;
+use super::browser_inspect;
 use super::browser_typo;
 use super::browser_media::{self, MediaPerms};
 use super::browser_full::{Full, Note, Redraw, Start, TextFocus, AREA_FULL};
@@ -30,7 +34,11 @@ use super::browser_logins::{self, Cred};
 use super::browser_persist;
 use super::browser_speed;
 use super::browser_images::{spawn_loader, ImgState, Msg, Pic, MAX_IMAGES};
-use super::browser_layout::{key_of, layout, Focus, ImgInfo, Kind, Layout, Prim};
+use super::browser_forms;
+use super::browser_stream;
+use super::browser_thumbs;
+use super::browser_upload;
+use super::browser_layout::{key_of_text, layout_text, Focus, ImgInfo, Kind, Layout, Prim};
 use tiny_skia::{FilterQuality, PixmapPaint, Transform};
 use super::{blink, App, AppCx, Flow};
 use crate::gfx::{rgb, Face, Gfx, Icon};
@@ -94,6 +102,23 @@ enum StartView {
     History,
     Bookmarks,
     Downloads,
+}
+
+/// Most addresses one load may be sent on to by the page's own scripts.
+const MAX_SCRIPT_HOPS: u8 = 3;
+
+/// The address a page's scripts asked to go to, when it is a web address other than the page itself (a different fragment of
+/// the same page is not a navigation).
+fn script_navigation_target(notes: &[String], here: &Url) -> Option<Url> {
+    let next = Url::parse(iyakki_js::navigation_in(notes)?).ok()?;
+    let strip = |u: &Url| {
+        let mut s = u.to_string();
+        if let Some(i) = s.find('#') {
+            s.truncate(i);
+        }
+        s
+    };
+    (strip(&next) != strip(here)).then_some(next)
 }
 
 enum Nav {
@@ -380,6 +405,16 @@ pub struct BrowserApp {
     serial_next: u64,
     /// The page just shown still has pictures to ask for.
     images_due: bool,
+    /// The page in view keeps its script engine (F-BJS-01): the serial of the visit it belongs to and the session.
+    live: Option<(u64, browser_live::PageKit)>,
+    /// A page being built again for a new window size by a thread of its own: (visit, the document, when it was asked for).
+    reflow_rx: Option<(u64, Receiver<Doc>)>,
+    /// The newest text typed while the live page was busy with an earlier one: sent when its answer arrives.
+    live_stash: Option<Interaction>,
+    /// The window size the page in view differs from, and since when (the page is built again once it has stayed that way a moment).
+    reflow_due: Option<std::time::Instant>,
+    /// Where the loader that is running now leaves the session it made.
+    loading_live: browser_live::Slot,
     /// The early fetches of the page being loaded or just shown (cancelled when another page is asked for).
     preload: Option<Arc<iyakki_web::preload::Preloader>>,
     layout: Option<Layout>,
@@ -391,12 +426,19 @@ pub struct BrowserApp {
     cfg: BrowserConfig,
     /// Storage and cookies of the sites visited in this session.
     sites: iyakki_js::Sites,
+    /// The width and height, in page pixels, the last drawn page was laid out for (0 before the first frame). The next page's
+    /// style sheets (`@media`) and scripts (`innerWidth`, `matchMedia`, sizes) are told this window instead of a fixed one.
+    css_win: (f32, f32),
+    /// Device pixels per CSS pixel the page is drawn at (the page scale): the pictures of a page are chosen for it.
+    dppx: f32,
     /// The developer panel (script errors, what was skipped) is showing.
     show_notes: bool,
     /// The page being loaded replaces a Google search (see `go_request`).
     rerouted: bool,
     /// Search pages that refused the current search (busy, or a check page); the next engine in the list is tried.
     search_tried: Vec<iyakki_web::SearchEngine>,
+    /// How many times scripts sent this load on to another address (reset when a page stays).
+    script_hops: u8,
     /// Said above the results when another engine answered instead of the chosen one.
     search_note: Option<String>,
     /// Bookmarks, history, zoom and downloads of this person.
@@ -409,10 +451,24 @@ pub struct BrowserApp {
     /// The address of the link under the pointer when the context menu was asked for.
     ctx_link: Option<String>,
     /// A file being saved: its name, the way to cancel it and where the result arrives.
-    download: Option<(String, Arc<std::sync::atomic::AtomicBool>, Receiver<Result<(String, u64), String>>)>,
+    download: Option<(String, Arc<std::sync::atomic::AtomicBool>, Receiver<Result<(String, u64), String>>, Arc<browser_stream::Progress>)>,
     /// A PDF open in the viewer (docs/PDF.md), over the page area; and: the download in progress is to be opened when it is saved.
     pdf: Option<super::pdfview::PdfView>,
     pdf_after: Option<String>,
+    /// What the History page is filtered by (`history: WORDS` in the address bar); empty shows everything.
+    hist_query: String,
+    /// Ctrl+Shift+K was pressed once: the vault name of the sign-in that a second press removes.
+    forget_pending: Option<String>,
+    /// Heartbeats since the saved data was compared with the file (the chat tools can change it behind the tile's back).
+    data_check: u32,
+    /// Small pictures of the sites visited most (browser_thumbs.rs), the page already pictured, and how many frames it has been ready.
+    thumbs: browser_thumbs::Thumbs,
+    thumb_done: String,
+    thumb_ready: u32,
+    /// The picture addresses of the start page that the image states were made for.
+    start_img_srcs: Vec<String>,
+    /// A PDF that finished downloading and was not opened: O opens it (offered in the status line; cleared by the next load).
+    pdf_offer: Option<String>,
     /// The tabs; the one in use (`active`) is `None` here because its state is in the fields above.
     tabs: Vec<Option<TabState>>,
     active: usize,
@@ -441,6 +497,8 @@ pub struct BrowserApp {
     closed: Vec<String>,
     /// Where to scroll once the page has been laid out again (after a zoom change).
     pending_scroll: Option<f32>,
+    /// The address whose `#fragment` was already scrolled to (a new load clears it; relayouts do not jump again).
+    frag_done: Option<String>,
     /// Find in page, when the bar is open.
     find: Option<Find>,
     /// Accessibility of the page: browse mode, the cursor, lists, reading aloud, forced colours (`browser_a11y.rs`).
@@ -454,6 +512,12 @@ pub struct BrowserApp {
     net_log: browser_devtools::Log,
     /// The Developer tools panel (F12, Ctrl+Shift+I): `browser_devpanel.rs`.
     dev: browser_devpanel::Panel,
+    /// How much of `net_log` was handed to the Developer tools buffers, the page whose address and notes were, and how long the load took (`browser_devfeed.rs`).
+    inspect: inspecthost::InspectHost,
+    dev_fed: usize,
+    dev_page_fed: Option<String>,
+    dev_notes_fed: Option<String>,
+    load_ms: u32,
     /// The panel or its button changed without a key or click (new console lines arrived): draw the whole scene again.
     dev_dirty: bool,
     /// The last pointer position, for the wheel over the panel.
@@ -564,6 +628,11 @@ impl BrowserApp {
             img_rx,
             serial_next: 1,
             images_due: false,
+            live: None,
+            reflow_rx: None,
+            live_stash: None,
+            reflow_due: None,
+            loading_live: browser_live::new_slot(),
             preload: None,
             layout: None,
             view_h: 400.0,
@@ -571,9 +640,12 @@ impl BrowserApp {
             hovered_link: None,
             cfg: browser_config::load(cx),
             sites: iyakki_js::Sites::default(),
+            css_win: (0.0, 0.0),
+            dppx: 1.0,
             show_notes: false,
             rerouted: false,
             search_tried: Vec::new(),
+            script_hops: 0,
             search_note: None,
             data: browser_data::load(cx),
             suggest: Vec::new(),
@@ -583,6 +655,14 @@ impl BrowserApp {
             download: None,
             pdf: None,
             pdf_after: None,
+            hist_query: String::new(),
+            forget_pending: None,
+            data_check: 0,
+            thumbs: browser_thumbs::Thumbs::new(&cx.services.dir().join(format!("browser-thumbs-{}", browser_config::who(cx)))),
+            thumb_done: String::new(),
+            thumb_ready: 0,
+            start_img_srcs: Vec::new(),
+            pdf_offer: None,
             tabs: vec![None],
             active: 0,
             groups: Groups::default(),
@@ -598,6 +678,7 @@ impl BrowserApp {
             chip_rects: Vec::new(),
             closed: Vec::new(),
             pending_scroll: None,
+            frag_done: None,
             find: None,
             a11y: a11y::A11y::new(),
             assist: None,
@@ -608,6 +689,11 @@ impl BrowserApp {
             dev_dirty: false,
             mouse: (0, 0),
             dev_counts: (0, 0),
+            inspect: Default::default(),
+            dev_fed: 0,
+            dev_page_fed: None,
+            dev_notes_fed: None,
+            load_ms: 0,
             popup: None,
             pending_cred: None,
             offer: None,
@@ -984,6 +1070,14 @@ impl BrowserApp {
 
     fn go_request(&mut self, req: Request, how: How, cx: &AppCx) {
         let req = Request { priority: iyakki_web::net::DOCUMENT, ..req };
+        self.frag_done = None;
+        self.pdf_offer = None;
+        self.dev_fed = 0;
+        self.dev_notes_fed = None;
+        self.load_ms = 0;
+        if self.inspect.page.is_some() {
+            self.inspect_reset();
+        }
         if self.full.is_some() {
             self.go_full(&req, cx);
             return;
@@ -1010,6 +1104,7 @@ impl BrowserApp {
         };
         // the person's ad and tracker blocking (switch, allowed sites, lists) is read before anything is requested
         browser_block::apply(cx);
+        browser_badsites::apply(cx);
         browser_headers::apply(cx);
         browser_block::weekly_refresh(cx);
         let url = req.url.clone();
@@ -1024,11 +1119,11 @@ impl BrowserApp {
         browser_speed::refresh(user_web.as_ref(), cx.services.dir(), cfg_now.cache);
         let wire: Arc<dyn iyakki_web::Fetch> = Arc::new(browser_devtools::Recording::new(user_web, self.net_log.clone()));
         // style sheets and scripts the page names start loading together as soon as its HTML is in hand
-        let mach = browser_speed::machine(cx.services.dir());
+        let mach = browser_speed::machine_os(&*cx.os, cx.services.dir());
         let preloader = {
             let policy = policy.clone();
             let jar = if cfg_now.cookies { Some(self.sites.cookies.clone()) } else { None };
-            iyakki_web::preload::Preloader::new(wire, &url, Arc::new(move |h: &str| policy.allows_host(h)), jar, browser_speed::preload_workers(&mach))
+            iyakki_web::preload::Preloader::new(wire.clone(), &url, Arc::new(move |h: &str| policy.allows_host(h)), jar, browser_speed::preload_workers(&mach))
         };
         if let Some(old) = self.preload.replace(preloader.clone()) {
             old.cancel();
@@ -1036,9 +1131,14 @@ impl BrowserApp {
         let web: Arc<dyn iyakki_web::Fetch> = preloader.clone();
         let (tx, rx) = channel();
         let target = url.clone();
+        // a session the loader makes goes into this slot; a loader of an earlier request keeps writing into its own, which nobody reads
+        let live_slot = browser_live::new_slot();
+        self.loading_live = live_slot.clone();
         // Settings may have changed since the last page
         self.cfg = browser_config::load(cx);
         let (cfg, sites) = (self.cfg.clone(), self.sites.clone());
+        let css_win = self.css_win;
+        let dppx = self.dppx;
         // the page's style sheets are told about the person's choices (`prefers-reduced-motion`, `prefers-contrast`)
         let (calm, forced) = (self.a11y.eff.freeze_animation || self.a11y.eff.reduce_motion, self.a11y.eff.forced_colors);
         self.focus_ctl = None;
@@ -1052,47 +1152,65 @@ impl BrowserApp {
             };
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
             // with cookies turned off nothing is sent and nothing is kept
-            let no_cookies = std::sync::Mutex::new(iyakki_web::CookieStore::new());
-            let store = if cfg.cookies { &sites.cookies } else { &no_cookies };
+            let store_arc: Arc<std::sync::Mutex<iyakki_web::CookieStore>> = if cfg.cookies { sites.cookies.clone() } else { Arc::new(std::sync::Mutex::new(iyakki_web::CookieStore::new())) };
+            let store = &*store_arc;
+            let mut vp = iyakki_web::css::Viewport { reduce_motion: calm, more_contrast: forced, ..iyakki_web::css::Viewport::default() };
+            vp.dppx = dppx.clamp(1.0, 4.0);
+            if css_win.0 >= 200.0 && css_win.1 >= 100.0 {
+                vp.width = css_win.0.min(vp.width.max(1280.0));
+                vp.height = css_win.1;
+            }
             // style sheets come through the same checks as the page: the account's hosts, cookies, a size limit
-            let sheet = |u: &Url| -> Option<String> {
-                let (_, r) = iyakki_web::fetch_following(web.as_ref(), Request { priority: iyakki_web::net::BLOCKING, ..Request::get(u) }, &allow, Some(Jar { store, now })).ok()?;
-                let ct = r.content_type.to_ascii_lowercase();
-                (r.status < 400 && r.body.len() <= iyakki_web::style::MAX_SHEET_BYTES && (ct.is_empty() || ct.contains("css") || ct.contains("text/plain"))).then(|| String::from_utf8_lossy(&r.body).into_owned())
+            let built = browser_live::page_builder(web.clone(), allow.clone(), store_arc.clone(), now, target.https, cfg.styles);
+            let build = {
+                let b = built.clone();
+                move |u: &Url, tree: &iyakki_web::html::Tree| -> Doc { (*b)(u, tree, &vp) }
             };
-            let vp = iyakki_web::css::Viewport { reduce_motion: calm, more_contrast: forced, ..iyakki_web::css::Viewport::default() };
-            let styles_on = cfg.styles;
-            let build = |u: &Url, tree: &iyakki_web::html::Tree| -> Doc {
-                if styles_on {
-                    let mut d = iyakki_web::style::styled_doc(tree, u, &vp, &sheet);
-                    // a page that brings its own style sheets was drawn for a white page, as every browser shows it
-                    if d.canvas.is_none() && (tree.find("style").is_some() || tree.find("link").is_some()) {
-                        d.canvas = Some([255, 255, 255, 255]);
-                    }
-                    d
-                } else {
-                    iyakki_web::doc::build(tree)
+            // what the browser keeps of this page to build it again for another window size
+            let leave_kit = |scripted: bool, session: Option<browser_live::LiveSession>| {
+                if let Ok(mut slot) = live_slot.lock() {
+                    *slot = Some(browser_live::PageKit { built: built.clone(), vp, scripted, session });
                 }
             };
             // scripts run only for sites the user has allowed (checked again for where redirects end up)
             let render = |u: &Url, html: &str| -> (Doc, Vec<String>) {
+                // a page in a script that needs shaping: its fonts are parsed now, beside the loading, not at the first drawing
+                if iyakki_uikit::gfx::needs_script_fonts(html) {
+                    iyakki_uikit::gfx::warm_script_fonts();
+                }
                 preloader.start(&iyakki_web::preload::scan(html, u, iyakki_web::preload::Wants { styles: cfg.styles, scripts: cfg.scripts_for(&u.host), images: cfg.images }));
                 if cfg.scripts_for(&u.host) {
                     let mut data = sites.for_origin(u);
+                    data.viewport = Some(vp);
                     if !cfg.cookies {
                         data.cookies = Arc::new(std::sync::Mutex::new(iyakki_web::CookieStore::new()));
                     }
-                    let (doc, mut notes) = iyakki_js::renderer_with(web.clone(), allow.clone(), data, &build)(u, html);
+                    let (res, live) = iyakki_js::run_page_live(html, u, web.clone(), allow.clone(), &data, iyakki_js::Limits::default());
+                    let mut notes = iyakki_js::notes_of(&res);
+                    let doc = build(u, &res.tree);
+                    // the engine stays for clicks on the drawn page (the browser takes it when the page arrives); only a page that has
+                    // something to run keeps one
+                    let lower = html.to_ascii_lowercase();
+                    let scripted = res.report.ran + res.report.failed > 0 || lower.contains("<script") || lower.contains(" onclick=");
+                    let mut session = None;
+                    if let Some(live) = live.filter(|_| scripted) {
+                        let (b, u2) = (built.clone(), u.clone());
+                        let rebuild: browser_live::Rebuild = Box::new(move |t, v| (*b)(&u2, t, v));
+                        session = browser_live::LiveSession::start(live, rebuild, vp);
+                    }
+                    leave_kit(scripted, session);
                     if doc.blocks.is_empty() {
                         // an app that needs more than this engine offers leaves nothing: show what the server sent
                         let plain = build(u, &iyakki_web::html::parse(html));
                         if !plain.blocks.is_empty() {
+                            leave_kit(false, None);
                             notes.insert(0, "The page's scripts left it empty (they need browser features this reader does not have), so it is shown without them.".into());
                             return (plain, notes);
                         }
                     }
                     (doc, notes)
                 } else {
+                    leave_kit(false, None);
                     (build(u, &iyakki_web::html::parse(html)), Vec::new())
                 }
             };
@@ -1128,6 +1246,7 @@ impl BrowserApp {
         let (dt, user) = (&cx.services.devtools, cx.session.user.as_str());
         if self.dev.open {
             self.dev.close(dt, user);
+            self.inspect = Default::default();
             cx.audit.record(user, "browser.devtools.panel", "closed");
         } else {
             self.dev.open(dt, user);
@@ -1166,6 +1285,9 @@ impl BrowserApp {
         match a {
             DevAct::Done => {}
             DevAct::Close => self.toggle_devpanel(cx),
+            DevAct::Eval(e) => self.dev_eval(e, cx),
+            DevAct::Inspect => self.dev_inspect(cx),
+            DevAct::Report => self.report_broken_site(cx),
             DevAct::Copy => {
                 let reader: Vec<browser_devtools::NetLine> = self.net_log.lock().map(|l| l.clone()).unwrap_or_default();
                 let text = self.dev.report(self.dev_ctx(), &reader);
@@ -1187,9 +1309,13 @@ impl BrowserApp {
         self.poll_full(cx);
         self.capture_tick(cx);
         self.mic_failure_tick();
+        self.dev_feed_reader(cx);
+        self.inspect_poll(cx);
         self.dev_tick(cx);
         self.poll_images(cx);
         self.poll_download(cx);
+        self.poll_live(cx);
+        self.poll_reflow(cx);
         let Nav::Loading { rx, how, .. } = &self.nav else { return };
         let how = *how;
         let result = match rx.try_recv() {
@@ -1213,6 +1339,22 @@ impl BrowserApp {
                 } else {
                     self.search_tried.clear();
                 }
+                // a script of the page asked to go to another address: follow it like a person's click, a few steps at most
+                let script_next = if status < 400 { script_navigation_target(&notes, &url) } else { None };
+                match script_next {
+                    Some(next) if self.script_hops < MAX_SCRIPT_HOPS => {
+                        self.script_hops += 1;
+                        let mut req = Request::get(&next);
+                        req.referer = url.to_string();
+                        self.go_request(req, how, cx);
+                        return;
+                    }
+                    Some(_) => {
+                        self.script_hops = 0;
+                        notes.push(format!("Scripts kept sending the browser on to other addresses; it was stopped after {MAX_SCRIPT_HOPS} steps."));
+                    }
+                    None => self.script_hops = 0,
+                }
                 if let Some(n) = self.search_note.take() {
                     notes.push(n);
                 }
@@ -1220,6 +1362,7 @@ impl BrowserApp {
                     notes.push("Google's results page needs a full browser, so this search was run on another search page instead (Settings → Browser).".into());
                 }
                 browser_persist::save(cx, &self.sites, iyakki_agent::clock::now_unix(), self.cfg.cookies);
+                self.load_ms = self.load_started.elapsed().as_millis().max(1).min(u32::MAX as u128) as u32;
                 let page = Arc::new(Page { url: url.clone(), status, doc, notes, source, media: false, download: false, ctype: String::new() });
                 if how == How::Push && status < 400 {
                     self.record_visit(&page, cx);
@@ -1229,6 +1372,10 @@ impl BrowserApp {
                 let needs_full = status < 400 && page_needs_full_engine(&page);
                 let source_has_script = page.source.to_ascii_lowercase().contains("<script");
                 self.show(page, how);
+                // the engine of this page, kept for clicks (it belongs to the visit just made)
+                self.live = browser_live::take(&self.loading_live).and_then(|kit| self.history.get(self.pos).map(|e| (e.serial, kit)));
+                self.reflow_rx = None;
+                self.reflow_due = None;
                 self.offer = None;
                 if let Some(c) = sent {
                     if browser_logins::for_site(cx, &c.host).is_ok_and(|saved| !saved.iter().any(|o| o.user == c.user && o.password == c.password)) {
@@ -1277,6 +1424,7 @@ impl BrowserApp {
             }
             Err(e) => {
                 self.pending_cred = None;
+                self.script_hops = 0;
                 if browser_typo::is_lookup_failure(&e) && !asked.host.is_empty() {
                     // an unknown name: say so and offer a search (and the likely site) instead of the resolver's wording
                     let html = browser_typo::not_found_html(&asked.host, self.cfg.search);
@@ -1293,6 +1441,8 @@ impl BrowserApp {
     }
 
     fn show(&mut self, page: Arc<Page>, how: How) {
+        // where the page's scripts left the window (`window.scrollTo` while it loaded): the drawn page starts there
+        let script_scroll = iyakki_js::scroll_in(&page.notes).map(|(_, y)| y.min(1.0e7));
         self.clear_selection();
         self.http_warned = false;
         self.field.set(&page.url.to_string());
@@ -1325,6 +1475,12 @@ impl BrowserApp {
                 self.pos = self.history.len() - 1;
             }
         }
+        if let Some(y) = script_scroll {
+            self.scroll = y;
+            if let Some(e) = self.history.get_mut(self.pos) {
+                e.scroll = y;
+            }
+        }
     }
 
     /// Ask for the pictures of the page just shown, and take in the ones that have arrived.
@@ -1337,7 +1493,8 @@ impl BrowserApp {
                         *st = ImgState::Failed("pictures are turned off (Settings → Browser)".into());
                     }
                 } else if let Some(page) = e.page.clone() {
-                    let jobs: Vec<(usize, String)> = page.doc.images.iter().enumerate().take(MAX_IMAGES).map(|(i, im)| (i, im.src.clone())).collect();
+                    // `loading=lazy` pictures wait until they are near the window (`start_lazy_images`)
+                    let jobs: Vec<(usize, String)> = page.doc.images.iter().enumerate().take(MAX_IMAGES).filter(|(_, im)| !im.lazy).map(|(i, im)| (i, im.src.clone())).collect();
                     for (i, _) in &jobs {
                         e.images[*i] = ImgState::Loading;
                     }
@@ -1350,6 +1507,7 @@ impl BrowserApp {
                 }
             }
         }
+        self.start_lazy_images(cx);
         while let Ok((serial, idx, result)) = self.img_rx.try_recv() {
             // the picture may belong to a page in another tab
             let others = self.tabs.iter_mut().flatten().flat_map(|t| t.history.iter_mut());
@@ -1361,6 +1519,41 @@ impl BrowserApp {
                 };
             }
         }
+    }
+
+    /// Start the `loading=lazy` pictures that have come within one window height above or two and a half below the visible part.
+    fn start_lazy_images(&mut self, cx: &AppCx) {
+        if !self.cfg.images {
+            return;
+        }
+        let Some(l) = &self.layout else { return };
+        let Some(e) = self.history.get(self.pos) else { return };
+        let Some(page) = e.page.clone() else { return };
+        let (top, bottom) = (self.scroll - self.view_h, self.scroll + self.view_h * 2.5);
+        let mut want: Vec<usize> = l
+            .prims
+            .iter()
+            .filter_map(|p| match p.kind {
+                Kind::Image { idx, .. } if p.y + p.h >= top && p.y <= bottom && idx < MAX_IMAGES => Some(idx),
+                _ => None,
+            })
+            .filter(|&idx| page.doc.images.get(idx).is_some_and(|im| im.lazy) && matches!(e.images.get(idx), Some(ImgState::Todo)))
+            .collect();
+        want.sort_unstable();
+        want.dedup();
+        if want.is_empty() {
+            return;
+        }
+        let serial = e.serial;
+        let jobs: Vec<(usize, String)> = want.iter().map(|&i| (i, page.doc.images[i].src.clone())).collect();
+        if let Some(e) = self.history.get_mut(self.pos) {
+            for &i in &want {
+                e.images[i] = ImgState::Loading;
+            }
+        }
+        let policy = cx.session.policy.clone();
+        let jar = if self.cfg.cookies { self.sites.cookies.clone() } else { Arc::new(std::sync::Mutex::new(iyakki_web::CookieStore::new())) };
+        spawn_loader(page.url.clone(), jobs, browser_speed::image_fetch(cx, self.preload.as_ref(), &page.url), move |h: &str| policy.allows_host(h), jar, serial, self.img_tx.clone());
     }
 
     fn goto_entry(&mut self, i: usize) {
@@ -1451,6 +1644,14 @@ impl BrowserApp {
     fn follow(&mut self, link: usize, cx: &AppCx) {
         let Some(page) = self.page().cloned() else {
             // a link on the start page, history or bookmarks (their addresses are complete)
+            if let Some(name) = self.start_links.get(link).and_then(|h| h.strip_prefix(PDF_LINK)).map(str::to_string) {
+                self.open_saved_pdf(&name, cx);
+                return;
+            }
+            if let Some(name) = self.start_links.get(link).and_then(|h| h.strip_prefix(OPEN_LINK)).map(str::to_string) {
+                self.open_saved_file(&name, cx);
+                return;
+            }
             if let Some(Ok(u)) = self.start_links.get(link).map(|h| Url::parse(h)) {
                 self.go(u, How::Push, cx);
             }
@@ -1469,8 +1670,291 @@ impl BrowserApp {
         }
     }
 
+    /// `short add yt2 https://example.org/s?q=%s` and `short remove yt2` in the address bar keep the person's own short words.
+    fn short_command(&mut self, cx: &AppCx) -> bool {
+        let line = self.field.value.trim().to_string();
+        let mut it = line.split_whitespace();
+        if it.next() != Some("short") {
+            return false;
+        }
+        let (verb, word, addr) = (it.next(), it.next(), it.next());
+        let cfg = browser_config::load(cx);
+        let mut cfg = cfg;
+        let msg = match (verb, word, addr, it.next()) {
+            (Some("add"), Some(w), Some(a), None) => match browser_config::valid_short_word(w, a) {
+                Ok(()) if cfg.short_words.len() >= 50 && !cfg.short_words.contains_key(w) => Err("at most 50 short words".to_string()),
+                Ok(()) => {
+                    cfg.short_words.insert(w.to_string(), a.to_string());
+                    Ok(format!("Short word {w} saved: {w} words now search {a}"))
+                }
+                Err(e) => Err(e),
+            },
+            (Some("remove"), Some(w), None, None) => {
+                if cfg.short_words.remove(w).is_some() { Ok(format!("Short word {w} removed.")) } else { Err(format!("no short word {w}")) }
+            }
+            (Some("list"), None, None, None) => {
+                self.status = Some((if cfg.short_words.is_empty() { "No short words of your own yet. short add NAME https://site/search?q=%s".to_string() } else { cfg.short_words.iter().map(|(k, v)| format!("{k} = {v}")).collect::<Vec<_>>().join(" · ") }, true));
+                self.field.value.clear();
+                return true;
+            }
+            _ => return false,
+        };
+        match msg {
+            Ok(m) => {
+                browser_config::save(cx, &cfg);
+                self.cfg = cfg;
+                self.status = Some((m, true));
+            }
+            Err(e) => self.status = Some((e, false)),
+        }
+        self.field.value.clear();
+        self.suggest.clear();
+        self.sug_sel = None;
+        true
+    }
+
+    /// `thumbnails on|off|clear` in the address bar: the small pictures of often-visited sites on the start page.
+    fn thumbs_command(&mut self, cx: &AppCx) -> bool {
+        let words = browser_data::command_words(&self.field.value);
+        if words.first().map(String::as_str) != Some("thumbnails") || words.len() > 2 || !matches!(words.get(1).map(String::as_str), None | Some("on" | "off" | "clear")) {
+            return false;
+        }
+        let msg = match words.get(1).map(String::as_str) {
+            Some("on") => {
+                self.data.thumbs_off = false;
+                "Small pictures of the sites you visit most are kept for the start page.".to_string()
+            }
+            Some("off") => {
+                self.data.thumbs_off = true;
+                self.thumbs.clear();
+                "No pictures of pages are kept; the ones kept were deleted.".to_string()
+            }
+            Some(_) => {
+                self.thumbs.clear();
+                "The pictures were deleted.".to_string()
+            }
+            None => format!("Pictures are {}; {} kept. thumbnails on, off or clear.", if self.data.thumbs_off { "off" } else { "on" }, self.thumbs.count()),
+        };
+        browser_data::save(cx, &self.data);
+        self.layout = None;
+        self.thumb_done.clear();
+        self.status = Some((msg, true));
+        self.field.value.clear();
+        self.suggest.clear();
+        self.sug_sel = None;
+        self.addr_focus = false;
+        true
+    }
+
+    /// `profile set FIELD VALUE`, `profile show` and `profile clear` in the address bar: the name, e-mail, phone and address that
+    /// Ctrl+Y fills into forms. They are kept in the personal vault.
+    fn profile_command(&mut self, cx: &AppCx) -> bool {
+        let words = browser_data::command_words(&self.field.value);
+        if words.first().map(String::as_str) != Some("profile") || !matches!(words.get(1).map(String::as_str), Some("set" | "show" | "clear")) {
+            return false;
+        }
+        let msg: Result<String, String> = (|| {
+            let mut p = browser_forms::load(cx)?;
+            match (words[1].as_str(), words.len()) {
+                ("set", n) if n >= 4 => {
+                    let f = browser_forms::Field::from_key(&words[2]).ok_or_else(|| format!("{} is not a field; the fields are {}", words[2], browser_forms::ALL.iter().map(|f| f.key()).collect::<Vec<_>>().join(", ")))?;
+                    p.set(f, &words[3..].join(" "))?;
+                    browser_forms::save(cx, &p)?;
+                    cx.audit.record(&cx.session.user, "browser.profile.set", f.key());
+                    Ok(format!("Saved {} in your vault. Ctrl+Y fills it into forms that ask for it.", f.key()))
+                }
+                ("show", 2) => Ok(if p.is_empty() { "Nothing is kept. profile set email you@example.org".to_string() } else { p.lines().join(" · ") }),
+                ("clear", 2) => {
+                    browser_forms::save(cx, &browser_forms::Profile::default())?;
+                    cx.audit.record(&cx.session.user, "browser.profile.clear", "all");
+                    Ok("Your saved details were removed from the vault.".to_string())
+                }
+                _ => Err("profile set FIELD VALUE · profile show · profile clear".to_string()),
+            }
+        })();
+        self.status = Some(match msg {
+            Ok(m) => (m, true),
+            Err(e) => (e, false),
+        });
+        self.field.value.clear();
+        self.suggest.clear();
+        self.sug_sel = None;
+        self.addr_focus = false;
+        true
+    }
+
+    /// Ctrl+Y: fill the name, e-mail, phone and address into the form that has the focus (click a field first), else into the form
+    /// that asks for the most of them. Fields that already hold text, cards, accounts and secrets are never touched; a page that is
+    /// not protected (http) gets nothing.
+    fn fill_details(&mut self, cx: &AppCx) {
+        let Some(page) = self.page().cloned() else { return };
+        if !page.url.https {
+            self.status = Some(("This page is not protected (http), so your details are not filled in.".into(), false));
+            return;
+        }
+        let profile = match browser_forms::load(cx) {
+            Ok(p) => p,
+            Err(e) => {
+                self.status = Some((e, false));
+                return;
+            }
+        };
+        if profile.is_empty() {
+            self.status = Some(("Nothing is kept yet. In the address bar: profile set email you@example.org (also name, phone, street, city, postcode, country, company).".into(), false));
+            return;
+        }
+        let scope = self.focus_ctl.and_then(|c| page.doc.controls.get(c)).map(|c| c.form);
+        let value_of = |i: usize| self.history.get(self.pos).and_then(|e| e.ctl.get(i)).map(|st| st.value.clone()).unwrap_or_default();
+        let plan = browser_forms::plan(&page.doc, &profile, scope, &value_of);
+        if plan.is_empty() {
+            self.status = Some(("No field here asks for your details (or they are already filled).".into(), false));
+            return;
+        }
+        for f in &plan {
+            match f.option {
+                Some(o) => {
+                    if let Some(st) = self.state_mut(f.control) {
+                        st.sel = o;
+                    }
+                }
+                None => self.set_control_value(f.control, &f.value),
+            }
+        }
+        cx.audit.record(&cx.session.user, "browser.profile.fill", &browser_logins::host_key(&page.url.host));
+        self.status = Some((format!("Filled in {} field{} from your saved details. Check them, then send the form.", plan.len(), if plan.len() == 1 { "" } else { "s" }), true));
+    }
+
+    /// Ctrl+Shift+K: remove the saved sign-in for this site (the one Ctrl+K filled last) from the vault. Asks to be pressed twice.
+    fn forget_login(&mut self, cx: &AppCx) {
+        let Some(page) = self.page().cloned() else { return };
+        let saved = match browser_logins::for_site(cx, &page.url.host) {
+            Ok(v) => v,
+            Err(e) => {
+                self.status = Some((e, false));
+                return;
+            }
+        };
+        if saved.is_empty() {
+            self.status = Some((format!("Nothing is saved for {}.", browser_logins::host_key(&page.url.host)), false));
+            return;
+        }
+        let c = saved[self.fill_n.saturating_sub(1) % saved.len()].clone();
+        let name = browser_logins::secret_name(&c.host, &c.user);
+        if self.forget_pending.as_deref() != Some(name.as_str()) {
+            self.status = Some((format!("Press Ctrl+Shift+K again to remove the saved sign-in {} for {} from your vault.", if c.user.is_empty() { "(no user name)" } else { &c.user }, c.host), true));
+            self.forget_pending = Some(name);
+            return;
+        }
+        self.forget_pending = None;
+        match cx.services.user_delete(&cx.session.user, &name) {
+            Ok(()) => {
+                cx.audit.record(&cx.session.user, "browser.password.forget", &c.host);
+                self.fill_n = 0;
+                self.status = Some((format!("Removed the saved sign-in {} for {}.", c.user, c.host), true));
+            }
+            Err(e) => self.status = Some((format!("Could not remove it: {e}"), false)),
+        }
+    }
+
+    /// When the page on screen is fully drawn, an often-visited https site gets a small picture for the start page (browser_thumbs.rs).
+    fn maybe_capture_thumb(&mut self, g: &Gfx, view: R, cx: &AppCx) {
+        let Some(page) = self.page().cloned() else { return };
+        let ready = !page.download && !page.media && self.layout.is_some() && self.scroll == 0.0 && self.pdf.is_none() && self.full.is_none() && !self.addr_focus && self.popup.is_none() && self.assist.is_none() && self.find.is_none() && self.media_ask.is_none() && self.sound_ask.is_none() && !self.dev.open && !self.loading_now() && self.history.get(self.pos).is_some_and(|e| e.images.iter().all(|i| i.settled()));
+        let host = page.url.host.clone();
+        let visits: u32 = self.data.history.iter().filter(|v| browser_data::host_of(&v.url) == host).map(|v| v.visits).sum();
+        // once per visit: the same address visited again is looked at again
+        let url = format!("{}|{visits}", page.url);
+        if !ready || self.thumb_done == url {
+            self.thumb_ready = 0;
+            return;
+        }
+        self.thumb_ready += 1;
+        if self.thumb_ready < 8 {
+            return; // drawn for several frames in a row: nothing is half-finished
+        }
+        self.thumb_ready = 0;
+        self.thumb_done = url;
+        let sensitive = page.doc.controls.iter().any(|c| matches!(c.kind, ControlKind::Password | ControlKind::File));
+        if !browser_thumbs::eligible(page.url.https, visits, sensitive, !self.data.thumbs_off) {
+            return;
+        }
+        if let Some(pm) = browser_thumbs::capture(&g.pm, (view.x, view.y, view.w, view.h)) {
+            if self.thumbs.save(&host, &pm).is_ok() {
+                cx.audit.record(&cx.session.user, "browser.thumbnail", &host);
+            }
+        }
+    }
+
+    /// The saved data was changed by something else (a chat tool): take the file's version, so the next save does not undo it.
+    fn reload_data_if_changed(&mut self, cx: &AppCx) {
+        let disk = browser_data::load(cx);
+        if disk != self.data {
+            self.data = disk;
+            self.layout = None;
+        }
+    }
+
+    /// `folder new|move|rename|delete|list ...` and `history: WORDS` in the address bar (F-BROW-95).
+    fn folder_command(&mut self, cx: &AppCx) -> bool {
+        let typed = self.field.value.trim().to_string();
+        // `history: WORDS` (the colon keeps a web search that starts with the word history a search)
+        if let Some(q) = typed.strip_prefix("history:") {
+            self.hist_query = q.trim().to_string();
+            self.show_view(StartView::History);
+            self.status = Some((if self.hist_query.is_empty() { "All of the history.".to_string() } else { format!("History matching {}", self.hist_query) }, true));
+            return true;
+        }
+        let words = browser_data::command_words(&typed);
+        // only the five folder verbs are commands: "folder structure in rust" stays a web search
+        if words.first().map(String::as_str) != Some("folder") || !matches!(words.get(1).map(String::as_str), Some("new" | "move" | "rename" | "delete" | "list")) {
+            return false;
+        }
+        let arg = |i: usize| words.get(i).map(String::as_str).unwrap_or("");
+        // the bookmark a move is about: the link selected on the Bookmarks page, else the page being read
+        let target = || -> Option<String> {
+            match self.page() {
+                Some(p) => Some(p.url.to_string()),
+                None => self.focus_link.and_then(|l| self.start_links.get(l).cloned()).filter(|u| u.contains("://")),
+            }
+        };
+        let msg: Result<String, String> = match (arg(1), words.len()) {
+            ("new", 3) => self.data.new_folder(arg(2)).map(|n| format!("Folder {n} made.")),
+            ("move", 3) => match target() {
+                None => Err("Select a bookmark first (Tab to it on the Bookmarks page, Ctrl+B) or open a bookmarked page.".to_string()),
+                Some(u) => match self.data.move_bookmark(&u, arg(2)) {
+                    Ok(true) => Ok(if arg(2) == "-" { "Moved to the top level.".to_string() } else { format!("Moved to {}.", arg(2)) }),
+                    Ok(false) => Err("That page is not bookmarked (Ctrl+D bookmarks it).".to_string()),
+                    Err(e) => Err(e),
+                },
+            },
+            ("rename", 4) => self.data.rename_folder(arg(2), arg(3)).map(|n| format!("Folder renamed ({n} bookmarks).")),
+            ("delete", 3) => self.data.delete_folder(arg(2)).map(|n| format!("Folder deleted; its {n} bookmarks are at the top level.")),
+            ("list", 2) => {
+                let names = self.data.folder_names();
+                Ok(if names.is_empty() { "No folders yet. folder new NAME".to_string() } else { names.iter().map(|f| format!("{f} ({})", self.data.bookmarks.iter().filter(|b| &b.folder == f).count())).collect::<Vec<_>>().join(" · ") })
+            }
+            _ => Err("folder new NAME · folder move NAME (- for none) · folder rename OLD NEW · folder delete NAME · folder list (put a name with spaces in quotes)".to_string()),
+        };
+        match msg {
+            Ok(m) => {
+                browser_data::save(cx, &self.data);
+                self.layout = None;
+                self.status = Some((m, true));
+            }
+            Err(e) => self.status = Some((e, false)),
+        }
+        self.field.value.clear();
+        self.suggest.clear();
+        self.sug_sel = None;
+        self.addr_focus = false;
+        true
+    }
+
     fn submit_address(&mut self, cx: &AppCx) {
-        let text = expand_shortcut(&self.field.value).unwrap_or_else(|| self.field.value.clone());
+        if self.short_command(cx) || self.folder_command(cx) || self.profile_command(cx) || self.thumbs_command(cx) {
+            return;
+        }
+        let text = expand_shortcut_with(&self.field.value, &self.cfg.short_words).unwrap_or_else(|| self.field.value.clone());
         self.suggest.clear();
         self.sug_sel = None;
         self.cfg = browser_config::load(cx);
@@ -1523,7 +2007,8 @@ impl BrowserApp {
         };
         let (tx, rx) = channel();
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (flag, web, url) = (cancel.clone(), cx.web.for_user(&cx.session.user).unwrap_or_else(|| cx.web.clone()), url);
+        let progress = Arc::new(browser_stream::Progress::default());
+        let (flag, prog, web, url) = (cancel.clone(), progress.clone(), cx.web.for_user(&cx.session.user).unwrap_or_else(|| cx.web.clone()), url);
         let name = match name.map(|n| sanitize_file_name(&n)).filter(|n| !n.is_empty()) {
             Some(n) => n,
             None => download_name(&url.to_string(), &ctype),
@@ -1531,47 +2016,37 @@ impl BrowserApp {
         let shown = name.clone();
         cx.audit.record(&cx.session.user, "browser.download", &url.host);
         let url_string = url.to_string();
+        let free = cx.os.disks().space(&dir.to_string_lossy()).ok().map(|s| s.0);
         let spawned = std::thread::Builder::new().name("iyakki-browser-download".into()).spawn(move || {
-            let r = web.get(&url).and_then(|resp| {
-                if flag.load(std::sync::atomic::Ordering::Relaxed) {
-                    return Err("cancelled".to_string());
-                }
-                if resp.status >= 400 {
-                    return Err(format!("the server answered {}", resp.status));
-                }
-                if resp.content_length.is_some_and(|n| n > resp.body.len() as u64) {
-                    return Err(format!("too large to save here (over {})", human_bytes(resp.body.len() as u64)));
-                }
-                // never overwrite: name (1).ext, name (2).ext …
-                let (stem, ext) = match name.rsplit_once('.') {
-                    Some((a, b)) if !a.is_empty() => (a.to_string(), format!(".{b}")),
-                    _ => (name.clone(), String::new()),
-                };
-                let mut final_name = name.clone();
-                let mut n = 1;
-                while dir.join(&final_name).exists() && n < 1000 {
-                    final_name = format!("{stem} ({n}){ext}");
-                    n += 1;
-                }
-                std::fs::write(dir.join(&final_name), &resp.body).map_err(|e| e.to_string())?;
-                Ok((final_name, resp.body.len() as u64))
-            });
+            // pieces of a megabyte, written as they arrive; Esc stops it between pieces (browser_stream.rs)
+            let r = browser_stream::download(web.as_ref(), &url, &dir, &name, &flag, &prog, free);
             let _ = tx.send(r);
         });
         match spawned {
             Ok(_) => {
-                self.status = Some((format!("Downloading {shown}…"), true));
-                self.download = Some((url_string, cancel, rx));
+                self.status = Some((format!("Downloading {shown}… (Esc cancels)"), true));
+                self.download = Some((url_string, cancel, rx, progress));
             }
             Err(e) => self.status = Some((format!("could not start: {e}"), false)),
         }
     }
 
+    /// While a download runs, the status line shows how far it is (called with every heartbeat).
+    fn download_progress_line(&mut self) {
+        if let Some((url, _, _, p)) = &self.download {
+            let name = download_name(url, "");
+            self.status = Some((format!("Downloading {name}  {}  (Esc cancels)", p.line()), true));
+        }
+    }
+
     fn poll_download(&mut self, cx: &AppCx) {
-        let Some((url, _, rx)) = &self.download else { return };
+        let Some((url, _, rx, _)) = &self.download else { return };
         let r = match rx.try_recv() {
             Ok(r) => r,
-            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Empty) => {
+                self.download_progress_line();
+                return;
+            }
             Err(TryRecvError::Disconnected) => Err("the download stopped".into()),
         };
         let url = url.clone();
@@ -1580,14 +2055,17 @@ impl BrowserApp {
             Ok((n, b)) => (n.clone(), *b, "saved".to_string()),
             Err(e) => (download_name(&url, ""), 0, e.clone()),
         };
+        let cancelled = matches!(&r, Err(e) if e == "cancelled");
         self.data.add_download(browser_data::Download { url, name: name.clone(), bytes, at: iyakki_agent::clock::now_unix(), status: status.clone() });
         browser_data::save(cx, &self.data);
+        let ok = r.is_ok();
         self.status = Some(match r {
             Ok((n, b)) => (format!("Saved {n} ({}) to Downloads.", human_bytes(b)), true),
+            Err(_) if cancelled => ("Download cancelled. Nothing was saved.".to_string(), true),
             Err(e) => (format!("Download failed: {e}"), false),
         });
         let _ = (name.clone(), status);
-        if self.status.as_ref().is_some_and(|s| s.1) {
+        if ok {
             self.pdf_download_done(&name, cx);
         } else {
             self.pdf_after = None;
@@ -1828,7 +2306,29 @@ impl BrowserApp {
         let before = self.layout.as_ref().map_or(1.0, |l| l.height.max(1.0));
         self.layout = None;
         self.pending_scroll = Some(keep * before);
-        self.status = Some((format!("{} zoom on {host}", if (z - 1.0).abs() < 0.01 { "Normal".to_string() } else { format!("{}%", (z * 100.0).round()) }), true));
+        let what = if self.data.is_text_zoom(&host) { "Text size" } else { "Zoom" };
+        self.status = Some((format!("{} {what} on {host}", if (z - 1.0).abs() < 0.01 { "Normal".to_string() } else { format!("{}%", (z * 100.0).round()) }), true));
+    }
+
+    /// Y: the zoom of this site makes only the letters bigger (pictures, boxes and spacing stay), or everything again.
+    fn toggle_text_zoom(&mut self, cx: &AppCx) {
+        let Some(host) = self.current_url().map(|u| u.host.clone()) else { return };
+        let on = self.data.toggle_text_zoom(&host);
+        browser_data::save(cx, &self.data);
+        let keep = self.scroll / self.layout.as_ref().map_or(1.0, |l| l.height.max(1.0));
+        let before = self.layout.as_ref().map_or(1.0, |l| l.height.max(1.0));
+        self.layout = None;
+        self.pending_scroll = Some(keep * before);
+        self.status = Some((if on { format!("Zoom on {host} now changes only the text (Y again for everything).") } else { format!("Zoom on {host} changes the whole page again.") }, true));
+    }
+
+    /// The scale of everything and of the text alone for the page being read: with text-only zoom the page keeps the interface scale.
+    fn zoom_scales(&self, s: f32) -> (f32, f32) {
+        let z = self.zoom();
+        match self.page() {
+            Some(p) if self.data.is_text_zoom(&p.url.host) => (s, z),
+            _ => (s * z, 1.0),
+        }
     }
 
     /// The words to work on: the selection if there is one, else the whole page.
@@ -1864,7 +2364,8 @@ impl BrowserApp {
             self.status = Some(("Open a page with some text first.".into(), false));
             return;
         };
-        self.status = Some(match browser_assist::remember(cx, &page.doc.title, &page.url.to_string(), &text) {
+        let whole = self.sel_text.trim().is_empty();
+        self.status = Some(match browser_assist::remember(cx, &page.doc.title, &page.url.to_string(), &text, whole) {
             Ok(n) => (format!("Kept {what} ({n} characters) in your knowledge (RAG). The assistant can find it from now on."), true),
             Err(e) => (e, false),
         });
@@ -1892,6 +2393,7 @@ impl BrowserApp {
     fn forget_site(&mut self, cx: &AppCx) {
         let Some(host) = self.current_url().map(|u| u.host.clone()).filter(|h| !h.is_empty()) else { return };
         browser_persist::forget(cx, &self.sites, &host);
+        self.thumbs.forget(&host);
         cx.audit.record(&cx.session.user, "browser.forget_site", &host);
         self.status = Some((format!("Forgot the cookies and saved data of {host}. You are signed out there."), true));
     }
@@ -1962,6 +2464,25 @@ impl BrowserApp {
         browser_data::save(cx, &self.data);
         cx.audit.record(&cx.session.user, if on { "browser.bookmark.add" } else { "browser.bookmark.remove" }, browser_data::host_of(&url));
         self.status = Some((if on { "Bookmarked.".into() } else { "Bookmark removed.".to_string() }, true));
+    }
+
+    /// A browser showing its Downloads list with these saved files in it (shell-level tests of the hand-over to other tiles).
+    #[cfg(test)]
+    pub(crate) fn with_downloads_for_test(cx: &AppCx, files: &[(&str, &str)]) -> BrowserApp {
+        let dir = Self::downloads_dir(cx).unwrap();
+        let mut a = BrowserApp::new(cx);
+        for (name, body) in files {
+            std::fs::write(dir.join(name), body).unwrap();
+            a.data.add_download(browser_data::Download { url: format!("https://x.org/{name}"), name: (*name).into(), bytes: body.len() as u64, at: 1, status: "saved".into() });
+        }
+        a.show_view(StartView::Downloads);
+        a
+    }
+
+    /// The address of the start-page link that has the keyboard focus (tests).
+    #[cfg(test)]
+    pub(crate) fn focused_start_link_for_test(&self) -> Option<String> {
+        self.focus_link.and_then(|l| self.start_links.get(l).cloned())
     }
 
     /// Show the browser's own history or bookmarks page as a step in the history of this tab.
@@ -2052,11 +2573,188 @@ impl BrowserApp {
         self.addr_focus = false;
         self.focus_ctl = Some(i);
         if let Some((c, st)) = self.control(i) {
-            if matches!(c.kind, ControlKind::Text | ControlKind::Password) {
+            if matches!(c.kind, ControlKind::Text | ControlKind::Password | ControlKind::File) {
                 let (value, mask) = (st.value.clone(), c.kind == ControlKind::Password);
                 self.edit = TextField::new("", mask);
                 self.edit.max = 2048;
                 self.edit.set(&value);
+            }
+        }
+    }
+
+    /// The live page of the visit in view, when it has one.
+    fn live_active(&mut self) -> Option<&mut browser_live::LiveSession> {
+        let serial = self.history.get(self.pos).map(|e| e.serial);
+        match &mut self.live {
+            Some((s, kit)) if Some(*s) == serial => kit.session.as_mut(),
+            _ => None,
+        }
+    }
+
+    /// Hands what the person did to the page's scripts. False when the page has no live engine (the reader answers by itself).
+    fn live_send(&mut self, what: Interaction) -> bool {
+        let node = match &what {
+            Interaction::Click(n) | Interaction::Input(n, _) | Interaction::Check(n, _) => *n,
+        };
+        if node == usize::MAX {
+            return false;
+        }
+        match self.live_active() {
+            Some(sess) => {
+                if !sess.send(what) {
+                    self.status = Some(("The page is still busy with the last clicks; try again in a moment.".into(), false));
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// What the person typed into a text field or a text area reaches the page's `input` and `change` handlers. While the page is still busy
+    /// with the last one only the newest text waits (it is sent when the answer arrives), so a fast typist does not queue up work. Passwords
+    /// are not sent: the reader submits them with the form, and a page's scripts do not need them to draw.
+    fn live_input(&mut self, i: usize) {
+        let Some((c, st)) = self.control(i) else { return };
+        if !matches!(c.kind, ControlKind::Text | ControlKind::Textarea) {
+            return;
+        }
+        let (node, value) = (c.node, st.value.clone());
+        let what = Interaction::Input(node, value);
+        match self.live_active() {
+            Some(sess) if sess.pending() == 0 => {
+                sess.send(what);
+            }
+            Some(_) => self.live_stash = Some(what),
+            None => {}
+        }
+    }
+
+    /// A check box or radio button changed: the page's scripts hear about it.
+    fn live_check(&mut self, i: usize) {
+        let Some((c, st)) = self.control(i) else { return };
+        let (node, on) = (c.node, st.checked);
+        self.live_send(Interaction::Check(node, on));
+    }
+
+    /// Puts a freshly built document where the page in view was: scroll, typed values and controls stay, the pictures are asked for
+    /// again only when the list changed.
+    fn replace_doc(&mut self, doc: Doc, more_notes: Vec<String>, error: Option<String>) -> Option<Arc<Page>> {
+        let old = self.page().cloned()?;
+        let mut notes = old.notes.clone();
+        notes.extend(more_notes);
+        if let Some(e) = error {
+            notes.push(format!("The page's scripts could not take that: {e}"));
+        }
+        let same_images = old.doc.images.len() == doc.images.len() && old.doc.images.iter().zip(doc.images.iter()).all(|(a, b)| a.src == b.src);
+        let page = Arc::new(Page { url: old.url.clone(), status: old.status, doc, notes, source: old.source.clone(), media: old.media, download: old.download, ctype: old.ctype.clone() });
+        if let Some(e) = self.history.get_mut(self.pos) {
+            if e.ctl.len() != page.doc.controls.len() {
+                e.ctl = page.doc.controls.iter().map(initial_state).collect();
+            }
+            if !same_images {
+                e.images = vec![ImgState::Todo; page.doc.images.len()];
+                self.images_due = !e.images.is_empty();
+            }
+            e.page = Some(page.clone());
+        }
+        self.layout = None;
+        Some(page)
+    }
+
+    /// Takes in what the live page answered: the changed page replaces the one shown, and a navigation a script asked for is followed
+    /// like any address.
+    fn poll_live(&mut self, cx: &AppCx) {
+        let serial = self.history.get(self.pos).map(|e| e.serial);
+        if self.live.as_ref().is_some_and(|(s, _)| Some(*s) != serial) {
+            // the person left the page: its engine goes
+            self.live = None;
+            return;
+        }
+        let Some((_, kit)) = self.live.as_mut() else { return };
+        let Some(sess) = kit.session.as_mut() else { return };
+        let got = match sess.poll() {
+            Ok(Some(u)) => u,
+            Ok(None) => return,
+            Err(()) => {
+                kit.session = None;
+                return;
+            }
+        };
+        let Some(page) = self.replace_doc(got.doc, got.notes, got.error) else { return };
+        if let Some(what) = self.live_stash.take() {
+            match self.live_active() {
+                Some(sess) if sess.pending() == 0 => {
+                    sess.send(what);
+                }
+                Some(_) => self.live_stash = Some(what),
+                None => {}
+            }
+        }
+        if let Some(next) = got.navigation {
+            if let Ok(u) = page.url.join(&next) {
+                let mut req = Request::get(&u);
+                req.referer = page.url.to_string();
+                self.go_request(req, How::Push, cx);
+            }
+        }
+    }
+
+    /// The window of the reader changed size (a window dragged, a screen turned): a page designed for the whole window has its media
+    /// queries answered again. Once the size has stayed new for a moment the page is built again for it: a page with a live engine is
+    /// told (its `resize` handlers run) and built from its own tree; a page without scripts is parsed again from its source.
+    fn poll_reflow(&mut self, _cx: &AppCx) {
+        let serial = self.history.get(self.pos).map(|e| e.serial);
+        // an answer from the thread that built the page again
+        if let Some((s, rx)) = &self.reflow_rx {
+            match rx.try_recv() {
+                Ok(doc) => {
+                    let s = *s;
+                    self.reflow_rx = None;
+                    if Some(s) == serial {
+                        let _ = self.replace_doc(doc, Vec::new(), None);
+                    }
+                }
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => self.reflow_rx = None,
+            }
+        }
+        let Some((s, kit)) = self.live.as_mut() else { return };
+        if Some(*s) != serial || self.full.is_some() || self.css_win.0 < 200.0 || self.css_win.1 < 100.0 {
+            return;
+        }
+        let designed = self.history.get(self.pos).and_then(|e| e.page.as_ref()).is_some_and(|p| p.doc.canvas.is_some() && !matches!(p.ctype.as_str(), HELP_TYPE | STUB_TYPE));
+        if !designed {
+            return;
+        }
+        let mut want = kit.vp;
+        want.width = self.css_win.0.min(1280.0f32.max(iyakki_web::css::Viewport::default().width));
+        want.height = self.css_win.1;
+        want.dppx = self.dppx.clamp(1.0, 4.0);
+        if (want.width - kit.vp.width).abs() < 16.0 && (want.height - kit.vp.height).abs() < 80.0 && (want.dppx - kit.vp.dppx).abs() < 0.5 {
+            self.reflow_due = None;
+            return;
+        }
+        let since = *self.reflow_due.get_or_insert_with(std::time::Instant::now);
+        if since.elapsed() < std::time::Duration::from_millis(300) {
+            return;
+        }
+        self.reflow_due = None;
+        kit.vp = want;
+        if let Some(sess) = kit.session.as_mut() {
+            sess.resize(want);
+        } else if !kit.scripted {
+            let Some(page) = self.history.get(self.pos).and_then(|e| e.page.clone()) else { return };
+            if page.source.is_empty() {
+                return;
+            }
+            let (built, url, src) = (kit.built.clone(), page.url.clone(), page.source.clone());
+            let (tx, rx) = channel();
+            let spawned = std::thread::Builder::new().name("iyakki-browser-reflow".into()).spawn(move || {
+                let tree = iyakki_web::html::parse(&src);
+                let _ = tx.send((*built)(&url, &tree, &want));
+            });
+            if spawned.is_ok() {
+                self.reflow_rx = Some((*s, rx));
             }
         }
     }
@@ -2070,7 +2768,7 @@ impl BrowserApp {
         }
         self.focus_link = None;
         match kind {
-            ControlKind::Text | ControlKind::Password => {
+            ControlKind::Text | ControlKind::Password | ControlKind::File => {
                 if self.focus_ctl != Some(i) {
                     self.focus_control(i);
                 }
@@ -2082,6 +2780,7 @@ impl BrowserApp {
                 if let Some(st) = self.state_mut(i) {
                     st.checked = !st.checked;
                 }
+                self.live_check(i);
             }
             ControlKind::Radio => {
                 self.focus_control(i);
@@ -2095,6 +2794,7 @@ impl BrowserApp {
                 if let Some(st) = self.state_mut(i) {
                     st.checked = true;
                 }
+                self.live_check(i);
             }
             ControlKind::Select => {
                 self.focus_control(i);
@@ -2105,12 +2805,16 @@ impl BrowserApp {
                 if let Some(f) = form {
                     self.submit_form(f, Some(i), cx);
                 } else {
+                    if !self.live_send(Interaction::Click(self.control(i).map(|(c, _)| c.node).unwrap_or(usize::MAX))) {
                     self.status = Some(("This button is not inside a form.".into(), false));
+                }
                 }
             }
             ControlKind::Button => {
                 self.focus_control(i);
-                self.status = Some(("This button needs JavaScript (press j to allow it for this site).".into(), false));
+                if !self.live_send(Interaction::Click(self.control(i).map(|(c, _)| c.node).unwrap_or(usize::MAX))) {
+                    self.status = Some(("This button needs JavaScript (press j to allow it for this site).".into(), false));
+                }
             }
             ControlKind::Hidden => {}
         }
@@ -2179,6 +2883,8 @@ impl BrowserApp {
             return;
         }
         let mut pairs: Vec<(String, String)> = Vec::new();
+        // (field name, the path the person typed) of every file field
+        let mut files: Vec<(String, String)> = Vec::new();
         for (i, c) in page.doc.controls.iter().enumerate().filter(|(_, c)| c.form == Some(form)) {
             if c.disabled || c.name.is_empty() && !matches!(c.kind, ControlKind::Submit) {
                 continue;
@@ -2186,6 +2892,8 @@ impl BrowserApp {
             let Some(st) = self.history.get(self.pos).and_then(|e| e.ctl.get(i)) else { continue };
             match c.kind {
                 ControlKind::Text | ControlKind::Password | ControlKind::Textarea => pairs.push((c.name.clone(), st.value.clone())),
+                // the file is read and sent below, as a multipart part
+                ControlKind::File => files.push((c.name.clone(), st.value.clone())),
                 ControlKind::Hidden => pairs.push((c.name.clone(), c.value.clone())),
                 ControlKind::Checkbox | ControlKind::Radio => {
                     if st.checked {
@@ -2228,7 +2936,18 @@ impl BrowserApp {
             Ok(mut u) => {
                 cx.audit.record(&cx.session.user, "browser.form", &u.host);
                 if f.post {
-                    self.go_request(Request { url: u, method: "POST".into(), body: body.into_bytes(), content_type: "application/x-www-form-urlencoded".into(), cookie: String::new(), referer: page.url.to_string(), ..Default::default() }, How::Push, cx);
+                    let (bytes, content_type) = if files.is_empty() {
+                        (body.into_bytes(), "application/x-www-form-urlencoded".to_string())
+                    } else {
+                        match self.multipart_body(&pairs, &files, &u.host, cx) {
+                            Ok(x) => x,
+                            Err(e) => {
+                                self.status = Some((e, false));
+                                return;
+                            }
+                        }
+                    };
+                    self.go_request(Request { url: u, method: "POST".into(), body: bytes, content_type, cookie: String::new(), referer: page.url.to_string(), ..Default::default() }, How::Push, cx);
                 } else {
                     u.query = (!body.is_empty()).then_some(body);
                     u.fragment = None;
@@ -2237,6 +2956,38 @@ impl BrowserApp {
             }
             Err(e) => self.status = Some((e, false)),
         }
+    }
+
+    /// The body of a form with files: the fields as text parts and each file the person named, read under their file rules.
+    /// An empty path sends an empty file part, as browsers do.
+    fn multipart_body(&mut self, pairs: &[(String, String)], files: &[(String, String)], host: &str, cx: &AppCx) -> Result<(Vec<u8>, String), String> {
+        let home = std::path::PathBuf::from(format!("/home/{}", cx.session.user));
+        let may_read = |p: &std::path::Path| iyakki_agent::scope::check_read(&cx.session.policy, &cx.session.user, p);
+        let mut parts: Vec<browser_upload::Part> = pairs.iter().map(|(n, v)| browser_upload::Part::text(n, v)).collect();
+        let mut sent = 0usize;
+        for (name, typed) in files {
+            match browser_upload::read_upload(typed, &home, &may_read)? {
+                Some((fname, data)) => {
+                    sent += data.len();
+                    let content_type = browser_upload::content_type_for(&fname).to_string();
+                    parts.push(browser_upload::Part { name: name.clone(), filename: Some(fname), content_type, data });
+                }
+                None => parts.push(browser_upload::Part { name: name.clone(), filename: Some(String::new()), content_type: String::new(), data: Vec::new() }),
+            }
+            if sent as u64 > browser_upload::MAX_UPLOAD {
+                return Err(format!("the files together are larger than {} MB", browser_upload::MAX_UPLOAD >> 20));
+            }
+        }
+        let mut rnd = || {
+            let mut b = [0u8; 8];
+            let _ = iyakki_sec::random_fill(&mut b);
+            u64::from_le_bytes(b)
+        };
+        let boundary = browser_upload::boundary_for(&parts, &mut rnd);
+        if sent > 0 {
+            cx.audit.record(&cx.session.user, "browser.upload", host);
+        }
+        Ok((browser_upload::encode(&parts, &boundary), format!("multipart/form-data; boundary={boundary}")))
     }
 
     /// A key while a form control has the keyboard. `None`: not for the control, treat it as a page key.
@@ -2263,7 +3014,7 @@ impl BrowserApp {
             }
         }
         match kind {
-            ControlKind::Text | ControlKind::Password => {
+            ControlKind::Text | ControlKind::Password | ControlKind::File => {
                 if *k == Key::Enter {
                     if let Some(f) = form {
                         self.submit_form(f, None, cx);
@@ -2274,6 +3025,7 @@ impl BrowserApp {
                     if let Some(st) = self.state_mut(c) {
                         st.value = v;
                     }
+                    self.live_input(c);
                 }
                 Some(Flow::Stay)
             }
@@ -2288,6 +3040,7 @@ impl BrowserApp {
                         _ => return None,
                     }
                 }
+                self.live_input(c);
                 Some(Flow::Stay)
             }
             ControlKind::Checkbox | ControlKind::Radio | ControlKind::Submit | ControlKind::Button if matches!(k, Key::Enter | Key::Char(' ')) => {
@@ -2330,9 +3083,15 @@ impl BrowserApp {
             Key::F(2) if !self.embedded => self.open_group_edit(self.active),
             Key::Nav { nav: super::super::ui::Nav::PageDown, ctrl: true, .. } => self.step_tab(true),
             Key::Nav { nav: super::super::ui::Nav::PageUp, ctrl: true, .. } => self.step_tab(false),
+            // Ctrl and + / - / 0, and Ctrl with the mouse wheel (the input layer turns it into these two): the same as + and -
+            Key::Ctrl('+' | '=') if !self.addr_focus => self.change_zoom(Some(true), cx),
+            Key::Ctrl('-') if !self.addr_focus => self.change_zoom(Some(false), cx),
+            Key::Ctrl('0') if !self.addr_focus => self.change_zoom(None, cx),
             Key::Ctrl('f') => self.open_find(),
             Key::Ctrl('s') => self.save_offer(cx),
             Key::Ctrl('k') => self.fill_login(cx),
+            Key::Ctrl('K') => self.forget_login(cx),
+            Key::Ctrl('y') => self.fill_details(cx),
             Key::Ctrl('g') => self.generate_password(cx),
             Key::F(3) if self.find.is_some() => self.step_find(true),
             Key::Ctrl('d') => self.toggle_bookmark(cx),
@@ -2345,6 +3104,9 @@ impl BrowserApp {
     }
 
     fn handle_key(&mut self, k: &Key, cx: &AppCx) -> Flow {
+        if !matches!(k, Key::Ctrl('K')) {
+            self.forget_pending = None;
+        }
         // the microphone chooser over the question has the keyboard first
         if self.media_mic_pick.is_some() {
             self.mic_pick_event(&Event::Key(k.clone()), cx);
@@ -2482,7 +3244,7 @@ impl BrowserApp {
             }
             Key::Char('y') => self.copy_link(),
             Key::Esc if self.download.is_some() => {
-                if let Some((_, flag, _)) = &self.download {
+                if let Some((_, flag, _, _)) = &self.download {
                     flag.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 self.status = Some(("Download cancelled.".into(), true));
@@ -2507,12 +3269,27 @@ impl BrowserApp {
             }
             Key::Char('d') if self.page().is_some_and(|p| p.download) => self.start_download(cx),
             Key::Char('o') if self.page().is_some_and(|p| p.download && p.ctype.to_ascii_lowercase().contains("pdf")) => self.open_pdf_page(cx),
+            Key::Char('o') if self.pdf_offer.is_some() => {
+                if let Some(name) = self.pdf_offer.take() {
+                    self.open_saved_pdf(&name, cx);
+                }
+            }
+            Key::Char('m') if self.page().is_none() && self.view() == StartView::Bookmarks && self.focus_link.is_some() => {
+                self.field.set("folder move ");
+                self.addr_focus = true;
+                self.status = Some(("Type the folder (a new name makes it, - means none) and press Enter.".into(), true));
+            }
+            Key::Char('s') if self.page().is_none() && self.view() == StartView::History => {
+                self.field.set("history: ");
+                self.addr_focus = true;
+            }
             Key::Ctrl('p') => self.save_page_pdf(cx),
             Key::Ctrl('P') => self.toggle_pdf_size(cx),
             Key::Ctrl('e') if self.page().is_none() && self.view() == StartView::Bookmarks => self.export_bookmarks(cx),
             Key::Char('I') if self.page().is_none() && self.view() == StartView::Bookmarks => self.import_bookmarks(cx),
             Key::Char('D') if self.page().is_none() && self.view() == StartView::History => {
                 self.data.clear_history();
+                self.thumbs.clear();
                 browser_data::save(cx, &self.data);
                 cx.audit.record(&cx.session.user, "browser.history.clear", "");
                 self.layout = None;
@@ -2540,6 +3317,7 @@ impl BrowserApp {
             Key::Char('+' | '=') => self.change_zoom(Some(true), cx),
             Key::Char('-') => self.change_zoom(Some(false), cx),
             Key::Char('0') => self.change_zoom(None, cx),
+            Key::Char('Y') => self.toggle_text_zoom(cx),
             Key::Char('R') => self.toggle_reader(),
             Key::Char('U') => self.toggle_source(),
             Key::Char('F') => self.open_full_browser(cx),
@@ -2549,9 +3327,34 @@ impl BrowserApp {
             Key::Char('S') => self.open_assist(Some(browser_assist::Task::Summarise), cx),
             Key::Char('T') => self.open_assist(Some(browser_assist::Task::Translate), cx),
             Key::Char('M') => self.remember_page(cx),
+            Key::Char('!') => self.report_broken_site(cx),
             _ => {}
         }
         Flow::Stay
+    }
+
+    /// `!`: save a report about the page on screen to a file on this computer (host, status, scripts, notes; no path or query).
+    fn report_broken_site(&mut self, cx: &AppCx) {
+        // a page of the built-in reader has a status and notes; a page the full web engine shows has only its address (the engine is
+        // asked for nothing else, so the report says "full" and has no notes)
+        let full_url = self.full.as_ref().and_then(|f| Url::parse(&f.url).ok());
+        let (host, status, scripts, engine, notes) = match (full_url, self.page().cloned()) {
+            (Some(u), _) => (u.host.clone(), 0, self.cfg.scripts_for(&u.host), "full", Vec::new()),
+            (None, Some(p)) => (p.url.host.clone(), p.status, self.cfg.scripts_for(&p.url.host), "reader", p.notes.clone()),
+            (None, None) => {
+                self.status = Some(("Open a page first; the report is about the page on screen.".into(), false));
+                return;
+            }
+        };
+        let l = super::browser_report::line(iyakki_agent::clock::now_unix(), &host, status, scripts, engine, &notes);
+        let path = super::browser_report::file_for(cx.services.dir(), &cx.session.user);
+        match super::browser_report::append(&path, &l) {
+            Ok(_) => {
+                cx.audit.record(&cx.session.user, "browser.report", &host);
+                self.status = Some((format!("Report about {host} saved on this computer (host, status and the notes; nothing was sent)."), true));
+            }
+            Err(e) => self.status = Some((e, false)),
+        }
     }
 
     /// The address to open in the full browser: the one being typed (when the bar has the focus), else the page, else
@@ -2559,7 +3362,7 @@ impl BrowserApp {
     fn full_browser_target(&self) -> Option<String> {
         let typed = self.field.value.trim();
         if self.addr_focus && !typed.is_empty() {
-            let text = expand_shortcut(typed).unwrap_or_else(|| typed.to_string());
+            let text = expand_shortcut_with(typed, &self.cfg.short_words).unwrap_or_else(|| typed.to_string());
             return Url::from_input_on(&text, self.cfg.search).ok().map(|u| u.to_string());
         }
         if let Some(u) = self.current_url() {
@@ -2621,7 +3424,7 @@ impl BrowserApp {
             env: iyakki_agent::webengine::helper_env(&profile).map(|mut e| {
                 e.extend(browser_block::prepare_full_engine(cx, &profile));
                 // the engine's share of memory and its cache model: the person's Speed and memory choice on this machine
-                e.extend(browser_speed::engine_env(browser_config::load(cx).cache, &browser_speed::machine(cx.services.dir())));
+                e.extend(browser_speed::engine_env(browser_config::load(cx).cache, &browser_speed::machine_os(&*cx.os, cx.services.dir())));
                 e
             }),
             helper,
@@ -2659,6 +3462,7 @@ impl BrowserApp {
         }
         match Full::start(start) {
             Ok(mut f) => {
+                browser_headers::sync_full(cx, &mut f);
                 f.navigate(&url);
                 self.clear_selection();
                 self.full = Some(f);
@@ -2671,6 +3475,16 @@ impl BrowserApp {
             }
             Err(e) => self.status = Some((format!("The full web engine could not be started: {e}"), false)),
         }
+    }
+
+    /// The screen locks with the browser data sealed: the full engine holds files of the open profile, so it is closed first (what the page
+    /// had stays in the built-in reader's history; F opens it in the engine again after the unlock).
+    pub(super) fn close_full_for_lock(&mut self, cx: &AppCx) -> bool {
+        let Some(f) = self.full.take() else { return false };
+        drop(f);
+        cx.audit.record(&cx.session.user, "browser.full.end", "screen lock");
+        self.status = Some(("The full web engine was closed when the screen locked (your browser data is sealed). Press F to open the page in it again.".into(), true));
+        true
     }
 
     /// F again, or Esc with the browser's own keys in charge: the page is shown by the built-in reader again.
@@ -2959,6 +3773,7 @@ impl BrowserApp {
         self.share_devices("", 0, cx);
         match self.embedded_start(helper, cx).map(Full::start) {
             Ok(Ok(mut f)) => {
+                browser_headers::sync_full(cx, &mut f);
                 f.navigate(url);
                 self.full = Some(f);
                 cx.audit.record(&cx.session.user, "browser.full.restart", "software drawing after the engine died at its start on the graphics card");
@@ -2979,6 +3794,7 @@ impl BrowserApp {
         self.share_devices("", 0, cx);
         match self.embedded_start(helper, cx).map(Full::start) {
             Ok(Ok(mut f)) => {
+                browser_headers::sync_full(cx, &mut f);
                 f.navigate(&url);
                 self.full = Some(f);
                 self.av.shown_reset();
@@ -3046,6 +3862,12 @@ impl BrowserApp {
                         dt.set_page(&cx.session.user, &f.url);
                     }
                     dt.record_line(&cx.session.user, &line);
+                }
+            }
+            Note::Headers { url, status, headers } => {
+                // kept (for the `browser_headers` tool) only while developer tools are on, like the page's own lines
+                if self.dev.open || cx.services.devtools.enabled(&cx.session.user) {
+                    iyakki_agent::devtools_headers::set_engine_headers(&cx.session.user, &url, status, &headers);
                 }
             }
             Note::Media { id, kinds, origin } => self.media_request(id, kinds, origin, cx),
@@ -3437,6 +4259,7 @@ impl BrowserApp {
         self.status = None;
         if let Some(f) = self.full.as_mut() {
             f.set_focus(true);
+            browser_headers::sync_full(cx, f);
             f.navigate(&url);
         }
     }
@@ -3553,12 +4376,20 @@ pub fn page_needs_full_engine(page: &Page) -> bool {
 }
 
 pub fn expand_shortcut(text: &str) -> Option<String> {
+    expand_shortcut_with(text, &Default::default())
+}
+
+/// Like `expand_shortcut`, with the person's own short words first (they may replace a built-in one).
+pub fn expand_shortcut_with(text: &str, own: &std::collections::BTreeMap<String, String>) -> Option<String> {
     let (key, rest) = text.trim().split_once(char::is_whitespace)?;
     let q = rest.trim();
     if q.is_empty() {
         return None;
     }
     let enc = form_urlencode(&[("q".to_string(), q.to_string())]).trim_start_matches("q=").to_string();
+    if let Some(t) = own.get(&key.to_ascii_lowercase()) {
+        return Some(t.replacen("%s", &enc, 1));
+    }
     let site = match key.to_ascii_lowercase().as_str() {
         "w" | "wiki" => "https://en.wikipedia.org/w/index.php?search=",
         "ddg" => "https://duckduckgo.com/html/?q=",
@@ -3641,11 +4472,32 @@ fn page_label(title: &str, url: &str) -> String {
 
 /// The page shown before anything has been opened, and the browser's own history and bookmarks pages. Every address in
 /// it is complete, so it can be followed without a page to resolve it against.
-fn start_page(data: &Data, engine: &str, view: StartView) -> (Doc, Vec<String>) {
+/// The start page's link to a saved PDF: this prefix and the file name (see `BrowserApp::follow`).
+const PDF_LINK: &str = "iyakki-pdf:";
+/// A link on the Downloads page to a saved file that another tile opens (F-BROX-01).
+const OPEN_LINK: &str = "iyakki-open:";
+
+/// Which tile opens a saved file, by its ending: `(tile id, words for the list)`. PDFs have their own viewer in the browser.
+pub fn open_target(name: &str) -> Option<(&'static str, &'static str)> {
+    let ext = name.rsplit_once('.')?.1.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "txt" | "md" | "log" | "json" | "xml" | "yaml" | "yml" | "toml" | "ini" | "cfg" | "conf" | "rs" | "py" | "js" | "sh" | "c" | "h" | "css" | "html" | "htm" | "tex" => ("edit", "opens in EDIT"),
+        "csv" | "tsv" => ("data", "opens in DATA"),
+        "mp3" | "flac" | "ogg" | "opus" | "wav" | "m4a" | "mp4" | "mkv" | "webm" | "avi" => ("media", "plays in MEDIA"),
+        _ => return None,
+    })
+}
+
+fn start_page(data: &Data, engine: &str, view: StartView, hist_query: &str, has_thumb: &dyn Fn(&str) -> bool) -> (Doc, Vec<String>) {
     let mut html = String::new();
     match view {
         StartView::Home => {
-            html.push_str(&format!("<h1>Search the web</h1><p>Type in the bar above and press Enter. Words are searched on {}; an address such as example.org is opened. Short words go straight to a site: w (Wikipedia), ddg, yt, gh, mdn.</p><p>F1 shows every key. Ctrl+D bookmarks a page, Ctrl+B shows bookmarks, Ctrl+H the history.</p>", escape(engine)));
+            if !iyakki_agent::webengine::offered() {
+                if let Some(n) = iyakki_agent::webengine::platform_note() {
+                    html.push_str(&format!("<p><i>{}</i></p>", escape(n)));
+                }
+            }
+            html.push_str(&format!("<h1>Search the web</h1><p>Type in the bar above and press Enter. Words are searched on {}; an address such as example.org is opened. Short words go straight to a site: w (Wikipedia), ddg, yt, gh, mdn.</p><p>F1 shows every key. Ctrl+D bookmarks a page, Ctrl+B shows bookmarks, Ctrl+H the history, Ctrl+J the downloads.</p>", escape(engine)));
             if !data.bookmarks.is_empty() {
                 html.push_str("<h3>Bookmarks</h3><ul>");
                 for b in data.bookmarks.iter().take(8) {
@@ -3657,7 +4509,9 @@ fn start_page(data: &Data, engine: &str, view: StartView) -> (Doc, Vec<String>) 
             if !top.is_empty() {
                 html.push_str("<h3>Most visited</h3><ul>");
                 for v in top {
-                    html.push_str(&format!("<li><a href=\"{}\">{}</a> · {}</li>", escape(&v.url), escape(&page_label(&v.title, &v.url)), escape(browser_data::host_of(&v.url))));
+                    let host = browser_data::host_of(&v.url);
+                    let pic = if !data.thumbs_off && has_thumb(host) { format!("<img src=\"{}{}\" width=\"{}\" height=\"{}\" alt=\"\"> ", browser_thumbs::SCHEME, escape(host), browser_thumbs::W / 2, browser_thumbs::H / 2) } else { String::new() };
+                    html.push_str(&format!("<li>{pic}<a href=\"{}\">{}</a> · {}</li>", escape(&v.url), escape(&page_label(&v.title, &v.url)), escape(host)));
                 }
                 html.push_str("</ul>");
             }
@@ -3671,9 +4525,13 @@ fn start_page(data: &Data, engine: &str, view: StartView) -> (Doc, Vec<String>) 
             }
         }
         StartView::History => {
-            html.push_str(&format!("<h1>History</h1><p>{} pages remembered on this account. Shift+D clears the list. Only addresses and titles are kept.</p>", data.history.len()));
+            html.push_str(&format!("<h1>History</h1><p>{} pages remembered on this account. S searches them (or type history: WORDS in the address bar), Shift+D clears the list. Only addresses and titles are kept.</p>", data.history.len()));
+            let found: Vec<&browser_data::Visit> = if hist_query.trim().is_empty() { data.recent(200) } else { data.search_history(hist_query, 200) };
+            if !hist_query.trim().is_empty() {
+                html.push_str(&format!("<p>{} found for <b>{}</b>. S searches again; an empty search shows everything.</p>", found.len(), escape(hist_query.trim())));
+            }
             html.push_str("<ul>");
-            for v in data.recent(200) {
+            for v in found {
                 html.push_str(&format!("<li><a href=\"{}\">{}</a> · {}</li>", escape(&v.url), escape(&page_label(&v.title, &v.url)), escape(browser_data::host_of(&v.url))));
             }
             html.push_str("</ul>");
@@ -3685,12 +4543,19 @@ fn start_page(data: &Data, engine: &str, view: StartView) -> (Doc, Vec<String>) 
             }
             html.push_str("<ul>");
             for d in &data.downloads {
-                html.push_str(&format!("<li>{} · {} · {}</li>", escape(&d.name), human_bytes(d.bytes), escape(&d.status)));
+                // a saved PDF opens in the viewer from here (the link carries only the file name; the folder is the person's Downloads)
+                if d.status == "saved" && d.name.to_ascii_lowercase().ends_with(".pdf") && !d.name.contains(['/', '\\']) {
+                    html.push_str(&format!("<li><a href=\"{PDF_LINK}{}\">{}</a> · {} · {} · opens in the PDF viewer</li>", escape(&d.name), escape(&d.name), human_bytes(d.bytes), escape(&d.status)));
+                } else if d.status == "saved" && !d.name.contains(['/', '\\']) && open_target(&d.name).is_some() {
+                    html.push_str(&format!("<li><a href=\"{OPEN_LINK}{}\">{}</a> · {} · {} · {}</li>", escape(&d.name), escape(&d.name), human_bytes(d.bytes), escape(&d.status), open_target(&d.name).map_or("", |t| t.1)));
+                } else {
+                    html.push_str(&format!("<li>{} · {} · {}</li>", escape(&d.name), human_bytes(d.bytes), escape(&d.status)));
+                }
             }
             html.push_str("</ul>");
         }
         StartView::Bookmarks => {
-            html.push_str("<h1>Bookmarks</h1><p>Ctrl+D on a page adds or removes it. Ctrl+E saves the list as bookmarks.html in Downloads; Shift+I reads that file back (other browsers' exports work too).</p>");
+            html.push_str("<h1>Bookmarks</h1><p>Ctrl+D on a page adds or removes it. Press M on a bookmark to put it in a folder. In the address bar: folder new NAME, folder move NAME (or - for no folder), folder rename OLD NEW, folder delete NAME, folder list. Ctrl+E saves the list as bookmarks.html in Downloads; Shift+I reads that file back (other browsers' exports work too).</p>");
             if data.bookmarks.is_empty() {
                 html.push_str("<p>Nothing is bookmarked yet.</p>");
             }
@@ -3699,6 +4564,9 @@ fn start_page(data: &Data, engine: &str, view: StartView) -> (Doc, Vec<String>) 
                     html.push_str(&format!("<h3>{}</h3>", escape(&folder)));
                 }
                 html.push_str("<ul>");
+                if items.is_empty() {
+                    html.push_str("<li><i>empty: folder move NAME puts the selected bookmark here</i></li>");
+                }
                 for b in items {
                     html.push_str(&format!("<li><a href=\"{}\">{}</a> · {}</li>", escape(&b.url), escape(&page_label(&b.title, &b.url)), escape(browser_data::host_of(&b.url))));
                 }
@@ -3777,14 +4645,14 @@ fn draw_control(g: &mut Gfx, c: &Control, st: &CtlState, r: R, s: f32, focused: 
     let text_color = if c.disabled { dim } else { text_c };
     let ring = |g: &mut Gfx| g.rrect_outline(r.x - 2.0 * s, r.y - 2.0 * s, r.w + 4.0 * s, r.h + 4.0 * s, 10.0 * s, 2.0 * s, ACCENT);
     match c.kind {
-        ControlKind::Text | ControlKind::Password => {
+        ControlKind::Text | ControlKind::Password | ControlKind::File => {
             if focused {
                 edit.render(g, r, true, s, blink(tick), Face::Sans, id);
                 return;
             }
             g.rrect(r.x, r.y, r.w, r.h, 8.0 * s, field);
             g.rrect_outline(r.x, r.y, r.w, r.h, 8.0 * s, 1.0 * s, dim);
-            let (shown, col) = if st.value.is_empty() { (c.placeholder.clone(), dim) } else if c.kind == ControlKind::Password { ("•".repeat(st.value.chars().count()), text_color) } else { (st.value.clone(), text_color) };
+            let (shown, col) = if st.value.is_empty() { (if c.kind == ControlKind::File && c.placeholder.is_empty() { "Type the path of a file to send".to_string() } else { c.placeholder.clone() }, dim) } else if c.kind == ControlKind::Password { ("•".repeat(st.value.chars().count()), text_color) } else { (st.value.clone(), text_color) };
             let shown = g.fit(size, &shown, Face::Sans, r.w - 24.0 * s);
             g.text(r.x + 12.0 * s, r.y + (r.h - lh) / 2.0, size, col, &shown, Face::Sans);
             g.hit(r, Event::Focus(id), "field");
@@ -3898,7 +4766,7 @@ impl BrowserApp {
     fn render_reader(&mut self, g: &mut Gfx, view: R, s: f32, tick: u64) {
         let view = self.render_engine_banner(g, view, s);
         // the page (or the start page), in a readable column
-        let ps = s * self.zoom();
+        let (ps, ts) = self.zoom_scales(s);
         let page = self.page().cloned();
         // a page with style sheets of its own was designed for the whole window (its media queries were evaluated for it,
         // see `Viewport`): it gets the width; plain documents stay in a column that is comfortable to read
@@ -3906,11 +4774,13 @@ impl BrowserApp {
         let col_max = if designed { iyakki_web::css::Viewport::default().width } else { 940.0 };
         let col_w = (view.w - 48.0 * s).min(col_max * ps).max(120.0);
         let col_x = view.x + (view.w - col_w) / 2.0;
+        self.css_win = (col_w / ps, view.h / ps);
+        self.dppx = ps;
         let start_doc;
         let doc: &Doc = match &page {
             Some(p) => &p.doc,
             None => {
-                let (d, links) = start_page(&self.data, self.cfg.search.name(), self.view());
+                let (d, links) = start_page(&self.data, self.cfg.search.name(), self.view(), &self.hist_query, &|h| self.thumbs.has(h));
                 // the page is rebuilt from the saved data each frame; lay it out again only when it changed
                 if links != self.start_links {
                     self.layout = None;
@@ -3920,6 +4790,21 @@ impl BrowserApp {
                 &start_doc
             }
         };
+        // the pictures of the start page are small files of this account, read at once (no network)
+        if page.is_none() {
+            let srcs: Vec<String> = doc.images.iter().map(|im| im.src.clone()).collect();
+            if srcs != self.start_img_srcs || self.history.get(self.pos).is_some_and(|e| e.images.len() != srcs.len()) {
+                let st: Vec<ImgState> = srcs.iter().map(|s| match s.strip_prefix(browser_thumbs::SCHEME).and_then(|h| self.thumbs.load(h)) {
+                    Some(pm) => ImgState::Ready(Arc::new(pm)),
+                    None => ImgState::Failed("no picture".into()),
+                }).collect();
+                if let Some(e) = self.history.get_mut(self.pos) {
+                    e.images = st;
+                }
+                self.start_img_srcs = srcs;
+                self.layout = None;
+            }
+        }
         let ctl: Vec<CtlState> = self.history.get(self.pos).map(|e| e.ctl.clone()).unwrap_or_default();
         let states: Vec<ImgState> = self.history.get(self.pos).map(|e| e.images.clone()).unwrap_or_default();
         let infos: Vec<ImgInfo> = states.iter().map(|st| match st {
@@ -3929,14 +4814,20 @@ impl BrowserApp {
             _ => ImgInfo::default(),
         }).collect();
         let rev = states.iter().filter(|st| st.settled()).count() as u32;
-        let key = key_of(col_w, ps);
+        let key = key_of_text(col_w, ps, ts);
         if self.layout.as_ref().is_none_or(|l| l.key != key || l.rev != rev) {
             let night = if self.page().is_some_and(|p| self.data.is_dark(&p.url.host)) { browser_dark::darken(doc) } else { None };
             // forced high-contrast colours and the font floor (Settings -> Accessibility, the Browser's own choices)
             let adapted = self.a11y_adapt(night.as_ref().unwrap_or(doc));
-            self.layout = Some(layout(g, adapted.as_ref().or(night.as_ref()).unwrap_or(doc), col_w, ps, &infos, rev));
+            self.layout = Some(layout_text(g, adapted.as_ref().or(night.as_ref()).unwrap_or(doc), col_w, ps, ts, &infos, rev));
             if let Some(y) = self.pending_scroll.take() {
                 self.scroll = y;
+            } else if let Some((key, frag)) = self.page().and_then(|p| p.url.fragment.clone().filter(|f| !f.is_empty()).map(|f| (p.url.to_string(), f))) {
+                // a page opened at `address#id` goes to the place the id names, once, when its layout exists
+                if self.frag_done.as_deref() != Some(key.as_str()) {
+                    self.frag_done = Some(key);
+                    self.a11y_follow_fragment(&frag);
+                }
             }
             if let Some(f) = &mut self.find {
                 f.dirty = true; // the words moved
@@ -4090,7 +4981,7 @@ impl BrowserApp {
             let log = f.page_log();
             let ph = (view.h * 0.4).min(260.0 * s);
             let (px, py) = (view.x + 20.0 * s, view.y + view.h - ph - 8.0 * s);
-            g.rrect(px, py, view.w - 40.0 * s, ph, 10.0 * s, [8, 11, 24, 238]);
+            g.rrect(px, py, view.w - 40.0 * s, ph, 10.0 * s, crate::fx::panel_alpha(238));
             g.rrect_outline(px, py, view.w - 40.0 * s, ph, 10.0 * s, 1.5 * s, [ACCENT[0], ACCENT[1], ACCENT[2], 110]);
             let size = 13.0 * s;
             let lh = g.line_height(size, Face::Mono) + 3.0 * s;
@@ -4109,12 +5000,15 @@ impl BrowserApp {
             let lines: Vec<String> = self.net_log.lock().map(|l| l.iter().map(|n| n.text()).collect()).unwrap_or_default();
             let ph = (view.h * 0.4).min(260.0 * s);
             let (px, py) = (view.x + 20.0 * s, view.y + view.h - ph - 8.0 * s);
-            g.rrect(px, py, view.w - 40.0 * s, ph, 10.0 * s, [8, 11, 24, 238]);
+            g.rrect(px, py, view.w - 40.0 * s, ph, 10.0 * s, crate::fx::panel_alpha(238));
             g.rrect_outline(px, py, view.w - 40.0 * s, ph, 10.0 * s, 1.5 * s, [ACCENT[0], ACCENT[1], ACCENT[2], 110]);
             let size = 13.0 * s;
             let lh = g.line_height(size, Face::Mono) + 3.0 * s;
             let rows = (((ph - 20.0 * s) / lh) as usize).max(1);
-            g.text(px + 12.0 * s, py + 6.0 * s, size, ACCENT, &format!("Network · {} request{}", lines.len(), if lines.len() == 1 { "" } else { "s" }), Face::Bold);
+            let active = self.page().map(|p| iyakki_agent::browserheaders::active_here(&p.url)).unwrap_or_default();
+            let head = format!("Network · {} request{}{}", lines.len(), if lines.len() == 1 { "" } else { "s" }, headers_note(&active));
+            let head = g.fit(size, &head, Face::Bold, view.w - 70.0 * s);
+            g.text(px + 12.0 * s, py + 6.0 * s, size, ACCENT, &head, Face::Bold);
             for (i, l) in lines.iter().take(rows.saturating_sub(1)).enumerate() {
                 let l = g.fit(size, l, Face::Mono, view.w - 70.0 * s);
                 let col = if l.split_whitespace().nth(1).is_some_and(|c| c == "---" || c.starts_with(['4', '5'])) { ERR } else { MUTED };
@@ -4125,7 +5019,7 @@ impl BrowserApp {
             if let Some(p) = self.page() {
                 let ph = (view.h * 0.4).min(260.0 * s);
                 let (px, py) = (view.x + 20.0 * s, view.y + view.h - ph - 8.0 * s);
-                g.rrect(px, py, view.w - 40.0 * s, ph, 10.0 * s, [8, 11, 24, 238]);
+                g.rrect(px, py, view.w - 40.0 * s, ph, 10.0 * s, crate::fx::panel_alpha(238));
                 g.rrect_outline(px, py, view.w - 40.0 * s, ph, 10.0 * s, 1.5 * s, [ACCENT[0], ACCENT[1], ACCENT[2], 110]);
                 let size = 13.0 * s;
                 let lh = g.line_height(size, Face::Mono) + 3.0 * s;
@@ -4141,11 +5035,33 @@ impl BrowserApp {
 }
 
 mod pdfhost;
+#[path = "browser_devfeed.rs"]
+mod devfeed;
+#[path = "browser_inspecthost.rs"]
+mod inspecthost;
 
 #[path = "browser_a11y.rs"]
 mod a11y;
 
 impl App for BrowserApp {
+    fn on_lock(&mut self, cx: &AppCx) {
+        self.close_full_for_lock(cx);
+    }
+    #[cfg(test)]
+    fn probe_link(&self) -> Option<String> {
+        self.focused_start_link_for_test()
+    }
+
+    fn dialog_title(&self) -> Option<String> {
+        if self.media_ask.is_some() {
+            Some("A page asks to use your camera, microphone or screen".into())
+        } else if self.sound_ask.is_some() {
+            Some("A page asks about sound".into())
+        } else {
+            None
+        }
+    }
+
     fn take_request(&mut self) -> Option<(String, String)> {
         self.av_request.take()
     }
@@ -4194,11 +5110,12 @@ impl App for BrowserApp {
             "b · back      f · forward      r · reload",
             "Ctrl+T new tab · Ctrl+W close it · Ctrl+Shift+T bring it back · Ctrl+PgUp/PgDn switch",
             "Ctrl+D bookmark · Ctrl+B bookmarks · Ctrl+H history · Ctrl+J downloads · D save a file · O open a PDF file · Ctrl+P save the page as PDF (Ctrl+Shift+P A4/Letter)",
-            "Ctrl+K fill the saved sign-in · Ctrl+S keep one · Ctrl+G make a password · Ctrl+F find · Y copy a link",
+            "Ctrl+K fill the saved sign-in · Ctrl+Shift+K remove it · Ctrl+S keep one · Ctrl+G make a password · Ctrl+Y fill your name and address (profile set …) · Ctrl+F find · Y copy a link",
+            "In the address bar: folder new|move|rename|delete|list · history: WORDS · profile set|show|clear",
             "j · allow JavaScript for this site (Settings → Browser for all)",
             "c · developer panel: notes about what was blocked or failed, then the network list",
             "F12 or Ctrl+Shift+I · Developer tools: console, network, timings (1 2 3 or Tab switch, / filter, f failed only, s sort, l level, x clear, y copy, d dock, + - size, Esc close)",
-            "Up / Down / PgUp / PgDn · scroll      + / − / 0 · zoom this site      R · reader view (just the article)      U · view source      X · forget this site's cookies and data      N · night colours",
+            "Up / Down / PgUp / PgDn · scroll      + / − / 0 or Ctrl+wheel · zoom this site      Y · zoom only the text      R · reader view (just the article)      U · view source      X · forget this site's cookies and data      N · night colours",
             "F · show this page with the full web engine (WebKit, drawn in this page area; needs its helper program, see docs/FULL-BROWSER.md). With it on: typing, clicks and the wheel go to the page, Esc hands the keyboard back, then F or Esc returns to the built-in reader",
             "Q · ask the assistant about the page or the selection    S · summarise    T · translate to English    M · keep it in your knowledge (RAG)",
             "Esc · leave a field, then leave the browser",
@@ -4229,6 +5146,11 @@ impl App for BrowserApp {
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
         if matches!(ev, Event::Tick) {
             super::web_agent::tick(&cx.services, &cx.audit, &cx.session);
+            self.data_check += 1;
+            if self.data_check >= 60 {
+                self.data_check = 0;
+                self.reload_data_if_changed(cx);
+            }
         }
         if matches!(ev, Event::Tab(super::web_agent::TAB_OPEN)) {
             self.agent_view = true;
@@ -4283,7 +5205,7 @@ impl App for BrowserApp {
                 Flow::Stay
             }
             Event::Key(k) => self.handle_key(k, cx),
-            Event::Paste(t) if self.dev.open && self.dev.editing => {
+            Event::Paste(t) if self.dev.open && (self.dev.editing || self.dev.insp.editing) => {
                 self.dev.paste(t);
                 self.dev_dirty = true;
                 Flow::Stay
@@ -4312,7 +5234,7 @@ impl App for BrowserApp {
                         self.scroll_to_match();
                     }
                 } else if let Some(c) = self.focus_ctl {
-                    let text_field = self.control(c).is_some_and(|(c, _)| matches!(c.kind, ControlKind::Text | ControlKind::Password));
+                    let text_field = self.control(c).is_some_and(|(c, _)| matches!(c.kind, ControlKind::Text | ControlKind::Password | ControlKind::File));
                     if text_field {
                         self.edit.paste(t);
                         let v = self.edit.value.clone();
@@ -4322,6 +5244,7 @@ impl App for BrowserApp {
                     } else if let Some(st) = self.state_mut(c) {
                         st.value.push_str(t);
                     }
+                    self.live_input(c);
                 }
                 Flow::Stay
             }
@@ -4557,6 +5480,10 @@ impl App for BrowserApp {
 
     fn context_items(&mut self, x: i32, y: i32) -> Vec<crate::ctxmenu::Item> {
         use crate::ctxmenu::{Item, COPY, CUT, PASTE, SELECT_ALL};
+        // the PDF viewer over the page has its own menu
+        if let Some(v) = &self.pdf {
+            return super::pdfview::menu_items(v);
+        }
         // a link under the pointer (the reader registers each link as a `Row` region)
         self.ctx_link = None;
         if self.full.is_none() {
@@ -4574,7 +5501,7 @@ impl App for BrowserApp {
         if self.view_rect.contains(x, y) && self.full_has_keys() {
             v.push(Item::new(CUT, "Cut", "Ctrl+X"));
             v.push(Item::new(COPY, "Copy", "Ctrl+C"));
-            v.push(Item::new(PASTE, "Paste", "Ctrl+V").needs_clip());
+            v.push(Item::new(PASTE, "Paste", iyakki_uikit::platform::paste_key()).needs_clip());
             v.push(Item::new(SELECT_ALL, "Select all", "Ctrl+A"));
             v.push(Item::separator());
         }
@@ -4600,6 +5527,10 @@ impl App for BrowserApp {
     }
 
     fn context_pick(&mut self, id: &str, cx: &AppCx) -> Flow {
+        if let Some(v) = self.pdf.as_mut() {
+            v.menu_pick(id);
+            return Flow::Stay;
+        }
         match id {
             "back" => self.back(),
             "forward" => self.forward(),
@@ -4688,6 +5619,7 @@ impl App for BrowserApp {
             self.render_full(g, view, s, tick);
         } else {
             self.render_reader(g, view, s, tick);
+            self.maybe_capture_thumb(g, view, cx);
         }
         if let Some((rect, dock)) = dev_panel {
             let reader: Vec<browser_devtools::NetLine> = self.net_log.lock().map(|l| l.clone()).unwrap_or_default();
@@ -5374,6 +6306,16 @@ mod look_tests;
 #[path = "browser_a11y_tests.rs"]
 mod a11y_tests;
 
+/// " · custom headers active here (2): Name, Name" for the Network panel's heading (rule names only, never values).
+fn headers_note(names: &[String]) -> String {
+    if names.is_empty() {
+        return String::new();
+    }
+    let shown: Vec<&str> = names.iter().take(3).map(String::as_str).collect();
+    let more = if names.len() > 3 { format!(" and {} more", names.len() - 3) } else { String::new() };
+    format!(" · custom headers active here ({}): {}{more}", names.len(), shown.join(", "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5439,6 +6381,87 @@ mod tests {
     }
 
     const GUIDE: &str = "<html><head><title>The Guide</title></head><body><h1>Guide</h1><p>Read the <a href=\"/more\">more</a> page or go <a href=\"https://other.org/x\">elsewhere</a>.</p></body></html>";
+
+    #[test]
+    fn a_page_scrolled_by_its_own_scripts_while_loading_is_drawn_from_there() {
+        let tall = "<html><body style=\"margin:0\"><div style=\"height:4000px\"></div><script>window.scrollTo(0, 700)</script></body></html>";
+        let still = "<html><body style=\"margin:0\"><div style=\"height:4000px\"></div></body></html>";
+        let web = site(vec![("https://a.org/", html(tall)), ("https://a.org/still", html(still))]);
+        let cx = cx_with("br_scrollto", web);
+        browser_config::save(&cx, &BrowserConfig { js_all: true, ..BrowserConfig::default() });
+        let mut a = BrowserApp::new(&cx);
+        a.open_url("a.org", &cx);
+        settle(&mut a, &cx);
+        assert_eq!(a.scroll, 700.0, "{:?}", a.page().map(|p| p.notes.clone()));
+        assert_eq!(a.history[a.pos].scroll, 700.0, "going back to the page keeps it there");
+        // a page nobody scrolled starts at the top
+        a.open_url("a.org/still", &cx);
+        settle(&mut a, &cx);
+        assert_eq!(a.scroll, 0.0);
+    }
+
+    #[test]
+    fn an_animated_webp_in_a_page_plays_all_its_frames_and_the_same_picture_twice_comes_from_the_cache() {
+        // F-BROX-04 and F-BROX-13 through the real page load: two <img> of one animated WebP file
+        let img = |t: &str, b: &[u8]| Response { status: 200, content_type: t.into(), body: b.to_vec(), ..Response::default() };
+        let webp = include_bytes!("../../../iyakki-web/tests/data/webp_anim.webp");
+        let web = site(vec![
+            ("https://s.org/", html("<p><img src=/a.webp alt=a width=40 height=30> <img src=/b.webp alt=b width=40 height=30></p>")),
+            ("https://s.org/a.webp", img("image/webp", webp)),
+            ("https://s.org/b.webp", img("image/webp", webp)),
+        ]);
+        let cx = cx_with("br_webp_anim", web);
+        let (hits0, _, _) = crate::apps::browser_images::pic_cache_stats();
+        let mut a = BrowserApp::new(&cx);
+        a.open_url("s.org", &cx);
+        settle(&mut a, &cx);
+        settle_images(&mut a, &cx);
+        let st = &a.history[a.pos].images;
+        assert_eq!(st.len(), 2);
+        assert!(st.iter().all(|i| matches!(i, ImgState::Animated(_))), "both play as animations");
+        // the two pictures are one file: the loader holds the cache while it decodes, so whichever comes second finds it there
+        let (hits, _, _) = crate::apps::browser_images::pic_cache_stats();
+        assert!(hits > hits0, "the second picture came from the cache");
+    }
+
+    #[test]
+    fn an_inline_svg_in_a_page_is_drawn_through_the_browser_and_its_text_is_not_page_text() {
+        let page = "<p>Logo <svg width=\"48\" height=\"24\" viewBox=\"0 0 48 24\"><rect width=\"48\" height=\"24\" fill=\"#00aa00\"/><text x=\"1\" y=\"10\">SECRETWORD</text></svg> end</p>";
+        let web = site(vec![("https://s.org/", html(page))]);
+        let cx = cx_with("br_inline_svg", web);
+        let mut a = BrowserApp::new(&cx);
+        a.open_url("s.org", &cx);
+        settle(&mut a, &cx);
+        settle_images(&mut a, &cx);
+        let st = &a.history[a.pos].images;
+        assert_eq!(st.len(), 1, "one inline picture");
+        let ImgState::Ready(pm) = &st[0] else { panic!("the SVG is drawn") };
+        assert_eq!((pm.width(), pm.height()), (48, 24));
+        let g = frame(&mut a, &cx, 1280, 720);
+        assert!(!shown(&g).contains("SECRETWORD"), "the words inside the drawing are not page text");
+    }
+
+    #[test]
+    fn a_page_with_webp_and_gif_pictures_shows_them_through_the_browser() {
+        // the formats of F-BROW-05 through the real page load, picture fetch and decode of the reader (a scripted web, no network)
+        let img = |t: &str, b: &[u8]| Response { status: 200, content_type: t.into(), body: b.to_vec(), ..Response::default() };
+        let web = site(vec![
+            ("https://s.org/", html("<p><img src=/a.webp alt=a width=40 height=30> <img src=/b.gif alt=b width=40 height=30> <img src=/c.webp alt=c width=40 height=30></p>")),
+            ("https://s.org/a.webp", img("image/webp", include_bytes!("../../../iyakki-web/tests/data/webp_lossy.webp"))),
+            ("https://s.org/b.gif", img("image/gif", include_bytes!("../../../iyakki-web/tests/data/pal.gif"))),
+            ("https://s.org/c.webp", img("image/webp", include_bytes!("../../../iyakki-web/tests/data/webp_lossless_palette.webp"))),
+        ]);
+        let cx = cx_with("br_formats", web);
+        let mut a = BrowserApp::new(&cx);
+        a.open_url("s.org", &cx);
+        settle(&mut a, &cx);
+        settle_images(&mut a, &cx);
+        let st = &a.history[a.pos].images;
+        assert_eq!(st.len(), 3);
+        assert!(st.iter().all(|i| matches!(i, ImgState::Ready(_))), "every format decodes and shows: {:?}", st.iter().map(|i| i.settled()).collect::<Vec<_>>());
+        let g = frame(&mut a, &cx, 1280, 720);
+        assert!(g.rgba().chunks(4).filter(|p| p[3] != 0).count() > 0);
+    }
 
     #[test]
     fn the_open_tabs_come_back_when_the_browser_is_opened_again_and_a_closed_one_does_not() {
@@ -5800,6 +6823,51 @@ mod tests {
     }
 
     #[test]
+    fn a_script_that_sends_the_page_on_is_followed_a_few_steps_and_never_forever() {
+        let go = |to: &str| html(&format!("<p>sent on</p><script>location.href = '{to}'</script>"));
+        let web = site(vec![
+            ("https://a.org/", go("/b")),
+            ("https://a.org/b", html("<p>arrived</p>")),
+            ("https://a.org/c1", go("/c2")),
+            ("https://a.org/c2", go("/c3")),
+            ("https://a.org/c3", go("/c4")),
+            ("https://a.org/c4", go("/c5")),
+            ("https://a.org/c5", html("<p>too far</p>")),
+            ("https://a.org/self", go("/self#again")),
+            ("https://a.org/text", go("javascript:alert(1)")),
+        ]);
+        let cx = cx_with("br_nav1", web);
+        browser_config::save(&cx, &BrowserConfig { js_all: true, ..BrowserConfig::default() });
+        let mut a = BrowserApp::new(&cx);
+        let before = a.history.len();
+        a.open_url("a.org", &cx);
+        settle(&mut a, &cx);
+        assert_eq!(first_text(&a), "arrived");
+        assert_eq!(a.current_url().unwrap().to_string(), "https://a.org/b");
+        assert_eq!(a.history.len(), before + 1, "the page that only sent the browser on is not a history entry");
+        // a chain of redirects is cut after three steps and the page it stopped on is shown with a note
+        a.open_url("a.org/c1", &cx);
+        settle(&mut a, &cx);
+        assert_eq!(a.current_url().unwrap().to_string(), "https://a.org/c4", "c1 -> c2 -> c3 -> c4, then stopped");
+        assert!(a.page().unwrap().notes.iter().any(|n| n.contains("stopped after 3 steps")), "{:?}", a.page().unwrap().notes);
+        assert_eq!(a.script_hops, 0, "the next load starts counting again");
+        // a script that points at the page itself (only another fragment) or at something that is not a web address stays put
+        a.open_url("a.org/self", &cx);
+        settle(&mut a, &cx);
+        assert_eq!(a.current_url().unwrap().to_string(), "https://a.org/self");
+        assert_eq!(first_text(&a), "sent on");
+        a.open_url("a.org/text", &cx);
+        settle(&mut a, &cx);
+        assert_eq!(a.current_url().unwrap().to_string(), "https://a.org/text");
+        // scripts off: nothing is followed
+        browser_config::save(&cx, &BrowserConfig { js_all: false, ..BrowserConfig::default() });
+        a.open_url("https://a.org/", &cx);
+        settle(&mut a, &cx);
+        assert_eq!(a.current_url().unwrap().to_string(), "https://a.org/");
+        assert_eq!(first_text(&a), "sent on");
+    }
+
+    #[test]
     fn words_in_the_address_bar_search_and_google_searches_are_rerouted() {
         let ddg = "https://www.bing.com/search?q=tamil+language";
         let web = site(vec![
@@ -6032,7 +7100,7 @@ mod tests {
             let infos = vec![ImgInfo { size: None, failed }; 4];
             for w in (1..=240).step_by(1).map(|w| w as f32).chain([400.0, 1200.0]) {
                 for s in [0.5f32, 1.0, 3.0] {
-                    let l = layout(&mut g, &doc, w, s, &infos, 0);
+                    let l = crate::apps::browser_layout::layout(&mut g, &doc, w, s, &infos, 0);
                     assert!(l.height.is_finite(), "width {w} scale {s}");
                 }
             }
@@ -6110,13 +7178,21 @@ mod tests {
             let r = iyakki_web::fetch_following(fetch.as_ref(), Request::get(&u), &allow, Some(Jar { store: &jar, now: 0 }));
             let Ok((req, resp)) = r else { eprintln!("{url}: could not load: {:?}", r.err()); continue };
             let html = String::from_utf8_lossy(&resp.body).into_owned();
-            let data = iyakki_js::SiteData::default();
+            // a window is given, as the browser does, so scripts get sizes
+            let data = iyakki_js::SiteData { viewport: Some(iyakki_web::css::Viewport { width: 1280.0, height: 720.0, ..Default::default() }), ..iyakki_js::SiteData::default() };
             let res = iyakki_js::run_page(&html, &req.url, web.clone(), allow, &data, iyakki_js::Limits::default());
             let doc = iyakki_web::doc::build(&res.tree);
             let texts: usize = doc.blocks.len();
             eprintln!("{url}: status {} ran {} failed {} skipped {} blocks {} ({:.1}s)", resp.status, res.report.ran, res.report.failed, res.report.skipped, texts, t0.elapsed().as_secs_f32());
-            for l in res.report.notes.iter().filter(|n| n.contains("error") || n.contains("could not") || n.contains("skipped") || n.contains("stopped")).take(4) {
+            let all = std::env::var("IYAKKI_ALL").is_ok();
+            for l in res.report.notes.iter().filter(|n| n.contains("error") || n.contains("could not") || n.contains("skipped") || n.contains("stopped")).take(if all { usize::MAX } else { 4 }) {
                 eprintln!("     {}", l.chars().take(260).collect::<String>());
+            }
+            if all {
+                // one machine-readable line per note, for ranking by frequency (see docs/development/BROWSER-COMPAT.md)
+                for l in res.report.notes.iter() {
+                    eprintln!("NOTE\t{url}\t{}", l.chars().take(300).collect::<String>().replace(['\n', '\t'], " "));
+                }
             }
         }
     }
@@ -6281,6 +7357,19 @@ mod tests {
     }
 
     #[test]
+    fn exclamation_mark_saves_a_report_about_the_page_to_a_file_and_says_so() {
+        let web = site(vec![("https://a.org/x?secret=1", html("<p>hello there</p>"))]);
+        let cx = cx_with("brreport", web);
+        let mut a = BrowserApp::new(&cx);
+        a.open_url("a.org/x?secret=1", &cx);
+        settle(&mut a, &cx);
+        key(&mut a, &cx, Key::Char('!'));
+        assert!(a.status.as_ref().is_some_and(|s| s.1 && s.0.contains("a.org") && s.0.contains("nothing was sent")), "{:?}", a.status);
+        let text = std::fs::read_to_string(crate::apps::browser_report::file_for(cx.services.dir(), &cx.session.user)).unwrap();
+        assert!(text.contains("\"host\":\"a.org\"") && !text.contains("secret"), "{text}");
+    }
+
+    #[test]
     fn boxes_are_centred_and_flex_columns_sit_side_by_side() {
         let page = "<style>.row{display:flex;gap:20px} .card{background:#336699;max-width:300px;margin:0 auto;padding:10px}</style><div class=row><div>alpha</div><div>beta</div><div>gamma</div></div><div class=card><p>inside</p></div>";
         let cx = cx_with("br16", site(vec![("https://a.org/", html(page))]));
@@ -6441,6 +7530,282 @@ mod tests {
     }
 
     #[test]
+    fn a_file_field_sends_the_named_file_as_multipart_and_refuses_what_it_cannot_read() {
+        let form = "<form action=/up method=post enctype=\"multipart/form-data\"><input name=title><input type=file name=doc><button>Send</button></form>";
+        let srv = server(vec![("GET https://s.org/", vec![html(form)]), ("POST https://s.org/up", vec![html("<p>got it</p>")])]);
+        let cx = cx_server("brupload", srv.clone());
+        let dir = std::env::temp_dir().join(format!("iyakki-brupload-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("report.pdf");
+        std::fs::write(&file, b"%PDF-fake").unwrap();
+        let mut a = BrowserApp::new(&cx);
+        a.open_url("s.org", &cx);
+        settle(&mut a, &cx);
+        let g = frame(&mut a, &cx, 1280, 720);
+        assert!(g.hits.iter().filter(|h| h.label == "field").count() >= 2, "the file field is a field");
+        let doc = a.page().unwrap().doc.clone();
+        let title = doc.controls.iter().position(|c| c.kind == ControlKind::Text).unwrap();
+        let doc_ctl = doc.controls.iter().position(|c| c.kind == ControlKind::File).expect("a file input is a file control");
+        type_into(&mut a, &cx, title, "Q3");
+        // a path that does not exist stops the send and says so
+        type_into(&mut a, &cx, doc_ctl, "/no/such/file.pdf");
+        a.handle(&Event::Key(Key::Enter), &cx);
+        settle(&mut a, &cx);
+        assert!(a.status_text().unwrap().contains("no such file"), "{:?}", a.status_text());
+        assert_eq!(srv.seen.lock().unwrap().iter().filter(|r| r.method == "POST").count(), 0, "nothing was sent");
+        // the right path sends title and file
+        a.handle(&Event::FocusAt(CONTROL_BASE + doc_ctl, 5.0), &cx);
+        for _ in 0..40 {
+            key(&mut a, &cx, Key::Backspace);
+        }
+        typ(&mut a, &cx, &file.display().to_string());
+        a.handle(&Event::Key(Key::Enter), &cx);
+        settle(&mut a, &cx);
+        assert_eq!(first_text(&a), "got it");
+        let post = srv.seen.lock().unwrap().iter().find(|r| r.method == "POST").cloned().unwrap();
+        assert!(post.content_type.starts_with("multipart/form-data; boundary=----IyakkiForm"), "{}", post.content_type);
+        let body = String::from_utf8_lossy(&post.body).into_owned();
+        assert!(body.contains("name=\"title\"\r\n\r\nQ3\r\n"), "{body}");
+        assert!(body.contains("name=\"doc\"; filename=\"report.pdf\"\r\nContent-Type: application/pdf\r\n\r\n%PDF-fake\r\n"), "{body}");
+        assert!(cx.audit.recent(30).iter().any(|l| l.contains("browser.upload") && l.contains("s.org")));
+        assert!(!cx.audit.recent(30).iter().any(|l| l.contains("report.pdf")), "the audit has no file names");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn bookmark_folders_are_made_and_filled_from_the_address_bar_and_history_can_be_searched() {
+        let srv = server(vec![("GET https://a.org/", vec![html("<title>Alpha</title><p>a</p>")]), ("GET https://b.org/", vec![html("<title>Bravo</title><p>b</p>")])]);
+        let cx = cx_server("brfolders", srv);
+        let mut a = BrowserApp::new(&cx);
+        for u in ["a.org", "b.org"] {
+            a.open_url(u, &cx);
+            settle(&mut a, &cx);
+            key(&mut a, &cx, Key::Ctrl('d'));
+        }
+        let say = |a: &mut BrowserApp, text: &str| {
+            a.addr_focus = true;
+            a.field.set(text);
+            a.handle(&Event::Key(Key::Enter), &cx);
+        };
+        // b.org is the page: move its bookmark into a folder that is made on the way
+        say(&mut a, "folder move Reading");
+        assert_eq!(a.status_text(), Some("Moved to Reading."));
+        say(&mut a, "folder new \"Work stuff\"");
+        say(&mut a, "folder list");
+        assert_eq!(a.status_text(), Some("Reading (1) · Work stuff (0)"));
+        // it is on the Bookmarks page under its folder, and survives a restart
+        key(&mut a, &cx, Key::Ctrl('b'));
+        let _ = frame(&mut a, &cx, 1280, 720);
+        let (doc, _) = start_page(&a.data, "x", StartView::Bookmarks, "", &|_| false);
+        let text = format!("{:?}", doc.blocks);
+        assert!(text.contains("Reading") && text.contains("Work stuff") && text.contains("empty: folder move"), "{text}");
+        assert_eq!(browser_data::load(&cx).bookmarks.iter().find(|b| b.url == "https://b.org/").unwrap().folder, "Reading");
+        // M on a selected bookmark opens the address bar ready for the folder name
+        a.focus_link = Some(0);
+        key(&mut a, &cx, Key::Char('m'));
+        assert!(a.addr_focus && a.field.value == "folder move ", "{:?}", a.field.value);
+        a.addr_focus = false;
+        say(&mut a, "folder rename Reading Later");
+        say(&mut a, "folder delete \"Work stuff\"");
+        say(&mut a, "folder list");
+        assert_eq!(a.status_text(), Some("Later (1)"));
+        say(&mut a, "folder shelves for a garage");
+        assert!(a.current_url().is_none() || a.status_text() != Some("Later (1)"), "anything but the five verbs is a web search");
+        // history search
+        let mut a = BrowserApp::new(&cx);
+        for u in ["a.org", "b.org"] {
+            a.open_url(u, &cx);
+            settle(&mut a, &cx);
+        }
+        say(&mut a, "history: bravo");
+        assert_eq!(a.view(), StartView::History);
+        let (doc, links) = start_page(&a.data, "x", StartView::History, &a.hist_query, &|_| false);
+        assert_eq!(links, vec!["https://b.org/".to_string()], "only the match is listed");
+        assert!(format!("{:?}", doc.blocks).contains("1 found for"));
+        let (_, all) = start_page(&a.data, "x", StartView::History, "", &|_| false);
+        assert_eq!(all.len(), 2);
+        key(&mut a, &cx, Key::Char('s'));
+        assert!(a.addr_focus && a.field.value == "history: ");
+    }
+
+    #[test]
+    fn saved_details_fill_a_form_that_asks_for_them_and_a_saved_sign_in_can_be_removed_from_the_browser() {
+        let order = "<form action=/o method=post><input name=fullname><input name=email><input name=street><input name=cc_number><input type=password name=pw><input type=submit></form>";
+        let srv = server(vec![("GET https://shop.org/", vec![html(order)]), ("GET http://plain.org/", vec![html(order)])]);
+        let cx = cx_server("brdetails", srv);
+        cx.services.on_login("root", "rootpass12", true);
+        let mut a = BrowserApp::new(&cx);
+        let say = |a: &mut BrowserApp, text: &str| {
+            a.addr_focus = true;
+            a.field.set(text);
+            a.handle(&Event::Key(Key::Enter), &cx);
+        };
+        a.open_url("shop.org", &cx);
+        settle(&mut a, &cx);
+        let _ = frame(&mut a, &cx, 1280, 720);
+        key(&mut a, &cx, Key::Ctrl('y'));
+        assert!(a.status_text().unwrap().contains("Nothing is kept yet"), "{:?}", a.status_text());
+        say(&mut a, "profile set name Ada Lovelace");
+        say(&mut a, "profile set email ada@example.org");
+        say(&mut a, "profile set street 12 Analytical Way");
+        say(&mut a, "profile set ssn 123");
+        assert!(a.status_text().unwrap().contains("not a field"));
+        say(&mut a, "profile show");
+        assert_eq!(a.status_text(), Some("name: Ada Lovelace · email: ada@example.org · street: 12 Analytical Way"));
+        let doc = a.page().unwrap().doc.clone();
+        let idx = |n: &str| doc.controls.iter().position(|c| c.name == n).unwrap();
+        // something already typed stays; click a field, then Ctrl+Y
+        type_into(&mut a, &cx, idx("email"), "mine@x.org");
+        key(&mut a, &cx, Key::Ctrl('y'));
+        assert!(a.status_text().unwrap().contains("Filled in 2 fields"), "{:?}", a.status_text());
+        let v = |a: &BrowserApp, n: &str| a.history[a.pos].ctl[idx(n)].value.clone();
+        assert_eq!((v(&a, "fullname").as_str(), v(&a, "email").as_str(), v(&a, "street").as_str()), ("Ada Lovelace", "mine@x.org", "12 Analytical Way"));
+        assert_eq!(v(&a, "cc_number"), "", "a card field is never filled");
+        assert!(cx.audit.recent(40).iter().any(|l| l.contains("browser.profile.fill") && l.contains("shop.org")));
+        assert!(!cx.audit.recent(40).iter().any(|l| l.contains("Lovelace") || l.contains("ada@example")), "the audit has no personal details");
+        // an unprotected page gets nothing
+        a.open_url("http://plain.org", &cx);
+        settle(&mut a, &cx);
+        key(&mut a, &cx, Key::Ctrl('y'));
+        assert!(a.status_text().unwrap().contains("not protected"));
+        // a saved sign-in is removed with two presses, and only the one for this site
+        browser_logins::save(&cx, &browser_logins::Cred { host: "shop.org".into(), user: "ada".into(), password: "pw-1-pw-1".into() }).unwrap();
+        browser_logins::save(&cx, &browser_logins::Cred { host: "other.org".into(), user: "ada".into(), password: "pw-2-pw-2".into() }).unwrap();
+        a.open_url("shop.org", &cx);
+        settle(&mut a, &cx);
+        key(&mut a, &cx, Key::Ctrl('K'));
+        assert!(a.status_text().unwrap().contains("again to remove"));
+        assert_eq!(browser_logins::for_site(&cx, "shop.org").unwrap().len(), 1, "one press removes nothing");
+        key(&mut a, &cx, Key::Ctrl('K'));
+        assert!(a.status_text().unwrap().starts_with("Removed"), "{:?}", a.status_text());
+        assert!(browser_logins::for_site(&cx, "shop.org").unwrap().is_empty());
+        assert_eq!(browser_logins::for_site(&cx, "other.org").unwrap().len(), 1);
+        say(&mut a, "profile clear");
+        assert!(browser_forms::load(&cx).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_change_made_behind_the_tile_by_a_chat_tool_is_picked_up_and_not_undone_by_its_next_save() {
+        let cx = cx_with("brreload", site(vec![]));
+        let mut a = BrowserApp::new(&cx);
+        let mut d = browser_data::load(&cx);
+        d.new_folder("FromChat").unwrap();
+        browser_data::save(&cx, &d);
+        for _ in 0..61 {
+            a.handle(&Event::Tick, &cx);
+        }
+        assert!(a.data.folders.contains("FromChat"), "the tile took the file's version");
+        a.data.set_zoom("x.org", 1.5);
+        browser_data::save(&cx, &a.data);
+        assert!(browser_data::load(&cx).folders.contains("FromChat"), "its own save keeps the folder");
+    }
+
+    #[test]
+    fn a_saved_file_opens_from_the_downloads_list_in_the_tile_that_suits_it() {
+        let cx = cx_with("brdlopen", site(vec![]));
+        let dir = BrowserApp::downloads_dir(&cx).unwrap();
+        let mut a = BrowserApp::new(&cx);
+        for (name, body) in [("notes.txt", "hello"), ("table.csv", "a,b\n1,2\n"), ("song.mp3", "id3"), ("pic.png", "x"), ("tool.exe", "x")] {
+            std::fs::write(dir.join(name), body).unwrap();
+            a.data.add_download(browser_data::Download { url: format!("https://x.org/{name}"), name: name.into(), bytes: body.len() as u64, at: 1, status: "saved".into() });
+        }
+        a.data.add_download(browser_data::Download { url: "https://x.org/failed.txt".into(), name: "failed.txt".into(), bytes: 0, at: 1, status: "the server answered 404".into() });
+        a.show_view(StartView::Downloads);
+        let _ = frame(&mut a, &cx, 1280, 720);
+        fn link(a: &BrowserApp, n: &str) -> Option<usize> {
+            a.start_links.iter().position(|l| l == &format!("iyakki-open:{n}"))
+        }
+        for n in ["notes.txt", "table.csv", "song.mp3"] {
+            assert!(link(&a, n).is_some(), "{n} is a link: {:?}", a.start_links);
+        }
+        for n in ["pic.png", "tool.exe", "failed.txt"] {
+            assert!(link(&a, n).is_none(), "{n} has no tile that opens it, or did not arrive");
+        }
+        let take = |a: &mut BrowserApp| crate::apps::App::take_request(a);
+        let i = link(&a, "notes.txt").unwrap();
+        a.follow(i, &cx);
+        assert_eq!(take(&mut a), Some(("edit".to_string(), dir.join("notes.txt").to_string_lossy().into_owned())));
+        let i = link(&a, "table.csv").unwrap();
+        a.follow(i, &cx);
+        assert_eq!(take(&mut a).map(|r| r.0), Some("data".to_string()));
+        let i = link(&a, "song.mp3").unwrap();
+        a.follow(i, &cx);
+        assert_eq!(take(&mut a), Some(("media".to_string(), format!("play:{}", dir.join("song.mp3").display()))));
+        assert!(cx.audit.recent(10).iter().any(|l| l.contains("browser.download.open")));
+        // a name with a folder in it, a hidden name and a file that is gone are refused with words
+        for bad in ["../notes.txt", ".hidden.txt", "sub/notes.txt", ""] {
+            a.open_saved_file(bad, &cx);
+            assert!(take(&mut a).is_none() && a.status_text().is_some_and(|s| s.contains("no tile")), "{bad}: {:?}", a.status_text());
+        }
+        std::fs::remove_file(dir.join("notes.txt")).unwrap();
+        a.open_saved_file("notes.txt", &cx);
+        assert!(take(&mut a).is_none() && a.status_text().unwrap().contains("not in Downloads"));
+        assert_eq!(open_target("A.MD"), Some(("edit", "opens in EDIT")));
+        assert_eq!(open_target("noext"), None);
+    }
+
+    #[test]
+    fn an_often_visited_site_gets_a_small_picture_on_the_start_page_never_a_sign_in_page_and_it_can_be_switched_off_and_cleared() {
+        let web = site(vec![("https://a.org/", html("<title>Alpha</title><h1>Alpha news</h1><p>Some text for the picture.</p>")), ("https://b.org/", html("<title>Bank</title><form action=/in method=post><input name=u><input type=password name=p></form>")), ("http://c.org/", html("<title>Plain</title><p>no tls</p>"))]);
+        let cx = cx_with("brthumbs", web);
+        let mut a = BrowserApp::new(&cx);
+        let visit = |a: &mut BrowserApp, u: &str| {
+            a.open_url(u, &cx);
+            settle(a, &cx);
+            for _ in 0..14 {
+                let _ = frame(a, &cx, 1280, 720);
+            }
+        };
+        visit(&mut a, "a.org");
+        assert!(!a.thumbs.has("a.org"), "one visit is not often");
+        visit(&mut a, "b.org");
+        visit(&mut a, "b.org");
+        visit(&mut a, "b.org");
+        visit(&mut a, "http://c.org");
+        visit(&mut a, "http://c.org");
+        visit(&mut a, "http://c.org");
+        assert!(!a.thumbs.has("b.org"), "a page with a password field is never pictured");
+        assert!(!a.thumbs.has("c.org"), "nor a page without https");
+        visit(&mut a, "a.org");
+        visit(&mut a, "a.org");
+        assert!(a.thumbs.has("a.org"), "the second and later visits get a picture");
+        let pm = a.thumbs.load("a.org").unwrap();
+        assert_eq!((pm.width(), pm.height()), (browser_thumbs::W, browser_thumbs::H));
+        assert!(pm.data().chunks_exact(4).any(|p| p[0] != p[1] || p[1] != p[2] || p[0] > 20), "something was drawn");
+        assert!(cx.audit.recent(40).iter().any(|l| l.contains("browser.thumbnail") && l.contains("a.org")));
+        // on the start page the picture is drawn beside the link
+        a.show_view(StartView::Home);
+        let _ = frame(&mut a, &cx, 1280, 720);
+        let _ = frame(&mut a, &cx, 1280, 720);
+        let ready = a.history[a.pos].images.iter().filter(|i| matches!(i, ImgState::Ready(p) if p.width() == browser_thumbs::W)).count();
+        assert_eq!(ready, 1, "one picture on the Most visited list");
+        assert!(a.layout.as_ref().unwrap().prims.iter().any(|p| matches!(p.kind, Kind::Image { .. })));
+        // switched off: deleted, and not made again
+        a.addr_focus = true;
+        a.field.set("thumbnails off");
+        a.handle(&Event::Key(Key::Enter), &cx);
+        assert_eq!(a.thumbs.count(), 0);
+        assert!(browser_data::load(&cx).thumbs_off);
+        visit(&mut a, "a.org");
+        visit(&mut a, "a.org");
+        assert_eq!(a.thumbs.count(), 0, "no picture while the switch is off");
+        a.addr_focus = true;
+        a.field.set("thumbnails on");
+        a.handle(&Event::Key(Key::Enter), &cx);
+        visit(&mut a, "a.org");
+        assert!(a.thumbs.has("a.org"));
+        // Shift+D (clear history) and X (forget the site) take it away too
+        a.show_view(StartView::History);
+        a.handle(&Event::Key(Key::Char('D')), &cx);
+        assert_eq!(a.thumbs.count(), 0, "clearing the history clears the pictures");
+        visit(&mut a, "a.org");
+        visit(&mut a, "a.org");
+        assert!(a.thumbs.has("a.org"));
+        a.handle(&Event::Key(Key::Char('X')), &cx);
+        assert!(!a.thumbs.has("a.org"), "forgetting the site forgets its picture");
+    }
+
+    #[test]
     fn the_submit_button_adds_its_own_value_and_the_back_button_remembers_what_was_typed() {
         let srv = server(vec![("GET https://s.org/", vec![html(SEARCH)]), ("GET https://s.org/search?q=x&lang=en&go=Find+it", vec![html("<p>done</p>")])]);
         let cx = cx_server("br21", srv);
@@ -6580,6 +7945,48 @@ mod tests {
     }
 
     #[test]
+    fn the_network_heading_names_the_custom_header_rules_active_on_the_page() {
+        assert_eq!(headers_note(&[]), "");
+        assert_eq!(headers_note(&["Staging".to_string()]), " · custom headers active here (1): Staging");
+        let many: Vec<String> = ["A", "B", "C", "D", "E"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(headers_note(&many), " · custom headers active here (5): A, B, C and 2 more");
+    }
+
+    #[test]
+    fn lazy_pictures_are_fetched_only_when_they_come_near_the_window() {
+        let filler = "<p>filler paragraph to push the page down</p>".repeat(80);
+        let page = format!("<p><img src=/p.png alt=top></p>{filler}<p><img src=/q.png loading=lazy alt=far></p>");
+        let srv = server(vec![
+            ("GET https://s.org/", vec![html(&page)]),
+            ("GET https://s.org/p.png", vec![Response { status: 200, content_type: "image/png".into(), body: png_file(), ..Response::default() }]),
+            ("GET https://s.org/q.png", vec![Response { status: 200, content_type: "image/png".into(), body: png_file(), ..Response::default() }]),
+        ]);
+        let cx = cx_server("br31", srv);
+        let mut a = BrowserApp::new(&cx);
+        a.open_url("s.org", &cx);
+        settle(&mut a, &cx);
+        frame(&mut a, &cx, 1280, 720);
+        for _ in 0..400 {
+            a.handle(&Event::Tick, &cx);
+            if matches!(a.history[a.pos].images[0], ImgState::Ready(_)) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(matches!(a.history[a.pos].images[0], ImgState::Ready(_)), "the picture at the top loads at once");
+        for _ in 0..20 {
+            a.handle(&Event::Tick, &cx);
+            frame(&mut a, &cx, 1280, 720);
+        }
+        assert!(matches!(a.history[a.pos].images[1], ImgState::Todo), "a lazy picture far below is not asked for");
+        // scroll to the bottom: now it is near
+        a.scroll = a.layout.as_ref().unwrap().height;
+        frame(&mut a, &cx, 1280, 720);
+        settle_images(&mut a, &cx);
+        assert!(matches!(a.history[a.pos].images[1], ImgState::Ready(_)), "it loads once it is near");
+    }
+
+    #[test]
     fn pictures_arrive_after_the_page_take_their_own_size_and_failures_show_their_description() {
         let page = "<p>Logo: <img src=/p.png alt=logo> <a href=/go><img src=/gone.png alt=\"A missing one\" width=50 height=40></a> <img src=\"data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7\" width=30 height=20></p>";
         let srv = server(vec![
@@ -6704,7 +8111,7 @@ mod tests {
         // everything off
         let srv = server(routes());
         let cx = cx_server("br40", srv.clone());
-        browser_config::save(&cx, &BrowserConfig { js_all: false, images: false, styles: true, cookies: false, js_sites: Default::default(), search: Default::default(), player: String::new(), cache: Default::default(), smooth: false });
+        browser_config::save(&cx, &BrowserConfig { js_all: false, images: false, styles: true, cookies: false, js_sites: Default::default(), search: Default::default(), player: String::new(), cache: Default::default(), smooth: false, short_words: Default::default() });
         let mut a = BrowserApp::new(&cx);
         a.open_url("s.org", &cx);
         settle(&mut a, &cx);
@@ -6713,7 +8120,7 @@ mod tests {
         assert!(matches!(&a.history[a.pos].images[0], ImgState::Failed(e) if e.contains("turned off")), "pictures are off");
         assert_eq!(srv.seen.lock().unwrap().len(), 1, "only the page was asked for");
         // scripts everywhere, pictures on, cookies on: the change applies to the next page without restarting
-        browser_config::save(&cx, &BrowserConfig { js_all: true, images: true, styles: true, cookies: true, js_sites: Default::default(), search: Default::default(), player: String::new(), cache: Default::default(), smooth: false });
+        browser_config::save(&cx, &BrowserConfig { js_all: true, images: true, styles: true, cookies: true, js_sites: Default::default(), search: Default::default(), player: String::new(), cache: Default::default(), smooth: false, short_words: Default::default() });
         a.reload(&cx);
         settle(&mut a, &cx);
         settle_images(&mut a, &cx);
@@ -6728,7 +8135,7 @@ mod tests {
         // cookies off: nothing set by the server is kept or sent
         let srv2 = server(routes());
         let cx2 = cx_server("br41", srv2.clone());
-        browser_config::save(&cx2, &BrowserConfig { js_all: true, images: false, styles: true, cookies: false, js_sites: Default::default(), search: Default::default(), player: String::new(), cache: Default::default(), smooth: false });
+        browser_config::save(&cx2, &BrowserConfig { js_all: true, images: false, styles: true, cookies: false, js_sites: Default::default(), search: Default::default(), player: String::new(), cache: Default::default(), smooth: false, short_words: Default::default() });
         let mut b = BrowserApp::new(&cx2);
         b.open_url("s.org", &cx2);
         settle(&mut b, &cx2);
@@ -7076,6 +8483,34 @@ mod tests {
         key(&mut a, &cx, Key::Enter);
         settle(&mut a, &cx);
         assert_eq!(a.current_url().unwrap().host, "en.wikipedia.org");
+    }
+
+    #[test]
+    fn own_short_words_are_added_used_validated_and_removed() {
+        let web = site(vec![("https://search.example.org/s?q=tamil+nadu", html("<title>Mine</title><p>x</p>"))]);
+        let cx = cx_with("brshortown", web);
+        let mut a = BrowserApp::new(&cx);
+        typ(&mut a, &cx, "short add se https://search.example.org/s?q=%s");
+        key(&mut a, &cx, Key::Enter);
+        assert_eq!(browser_config::load(&cx).short_words.get("se").map(String::as_str), Some("https://search.example.org/s?q=%s"));
+        typ(&mut a, &cx, "short add Bad! https://x.org/?q=%s");
+        key(&mut a, &cx, Key::Enter);
+        typ(&mut a, &cx, "short add nos https://x.org/");
+        key(&mut a, &cx, Key::Enter);
+        typ(&mut a, &cx, "short add js javascript:alert(%s)");
+        key(&mut a, &cx, Key::Enter);
+        assert_eq!(browser_config::load(&cx).short_words.len(), 1, "bad words and addresses are refused");
+        typ(&mut a, &cx, "se tamil nadu");
+        key(&mut a, &cx, Key::Enter);
+        settle(&mut a, &cx);
+        assert_eq!(a.current_url().unwrap().host, "search.example.org");
+        let mut own = std::collections::BTreeMap::new();
+        own.insert("w".to_string(), "https://mine.org/?q=%s".to_string());
+        assert_eq!(expand_shortcut_with("w x y", &own).as_deref(), Some("https://mine.org/?q=x+y"), "a person's word beats a built-in one");
+        key(&mut a, &cx, Key::Ctrl('l'));
+        typ(&mut a, &cx, "short remove se");
+        key(&mut a, &cx, Key::Enter);
+        assert!(browser_config::load(&cx).short_words.is_empty());
     }
 
     #[test]
@@ -7529,6 +8964,44 @@ mod tests {
         assert!(g.hits.iter().filter(|h| h.label == "link").count() >= 2, "the page is still drawn and clickable when small");
     }
 
+    #[test]
+    fn text_only_zoom_makes_the_letters_bigger_but_not_the_pictures_and_ctrl_plus_works() {
+        let web = site(vec![("https://a.org/", html("<h1>Head</h1><p>Read this text here.</p><p>More text goes in this second paragraph and the next line wraps.</p><div style='width:100px;background:#c00'>x</div>"))]);
+        let cx = cx_with("brtextzoom", web);
+        let mut a = BrowserApp::new(&cx);
+        a.open_url("a.org", &cx);
+        settle(&mut a, &cx);
+        let _ = frame(&mut a, &cx, 1280, 720);
+        let normal = text_size(&a, "Read");
+        let h0 = a.layout.as_ref().unwrap().height;
+        let boxes = |a: &BrowserApp| a.layout.as_ref().unwrap().prims.iter().filter(|p| matches!(p.kind, Kind::Rect { .. }))
+            .map(|p| p.w.round() as i32).collect::<Vec<_>>();
+        let img0 = boxes(&a);
+        key(&mut a, &cx, Key::Char('Y'));
+        assert!(a.status_text().unwrap().contains("only the text"), "{:?}", a.status_text());
+        for _ in 0..3 {
+            key(&mut a, &cx, Key::Ctrl('+'));
+        }
+        let _ = frame(&mut a, &cx, 1280, 720);
+        assert!(a.zoom() > 1.2);
+        assert!(text_size(&a, "Read") > normal * 1.2, "the text grew");
+        assert!(a.layout.as_ref().unwrap().height > h0, "and the page got taller to hold it");
+        assert!(!img0.is_empty(), "the test page has a box");
+        assert_eq!(boxes(&a), img0, "boxes keep their size");
+        assert!(a.status_text().unwrap().contains("Text size"));
+        // remembered for the site, switched back with Y, reset with Ctrl+0
+        assert!(browser_data::load(&cx).text_zoom.contains("a.org"));
+        key(&mut a, &cx, Key::Char('Y'));
+        let _ = frame(&mut a, &cx, 1280, 720);
+        assert_ne!(boxes(&a), img0, "everything grows again");
+        key(&mut a, &cx, Key::Ctrl('0'));
+        assert_eq!(a.zoom(), 1.0);
+        for _ in 0..40 {
+            key(&mut a, &cx, Key::Ctrl('-'));
+        }
+        assert_eq!(a.zoom(), browser_data::ZOOM_MIN);
+    }
+
     // ------------------------------------------------------------------ find in page
 
     fn find_state(a: &BrowserApp) -> (usize, usize) {
@@ -7581,6 +9054,65 @@ mod tests {
         key(&mut a, &cx, Key::Esc);
         assert!(a.find.is_none());
         key(&mut a, &cx, Key::Char('r')); // page keys work again
+    }
+
+    #[test]
+    fn a_pdf_download_is_offered_and_the_downloads_list_opens_a_saved_pdf_in_the_viewer() {
+        let mut w = iyakki_pdf::Builder::new(iyakki_pdf::PageSize::A4);
+        w.title = "Offer".into();
+        w.blocks.push(iyakki_pdf::Block::Para("Offered paragraph.".into()));
+        let pdf = Response { status: 200, content_type: "application/pdf".into(), body: w.build().0, ..Response::default() };
+        let web = site(vec![("https://files.org/docs/offer.pdf", pdf)]);
+        let cx = cx_with("brpdfoffer", web);
+        let mut a = BrowserApp::new(&cx);
+        a.open_url("https://files.org/docs/offer.pdf", &cx);
+        settle(&mut a, &cx);
+        key(&mut a, &cx, Key::Char('d'));
+        for _ in 0..2000 {
+            a.handle(&Event::Tick, &cx);
+            if a.data.downloads.iter().any(|d| d.name == "offer.pdf") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(a.status_text().unwrap().contains("Press O to read it"), "{:?}", a.status_text());
+        assert!(a.pdf.is_none(), "offered, not forced");
+        // the Downloads list shows it as a link to the viewer
+        key(&mut a, &cx, Key::Ctrl('j'));
+        let _ = frame(&mut a, &cx, 1280, 720);
+        let li = a.start_links.iter().position(|l| l == "iyakki-pdf:offer.pdf").expect("the list links the saved PDF");
+        a.follow(li, &cx);
+        assert!(a.pdf.is_some(), "a click on the saved PDF opens the viewer");
+        a.pdf = None;
+        // names with folders in them are refused
+        a.open_saved_pdf("../x.pdf", &cx);
+        assert!(a.pdf.is_none() && a.status_text().unwrap().contains("not a PDF"));
+        a.open_saved_pdf("gone.pdf", &cx);
+        assert!(a.pdf.is_none() && a.status_text().unwrap().contains("not in Downloads"));
+    }
+
+    #[test]
+    fn a_page_opened_at_an_id_scrolls_to_it_once_and_a_link_to_an_id_does_too() {
+        let filler: String = (0..80).map(|i| format!("<p>Line {i} of the filler text that pushes the page down.</p>")).collect();
+        let body = format!("<title>Long</title><p><a href=\"#end\">jump</a></p>{filler}<h2 id=\"end\">The End Section</h2><p>after</p>");
+        let web = site(vec![("https://a.org/", html(&body))]);
+        let cx = cx_with("branchor", web);
+        let mut a = BrowserApp::new(&cx);
+        a.open_url("a.org/#end", &cx);
+        settle(&mut a, &cx);
+        let _ = frame(&mut a, &cx, 1280, 720);
+        assert!(a.scroll > 300.0, "opened at #end: {}", a.scroll);
+        let at = a.scroll;
+        key(&mut a, &cx, Key::Char('m'));
+        let _ = frame(&mut a, &cx, 1280, 720);
+        assert_eq!(a.scroll, at, "a later layout does not jump again");
+        let mut b = BrowserApp::new(&cx);
+        b.open_url("a.org", &cx);
+        settle(&mut b, &cx);
+        let _ = frame(&mut b, &cx, 1280, 720);
+        assert_eq!(b.scroll, 0.0);
+        b.follow(0, &cx);
+        assert!(b.scroll > 300.0, "the in-page link goes to the id: {}", b.scroll);
     }
 
     #[test]
@@ -7715,6 +9247,31 @@ mod tests {
         assert!(matches!(&a.history[a.pos].images[0], ImgState::Failed(e) if e.contains("without protection")), "{:?}", a.history[a.pos].images.iter().map(|i| i.settled()).collect::<Vec<_>>());
         assert!(matches!(a.history[a.pos].images[1], ImgState::Ready(_)));
         assert!(!srv.seen.lock().unwrap().iter().any(|r| r.url.to_string().starts_with("http://cdn.org")), "the unprotected address is never even asked");
+    }
+
+    #[test]
+    fn a_secure_page_does_not_load_unprotected_style_sheets_or_scripts() {
+        let page = "<link rel=stylesheet href=\"http://cdn.org/a.css\"><link rel=stylesheet href=\"https://cdn.org/b.css\"><script src=\"http://cdn.org/a.js\"></script><script src=\"https://cdn.org/b.js\"></script><p id=t>plain</p>";
+        let css = |c: &str| Response { status: 200, content_type: "text/css".into(), body: c.as_bytes().to_vec(), ..Response::default() };
+        let js = |c: &str| Response { status: 200, content_type: "text/javascript".into(), body: c.as_bytes().to_vec(), ..Response::default() };
+        let srv = server(vec![
+            ("GET https://s.org/", vec![html(page)]),
+            ("GET http://cdn.org/a.css", vec![css("p { color: red }")]),
+            ("GET https://cdn.org/b.css", vec![css("p { color: blue }")]),
+            ("GET http://cdn.org/a.js", vec![js("document.getElementById('t').textContent = 'insecure script ran'")]),
+            ("GET https://cdn.org/b.js", vec![js("document.getElementById('t').textContent += ' secure script ran'")]),
+        ]);
+        let cx = cx_server("brmixed2", srv.clone());
+        browser_config::save(&cx, &BrowserConfig { js_all: true, ..BrowserConfig::default() });
+        let mut a = BrowserApp::new(&cx);
+        a.open_url("s.org", &cx);
+        settle(&mut a, &cx);
+        let text = first_text(&a);
+        assert!(text.contains("secure script ran") && !text.contains("insecure script ran"), "{text}");
+        let notes = a.page().unwrap().notes.join("|");
+        assert!(notes.contains("without protection"), "the page says a script was held back: {notes}");
+        assert!(!srv.seen.lock().unwrap().iter().any(|r| r.url.to_string().starts_with("http://cdn.org")), "the unprotected addresses are never even asked: {:?}", srv.seen.lock().unwrap().iter().map(|r| r.url.to_string()).collect::<Vec<_>>());
+        assert!(srv.seen.lock().unwrap().iter().any(|r| r.url.to_string() == "https://cdn.org/b.css"), "the protected sheet is");
     }
 
     #[test]
@@ -7881,7 +9438,7 @@ mod tests {
     /// The pure-Rust fake helper of `iyakki-webview` (built on demand: `cargo test -p iyakki-shell` does not build other crates' programs).
     fn fake_helper() -> PathBuf {
         let exe = std::env::current_exe().unwrap();
-        let dir = exe.parent().unwrap().parent().unwrap().to_path_buf();
+        let dir = exe.ancestors().find(|d| d.file_name().is_some_and(|n| n == "debug" || n == "release")).expect("the profile folder (target/debug) above the test program").to_path_buf();
         let p = dir.join("iyakki-fake-webview");
         if !p.is_file() {
             let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
@@ -7912,7 +9469,11 @@ mod tests {
     }
 
     include!("browser_block_ui_tests.rs");
+    include!("browser_speedreport_tests.rs");
+    include!("browser_live_tests.rs");
+    include!("browser_badsites_tests.rs");
     include!("browser_devpanel_tests.rs");
+    include!("browser_devfeed_tests.rs");
     include!("browser_media_tests.rs");
     include!("browser_consent_live_tests.rs");
     include!("browser_navpolicy_tests.rs");
@@ -8250,7 +9811,10 @@ mod tests {
         assert!(a.addr_focus);
         typ(&mut a, &cx, "b.org/x");
         key(&mut a, &cx, Key::Enter);
-        pump(&mut a, &cx, "the new page", |a| full_title(a) == "fake page https://b.org/x");
+        // the engine tells the title and the address in separate messages, and the bar and the history follow the address: wait for all of them
+        pump(&mut a, &cx, "the new page", |a| {
+            full_title(a) == "fake page https://b.org/x" && a.full.as_ref().is_some_and(|f| f.url == "https://b.org/x") && a.field.value == "https://b.org/x" && a.data.history.iter().any(|v| v.url == "https://b.org/x")
+        });
         assert!(!a.addr_focus, "Enter sends the keyboard back to the page");
         assert!(!a.full.as_ref().unwrap().log.iter().any(|l| l.contains("Key {")), "typing in the bar never went to the page: {:?}", a.full.as_ref().unwrap().log);
         assert_eq!(a.tab_titles()[0], "fake page https://b.org/x");

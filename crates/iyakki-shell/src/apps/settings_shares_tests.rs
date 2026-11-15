@@ -153,6 +153,9 @@ fn folders_outside_the_account_are_refused() {
     let mut a = SettingsApp::new(&cx);
     // even an administrator cannot map the whole filesystem or the system's interfaces
     for p in ["/", "/proc", "/sys", "/dev"] {
+        if !std::path::Path::new(p).exists() {
+            continue; // no such system interface on this machine (macOS has no /proc or /sys)
+        }
         let mut f = form_for(&cx, "x", 0);
         f.set_value(1, p);
         let e = a.shares_submit(&cx, &ShareForm::New, &mut f).unwrap_err();
@@ -236,6 +239,53 @@ fn start_stop_and_stop_all_with_a_real_server() {
     assert!(matches!(&a.modal, Some(Modal::Form(FormKind::Share(ShareForm::Delete(_)), _))));
     key(&mut a, &cx, Key::Esc);
     assert_eq!(SettingsApp::shares_len(&cx), 1);
+}
+
+#[test]
+fn edit_changes_an_existing_share_delete_needs_the_typed_word_and_the_devices_list_offers_stop_while_something_is_shared() {
+    let _g = serial();
+    let cx = admin("shr-edit");
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx, Tab::Shares);
+    let mut f = form_for(&cx, "plans", 3);
+    a.shares_submit(&cx, &ShareForm::New, &mut f).unwrap();
+    let id = SettingsApp::shares_rows(&cx)[0].cfg.id.clone();
+    // Edit opens the form filled in with the share as it is, and a changed name is kept (the folder and the id stay)
+    key(&mut a, &cx, Key::Char('e'));
+    let Some(Modal::Form(FormKind::Share(ShareForm::Edit(eid)), form)) = &mut a.modal else { panic!("the edit form is not open") };
+    assert_eq!(eid, &id);
+    assert_eq!(form.value(0), "plans");
+    form.set_value(0, "plans 2");
+    let mut f = form.clone();
+    a.modal = None;
+    a.shares_submit(&cx, &ShareForm::Edit(id.clone()), &mut f).unwrap();
+    let rows = SettingsApp::shares_rows(&cx);
+    assert_eq!((rows.len(), rows[0].cfg.name.as_str(), rows[0].cfg.id.as_str()), (1, "plans 2", id.as_str()));
+    // the Devices list: a Sharing row with a Stop button only while something is shared, and Stop closes it
+    let dir = std::env::temp_dir().join(format!("iyakki-shr-devpop-{}", std::process::id()));
+    let probe = crate::devpop::Probe::real(crate::apps::devices::DeviceEnv::real(), None, dir.clone(), "test-host".into(), false);
+    assert!(!crate::devpop::gather(&probe).items.iter().any(|i| i.title == "Sharing"));
+    key(&mut a, &cx, Key::Char('s'));
+    assert_eq!(iyakki_agent::sharedfolder::running_total(), 1);
+    let snap = crate::devpop::gather(&probe);
+    let row = snap.items.iter().find(|i| i.title == "Sharing").expect("a Sharing row while a folder is shared");
+    assert!(row.detail.starts_with("1 shared folder(s)") && row.acts == vec![crate::devpop::Act::StopSharing]);
+    assert_eq!(crate::devpop::run_act(&probe, &crate::devpop::Act::StopSharing).unwrap(), "Stopped 1 shared folder(s).");
+    assert_eq!(iyakki_agent::sharedfolder::running_total(), 0);
+    assert!(!crate::devpop::gather(&probe).items.iter().any(|i| i.title == "Sharing"));
+    // Delete asks for the word: a wrong word keeps the share, DELETE removes it
+    key(&mut a, &cx, Key::Char('d'));
+    let Some(Modal::Form(FormKind::Share(ShareForm::Delete(did)), form)) = &mut a.modal else { panic!("the delete form is not open") };
+    assert_eq!(did, &id);
+    form.set_value(0, "delete");
+    let mut f = form.clone();
+    a.modal = None;
+    assert!(a.shares_submit(&cx, &ShareForm::Delete(id.clone()), &mut f).unwrap_err().contains("Type DELETE exactly"));
+    assert_eq!(SettingsApp::shares_len(&cx), 1);
+    f.set_value(0, "DELETE");
+    assert_eq!(a.shares_submit(&cx, &ShareForm::Delete(id), &mut f).unwrap(), "The share is removed.");
+    assert_eq!(SettingsApp::shares_len(&cx), 0);
+    assert!(std::path::Path::new(&folder(&cx, "plans")).exists(), "the person's files are not touched");
 }
 
 #[test]
@@ -389,4 +439,75 @@ fn the_form_says_in_one_line_who_may_map_which_folder_and_the_line_fits_at_four_
             }
         }
     }
+}
+
+#[test]
+fn the_media_server_key_needs_a_shared_folder_asks_before_switching_on_and_the_page_says_it_is_off() {
+    let _g = serial();
+    let cx = admin("shr-media");
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx, Tab::Shares);
+    // nothing shared as files: refused in words, no question
+    key(&mut a, &cx, Key::Char('m'));
+    assert!(status(&a).contains("no folder shared as Files"), "{}", status(&a));
+    assert!(a.modal.is_none());
+    assert!(iyakki_agent::upnp_serve::status_for(&cx.session.user).is_none());
+    // the page says the server is off and names the key
+    let g = draw(&mut a, &cx, 1920, 1080);
+    assert!(g.hits.iter().any(|h| h.ev == Event::Key(Key::Char('m'))), "the Media server button is on the page");
+    // with a share (not started): m asks, any other key keeps it off
+    let mut f = form_for(&cx, "tunes", 0);
+    a.shares_submit(&cx, &ShareForm::New, &mut f).unwrap();
+    key(&mut a, &cx, Key::Char('m'));
+    assert!(matches!(&a.modal, Some(Modal::Confirm(ConfirmKind::MediaServerOn, t)) if t.contains("without a password")), "switching on asks first");
+    key(&mut a, &cx, Key::Char('n'));
+    assert!(a.modal.is_none());
+    // the real switch binds the SSDP port that another media server may hold: the on path is covered by the agent tests on loopback
+    assert!(iyakki_agent::upnp_serve::status_for(&cx.session.user).is_none(), "no answer, still off");
+}
+
+#[test]
+fn a_share_is_edited_in_place_deleted_only_after_the_typed_word_and_stopped_from_the_devices_list() {
+    let _g = serial();
+    let cx = admin("shr-m66");
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx, Tab::Shares);
+    let mut f = form_for(&cx, "docs", 3);
+    a.shares_submit(&cx, &ShareForm::New, &mut f).unwrap();
+    let id = SettingsApp::shares_rows(&cx)[0].cfg.id.clone();
+    let port = SettingsApp::shares_rows(&cx)[0].cfg.port;
+    // Edit: key e opens the form filled in with what the share has; saving changes that share, not a second one
+    key(&mut a, &cx, Key::Char('e'));
+    let Some(Modal::Form(FormKind::Share(ShareForm::Edit(eid)), form)) = &a.modal else { panic!("the edit form: {:?}", a.modal.as_ref().map(|_| "a modal")) };
+    assert_eq!(eid, &id);
+    assert_eq!(form.value(0), "docs", "filled in with the share's own name");
+    key(&mut a, &cx, Key::Esc);
+    let mut edited = form_for(&cx, "docs-renamed", 3);
+    edited.set_value(0, "docs-renamed");
+    a.shares_submit(&cx, &ShareForm::Edit(id.clone()), &mut edited).unwrap();
+    assert!(status(&a).is_empty() || !status(&a).contains("error"));
+    let rows = SettingsApp::shares_rows(&cx);
+    assert_eq!(rows.len(), 1, "edited in place");
+    assert_eq!((rows[0].cfg.id.as_str(), rows[0].cfg.name.as_str()), (id.as_str(), "docs-renamed"));
+    // a running share is listed in the top bar's Devices list with a Stop button, and Stop ends it
+    key(&mut a, &cx, Key::Char('s'));
+    assert_eq!(iyakki_agent::sharedfolder::running_total(), 1);
+    let probe = crate::devpop::tests::probe_at(&crate::devpop::tests::tmp("shr-m66-probe"));
+    let snap = crate::devpop::gather(&probe);
+    let row = snap.items.iter().find(|i| i.title == "Sharing").expect("a Sharing row while a folder is shared");
+    assert!(row.detail.starts_with("1 shared folder(s)") && row.acts == vec![crate::devpop::Act::StopSharing], "{row:?}");
+    let said = crate::devpop::run_act(&probe, &crate::devpop::Act::StopSharing).unwrap();
+    assert_eq!(said, "Stopped 1 shared folder(s).");
+    assert_eq!(iyakki_agent::sharedfolder::running_total(), 0);
+    assert!(refused(port));
+    assert!(!crate::devpop::gather(&probe).items.iter().any(|i| i.title == "Sharing"), "no row once nothing is shared");
+    // Delete: the wrong word refuses and keeps the share; the exact word removes it (the files are not touched)
+    let mut wrong = Form::new("Delete").text("Type DELETE", "", "DELETE");
+    wrong.set_value(0, "delete");
+    assert!(a.shares_submit(&cx, &ShareForm::Delete(id.clone()), &mut wrong).unwrap_err().contains("Type DELETE exactly"));
+    assert_eq!(SettingsApp::shares_len(&cx), 1);
+    let mut right = Form::new("Delete").text("Type DELETE", "", "DELETE");
+    right.set_value(0, "DELETE");
+    assert_eq!(a.shares_submit(&cx, &ShareForm::Delete(id.clone()), &mut right).unwrap(), "The share is removed.");
+    assert_eq!(SettingsApp::shares_len(&cx), 0);
 }

@@ -537,7 +537,7 @@ impl Timer for FakeTimer {
         1_800_000_000 + self.now_ms() / 1000
     }
     fn sleep(&self, ms: u64, gate: &Gate) -> bool {
-        self.slept.lock().unwrap().push(ms);
+        self.slept.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(ms);
         if self.cancel_next.swap(false, Ordering::SeqCst) {
             gate.bump();
             return false;

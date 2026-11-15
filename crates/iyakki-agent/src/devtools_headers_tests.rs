@@ -163,3 +163,28 @@ fn scrub_header_hides_cookies_and_tokens_only() {
     assert_eq!(scrub_header("Content-Type", "text/html; charset=UTF-8"), "text/html; charset=UTF-8");
     assert_eq!(scrub_header("X-Trace", "eyJhbGciOiJIUzI1NiJ9.e30.abcdefghijk"), "<redacted>");
 }
+
+#[test]
+fn headers_the_engine_reported_answer_for_the_open_page_without_any_request_and_hide_secrets() {
+    let (svc, web, p) = world("engine", vec![("fallback.example.test", Response { status: 200, headers: h(&[("Server", "web")]), ..Response::default() })]);
+    let url = "https://engine.example.test/page";
+    svc.set_page_snapshot("engine-user", Some(PageSnapshot { url: url.into(), title: "t".into(), text: String::new(), selection: String::new(), time: 0, full_engine: true }));
+    // nothing reported yet: the tool makes its own request as before
+    let before = report(&svc, &p, "engine-user", &json!({}));
+    assert!(before.contains("fetched these headers itself") || before.contains("Stopped"), "{before}");
+    let asked = web.seen.lock().unwrap().len();
+    assert!(asked > 0);
+    set_engine_headers("engine-user", url, 200, "Content-Type: text/html\nSet-Cookie: sid=abc123; HttpOnly\nServer: nginx\nStrict-Transport-Security: max-age=63072000\nbad header line\n: nothing\nX-Frame-Options: DENY\n");
+    let r = report(&svc, &p, "engine-user", &json!({}));
+    assert!(r.contains("read from the browser engine itself") && r.contains("status 200, 5 headers"), "{r}");
+    assert!(r.contains("Set-Cookie: <redacted>") && !r.contains("abc123"), "{r}");
+    assert!(r.contains("HSTS present") && r.contains("X-Frame-Options DENY"), "{r}");
+    assert_eq!(web.seen.lock().unwrap().len(), asked, "no request was made");
+    // another page, or another address asked for: the old way
+    svc.set_page_snapshot("engine-user", Some(PageSnapshot { url: "https://fallback.example.test/x".into(), title: "t".into(), text: String::new(), selection: String::new(), time: 0, full_engine: true }));
+    let other = report(&svc, &p, "engine-user", &json!({}));
+    assert!(!other.contains("read from the browser engine itself"), "{other}");
+    assert!(engine_headers_for("engine-user", url).is_some() && engine_headers_for("someone-else", url).is_none());
+    forget_engine_headers("engine-user");
+    assert!(engine_headers_for("engine-user", url).is_none());
+}

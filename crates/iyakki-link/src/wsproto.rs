@@ -83,11 +83,18 @@ pub struct Parser {
     buf: Vec<u8>,
     partial: Option<(bool, Vec<u8>)>, // (is text, data so far) of a fragmented message
     max_message: usize,
+    /// Server side (default): frames must be masked. Client side: frames from a server must NOT be masked.
+    expect_masked: bool,
 }
 
 impl Parser {
     pub fn new(max_message: usize) -> Parser {
-        Parser { buf: Vec::new(), partial: None, max_message }
+        Parser { buf: Vec::new(), partial: None, max_message, expect_masked: true }
+    }
+
+    /// A parser for a client reading what a server sends: unmasked frames only (RFC 6455 section 5.1).
+    pub fn for_client(max_message: usize) -> Parser {
+        Parser { expect_masked: false, ..Parser::new(max_message) }
     }
 
     pub fn push(&mut self, bytes: &[u8]) {
@@ -106,8 +113,8 @@ impl Parser {
             if rsv != 0 {
                 return Err(WsError::Protocol("reserved bits set"));
             }
-            if !masked {
-                return Err(WsError::Protocol("client frames must be masked"));
+            if masked != self.expect_masked {
+                return Err(WsError::Protocol(if self.expect_masked { "client frames must be masked" } else { "server frames must not be masked" }));
             }
             let (len, mut at) = match len7 {
                 126 if b.len() >= 4 => (u16::from_be_bytes([b[2], b[3]]) as usize, 4),
@@ -118,12 +125,16 @@ impl Parser {
             if len > self.max_message {
                 return Err(WsError::Protocol("message too large"));
             }
-            if b.len() < at + 4 + len {
+            if b.len() < at + if masked { 4 } else { 0 } + len {
                 return Ok(None);
             }
-            let mask = [b[at], b[at + 1], b[at + 2], b[at + 3]];
-            at += 4;
-            let payload: Vec<u8> = b[at..at + len].iter().enumerate().map(|(i, x)| x ^ mask[i % 4]).collect();
+            let payload: Vec<u8> = if masked {
+                let mask = [b[at], b[at + 1], b[at + 2], b[at + 3]];
+                at += 4;
+                b[at..at + len].iter().enumerate().map(|(i, x)| x ^ mask[i % 4]).collect()
+            } else {
+                b[at..at + len].to_vec()
+            };
             self.buf.drain(..at + len);
             match op {
                 0x8 => return Ok(Some(Message::Close)),
@@ -171,6 +182,18 @@ pub fn frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
         }
     }
     f.extend_from_slice(payload);
+    f
+}
+
+/// One masked client frame (a client must mask everything it sends; `mask` should be random per frame).
+pub fn client_frame(opcode: u8, payload: &[u8], mask: [u8; 4]) -> Vec<u8> {
+    let mut f = frame(opcode, payload);
+    f[1] |= 0x80;
+    let at = f.len() - payload.len();
+    let masked: Vec<u8> = payload.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]).collect();
+    f.truncate(at);
+    f.extend_from_slice(&mask);
+    f.extend_from_slice(&masked);
     f
 }
 
@@ -276,5 +299,33 @@ mod tests {
         assert_eq!(f[1], 127);
         assert_eq!(u64::from_be_bytes(f[2..10].try_into().unwrap()), 70_000);
         assert_eq!(close_frame(), vec![0x88, 0]);
+    }
+
+    #[test]
+    fn a_client_masks_what_it_sends_and_reads_unmasked_server_frames() {
+        // client -> server: the server parser accepts it, and the text comes back whole
+        for text in ["hi", &"x".repeat(300), &"y".repeat(70_000)] {
+            let mut server = Parser::new(1 << 20);
+            server.push(&client_frame(0x1, text.as_bytes(), [9, 8, 7, 6]));
+            assert_eq!(server.next(), Ok(Some(Message::Text(text.to_string()))));
+        }
+        // server -> client: unmasked frames, in pieces
+        let mut c = Parser::for_client(1 << 20);
+        let f = text_frame("hello");
+        c.push(&f[..3]);
+        assert_eq!(c.next(), Ok(None));
+        c.push(&f[3..]);
+        assert_eq!(c.next(), Ok(Some(Message::Text("hello".into()))));
+        c.push(&frame(0x9, b"p"));
+        assert_eq!(c.next(), Ok(Some(Message::Ping(b"p".to_vec()))));
+        c.push(&close_frame());
+        assert_eq!(c.next(), Ok(Some(Message::Close)));
+        // each side refuses the other's kind of frame
+        let mut c = Parser::for_client(1 << 20);
+        c.push(&client_frame(0x1, b"x", [1, 2, 3, 4]));
+        assert!(c.next().is_err(), "a server must not mask");
+        let mut s = Parser::new(1 << 20);
+        s.push(&text_frame("x"));
+        assert!(s.next().is_err(), "a client must mask");
     }
 }

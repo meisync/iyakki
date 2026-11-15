@@ -202,6 +202,8 @@ pub enum Lang {
     Cypher,
     /// The name of a view of the local cluster (`dash/kube.rs`).
     Kube,
+    /// A bucket and a prefix of an S3-compatible object store (`dash/s3.rs`).
+    S3,
 }
 
 impl Lang {
@@ -212,6 +214,7 @@ impl Lang {
             Lang::EsDsl => "Elasticsearch query (JSON)",
             Lang::Cypher => "Cypher (graph)",
             Lang::Kube => "view name (cluster)",
+            Lang::S3 => "bucket/prefix (object storage)",
         }
     }
 }
@@ -590,6 +593,11 @@ impl Http {
 
     pub fn base(&self) -> &str {
         &self.base
+    }
+
+    /// A value (a key the connector signs with) that must never come back in an answer or an error.
+    pub fn add_secret(&mut self, s: Zeroizing<String>) {
+        self.secrets.push(s);
     }
 
     /// Send a request. `path` starts with `/` and may carry a query string (already encoded). Transport failures and error

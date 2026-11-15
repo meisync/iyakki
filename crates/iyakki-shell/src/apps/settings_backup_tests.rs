@@ -3,7 +3,7 @@
 
 use iyakki_agent::backup::{self as bk, Layout};
 
-use super::backup_page::BackupForm;
+use super::backup_page::{BackupForm, BackupOut};
 use super::*;
 use crate::apps::tests::{cx_with_admin_store, temp_dir};
 
@@ -236,4 +236,76 @@ fn the_page_fits_from_a_phone_to_4k_in_both_modes() {
             }
         }
     }
+}
+
+#[test]
+fn the_page_shows_a_bar_while_a_backup_runs_and_the_s_key_stops_it() {
+    let (cx, mut a, _l, _stick) = fake("bk-stop", "amy");
+    goto(&mut a, &cx, Tab::Backup);
+    // a running job that holds a progress record and ends when the stop flag is set (the real job does the same with `create_with_progress`)
+    let pr = std::sync::Arc::new(bk::Progress::default());
+    a.backup.progress = Some(pr.clone());
+    let p2 = pr.clone();
+    a.start("Backing up", move || {
+        for _ in 0..400 {
+            if p2.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        JobOut::Backup(BackupOut::Made(Err(bk::BackupError::Cancelled.to_string())))
+    });
+    assert!(a.backup_buttons().iter().any(|b| b.2 == 's' && b.0 == "Stop the backup"), "the stop button is there while it runs");
+    let counting = alltext(&draw(&mut a, &cx, 1280, 720));
+    assert!(counting.contains("Counting the files"), "{counting}");
+    pr.total.store(1000, std::sync::atomic::Ordering::Relaxed);
+    pr.done.store(250, std::sync::atomic::Ordering::Relaxed);
+    assert!(alltext(&draw(&mut a, &cx, 1280, 720)).contains("25%"), "the bar says how far it has come");
+    key(&mut a, &cx, Key::Char('s'));
+    assert!(pr.cancel.load(std::sync::atomic::Ordering::Relaxed), "{}", status(&a));
+    wait(&mut a, &cx);
+    assert!(status(&a).contains("stopped") && a.backup.progress.is_none(), "{}", status(&a));
+    assert!(!a.backup_buttons().iter().any(|b| b.2 == 's'), "no stop button when nothing runs");
+    key(&mut a, &cx, Key::Char('s'));
+    assert!(status(&a).contains("No backup is running"));
+}
+
+#[test]
+fn a_real_backup_made_through_the_page_leaves_no_progress_behind() {
+    let (cx, mut a, _l, stick) = fake("bk-prog", "amy");
+    goto(&mut a, &cx, Tab::Backup);
+    make(&mut a, &cx, &stick, "", "").unwrap();
+    assert!(a.backup.progress.is_none() && !stick.read_dir().unwrap().flatten().all(|e| e.path().extension().is_none_or(|x| x != bk::EXTENSION)), "{}", status(&a));
+}
+
+#[test]
+fn the_schedule_form_saves_checks_and_shows_the_schedule_and_u_turns_it_off() {
+    let (cx, mut a, _l, stick) = fake("bk-sched", "amy");
+    goto(&mut a, &cx, Tab::Backup);
+    let dir = cx.services.dir().to_path_buf();
+    assert!(!iyakki_agent::backup_schedule::Schedule::load(&dir, "amy").enabled);
+    let form = |days: &str, hour: &str, folder: &str, keep: &str, pf: &str| {
+        let mut f = Form::new("x").text("d", "", "").text("h", "", "").path("f", "", "", crate::filepicker::PathKind::Folder, &[]).text("k", "", "").path("p", "", "", crate::filepicker::PathKind::File, &[]);
+        for (i, v) in [days, hour, folder, keep, pf].into_iter().enumerate() {
+            f.set_value(i, v);
+        }
+        f
+    };
+    let stick_s = stick.to_string_lossy().into_owned();
+    for bad in [form("0", "3", &stick_s, "7", ""), form("2", "24", &stick_s, "7", ""), form("2", "3", &stick_s, "0", ""), form("2", "3", "relative", "7", ""), form("2", "3", &format!("{stick_s}/not-there"), "7", ""), form("x", "3", &stick_s, "7", "")] {
+        let mut b = bad;
+        assert!(a.backup_submit(&cx, &BackupForm::Schedule, &mut b).is_err());
+    }
+    assert!(!iyakki_agent::backup_schedule::Schedule::load(&dir, "amy").enabled, "nothing was saved by a bad form");
+    let mut ok = form("2", "5", &stick_s, "4", "");
+    let said = a.backup_submit(&cx, &BackupForm::Schedule, &mut ok).unwrap();
+    assert!(said.contains("Every 2 day(s) from 05:00") && said.contains("NOT encrypted"), "{said}");
+    let s = iyakki_agent::backup_schedule::Schedule::load(&dir, "amy");
+    assert!(s.enabled && (s.every_days, s.hour, s.keep) == (2, 5, 4) && s.dest == stick_s);
+    let t = alltext(&draw(&mut a, &cx, 1280, 720));
+    assert!(t.contains("Every 2 day(s) from 05:00"), "the page shows it: {t}");
+    key(&mut a, &cx, Key::Char('u'));
+    assert!(!iyakki_agent::backup_schedule::Schedule::load(&dir, "amy").enabled && status(&a).contains("is off"));
+    let audit = std::fs::read_to_string(cx.audit.path()).unwrap_or_default();
+    assert!(audit.contains("backup.schedule"), "{audit}");
 }

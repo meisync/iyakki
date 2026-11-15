@@ -272,6 +272,79 @@ fn media_keys_answer_for_the_radio_and_say_when_nothing_plays() {
     assert_eq!(osd(&sh).unwrap().text, "Nothing is playing");
 }
 
+/// A stream of silent MP3 frames that never ends; `open` can be held back to keep the radio in "connecting".
+struct SilentStream {
+    hold: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+struct Silence(usize);
+impl std::io::Read for Silence {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let n = out.len().min(417);
+        for b in out[..n].iter_mut() {
+            *b = [0xFF, 0xFB, 0x90, 0x64].get(self.0).copied().unwrap_or(0);
+            self.0 = (self.0 + 1) % 417;
+        }
+        Ok(n)
+    }
+}
+impl iyakki_agent::iyakki_proxy::Streamer for SilentStream {
+    fn open(&self, _url: &str, _h: &[(String, String)]) -> Result<iyakki_agent::iyakki_proxy::StreamHead, String> {
+        while self.hold.load(std::sync::atomic::Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        Ok(iyakki_agent::iyakki_proxy::StreamHead { status: 200, headers: vec![("content-type".into(), "audio/mpeg".into())], body: Box::new(Silence(0)) })
+    }
+}
+
+fn wait_radio(sh: &Shell, what: impl Fn(&iyakki_agent::radio::RadioState) -> bool) {
+    for _ in 0..500 {
+        if what(&sh.env.services.radio.state()) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("{:?}", sh.env.services.radio.state());
+}
+
+#[test]
+fn media_keys_drive_a_radio_that_plays_in_the_background_pause_resume_stop_and_the_station_hint() {
+    use iyakki_agent::radio::RadioState;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (mut sh, _) = signed_in("fn-media-playing");
+    let hold = std::sync::Arc::new(AtomicBool::new(true));
+    let radio = sh.env.services.radio.clone();
+    radio.set_streamer(std::sync::Arc::new(SilentStream { hold: hold.clone() }));
+    let allow: std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync> = std::sync::Arc::new(|_| true);
+    radio.play(&iyakki_agent::radio::Station::new("Jazz FM", "https://jazz.example.org/live.mp3"), allow, "tee /dev/null");
+    // still connecting: play/pause cannot pause what has not started, and says so
+    assert!(matches!(radio.state(), RadioState::Connecting(_)));
+    press(&mut sh, FnKey::PlayPause);
+    assert_eq!(osd(&sh).unwrap().text, "Radio is connecting");
+    assert!(!radio.is_paused());
+    // playing: the key pauses, the same key resumes
+    hold.store(false, Ordering::SeqCst);
+    wait_radio(&sh, |s| matches!(s, RadioState::Playing { .. }));
+    press(&mut sh, FnKey::PlayPause);
+    assert_eq!(osd(&sh).unwrap().text, "Radio paused");
+    assert!(radio.is_paused());
+    press(&mut sh, FnKey::PlayPause);
+    assert_eq!(osd(&sh).unwrap().text, "Radio playing");
+    assert!(!radio.is_paused() && radio.is_active());
+    // next and previous cannot change the station from here (the Radio app is closed): they say where to go and leave the radio alone
+    press(&mut sh, FnKey::Next);
+    assert_eq!(osd(&sh).unwrap().text, "Open Radio to change the station");
+    press(&mut sh, FnKey::Prev);
+    assert_eq!(osd(&sh).unwrap().text, "Open Radio to change the station");
+    assert!(radio.is_active());
+    // stop ends it; after that the keys say nothing plays
+    press(&mut sh, FnKey::Stop);
+    assert_eq!(osd(&sh).unwrap().text, "Radio stopped");
+    assert_eq!(radio.state(), RadioState::Idle);
+    press(&mut sh, FnKey::PlayPause);
+    assert_eq!(osd(&sh).unwrap().text, "Nothing is playing");
+}
+
 #[test]
 fn the_wifi_key_waits_for_the_kernel_and_never_switches_twice() {
     let (mut sh, sys) = signed_in("fn-rf");

@@ -168,3 +168,35 @@ fn every_control_is_on_screen_at_the_test_sizes() {
         }
     }
 }
+
+#[test]
+fn the_startup_disk_keys_ask_first_and_the_restart_switch_is_kept_and_audited() {
+    let (cx, mut a) = rig("pc-startup", true);
+    assert!(!cx.services.startup_reboot_into_iyakki(), "off by default");
+    // the keys that write firmware variables only open a card; the firmware is not touched here
+    for (ch, want) in [('e', computer_page::CompAct::StartRegister), ('b', computer_page::CompAct::StartFirst), ('n', computer_page::CompAct::StartNext), ('v', computer_page::CompAct::StartRevert)] {
+        key(&mut a, &cx, ch);
+        assert!(matches!(&a.modal, Some(Modal::Confirm(ConfirmKind::Computer(act), _)) if *act == want), "{ch}");
+        a.modal = None;
+    }
+    // the switch asks, then changes the setting and writes an audit line
+    key(&mut a, &cx, 'w');
+    assert!(matches!(&a.modal, Some(Modal::Confirm(ConfirmKind::Computer(computer_page::CompAct::RebootInto(true)), _))));
+    assert!(!cx.services.startup_reboot_into_iyakki(), "nothing changed before the yes");
+    key(&mut a, &cx, 'n');
+    assert!(!cx.services.startup_reboot_into_iyakki(), "no keeps it");
+    key(&mut a, &cx, 'w');
+    key(&mut a, &cx, 'y');
+    assert!(cx.services.startup_reboot_into_iyakki());
+    // the page says so (no firmware variables on a test machine, so the first words are about that)
+    let g = draw(&mut a, &cx, 1280, 800);
+    assert!(g.hits.iter().any(|h| matches!(h.ev, Event::Key(Key::Char('b')))), "a button for starting IYAKKI first");
+    // an ordinary account cannot
+    let mut cx2 = rig("pc-startup-user", true).0;
+    cx2.session.user = "amy".into();
+    cx2.session.policy = Role::User.template();
+    let mut a2 = SettingsApp::new(&cx2);
+    a2.go_to(Tab::Computer);
+    key(&mut a2, &cx2, 'b');
+    assert!(a2.modal.is_none());
+}

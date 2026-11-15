@@ -8,6 +8,7 @@ Related: `docs/development/CLAUDE-CODE-APP-DEVELOPMENT.md` (kinds of app, sectio
 `docs/DEVELOPER-MODE.md`, `docs/EMBEDDING-AND-BACKEND.md`.
 
 Status words: **exists** = reachable by the person or the assistant today, but not by apps; **partly**; **gap** = nothing yet. Effort: S under 3 days, M about a week, L more.
+**Update 2026-11-12:** the bridge side of 4.2, 4.4, 4.5, 4.8, 4.9, 4.10, 4.11 (markdown, audio, media, dash, flows, k3s, embed), `speech.listen` (4.3) and the money limits is built as SDK 1.2; the interface as built is section 14 and it wins where it differs. What each call does on the machine (viewer, painting, engines, player, microphone) is still a backend that answers `Unavailable` until it is wired (FEATURES F-SDK-14 to F-SDK-16).
 
 ## 1. Principles
 
@@ -501,3 +502,138 @@ Answered (these are decisions, not proposals; the numbers refer to the list abov
 * **13. Service package kind: approved.** The install wizard shows the person **every permission the service asks for** (what it will use) and nothing is granted without that.
 
 Still open: 3, 5, 7, 8, 9, 11, 12, 14, 15.
+
+## 14. Bridge v2 (SDK 1.2): the interface as decided
+
+Decided 2026-11-12: the owner left the interface of F-SDK-04 to the engineer on one condition, "extensible, backward and forward compatible". This section is the interface;
+`docs/development/SDK-BRIDGE-V2.md` records the rules and the namespace table with versions. The manifest of the namespaces lives in one place in code, `iyakki_core_api::sdkbridge`
+(`NAMESPACES`, `CAPABILITIES`, `SDK_VERSION`), and the typings (`dist/sdk/iyakki.d.ts`), the emulator and the tests are checked against it. Where this section differs from sections 4 and 5
+(written earlier as proposals), this section wins; the differences are listed in 14.12.
+
+### 14.1 Discovery and compatibility (SDK 1.1)
+
+```ts
+iyakki.version: string                                  // "1.2"
+iyakki.has(name: string): boolean                       // 'markdown', 'markdown.render', 'speech.listen'; true when this host knows it AND the app declared what it needs
+iyakki.capabilities(): { sdk: string, major: number, minor: number,
+   namespaces: { name, since, capability: string|null, ready: boolean, ops: { name, since, approval, effect, ready }[] }[],
+   capabilities: { key, since, granted: boolean }[] }  // synchronous
+iyakki.call(op: string, args?: object): Promise<any>    // the generic door: 'markdown.render'. Known calls behave exactly as iyakki.markdown.render; an unknown one rejects with Unsupported
+```
+* **Feature test first.** `if (iyakki.has && iyakki.has('markdown.render')) ...`. On an older host `iyakki.has` does not exist: write `const has = (n) => typeof iyakki.has === 'function' && iyakki.has(n)`.
+* **Unknown name** (a namespace or call this host does not know, or a newer one than its SDK): the promise rejects with `Error.code === 'Unsupported'`, `.op`, `.namespace`, `.sdk` (the host's version) and the sentence
+  "iyakki.X is not available in this version of IYAKKI (SDK 1.2)". It is never a crash and never reveals whether the app holds a capability.
+* **Unknown arguments** of the new namespaces are ignored; the reply carries `ignored: ["name", ...]` only when something was ignored. (The original `llm` and `speech.say` calls keep their strict argument check: they shipped that way.)
+* **`app.json`**: `"sdk": "1.2"` is the least SDK the app needs (refused at install with "update IYAKKI" when the host is older). New capability keys of a newer app go in `capabilities` **and** in
+  `requires.capabilities_optional`: a host that does not know the key then ignores it (and notes it in the audit) instead of refusing the install; the app finds out with `iyakki.has`.
+* **Errors** add nothing but the existing codes of section 3 (`Unsupported` is now emitted). Extra fields only ever get added.
+* **Events** use the existing handle mechanism (`__iyakkiEmit`), at most 50 waiting per handle.
+* **Replies are objects** with named fields so a field can be added later (a list is `{ items: [...] }`); the original 1.0/1.1 calls keep the shapes they shipped with.
+
+### 14.2 `markdown` (capability `markdown`, SDK 1.2)
+
+```ts
+markdown.render(text: string, opts?: { width?: number }): Promise<{ lines: number, plain: string, truncated: boolean, links: { text, url }[], blockedLinks: number, images: number, ignored?: string[] }>   // approval none; analysis only
+markdown.view(text: string, opts?: { title?: string }): Promise<{ id: number }>      // opens the viewer as its own tile; approval none; at most 4 open per app
+markdown.openFile(): Promise<{ id: number }>                                           // the person picks the file in the dialog (that dialog is the approval); the app never sees a path
+```
+Text up to 1 MB. `width` in CSS px (default 640; the line count assumes 8 px a character, so it is an estimate: the viewer's own layout decides). Links with a `javascript:`, `data:`, `vbscript:` or `file:` scheme
+are not listed, only counted in `blockedLinks`; links never run, they open only after the shell's link warning. Needs a viewer in the shell: without one `view` and `openFile` answer `Unavailable` (F-SDK-14).
+
+### 14.3 `embed` (capability `embed`: the kinds; `embed_hosts`: web sites; SDK 1.2)
+
+```ts
+embed.mount(target: string | { x: number, y: number, w: number, h: number }, kind: 'markdown'|'browser'|'media'|'dash', options?: object): Promise<EmbedHandle>
+EmbedHandle = { id: number, update(options): Promise<{ id }>, call(method: string, args?: object): Promise<any>, unmount(): Promise<void>, on(event, fn), off(event, fn) }
+embed.list(): Promise<{ items: { id, kind }[] }>
+```
+`target` is an element id (`[A-Za-z][A-Za-z0-9_-]{0,63}`) or a rectangle in page px; at least 120x80, at most 900 px wide and 2880 high; at most **2 embeds per app and 1 browser**. The kind must be in the app's `embed` list.
+`markdown` options `{text}` (1 MB) or `{file}` (a path inside the app); methods `scrollTo`, `find`, `focus`, `blur`; events `link` `{url}`, `scroll`, `ready`.
+`browser` options `{url, mode?: 'full'|'reader', readonly?: boolean, allowFullscreen?: boolean}`; **the url's host must be in `embed_hosts`** and allowed by the person's host policy, else `Blocked`; only http and https; methods `back`, `forward`, `reload`,
+`stop`, `focus`, `blur`; events `navigated`, `loading`, `blocked`, `fullscreen`, `closed`. The first mount of a browser embed asks once ("shows a web page inside itself"); `markdown` needs no card.
+`media`: `{file}` (inside the app), methods `play`, `pause`, `seek`; events `state`, `ended`, `error`. `dash`: `{dashboard}` of a source the app may read; method `setRange`; event `range`.
+The shell paints the rectangle and owns the pixels; the page never sees them or the keys inside. Without a shell surface `mount` answers `Unavailable` (F-SDK-14).
+
+### 14.4 `dash` (capability `dash`: the sources it may read; SDK 1.2)
+
+```ts
+dash.sources(): Promise<{ items: { name, kind, language }[] }>                          // only the sources named in the capability
+dash.query(source: string, query: string, opts?: { range?: { from: string, to: string }, limit?: number /*<=1000*/ }): Promise<{ columns: { name, type }[], rows: any[][], truncated: boolean }>
+dash.panel.add(dashboard: string, panel: { title: string, source: string, query: string, visual?: string }): Promise<{ id }>   // card every time
+```
+First `query` of each source asks once ("may read from prometheus-main"). Read-only by rule (the engine refuses writes); 1000 rows, 30 queries a minute, query up to 8000 characters. A source not in the capability list is `NoCapability`.
+
+### 14.5 `flows` (capability `flows`: the flows it may run; SDK 1.2)
+
+```ts
+flows.list(): Promise<{ items: { id, name, version, inputs: { name, type, required }[] }[] }>   // only the listed flows, only published versions
+flows.run(flow: string, inputs?: object, opts?: { key?: string }): Promise<{ run: string }>   // a card every time: flow, version, inputs; `key` makes a repeated call return the same run
+flows.status(run: string): Promise<{ state: string, steps: { node, state }[], error?: string }>   // only runs this app started
+flows.cancel(run: string): Promise<{ run, state }>                                    // a card every time
+```
+10 runs an hour per app; inputs up to 16 KB. Creating, editing and publishing flows stays with the assistant's always-asking tools. Run state is polled with `status` in 1.2 (a `run` event is an additive later change).
+
+### 14.6 `k3s` (capability `k3s`: `"read"` or `"manage"`; SDK 1.2)
+
+```ts
+k3s.status(): Promise<{ cluster, namespace, ready: boolean, writable: boolean }>
+k3s.get(kind: string, opts?: { name?: string, selector?: string }): Promise<{ items: object[] }>     // Secret data is removed
+k3s.logs(pod: string, opts?: { tail?: number /*<=500*/ }): Promise<{ lines: string[] }>
+k3s.apply(yaml: string): Promise<{ plan: string }>      // manage only; the card shows the lint result and diff; only the app's own namespace
+k3s.restart(name: string): Promise<{ restarted: string }>   // manage only; card
+```
+Only the namespace the host assigns to the app. Never: namespace delete, cluster-scoped objects, other namespaces, Secret values, exec. Without the service package kind the host has no namespace to give: `Unavailable` (F-SDK-15).
+
+### 14.7 `media` and `audio` (capabilities `media`, `audio`; SDK 1.2; host-side playback control only)
+
+```ts
+media.library(opts?: { kind?: 'audio'|'video' }): Promise<{ items: { id, title, artist?, secs, kind }[] }>   // metadata only, the person's media folders; asks once
+media.play(src: { id: string } | { file: string }, opts?: { start?: number }): Promise<{ id }>               // `id` from the library: no card; `file`: a card every time
+media.pause(id) / media.resume(id) / media.stop(id): Promise<{ id, state }>
+media.state(id?): Promise<{ id, state: 'playing'|'paused'|'ended'|'stopped', position: number }>
+media.queue.add(id): Promise<{ queued: number }> / media.queue.list(): Promise<{ items }>
+audio.play(src: { file: string } | { wav: string /*base64, <= 2 MB*/ }, opts?: { volume?: number /*0..1*/, loop?: boolean, channel?: 'cue'|'music'|'speech' }): Promise<{ id }>   // asks once
+audio.pause(id) / audio.resume(id) / audio.stop(id) / audio.setVolume(id, volume): Promise<{ id }>
+audio.outputs(): Promise<{ items: { name, active }[] }>
+```
+No pictures or sound reach the page. One audio stream per app; the person's volume and mute always apply; `Busy` with `.holder` while the speaker cannot be shared. A `{ url }` source is `Unsupported` in 1.2.
+
+### 14.8 `speech.listen` (capability `microphone`; SDK 1.2; permission model only)
+
+```ts
+speech.listen(opts?: { lang?: string, maxSeconds?: number /*<=60*/, device?: string }): Promise<ListenHandle>   // a card every time, naming the microphone; ListenHandle = { id, on('result'|'error'|'done', fn), cancel() }
+```
+Result `{ text }`; the sound is never given to the app and is dropped after recognition. 20 listens an hour; one at a time; denied or unanswered in 120 s is `Denied`; no engine or microphone is `Unavailable`
+(T2 laptops: always, until capture is proven). Every listen is written to the audit log. The recognition itself is the existing voice engine and is wired by F-SDK-16.
+
+### 14.9 `money` (capability `money`: the currency; SDK 1.2)
+
+```ts
+money.limits(): Promise<{ currency: string, perDayMinor: number, spentTodayMinor: number, remainingMinor: number, confirmEach: boolean, resetsAt: number }>
+money.spend(req: { amountMinor: number, currency: string, purpose: string /*<=120*/, ref?: string }): Promise<{ receipt: string, remainingMinor: number }>
+money.requestLimit(req: { perDayMinor: number, why: string /*<=200*/ }): Promise<{ perDayMinor: number }>      // a card every time
+```
+Amounts are whole **minor units** of the declared currency (cents; yen for a currency with no fraction). The limit is **per app and per day, default 0**, so every spend is `BudgetStop` (with `.limit`, `.remaining`, `.resets_at`)
+until the person raises it. Only the person raises it: in the Info panel, with the chat tool `app_money_limit_set` (which asks), or by allowing the card of `requestLimit`; a raise is never granted by an autonomy setting and is audited.
+The limit is checked before every spend, against what was already spent today, and again when the person answers the card. By default **every spend also shows a card** (`confirmEach`); the person may switch that off for amounts inside the limit.
+**No payment provider is called in 1.2:** after the checks `spend` answers `Unavailable` ("no payment provider is set up") and records nothing; a provider is a later, separate decision.
+
+### 14.10 Approval classes of v2 (the table of `iyakki_core_api::sdkbridge`)
+
+| Class | Meaning | Calls (SDK 1.2) |
+|---|---|---|
+| `none` | reads or touches only the app's own things | `markdown.render`, `markdown.view`, `embed.update/call/unmount/list`, `dash.sources`, `flows.list/status`, `k3s.status/get/logs`, `media.pause/resume/stop/state/queue.list`, `audio.pause/resume/stop/setVolume/outputs`, `money.limits`, `speech.cancel` |
+| `first-use` | once per app, kept, revocable | `embed.mount` (browser), `dash.query` (per source), `media.library`, `audio.play` |
+| `each-call` | a card every time | `markdown.openFile`, `dash.panel.add`, `flows.run/cancel`, `k3s.apply/restart`, `media.play` (a file), `media.queue.add`, `speech.listen`, `money.requestLimit` |
+| `limit` | checked against the person's limit, and a card unless switched off | `money.spend` |
+A test of the manifest fails if a call that changes something, spends or listens has class `none`.
+
+### 14.11 Chat tools (CHAT-REACHABILITY.md)
+
+The Apps access page (`AppAccess`) gets `app_sdk_status` (free: the SDK version, the namespaces and what installed apps declared) and `app_money_limit_status` (free) / `app_money_limit_set` (asks every time, never auto-approved; changes the currency limit and
+whether each spend asks). The install card lists every capability with its parameters in plain words.
+
+### 14.12 Differences from sections 4 and 5
+
+`embed` has no `focus()/blur()` on the handle itself (they are `call` methods); events of flow runs are polled; replies are objects (`{ items }`, `{ lines }`) so fields can be added; `audio.play` has no `url` source in 1.2;
+`llm.embed` stays out of 1.2 (the capability `embed` is the viewer embedding, `llm.embed` would be a later additive call).

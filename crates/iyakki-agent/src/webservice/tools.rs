@@ -38,6 +38,12 @@ impl ProfileTools {
 }
 
 impl Tools for ProfileTools {
+
+    fn inner_tools(&self) -> Option<&dyn Tools> {
+
+        Some(&*self.inner)
+
+    }
     fn defs(&self) -> Vec<ToolDef> {
         self.inner.defs().into_iter().filter(|d| self.allowed.contains(&d.spec.name)).collect()
     }

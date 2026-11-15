@@ -9,8 +9,8 @@ use crate::gfx::{rgb, Gfx};
 use crate::ui::{ERR, MUTED, OK};
 
 /// Every node kind that has its own icon (the table test checks that the registry has no kind outside it).
-pub const KINDS: [&str; 40] = [
-    "start", "end", "http", "cli", "browser", "agent", "script", "grpc", "thrift", "remote", "condition", "switch", "parallel", "join", "delay", "approval", "notify", "subflow", "foreach", "cam_photo", "br_open", "br_screenshot", "br_dom", "br_assert", "br_click", "br_type", "br_fill", "br_submit", "br_key", "br_hover", "br_scroll", "br_select", "br_wait", "br_extract", "br_js", "br_frame", "br_viewport", "br_storage", "br_download", "br_compare",
+pub const KINDS: [&str; 41] = [
+    "start", "end", "http", "cli", "browser", "agent", "script", "grpc", "thrift", "remote", "condition", "switch", "parallel", "join", "delay", "approval", "notify", "subflow", "foreach", "cam_photo", "remote_flow", "br_open", "br_screenshot", "br_dom", "br_assert", "br_click", "br_type", "br_fill", "br_submit", "br_key", "br_hover", "br_scroll", "br_select", "br_wait", "br_extract", "br_js", "br_frame", "br_viewport", "br_storage", "br_download", "br_compare",
 ];
 
 pub fn has_icon(kind: &str) -> bool {
@@ -81,7 +81,7 @@ pub fn draw_kind(g: &mut Gfx, kind: &str, cx: f32, cy: f32, size: f32, c: [u8; 4
             poly(g, &[p(-0.2, -0.8), p(-0.45, -0.8), p(-0.55, -0.55), p(-0.55, -0.1), p(-0.8, 0.0), p(-0.55, 0.1), p(-0.55, 0.55), p(-0.45, 0.8), p(-0.2, 0.8)], w, c, false);
             poly(g, &[p(0.2, -0.8), p(0.45, -0.8), p(0.55, -0.55), p(0.55, -0.1), p(0.8, 0.0), p(0.55, 0.1), p(0.55, 0.55), p(0.45, 0.8), p(0.2, 0.8)], w, c, false);
         }
-        "grpc" | "thrift" | "remote" => {
+        "grpc" | "thrift" | "remote" | "remote_flow" => {
             g.rrect(cx - r * 0.45, cy - r * 0.2, r * 0.9, r * 0.8, r * 0.15, c);
             g.line(p(-0.22, -0.2).0, p(-0.22, -0.2).1, p(-0.22, -0.8).0, p(-0.22, -0.8).1, w * 1.1, c);
             g.line(p(0.22, -0.2).0, p(0.22, -0.2).1, p(0.22, -0.8).0, p(0.22, -0.8).1, w * 1.1, c);

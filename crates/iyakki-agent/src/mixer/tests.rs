@@ -377,11 +377,13 @@ fn mixing_four_sources_for_ten_seconds_takes_far_less_than_real_time() {
             let chunk: Vec<f32> = (0..per).flat_map(|i| std::iter::repeat_n(t[(p * per + i) % t.len()], ch)).collect();
             w.write_f32(&chunk);
         }
-        let t0 = Instant::now();
+        // this thread's CPU time, not the wall clock: a machine busy with other tests keeps this thread off the CPU for whole
+        // periods, and that waiting is not mixing
+        let t0 = thread_cpu_ns();
         e.mix_period(1.0, &mut out);
-        times.push(t0.elapsed().as_secs_f64());
+        times.push(thread_cpu_ns().saturating_sub(t0) as f64 / 1e9);
     }
-    // a machine busy with other tests preempts this thread now and then: the slowest 10 percent of the periods are left out, so the bound measures the mixing and not the scheduler
+    // the slowest 10 percent of the periods are still left out (a cache flushed by another process, an interrupt)
     times.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let keep = times.len() * 9 / 10;
     let took: f64 = times[..keep].iter().sum::<f64>() * times.len() as f64 / keep as f64;
@@ -408,6 +410,7 @@ fn wait_for(what: &str, f: impl Fn() -> bool) {
 
 #[test]
 fn the_service_plays_a_source_to_the_sink_and_lets_the_card_go_when_idle() {
+    let _rt = crate::mixer::rt_serial();
     let sink = FakeSink::new();
     let m = Mixer::start(fast(), Box::new(sink.clone()));
     let w = m.open_source(SourceKind::Media, 48_000, 2).unwrap();
@@ -430,6 +433,7 @@ fn the_service_plays_a_source_to_the_sink_and_lets_the_card_go_when_idle() {
 
 #[test]
 fn a_change_of_the_sound_output_moves_what_is_playing_to_the_new_device() {
+    let _rt = crate::mixer::rt_serial();
     // a station that plays on and on: the card is opened again when the chosen output changes, the stream goes on, nothing is dropped
     let sink = FakeSink::new();
     let m = Mixer::start(fast(), Box::new(sink.clone()));
@@ -458,6 +462,7 @@ impl FakeSink {
 
 #[test]
 fn a_card_that_cannot_be_opened_is_busy_and_recovers() {
+    let _rt = crate::mixer::rt_serial();
     let sink = FakeSink::new();
     sink.lock().fail_open = Some("Device or resource busy".into());
     let m = Mixer::start(fast(), Box::new(sink.clone()));
@@ -474,6 +479,7 @@ fn a_card_that_cannot_be_opened_is_busy_and_recovers() {
 
 #[test]
 fn disabled_refuses_and_invalid_formats_are_refused() {
+    let _rt = crate::mixer::rt_serial();
     let m = Mixer::start(fast(), Box::new(FakeSink::new()));
     m.set_enabled(false);
     assert_eq!(m.open_source(SourceKind::Media, 48_000, 2).err(), Some(MixError::Disabled));
@@ -486,6 +492,7 @@ fn disabled_refuses_and_invalid_formats_are_refused() {
 
 #[test]
 fn exclusive_holds_everything_but_alarms_out() {
+    let _rt = crate::mixer::rt_serial();
     let m = Mixer::start(fast(), Box::new(FakeSink::new()));
     let x = m.open_source_with(SourceKind::Media, 48_000, 2, "player", true).unwrap();
     match m.open_source(SourceKind::Radio, 48_000, 2) {
@@ -500,6 +507,7 @@ fn exclusive_holds_everything_but_alarms_out() {
 
 #[test]
 fn a_full_mixer_gives_way_to_a_more_important_source_and_refuses_an_equal_one() {
+    let _rt = crate::mixer::rt_serial();
     let m = Mixer::start(fast(), Box::new(FakeSink::new()));
     let mut keep = Vec::new();
     for _ in 0..MAX_SOURCES {
@@ -514,6 +522,7 @@ fn a_full_mixer_gives_way_to_a_more_important_source_and_refuses_an_equal_one() 
 
 #[test]
 fn shutdown_joins_the_thread_and_ends_the_sources() {
+    let _rt = crate::mixer::rt_serial();
     let sink = FakeSink::new();
     let m = Mixer::start(fast(), Box::new(sink.clone()));
     let w = m.open_source(SourceKind::Media, 48_000, 2).unwrap();
@@ -529,6 +538,7 @@ fn shutdown_joins_the_thread_and_ends_the_sources() {
 
 #[test]
 fn play_wav_reaches_the_sink_and_returns_when_mixed() {
+    let _rt = crate::mixer::rt_serial();
     let sink = FakeSink::new();
     let m = Mixer::start(fast(), Box::new(sink.clone()));
     let wav = crate::voice::encode_wav(&vec![6000i16; 4410], 44_100);
@@ -545,6 +555,7 @@ fn stats_line_reads_well() {
 
 #[test]
 fn a_decoder_pipe_feeds_a_source_as_plain_pcm() {
+    let _rt = crate::mixer::rt_serial();
     let sink = FakeSink::new();
     let m = Mixer::start(fast(), Box::new(sink.clone()));
     // what a decoder helper writes to its standard output: s16le at its own rate and channel count
@@ -555,6 +566,99 @@ fn a_decoder_pipe_feeds_a_source_as_plain_pcm() {
     wait_for("the pipe audio", || sink.lock().samples.iter().filter(|&&s| s > 6000).count() > 40_000);
     assert!(sink.lock().samples.iter().filter(|&&s| s > 6000).count() < 100_000);
     m.shutdown();
+}
+
+/// A reader that hands out the bytes in the given piece sizes, then ends (or fails with `err`).
+struct Pieces {
+    data: Vec<u8>,
+    sizes: Vec<usize>,
+    at: usize,
+    err: Option<&'static str>,
+}
+
+impl std::io::Read for Pieces {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.at >= self.data.len() {
+            return match self.err {
+                Some(e) => Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, e)),
+                None => Ok(0),
+            };
+        }
+        let want = if self.sizes.is_empty() { buf.len() } else { self.sizes.remove(0) };
+        let n = want.min(buf.len()).min(self.data.len() - self.at);
+        buf[..n].copy_from_slice(&self.data[self.at..self.at + n]);
+        self.at += n;
+        Ok(n)
+    }
+}
+
+#[test]
+fn a_decoder_pipe_that_splits_a_sample_across_reads_loses_no_sample() {
+    let _rt = crate::mixer::rt_serial();
+    let sink = FakeSink::new();
+    let m = Mixer::start(fast(), Box::new(sink.clone()));
+    // 11 025 samples of 5000 at 22 050 Hz mono, handed over in odd piece sizes (1, 3, 5, 7 bytes, then whole blocks): every read
+    // that ends in the middle of a sample must hold the odd byte back and join it to the next read
+    let bytes: Vec<u8> = (0..11_025).flat_map(|_| 5000i16.to_le_bytes()).collect();
+    let r = Pieces { data: bytes.clone(), sizes: vec![1, 3, 5, 7, 1, 1, 9], at: 0, err: None };
+    let w = m.open_source(SourceKind::Radio, 22_050, 1).unwrap();
+    let h = w.feed_reader(r);
+    assert_eq!(h.join().unwrap(), Ok(bytes.len()), "every byte counted once");
+    // a sample joined from the wrong two bytes would be 0x8813 (about -30000) or 0x0088 (136): far outside the band (the resampler may overshoot a little)
+    wait_for("the audio", || sink.lock().samples.iter().filter(|&&s| s > 4000).count() > 20_000);
+    assert!(sink.lock().samples.iter().all(|&s| s < 8000 && s > -2000), "no sample was cut wrongly: the loudest is {}", sink.lock().samples.iter().max().unwrap());
+    m.shutdown();
+}
+
+#[test]
+fn a_decoder_pipe_that_ends_at_once_or_fails_leaves_no_source_behind() {
+    let _rt = crate::mixer::rt_serial();
+    let sink = FakeSink::new();
+    let m = Mixer::start(fast(), Box::new(sink.clone()));
+    // nothing at all: finished with zero bytes, and the source goes away
+    let w = m.open_source(SourceKind::Radio, 44_100, 2).unwrap();
+    assert_eq!(w.feed_reader(std::io::Cursor::new(Vec::<u8>::new())).join().unwrap(), Ok(0));
+    wait_for("the empty source to end", || m.sources().is_empty());
+    // a trailing single byte is not a sample: it is counted as read but never played, and nothing breaks
+    let w = m.open_source(SourceKind::Radio, 44_100, 2).unwrap();
+    assert_eq!(w.feed_reader(std::io::Cursor::new(vec![7u8])).join().unwrap(), Ok(1));
+    wait_for("the one-byte source to end", || m.sources().is_empty());
+    // the decoder dies in the middle: what came before is played, the reason comes back, and the source does not stay open
+    let before: Vec<u8> = (0..4_410).flat_map(|_| 6000i16.to_le_bytes()).collect();
+    let w = m.open_source(SourceKind::Radio, 44_100, 1).unwrap();
+    let r = Pieces { data: before, sizes: vec![], at: 0, err: Some("decoder pipe closed") };
+    let e = w.feed_reader(r).join().unwrap().unwrap_err();
+    assert!(e.contains("decoder pipe closed"), "{e}");
+    wait_for("the audio from before the failure", || sink.lock().samples.iter().any(|&s| s > 5000));
+    wait_for("the failed source to end", || m.sources().is_empty());
+    m.shutdown();
+}
+
+#[test]
+fn a_decoder_pipe_is_paced_by_the_speaker_and_stops_when_the_mixer_stops() {
+    let _rt = crate::mixer::rt_serial();
+    let sink = FakeSink::new();
+    let m = Mixer::start(fast(), Box::new(sink.clone()));
+    // an endless decoder: the reader would fill memory if the thread did not wait for room in the queue
+    struct Endless(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+    impl std::io::Read for Endless {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.0.fetch_add(buf.len(), std::sync::atomic::Ordering::SeqCst);
+            buf.fill(0);
+            Ok(buf.len())
+        }
+    }
+    let read = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let w = m.open_source(SourceKind::Radio, 48_000, 2).unwrap();
+    let h = w.feed_reader(Endless(read.clone()));
+    std::thread::sleep(Duration::from_millis(400));
+    let so_far = read.load(std::sync::atomic::Ordering::SeqCst);
+    // 0.4 s of 48 kHz stereo is about 77 KB at the speaker's pace; a thread that is not paced would have read far more than a few MB
+    assert!(so_far < 4_000_000, "the decoder was read {so_far} bytes in 0.4 s: it is not waiting for the speaker");
+    assert!(!h.is_finished(), "an endless pipe is still being played");
+    m.shutdown();
+    let e = h.join().unwrap().unwrap_err();
+    assert!(!e.is_empty(), "the thread ends with a reason when the mixer stops");
 }
 
 #[test]
@@ -596,4 +700,74 @@ fn levels_by_name_apply_to_sources_that_open_later_and_are_bounded() {
     assert_eq!(serde_json::from_str::<SoundSettings>(&json).unwrap().source_levels.get("Browser"), Some(&40));
     assert_eq!(serde_json::from_str::<SoundSettings>("{}").unwrap().source_levels.len(), 0, "an old settings file has none");
     set_source_levels(&Default::default());
+}
+
+// ---- live (low-latency) sources: the browser's sound -------------------------------------------------------------------
+
+#[test]
+fn a_live_source_has_a_small_ring_and_starts_after_one_period_where_a_media_source_holds_seconds_and_waits_800_ms() {
+    let c = MixerCfg::default().with_live_target_ms(100);
+    assert_eq!((c.live_sink_buffer_ms, c.live_sink_period_ms, c.live_lead_periods, c.engine.live_ring_ms, c.engine.live_prefill_ms), (40, 10, 2, 20, 20));
+    // the cause of the lag and the tail: a media source queued up to 6 s and waited for 800 ms before it sounded
+    assert_eq!((EngineCfg::default().media_prefill_ms, super::engine::ring_ms(SourceKind::Media)), (800, 6_000));
+    let mut e = Engine::new(c.engine);
+    let live = SourceShared::new_with(900, SourceKind::Media, "Browser", 48_000, 2, false, Wake::new(), Some(c.engine.live_ring_ms));
+    e.add(live.clone());
+    let w = SourceWriter { s: live };
+    assert!(e.has_live());
+    let n = w.write_f32(&vec![0.5; 48_000 * 2]);
+    assert_eq!(n, 48_000 * 2 * 20 / 1000, "the ring holds 20 ms and not a second more");
+    let mut out = Vec::new();
+    e.mix_period(1.0, &mut out);
+    assert!(out.iter().any(|s| *s != 0), "a live source sounds after one period queued, not after 800 ms");
+    w.flush();
+    assert_eq!(w.buffered_ms(), 0);
+    w.finish();
+    assert!(!e.has_live());
+}
+
+#[test]
+fn a_live_source_makes_the_mixer_reopen_the_device_with_a_small_buffer_and_the_other_streams_keep_the_big_one() {
+    let _rt = crate::mixer::rt_serial();
+    let sink = FakeSink::new();
+    let m = Mixer::start(MixerCfg { raise_priority: false, realtime: false, idle_ms: 5000, engine: EngineCfg::default().no_prefill(), ..MixerCfg::default() }, Box::new(sink.clone()));
+    let radio = m.open_source(SourceKind::Radio, 48_000, 2).unwrap();
+    // the radio is fed all the time (a source that ran dry is silent and the device may be idle), and every wait has a long deadline
+    let t0 = std::time::Instant::now();
+    while sink.lock().opens == 0 && t0.elapsed() < Duration::from_secs(15) {
+        radio.write_f32(&vec![0.2; 960 * 2]);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let (opens, low) = {
+        let l = sink.lock();
+        (l.opens, l.open_low)
+    };
+    assert_eq!((opens, low), (1, None), "a radio alone: the normal device");
+    // the device is open and sounding when the live source arrives (so it has to be dropped and opened small, not just opened)
+    let t0 = std::time::Instant::now();
+    while !sink.lock().open && t0.elapsed() < Duration::from_secs(15) {
+        radio.write_f32(&vec![0.2; 960 * 2]);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let web = m.open_live_source(SourceKind::Media, 48_000, 2, "Browser").unwrap();
+    web.write_f32(&vec![0.2; 960 * 2]);
+    // wait for the device to be open small (the sources are fed all the time); counts are not compared for equality, because on a loaded
+    // machine the mixer may reopen more than once before the test looks, and what matters is that the first open was the normal one
+    // (checked above), the small one came after the device was dropped, and nothing reopened it big again while the live source sounds
+    let t0 = std::time::Instant::now();
+    let mut seen = None;
+    while seen.is_none() && t0.elapsed() < Duration::from_secs(15) {
+        std::thread::sleep(Duration::from_millis(5));
+        radio.write_f32(&vec![0.2; 960 * 2]);
+        web.write_f32(&vec![0.2; 960 * 2]);
+        let l = sink.lock();
+        if l.open && l.open_low == Some((40, 10)) {
+            seen = Some((l.opens, l.aborts));
+        }
+    }
+    let l = sink.lock();
+    let (opens, aborts) = seen.expect("the device was opened with the small buffer");
+    assert!(opens >= 2 && aborts >= 1, "the device was dropped (not played out) and opened small: {opens} opens, {aborts} aborts");
+    drop(l);
+    m.shutdown();
 }

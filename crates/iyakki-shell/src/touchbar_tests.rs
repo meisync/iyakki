@@ -157,6 +157,12 @@ fn the_registry_keeps_six_items_per_app_and_the_app_strip_falls_back() {
         let n = std.get(app).len();
         assert!((1..=MAX_APP_ITEMS).contains(&n), "{app}: {n}");
     }
+    // the IDE offers Run, Test, Save and Deploy with the keys its help lists; the browser's buttons are numbered buttons that work in every view
+    let ide: Vec<(String, Action)> = std.get("ide").iter().map(|i| (i.id.clone(), i.action.clone())).collect();
+    assert_eq!(ide[0], ("run".to_string(), Action::Key(Key::F(5))));
+    assert!(ide.contains(&("test".to_string(), Action::Key(Key::Ctrl('U')))) && ide.contains(&("deploy".to_string(), Action::Key(Key::Ctrl('I')))));
+    let br: Vec<Action> = std.get("browser").iter().take(3).map(|i| i.action.clone()).collect();
+    assert_eq!(br, [Action::Tab(0), Action::Tab(1), Action::Tab(2)]);
     // chat: new chat is Ctrl+N, as its help says; radio: media keys
     assert_eq!(std.get("chat")[0].action, Action::Key(Key::Ctrl('n')));
     assert_eq!(std.get("radio")[0].action, Action::Fn(FnKey::Prev));

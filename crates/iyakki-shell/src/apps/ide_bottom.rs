@@ -129,11 +129,29 @@ pub struct Runner {
     rx: Option<Receiver<Out>>,
     pub started: Option<Instant>,
     pub name: String,
+    /// The person's own home folder: the `HOME` of every command this runner starts (on the IYAKKI system), instead of the
+    /// `HOME` the shell process itself has.
+    home: Option<PathBuf>,
+}
+
+/// The environment a command of the build and run panel gets on top of the cut-down one: `PATH` with the CLI tile's folder and,
+/// when the person's home is known, `HOME` (F-STORE-09).
+pub fn run_env(path: Vec<(String, String)>, home: Option<&Path>) -> Vec<(String, String)> {
+    let mut env = path;
+    if let Some(h) = home {
+        env.push(("HOME".to_string(), h.display().to_string()));
+    }
+    env
 }
 
 impl Runner {
     pub fn new() -> Runner {
-        Runner { rx: None, started: None, name: String::new() }
+        Runner { rx: None, started: None, name: String::new(), home: None }
+    }
+
+    /// Commands started from now on get `home` as their `HOME`.
+    pub fn set_home(&mut self, home: Option<PathBuf>) {
+        self.home = home;
     }
 
     pub fn busy(&self) -> bool {
@@ -159,7 +177,7 @@ impl Runner {
                 return;
             }
         };
-        let env = path_env();
+        let env = run_env(path_env(), self.home.as_deref());
         let _ = std::thread::Builder::new().name("iyakki-ide-run".into()).spawn(move || {
             let _ = tx.send(wsexec::run_argv(&cwd, &argv, &env, timeout, MAX_OUTPUT));
         });
@@ -400,7 +418,8 @@ impl Term {
                     crate::ui::clipboard::copy(&t);
                 } else if self.input.selection().is_some() {
                     self.input.handle(&Key::Ctrl('c'));
-                } else if self.runner.busy() {
+                } else if self.runner.busy() && !crate::inputprofile::last_press_was_command() {
+                    // Control+C stops waiting; Command+C (the Mac profile's copy) never does
                     self.runner.abandon();
                     self.log.push("^C (stopped waiting)", AMBER);
                 }
@@ -907,6 +926,32 @@ mod tests {
         // a folder that is already on PATH is not added twice
         std::env::set_var("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default()));
         assert!(path_env().is_empty());
+    }
+    #[test]
+    fn a_command_of_the_panel_gets_the_persons_own_home_as_home() {
+        // the environment is built from the person's folder, and PATH is kept
+        let path = vec![("PATH".to_string(), "/x:/y".to_string())];
+        assert_eq!(run_env(path.clone(), None), path);
+        let with = run_env(path, Some(Path::new("/home/amy")));
+        assert_eq!(with.last(), Some(&("HOME".to_string(), "/home/amy".to_string())));
+        // and a started command really sees it, whatever HOME the shell process has
+        let d = std::env::temp_dir().join(format!("iyakki-ide-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("person")).unwrap();
+        let mut r = Runner::new();
+        r.set_home(Some(d.join("person")));
+        r.start(&d, vec!["/bin/sh".to_string(), "-c".to_string(), "echo home=$HOME".to_string()], Duration::from_secs(10));
+        let mut out = None;
+        for _ in 0..500 {
+            if let Some((o, _)) = r.poll() {
+                out = Some(o);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let o = out.expect("the command ended");
+        assert!(o.stdout.contains(&format!("home={}", d.join("person").display())), "{:?} {:?}", o.stdout, o.stderr);
+        let _ = std::fs::remove_dir_all(&d);
     }
     #[test]
     fn a_command_started_by_the_panel_in_a_workspace_with_a_missing_sandbox_stops_and_is_not_run_on_the_machine() {

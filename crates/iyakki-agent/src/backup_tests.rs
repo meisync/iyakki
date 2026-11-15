@@ -312,3 +312,41 @@ fn human_sizes() {
     assert_eq!(human(1536), "1.5 KB");
     assert_eq!(human(3 << 20), "3.0 MB");
 }
+
+#[test]
+fn a_backup_reports_progress_over_both_passes_and_can_be_stopped_without_leaving_a_file() {
+    let root = tmp("progress");
+    let l = layout(&root, "amy");
+    fill(&l);
+    // a bigger file so the progress is more than a few bytes
+    fs::write(l.home.join("Recordings/big.wav"), vec![7u8; 3 << 20]).unwrap();
+    let dest = root.join("stick");
+    fs::create_dir_all(&dest).unwrap();
+    let pr = Progress::default();
+    let c = create_with_progress(&l, &dest, &opts(1_000_000), &pr).unwrap();
+    let total = pr.total.load(Ordering::Relaxed);
+    assert!(total > 6 << 20, "{total}");
+    assert_eq!(pr.done.load(Ordering::Relaxed), total, "both passes were counted");
+    assert!(c.path.exists());
+    // stopped before it starts reading: no file under the real name, no .part left, the error says so
+    let stop = Progress::default();
+    stop.cancel.store(true, Ordering::Relaxed);
+    let dest2 = root.join("stick2");
+    fs::create_dir_all(&dest2).unwrap();
+    let e = create_with_progress(&l, &dest2, &opts(1_000_001), &stop).unwrap_err();
+    assert_eq!(e, BackupError::Cancelled);
+    assert!(e.to_string().contains("stopped"));
+    assert_eq!(fs::read_dir(&dest2).unwrap().count(), 0, "nothing was left behind");
+    // stopped while the file is written (after the hashes): the half file goes
+    let late = std::sync::Arc::new(Progress::default());
+    let l2 = late.clone();
+    let (l_, d_) = (l.clone(), dest2.clone());
+    let h = std::thread::spawn(move || create_with_progress(&l_, &d_, &opts(1_000_002), &l2));
+    while late.done.load(Ordering::Relaxed) < 1 {
+        std::thread::yield_now();
+    }
+    late.cancel.store(true, Ordering::Relaxed);
+    let r = h.join().unwrap();
+    assert!(matches!(r, Err(BackupError::Cancelled)) || r.is_ok(), "a very fast run may have finished first");
+    assert!(fs::read_dir(&dest2).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().ends_with(".part")), "no .part file stays");
+}

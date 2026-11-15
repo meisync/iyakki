@@ -87,6 +87,15 @@ fn setsockopt_u32(fd: i32, level: i32, name: i32, v: u32) -> std::io::Result<()>
     }
 }
 
+#[cfg(not(target_os = "linux"))]
+fn set_mark(_fd: i32, mark: Option<u32>) -> Result<(), String> {
+    match mark {
+        Some(_) => Err(format!("marking the forwarder's socket is {}", crate::oscompat::UNAVAILABLE)),
+        None => Ok(()),
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn set_mark(fd: i32, mark: Option<u32>) -> Result<(), String> {
     match mark {
         Some(m) => setsockopt_u32(fd, libc::SOL_SOCKET, libc::SO_MARK, m).map_err(|e| format!("could not mark the forwarder's socket ({e}); this needs administrator rights")),
@@ -155,6 +164,16 @@ fn now_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
+/// Outside Linux: the standard library's randomly keyed hasher (its keys come from the system's random source).
+#[cfg(not(target_os = "linux"))]
+fn random_u16() -> u16 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u64(now_secs());
+    h.finish() as u16
+}
+
+#[cfg(target_os = "linux")]
 fn random_u16() -> u16 {
     let mut b = [0u8; 2];
     // SAFETY: b is valid for 2 bytes; getrandom does not block for so few bytes once the pool is seeded.
@@ -173,6 +192,16 @@ fn is_loopback(a: &SocketAddr) -> bool {
 }
 
 /// Connect with the mark set before the first packet, with a timeout.
+#[cfg(not(target_os = "linux"))]
+pub fn connect_marked(addr: SocketAddr, mark: Option<u32>, timeout: Duration) -> std::io::Result<TcpStream> {
+    if mark.is_some() {
+        return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, format!("marking a connection is {}", crate::oscompat::UNAVAILABLE)));
+    }
+    TcpStream::connect_timeout(&addr, timeout)
+}
+
+/// (the Linux version of the above: `SO_MARK`, `SOCK_NONBLOCK`)
+#[cfg(target_os = "linux")]
 pub fn connect_marked(addr: SocketAddr, mark: Option<u32>, timeout: Duration) -> std::io::Result<TcpStream> {
     let fam = if addr.is_ipv4() { libc::AF_INET } else { libc::AF_INET6 };
     // SAFETY: plain syscall; the descriptor is wrapped (and closed) below on every path.

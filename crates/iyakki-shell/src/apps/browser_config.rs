@@ -30,13 +30,20 @@ pub struct BrowserConfig {
     /// "Smooth pages": the full web engine draws at half the width and height (a quarter of the pixels) and the shell stretches the
     /// picture: much smoother scrolling and video on a computer without a graphics driver for its engine, with softer text.
     pub smooth: bool,
+    /// The person's own short words for the address bar: word -> address with `%s` where the search words go.
+    pub short_words: std::collections::BTreeMap<String, String>,
+}
+
+/// A short word is one to twelve lowercase letters or digits; the address must be https (or http) and hold `%s`. Anything else is refused.
+pub fn valid_short_word(word: &str, template: &str) -> Result<(), String> {
+    iyakki_agent::browsershort::valid(word, template)
 }
 
 impl Default for BrowserConfig {
     fn default() -> Self {
         // everything is on, scripts included (owner decision 2026-10-28: video, maps, mail and most recorders need them); the person can
         // block scripts everywhere, or allow them only for chosen sites, in Settings -> Browser
-        BrowserConfig { js_all: true, js_sites: BTreeSet::new(), images: true, styles: true, cookies: true, search: SearchEngine::default(), player: String::new(), cache: iyakki_web::net::CacheSize::Auto, smooth: false }
+        BrowserConfig { js_all: true, js_sites: BTreeSet::new(), images: true, styles: true, cookies: true, search: SearchEngine::default(), player: String::new(), cache: iyakki_web::net::CacheSize::Auto, smooth: false, short_words: Default::default() }
     }
 }
 
@@ -108,6 +115,9 @@ pub fn load(cx: &AppCx) -> BrowserConfig {
             c.player = v["player"].as_str().filter(|p| iyakki_agent::voice::validate_command(p).is_ok()).unwrap_or("").to_string();
             c.cache = v["cache"].as_str().map(iyakki_web::net::CacheSize::from_id).unwrap_or(c.cache);
             c.smooth = v["smooth"].as_bool().unwrap_or(c.smooth);
+            if let Some(m) = v["short_words"].as_object() {
+                c.short_words = m.iter().filter_map(|(k, t)| t.as_str().filter(|t| valid_short_word(k, t).is_ok()).map(|t| (k.clone(), t.to_string()))).take(50).collect();
+            }
             c.js_sites = clean_hosts(v["js_sites"].as_array().into_iter().flatten().filter_map(|h| h.as_str().map(str::to_string)));
         }
     } else if let Ok(text) = std::fs::read_to_string(old_sites_path(cx)) {
@@ -121,7 +131,7 @@ pub fn load(cx: &AppCx) -> BrowserConfig {
 
 pub fn save(cx: &AppCx, c: &BrowserConfig) {
     let p = path(cx);
-    let json = serde_json::json!({ "js_all": c.js_all, "js_sites": c.js_sites, "images": c.images, "styles": c.styles, "cookies": c.cookies, "search": c.search.id(), "player": c.player, "cache": c.cache.id(), "smooth": c.smooth });
+    let json = serde_json::json!({ "js_all": c.js_all, "js_sites": c.js_sites, "images": c.images, "styles": c.styles, "cookies": c.cookies, "search": c.search.id(), "player": c.player, "cache": c.cache.id(), "smooth": c.smooth, "short_words": c.short_words });
     SMOOTH.with(|s| s.set(c.smooth));
     write_checked("browser settings", &p, &json.to_string());
 }

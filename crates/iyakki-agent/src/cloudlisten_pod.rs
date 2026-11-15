@@ -98,7 +98,7 @@ struct Real(Child);
 
 impl Proc for Real {
     fn alive(&mut self) -> bool {
-        matches!(self.0.try_wait(), Ok(None))
+        iyakki_core_api::child_status(&mut self.0).is_running()
     }
     fn kill(&mut self) {
         let _ = self.0.kill();
@@ -237,5 +237,24 @@ impl Drop for PortForward {
         for (_, mut f) in self.live.lock().unwrap_or_else(|e| e.into_inner()).drain() {
             f.proc.kill();
         }
+    }
+}
+
+#[cfg(test)]
+mod gone_tests {
+    use super::*;
+
+    #[test]
+    fn a_listener_whose_exit_status_the_pid_one_reaper_took_is_seen_as_ended() {
+        let mut c = std::process::Command::new("sh").args(["-c", "exit 0"]).spawn().unwrap();
+        iyakki_core_api::steal_status(c.id());
+        assert!(c.try_wait().is_err(), "the status is gone, as with the PID 1 reaper");
+        let mut real = Real(c);
+        assert!(!real.alive());
+        // and a running one is alive until it is killed
+        let mut sleeper = Real(std::process::Command::new("sleep").arg("30").spawn().unwrap());
+        assert!(sleeper.alive());
+        sleeper.kill();
+        assert!(!sleeper.alive());
     }
 }

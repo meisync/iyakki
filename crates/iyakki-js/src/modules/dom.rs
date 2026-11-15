@@ -21,6 +21,12 @@ pub struct DomModule {
     ids: HashMap<String, Vec<usize>>,
     ids_built: bool,
     ids_upto: usize,
+    /// Counts changes to the tree (not to scripts' own variables), so sizes are measured again only when something moved.
+    rev: u64,
+    /// Nodes a script holds an object for. A detached tree none of whose nodes is in this set can be given back (see `reclaim`).
+    wrapped: std::cell::RefCell<HashSet<usize>>,
+    /// Sizes and computed styles for scripts (see [`super::dom_layout`]).
+    pub layout: super::dom_layout::LayoutState,
 }
 
 /// A `<script>` in the page.
@@ -33,9 +39,26 @@ pub struct Script {
     pub kind: String,
     /// `nomodule`: for browsers that cannot run modules, so this one skips it.
     pub nomodule: bool,
+    /// `defer`: an external classic script that waits until the page is read, then runs in order.
+    pub defer: bool,
+    /// `async`: runs when it is ready, without keeping the others waiting.
+    pub is_async: bool,
 }
 
 impl Script {
+    /// When this script runs among the page's scripts (F-BROX-12): 0 the scripts that block (classic, in the order written), 1 `defer`
+    /// scripts and modules in the order written, 2 `async` scripts (a classic script's `defer` counts only with an address).
+    pub fn phase(&self) -> u8 {
+        let module = self.kind == "module";
+        if self.is_async && (self.src.is_some() || module) {
+            2
+        } else if module || (self.defer && self.src.is_some()) {
+            1
+        } else {
+            0
+        }
+    }
+
     /// Classic JavaScript (not a module, not JSON or a template).
     pub fn is_classic_js(&self) -> bool {
         matches!(self.kind.as_str(), "" | "text/javascript" | "application/javascript" | "text/ecmascript" | "application/ecmascript" | "text/x-javascript" | "application/x-javascript")
@@ -90,7 +113,22 @@ pub fn ensure_skeleton(t: &mut Tree) {
 impl DomModule {
     pub fn new(mut tree: Tree) -> DomModule {
         ensure_skeleton(&mut tree);
-        DomModule { tree, claimed: HashSet::new(), selectors: HashMap::new(), ids: HashMap::new(), ids_built: false, ids_upto: 0 }
+        DomModule { tree, claimed: HashSet::new(), selectors: HashMap::new(), ids: HashMap::new(), ids_built: false, ids_upto: 0, rev: 0, wrapped: Default::default(), layout: Default::default() }
+    }
+
+    /// The window changed: sizes and `@media` are worked out again for it.
+    pub fn set_viewport(&mut self, vp: iyakki_web::css::Viewport) {
+        if let Some(env) = self.layout.env.as_mut() {
+            env.vp = vp;
+        }
+        self.rev += 1;
+        self.layout.runs = 0;
+    }
+
+    /// Let scripts ask for sizes: the page's address, how to fetch its style sheets, and the window it is laid out for.
+    pub fn with_layout(mut self, env: super::dom_layout::LayoutEnv) -> DomModule {
+        self.layout.env = Some(env);
+        self
     }
 
     pub fn into_tree(self) -> Tree {
@@ -109,6 +147,8 @@ impl DomModule {
                 text: self.tree.text_of(n),
                 kind: self.tree.attr(n, "type").unwrap_or("").trim().to_ascii_lowercase(),
                 nomodule: self.tree.attr(n, "nomodule").is_some(),
+                defer: self.tree.attr(n, "defer").is_some(),
+                is_async: self.tree.attr(n, "async").is_some(),
             })
             .collect()
     }
@@ -141,6 +181,17 @@ impl DomModule {
 
     /// Add the nodes created since the index was last looked at.
     fn sync_ids(&mut self) {
+        // numbers handed out again after their node was released: the index must learn their new ids
+        let reused = std::mem::take(&mut self.tree.reused);
+        if self.ids_built {
+            for n in reused {
+                if n < self.ids_upto {
+                    if let Some(id) = self.tree.attr(n, "id").filter(|i| !i.is_empty()) {
+                        self.ids.entry(id.to_string()).or_default().push(n);
+                    }
+                }
+            }
+        }
         self.ids_built = true;
         for n in self.ids_upto..self.tree.nodes.len() {
             if let Some(id) = self.tree.attr(n, "id").filter(|i| !i.is_empty()) {
@@ -186,6 +237,7 @@ impl DomModule {
 
     /// `[id, tag]` for a node ("" for text), the form scripts get nodes in.
     fn pair(&self, n: usize) -> serde_json::Value {
+        self.wrapped.borrow_mut().insert(n);
         serde_json::json!([n, self.tag_of(n)])
     }
 
@@ -198,12 +250,29 @@ impl DomModule {
 
     /// `[id, tag, id, tag, ...]` for a list of nodes.
     fn flat(&self, ids: &[usize]) -> serde_json::Value {
+        self.wrapped.borrow_mut().extend(ids.iter().copied());
         let mut v = Vec::with_capacity(ids.len() * 2);
         for &n in ids {
             v.push(serde_json::Value::from(n));
             v.push(serde_json::Value::from(self.tag_of(n)));
         }
         serde_json::Value::Array(v)
+    }
+
+    /// Give back a detached tree that no script holds an object for (its node numbers are used again). Returns how many nodes.
+    fn reclaim(&mut self, top: usize) -> usize {
+        let Some(nodes) = self.tree.detached_subtree(top) else { return 0 };
+        {
+            let w = self.wrapped.borrow();
+            if nodes.iter().any(|n| w.contains(n)) {
+                return 0;
+            }
+        }
+        for &n in &nodes {
+            self.unindex_id(n);
+        }
+        self.tree.release_nodes(&nodes);
+        nodes.len()
     }
 
     fn opt(v: &serde_json::Value) -> Option<usize> {
@@ -217,7 +286,7 @@ impl WebModule for DomModule {
     }
 
     fn prelude(&self) -> &'static str {
-        include_str!("dom.js")
+        concat!(include_str!("dom.js"), include_str!("dom_extra.js"))
     }
 
     fn call(&mut self, op: &str, a: &serde_json::Value) -> Result<serde_json::Value, String> {
@@ -277,15 +346,41 @@ impl WebModule for DomModule {
             }
             "create" => {
                 let tag = a["tag"].as_str().unwrap_or("");
-                json!(self.tree.new_element(tag)?)
+                let n = self.tree.new_element(tag)?;
+                self.wrapped.borrow_mut().insert(n);
+                json!(n)
             }
-            "text" => json!(self.tree.new_text(a["text"].as_str().unwrap_or(""))?),
+            "text" => {
+                let n = self.tree.new_text(a["text"].as_str().unwrap_or(""))?;
+                self.wrapped.borrow_mut().insert(n);
+                json!(n)
+            }
+            "release" => {
+                // objects that scripts dropped: the nodes they stood for may go if they hang on nothing
+                let ids: Vec<usize> = a["ids"].as_array().map(|v| v.iter().filter_map(|x| x.as_u64().map(|x| x as usize)).collect()).unwrap_or_default();
+                let mut tops = Vec::new();
+                for id in ids {
+                    if id >= self.tree.nodes.len() || !self.wrapped.borrow_mut().remove(&id) {
+                        continue;
+                    }
+                    let mut top = id;
+                    while let Some(p) = self.tree.parent_of(top) {
+                        top = p;
+                    }
+                    tops.push(top);
+                }
+                tops.sort_unstable();
+                tops.dedup();
+                let freed: usize = tops.into_iter().map(|t| self.reclaim(t)).sum();
+                json!(freed)
+            }
             "clone" => {
                 let n = self.node(Self::id(a, "n")?)?;
                 let c = self.tree.clone_node(n, a["deep"].as_bool().unwrap_or(false))?;
                 self.pair(c)
             }
             "insert" => {
+                self.rev += 1;
                 let (p, c) = (self.node(Self::id(a, "p")?)?, self.node(Self::id(a, "c")?)?);
                 let r = Self::opt(&a["r"]);
                 self.tree.insert(p, c, r)?;
@@ -298,6 +393,7 @@ impl WebModule for DomModule {
                 }
             }
             "remove" => {
+                self.rev += 1;
                 let c = self.node(Self::id(a, "c")?)?;
                 self.tree.detach(c);
                 serde_json::Value::Null
@@ -312,6 +408,7 @@ impl WebModule for DomModule {
                 json!(self.tree.attr(n, &k))
             }
             "setattr" => {
+                self.rev += 1;
                 let n = self.node(Self::id(a, "n")?)?;
                 let k = a["k"].as_str().unwrap_or("");
                 let is_id = k.eq_ignore_ascii_case("id");
@@ -326,6 +423,7 @@ impl WebModule for DomModule {
                 serde_json::Value::Null
             }
             "rmattr" => {
+                self.rev += 1;
                 let n = self.node(Self::id(a, "n")?)?;
                 let k = a["k"].as_str().unwrap_or("");
                 let is_id = k.eq_ignore_ascii_case("id");
@@ -341,8 +439,13 @@ impl WebModule for DomModule {
                 json!(self.tree.text_of(n))
             }
             "text_set" => {
+                self.rev += 1;
                 let n = self.node(Self::id(a, "n")?)?;
+                let old = self.tree.nodes[n].children.clone();
                 self.tree.set_text_content(n, a["text"].as_str().unwrap_or(""))?;
+                for c in old {
+                    self.reclaim(c);
+                }
                 serde_json::Value::Null
             }
             "html_get" => {
@@ -350,8 +453,13 @@ impl WebModule for DomModule {
                 json!(if a["outer"].as_bool().unwrap_or(false) { self.tree.outer_html(n) } else { self.tree.inner_html(n) })
             }
             "html_set" => {
+                self.rev += 1;
                 let n = self.node(Self::id(a, "n")?)?;
+                let old = self.tree.nodes[n].children.clone();
                 self.tree.set_inner_html(n, a["html"].as_str().unwrap_or(""))?;
+                for c in old {
+                    self.reclaim(c);
+                }
                 serde_json::Value::Null
             }
             "query" => {
@@ -402,6 +510,34 @@ impl WebModule for DomModule {
             "claim_script" => {
                 let n = self.node(Self::id(a, "n")?)?;
                 json!(self.claim(n))
+            }
+            "rect" => {
+                let n = self.node(Self::id(a, "n")?)?;
+                self.layout.ensure(&self.tree, self.rev);
+                json!(self.layout.rect(n))
+            }
+            "computed" => {
+                let n = self.node(Self::id(a, "n")?)?;
+                self.layout.ensure(&self.tree, self.rev);
+                super::dom_layout::computed_json(&self.layout, n)
+            }
+            "point" => {
+                self.layout.ensure(&self.tree, self.rev);
+                let hits = self.layout.hit(&self.tree, a["x"].as_f64().unwrap_or(0.0) as f32, a["y"].as_f64().unwrap_or(0.0) as f32);
+                self.flat(&hits)
+            }
+            "scrollsize" => {
+                let n = self.node(Self::id(a, "n")?)?;
+                self.layout.ensure(&self.tree, self.rev);
+                json!(self.layout.scroll_size(&self.tree, n))
+            }
+            "docwidth" => {
+                self.layout.ensure(&self.tree, self.rev);
+                json!(self.layout.laid.as_ref().map_or(0.0, |l| l.boxes.width))
+            }
+            "docheight" => {
+                self.layout.ensure(&self.tree, self.rev);
+                json!(self.layout.laid.as_ref().map_or(0.0, |l| l.boxes.height))
             }
             other => return Err(format!("dom has no operation {other}")),
         })
@@ -463,7 +599,7 @@ mod tests {
         assert_eq!(run(&mut e, "a.classList.add('z'); a.classList.remove('x'); a.classList.toggle('y'); a.className"), "z");
         assert_eq!(run(&mut e, "a.textContent = 'went'; a.outerHTML"), "<a id=\"a\" href=\"/next?x=1\" data-user-id=\"42\" target=\"_blank\" data-foo-bar=\"z\" class=\"z\">went</a>");
         assert_eq!(run(&mut e, "const p = document.getElementById('p'); p.innerHTML = '<i>new</i> &amp; <b>old</b>'; [p.innerHTML, p.textContent, p.children.length, p.firstElementChild.tagName].join('|')"), "<i>new</i> &amp; <b>old</b>|new & old|2|I");
-        assert_eq!(run(&mut e, "a.style.color = 'red'; a.style.fontSize = '12px'; a.style.cssText + '|' + a.style.fontSize + '|' + a.getAttribute('style')"), "color: red; font-size: 12px|12px|color: red; font-size: 12px");
+        assert_eq!(run(&mut e, "a.style.color = 'red'; a.style.fontSize = '12px'; a.style.cssText + '|' + a.style.fontSize + '|' + a.getAttribute('style')"), "color: red; font-size: 12px;|12px|color: red; font-size: 12px;");
         assert_eq!(run(&mut e, "a.removeAttribute('target'); a.target + a.getAttributeNames().join()"), "id,href,data-user-id,data-foo-bar,class,style");
     }
 
@@ -628,7 +764,7 @@ mod tests {
         let mut e = page("<a id=l href='/x' CLASS='one two' data-k=v>link</a>");
         assert_eq!(run(&mut e, "const a = document.getElementById('l'); [a.getAttribute('class'), a.getAttribute('CLASS'), a.hasAttribute('href'), a.hasAttribute('nope'), a.getAttribute('nope'), a.getAttributeNames().join()].join('|')"), "one two|one two|true|false||id,href,class,data-k");
         assert_eq!(run(&mut e, "a.setAttribute('Title', 'T'); a.setAttribute('href', '/y'); [a.getAttribute('title'), a.href, a.attributes.length, a.attributes.getNamedItem('title').value, a.attributes.getNamedItem('zzz')].join('|')"), "T|https://a.org/y|5|T|");
-        assert_eq!(run(&mut e, "a.removeAttribute('TITLE'); a.className = 'z'; a.dataset.more = 'm'; a.style.color = 'red'; [a.hasAttribute('title'), a.getAttribute('class'), a.getAttribute('data-more'), a.getAttribute('style'), a.hasAttributes()].join('|')"), "false|z|m|color: red|true");
+        assert_eq!(run(&mut e, "a.removeAttribute('TITLE'); a.className = 'z'; a.dataset.more = 'm'; a.style.color = 'red'; [a.hasAttribute('title'), a.getAttribute('class'), a.getAttribute('data-more'), a.getAttribute('style'), a.hasAttributes()].join('|')"), "false|z|m|color: red;|true");
         assert_eq!(run(&mut e, "a.toggleAttribute('hidden'); a.toggleAttribute('hidden'); a.toggleAttribute('open', true); [a.hasAttribute('hidden'), a.hasAttribute('open')].join()"), "false,true");
         // copies and parsed markup bring their attributes along, and are independent of the original
         assert_eq!(run(&mut e, "const c = a.cloneNode(false); c.setAttribute('href', '/copy'); [c.getAttribute('data-k'), c.getAttribute('href'), a.getAttribute('href')].join()"), "v,/copy,/y");

@@ -1,0 +1,42 @@
+<!doctype html><html><head><meta charset="utf-8"><title>IYAKKI — locked design</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0E1116;color:#E8EAEE;font:400 14px/1.6 Inter,sans-serif;-webkit-font-smoothing:antialiased;padding:48px 0 90px}
+.hd{max-width:1180px;margin:0 auto 44px;padding:0 24px}
+.hd h1{font-size:34px;font-weight:800;letter-spacing:-1px}
+.hd .s{color:#9AA3B2;margin-top:8px;font-size:15px}
+.hd .meta{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}
+.hd .m{font-size:11.5px;font-weight:600;background:#1A1F27;border:1px solid #262D38;border-radius:999px;padding:5px 13px;color:#B9C2D0}
+.sec{max-width:1180px;margin:0 auto 54px;padding:0 24px}
+.sec h2{font-size:18px;font-weight:700;letter-spacing:-.3px;display:flex;align-items:baseline;gap:12px}
+.sec h2 b{font-size:11px;font-weight:700;letter-spacing:1px;color:#6E7policy}
+.sec .n{color:#8C96A6;font-size:13.5px;margin:6px 0 14px;max-width:760px}
+.shot{width:1132px;height:636.75px;position:relative;border-radius:14px;overflow:hidden;
+border:1px solid #2A313D;box-shadow:0 20px 50px rgba(0,0,0,.5)}
+.shot iframe{width:1920px;height:1080px;border:0;transform:scale(.5896);transform-origin:0 0;display:block}
+.cap{font-size:11.5px;color:#6D778A;margin-top:9px;font-family:ui-monospace,monospace}
+</style></head><body>
+<div class="hd">
+  <h1>IYAKKI — home screen, locked design</h1>
+  <div class="s">Paged launcher on a frosted island over the desktop wallpaper. Every screen below is the live page, not a picture.</div>
+  <div class="meta"><span class="m">6 pages · swipe / ← → / 1–6</span><span class="m">Light, no dark surfaces</span>
+  <span class="m">Frosted island over a sharp wallpaper</span><span class="m">Customisable widgets</span>
+  <span class="m">Attention-first status</span><span class="m">1920 × 1080</span></div>
+</div>
+<div id="out"></div>
+<script>
+const S=[
+ ["The desktop","desktop=1","The wallpaper with the launcher dismissed. The island scales back to 1.0 and the frost clears."],
+ ["Page 1 — The machine","p=0","Customisable widget board. Leads with what needs a person, then the approval queue, machine vitals, runs, tokens, network."],
+ ["Page 1 — edit mode","p=0&edit=1","Widgets jiggle, each gets a remove badge, a drag grip and a size selector; a dashed slot offers more widgets."],
+ ["Page 2 — Ask & Create","p=1","7 apps. Icons pop in staggered; state lives on the badge and the chip, never on the icon colour."],
+ ["Page 3 — Build","p=2","9 apps. The per-group band at the foot carries what needs a person and what the group is doing right now."],
+ ["Page 4 — Media","p=3","6 apps."],
+ ["Page 5 — Data","p=4","3 apps — the sparsest page, and the test of whether the island holds up when a group is small."],
+ ["Page 6 — Devices & System","p=5","12 apps, the fullest page. DISKS carries the red badge and the ATTENTION chip."]];
+document.getElementById('out').innerHTML=S.map(([t,q,n],i)=>`<div class="sec">
+ <h2>${String(i+1).padStart(2,'0')} · ${t}</h2><div class="n">${n}</div>
+ <div class="shot"><iframe src="glossy.html?${q}" scrolling="no" loading="eager"></iframe></div>
+ <div class="cap">glossy.html?${q}</div></div>`).join('');
+</script></body></html>

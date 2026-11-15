@@ -37,6 +37,14 @@ impl<A: App> TileHarness<A> {
         TileHarness { app, cx, size: STANDARD_SIZES[0], tick: 0, last: None }
     }
 
+    /// The machine the tile sees through `cx.os` (a [`iyakki_core_fake::FakeOs`] with the figures a test chose, say) instead of the default one.
+    /// A tile asks the machine only through `cx.os`, so this is the whole machine for it (UI/OS split plan step 5).
+    pub fn with_os(mut self, os: std::sync::Arc<dyn iyakki_core_api::Os>) -> TileHarness<A> {
+        self.cx.os = os;
+        self.last = None;
+        self
+    }
+
     /// Send one event; the last picture is out of date afterwards.
     pub fn send(&mut self, ev: Event) -> Flow {
         self.last = None;

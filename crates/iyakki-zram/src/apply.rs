@@ -227,6 +227,12 @@ fn tune(env: &Env, cfg: &Config, zram_on: bool, out: &mut Vec<Step>) {
     out.push(ok(format!("vm: swappiness {}{}", cfg.swappiness, if zram_on { ", page-cluster 0, watermark_boost_factor 0, watermark_scale_factor 50" } else { "" })));
 }
 
+/// Is zswap on? `None` when the kernel has no zswap.
+pub fn zswap_enabled(env: &Env) -> Option<bool> {
+    let p = env.sys.join("module/zswap/parameters");
+    p.is_dir().then(|| read(&p.join("enabled")).trim() == "Y")
+}
+
 fn setup_zswap(env: &Env, cfg: &Config, out: &mut Vec<Step>) {
     let p = env.sys.join("module/zswap/parameters");
     if !p.is_dir() {

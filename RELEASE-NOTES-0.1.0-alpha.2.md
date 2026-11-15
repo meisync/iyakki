@@ -46,10 +46,10 @@ The full list is in [CHANGELOG.md](CHANGELOG.md). In short:
 * The wake phrase has no real-voice measurement; the only model is synthetic. Leave it off.
 * The encrypted home is a first version: whole-disk encryption, TPM sealing and exporting the container are not built.
 * Bluetooth scan results arrive when the scan ends.
-* **Mac profile: Ctrl+Cmd+Q does not lock the screen** (Ctrl+Cmd+L does) (KI-081). Use Ctrl+Cmd+L or the Power menu.
+* **Mac profile: Ctrl+Cmd+L locks the screen; Ctrl+Cmd+Q signs out** (after a confirm card) (KI-081, owner decision 2026-11-11).
 * **The camera light can stay on after leaving the Cameras tile** (seen on a Lenovo laptop) (KI-080). Sign out or switch off if the light stays on.
 * **A covered camera shows a bare black picture** with no explanation (a closed shutter on an HP laptop looked like a broken camera) (KI-082).
-* **A driver download with no network spins instead of failing** (KI-083). Cancel and retry once a network is up.
+* **A driver download with no network spins instead of failing** (KI-083). Cancel and retry once a network is up. (Fixed in alpha.3: it now fails within seconds with a plain message.)
 * Secure Boot is verified in QEMU only on most machines.
 * Most feature rows are still `partial`: the matrix has a priority list and a plan (docs/development/PARTIALS-PLAN-2026-11-10.md).
 

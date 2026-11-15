@@ -18,6 +18,7 @@ impl Drop for Registered {
 
 fn remote(tag: &str) -> (Shell, Gfx, Arc<BrowserMedia>, Arc<M<Vec<String>>>, Registered) {
     let turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
+    iyakki_agent::browsermedia::isolate_for_this_thread();
     let (mut sh, _) = shell_with_users(tag);
     login(&mut sh, "root", "rootpass12");
     let log = Arc::new(M::new(Vec::new()));
@@ -94,6 +95,7 @@ fn the_camera_tile_opens_in_a_browser_session_on_a_machine_without_a_camera() {
     sh.handle(&Event::Key(Key::Esc));
     // a policy that forbids the camera keeps the tile greyed with the usual hint
     let user = sh.session.as_ref().unwrap().user.clone();
+    iyakki_agent::browsermedia::isolate_for_this_thread();
     iyakki_agent::browsermedia::register(&user, BrowserMedia::silent(Policy { camera: false, ..Policy::allow_all() }));
     assert!(!sh.browser_camera_offered() && !sh.camera_ready());
     sh.sel = i;

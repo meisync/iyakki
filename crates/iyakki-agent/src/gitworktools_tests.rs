@@ -28,6 +28,7 @@ struct Rig {
     env: Arc<GitWorkEnv>,
     policy: Policy,
     audit: Arc<Mutex<Vec<String>>>,
+    store: Arc<MemStore>,
 }
 
 fn fake_git(dir: &Path) -> PathBuf {
@@ -38,6 +39,7 @@ fn fake_git(dir: &Path) -> PathBuf {
         format!(
             r#"#!/bin/sh
 echo "ARGV: $*" >> '{log}'
+echo "ASKPASS_SET=$([ -n "$GIT_ASKPASS" ] && echo yes || echo no) SOCK=$([ -S "$IYAKKI_GIT_ASKPASS_SOCK" ] && echo yes || echo no)" >> '{log}'
 case "$*" in *failme*) echo "fatal: repository not found" >&2; exit 128;; esac
 case "$1" in
   clone)
@@ -81,10 +83,11 @@ fn build(tag: &str, edit: impl FnOnce(&mut Policy, &Path), allow_local: bool, re
     let audit_fn: crate::gitkeys::AuditFn = Arc::new(move |a, b| a2.lock().unwrap().push(format!("{a} {b}")));
     let jobs = Arc::new(crate::jobs::Jobs::new(&base.join("jobs")));
     let git = if real_git { crate::ssh::find_program("git", &std::env::var("PATH").unwrap()).unwrap() } else { fake_git(&base) };
-    let (b2, p2, af2) = (base.clone(), policy.clone(), audit_fn.clone());
+    let store = Arc::new(MemStore::default());
+    let (b2, p2, af2, st2) = (base.clone(), policy.clone(), audit_fn.clone(), store.clone());
     let policy_copy = policy.clone();
     let make_ctx: Arc<dyn Fn(&Path, &str) -> Result<Ctx, String> + Send + Sync> = Arc::new(move |root, name| {
-        let keys = Arc::new(GitKeys::new(&b2.join("ssh"), Arc::new(MemStore::default()), af2.clone(), Arc::new(Session::default())));
+        let keys = Arc::new(GitKeys::new(&b2.join("ssh"), st2.clone(), af2.clone(), Arc::new(Session::default())));
         let (pol, user) = (p2.clone(), "alice".to_string());
         Ok(Ctx {
             keys,
@@ -113,7 +116,7 @@ fn build(tag: &str, edit: impl FnOnce(&mut Policy, &Path), allow_local: bool, re
         wait: Duration::from_secs(30),
     };
     let env = Arc::new(env);
-    Rig { base, env_dir, repos, tools: GitWorkTools::with_env(Arc::new(NoTools), env.clone()), env, policy: policy_copy, audit }
+    Rig { base, env_dir, repos, tools: GitWorkTools::with_env(Arc::new(NoTools), env.clone()), env, policy: policy_copy, audit, store }
 }
 
 fn rig(tag: &str) -> Rig {
@@ -302,6 +305,70 @@ fn a_clone_runs_the_tiles_job_with_the_submodule_flags_and_lists_what_it_found()
     assert!(!r.repos.join("failme").exists());
     let list = r.tools.call("git_clones_list", &json!({})).unwrap();
     assert!(list.contains("failed (fatal: repository not found)") && list.contains("finished"), "{list}");
+    // each clone was waiting work in the ledger until it ended, and says how it ended (F-AI-16)
+    let tickets = crate::pending::Ledger::open(&r.env_dir.join("pending"), "alice").list("");
+    let git: Vec<_> = tickets.iter().filter(|t| t.source == crate::pending::Source::Git).collect();
+    assert_eq!(git.len(), 3, "{tickets:?}");
+    assert_eq!(git.iter().filter(|t| t.state == crate::pending::State::FinishedOk).count(), 2);
+    assert!(git.iter().any(|t| t.state == crate::pending::State::FinishedFailed && t.detail.contains("repository not found")), "{git:?}");
+}
+
+fn conn(r: &Rig, name: &str, url: &str, token: Option<&str>) -> crate::gitconn::Connection {
+    let keys = GitKeys::new(&r.base.join("ssh"), r.store.clone(), Arc::new(|_, _| {}), Arc::new(Session::default()));
+    keys.conns().add(crate::gitconn::Connection { name: name.into(), url: url.into(), ..Default::default() }, token).unwrap()
+}
+
+#[test]
+fn a_private_repository_uses_the_saved_connection_by_name_and_its_token_is_in_no_card_result_audit_or_command() {
+    const SECRET: &str = "tok_Zq81MnbvCxyWQERTYUIOP5566";
+    let r = rig("savedconn");
+    let c = conn(&r, "Work Gitea", "https://git.example.org", Some(SECRET));
+    assert!(!c.token_vault.is_empty() && c.has_token());
+    // the card says whose sign-in is used and how, never the token
+    let named = json!({"url": "https://git.example.org/ops/private.git", "connection": "work gitea"});
+    let card = r.tools.preview("git_clone_repo", &named).unwrap();
+    assert!(card.contains("Signs in with: your saved connection “Work Gitea” (personal access token)"), "{card}");
+    // the host's own connection is used even when the chat names none
+    let unnamed = r.tools.preview("git_clone_repo", &json!({"url": "https://git.example.org/ops/private.git"})).unwrap();
+    assert!(unnamed.contains("your saved connection “Work Gitea”"), "{unnamed}");
+    // a name that is not the person's, or a connection for another host, is refused with the way out; nothing is started
+    let e = r.tools.call("git_clone_repo", &json!({"url": "https://git.example.org/ops/private.git", "connection": "nobody"})).unwrap_err();
+    assert!(e.contains("there is no Git connection called nobody") && e.contains("Work Gitea"), "{e}");
+    let other = conn(&r, "Elsewhere", "https://git.other.example", Some("tok_other_0123456789abcdefgh"));
+    let e = r.tools.call("git_clone_repo", &json!({"url": "https://git.example.org/ops/private.git", "connection": other.name})).unwrap_err();
+    assert!(e.contains("is for git.other.example, not git.example.org") && e.contains("only used for its own host"), "{e}");
+    assert!(git_log(&r).is_empty(), "nothing ran for a refused request");
+    // the clone: git is handed the askpass socket (that is how the token reaches it), the result and the audit name no token
+    let out = r.tools.call("git_clone_repo", &named).unwrap();
+    assert!(out.starts_with("Cloned ops/private into "), "{out}");
+    let log = git_log(&r);
+    assert!(log.contains("ASKPASS_SET=yes SOCK=yes"), "git was not pointed at the askpass socket:\n{log}");
+    assert!(log.contains("clone --progress -- https://git.example.org/ops/private.git private"), "{log}");
+    let audit = audit_text(&r);
+    for (what, text) in [("card", &card), ("unnamed card", &unnamed), ("result", &out), ("git command line", &log), ("audit", &audit), ("error", &e)] {
+        assert!(!text.contains(SECRET) && !text.contains("tok_other"), "the token is in the {what}: {text}");
+    }
+    // nothing in the Repositories folder or the job folders holds it either
+    fn walk(d: &Path, secret: &str, hits: &mut Vec<String>) {
+        for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, secret, hits);
+            } else if std::fs::read(&p).map(|b| b.windows(secret.len()).any(|w| w == secret.as_bytes())).unwrap_or(false) {
+                hits.push(p.display().to_string());
+            }
+        }
+    }
+    let mut hits = Vec::new();
+    walk(&r.repos, SECRET, &mut hits);
+    walk(&r.base.join("jobs"), SECRET, &mut hits);
+    assert!(hits.is_empty(), "the token was written to {hits:?}");
+    // a connection with no token says so: only public repositories
+    let r2 = rig("savedconn-none");
+    let key = GitKeys::new(&r2.base.join("ssh"), r2.store.clone(), Arc::new(|_, _| {}), Arc::new(Session::default()));
+    key.conns().add(crate::gitconn::Connection { name: "Bare".into(), url: "https://git.example.org".into(), method: crate::gitconn::Method::Ssh, key: "k1".into(), ..Default::default() }, None).unwrap();
+    let card = r2.tools.preview("git_clone_repo", &json!({"url": "https://git.example.org/ops/private.git"})).unwrap();
+    assert!(card.contains("has no token, so only public repositories can be cloned"), "{card}");
 }
 
 #[test]

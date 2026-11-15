@@ -10,10 +10,28 @@
 use super::*;
 
 impl Shell {
+    /// Home with nothing on it that moves (KI-092): signed in, no card or popover open, no toast, no start-up strip animating, no
+    /// request waiting with its pulse, no camera sign. Every real change (a click, a badge, a new strip text, the clock's minute)
+    /// asks for its own frame, so the safety-net redraw may be slow here.
+    pub(super) fn home_is_calm(&self) -> bool {
+        matches!(self.screen, Screen::Launcher)
+            && self.overlay_free()
+            && self.devask.pending.is_none()
+            && !self.devask.open
+            && !self.cam_sign
+            && matches!(self.startup.phase, iyakki_agent::startup::Phase::Gone)
+            && matches!(self.startup.phase_sys, iyakki_agent::startup::Phase::Gone)
+    }
+
     /// Nothing is drawn over the app's live picture: no menu, card, toast, dialog, popover or sign, no several panes, and the
     /// pointer is below the header (the clock's tooltip hangs from it).
     pub(super) fn live_clear(&self) -> bool {
         let s = scale_for(self.size.0, self.size.1);
+        self.overlay_free() && self.mouse.1 as f32 > (HEADER_H + 80.0) * s
+    }
+
+    /// Nothing is drawn over the screen that moves on its own (no card, popover, toast, sign or dialog), whoever signed in.
+    fn overlay_free(&self) -> bool {
         self.session.is_some()
             && !self.ws_active()
             && self.ctx.is_none()
@@ -35,7 +53,6 @@ impl Shell {
             && self.loss.card_until.is_none()
             && iyakki_storage::loss::snapshot().state.healthy()
             && self.env.services.camera.in_use().is_none()
-            && self.mouse.1 as f32 > (HEADER_H + 80.0) * s
     }
 
     /// Between full redraws: paint what changed in the open app's live picture. Returns the screen rectangle `(x, y, w, h)`

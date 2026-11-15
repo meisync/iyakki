@@ -113,7 +113,7 @@ pub fn detect_denial(reply: &str, request: &str, names: &[&str]) -> Option<Findi
     if r.is_empty() || r.len() > 900 {
         return None;
     }
-    if !REFUSAL.iter().any(|p| r.contains(p)) {
+    if !REFUSAL.iter().any(|p| r.contains(p)) && !crate::phrases::mentions_refusal(&r) {
         return None;
     }
     if LEGIT.iter().any(|p| r.contains(p)) {
@@ -137,10 +137,10 @@ pub fn detect_ask_first(reply: &str, request: &str, names: &[&str]) -> Option<Fi
     }
     let tail_start = r.len().saturating_sub(260);
     let tail = &r[r.char_indices().map(|(i, _)| i).find(|i| *i >= tail_start).unwrap_or(0)..];
-    let opener = ASK_OPENERS.iter().find_map(|o| tail.find(o).map(|i| (o, i)))?;
+    let opener = ASK_OPENERS.iter().find_map(|o| tail.find(o).map(|i| (*o, i))).or_else(|| crate::phrases::ask_opener(tail))?;
     let after = &tail[opener.1 + opener.0.len()..];
     let clause: String = after.chars().take(70).collect();
-    if !READ_VERBS.iter().any(|v| clause.contains(v)) || WRITE_VERBS.iter().any(|v| clause.contains(v)) {
+    if !(READ_VERBS.iter().any(|v| clause.contains(v)) || crate::phrases::reads(&clause)) || WRITE_VERBS.iter().any(|v| clause.contains(v)) || crate::phrases::writes(&clause) {
         return None;
     }
     let mut found = topics(request, reply, names);
@@ -487,7 +487,7 @@ pub fn claims_progress(text: &str) -> bool {
     if l.trim_end().ends_with('?') {
         return false;
     }
-    ["done", "complete", "created", "built", "deployed", "running", "successfully", "ready", "finished", "implemented", "set up", "written", "installed", "works", "working"].iter().any(|w| l.contains(w))
+    ["done", "complete", "created", "built", "deployed", "running", "successfully", "ready", "finished", "implemented", "set up", "written", "installed", "works", "working"].iter().any(|w| l.contains(w)) || crate::phrases::claims_progress(&l)
 }
 
 /// The request-only note that asks the model to settle open board rows.

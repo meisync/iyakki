@@ -176,6 +176,9 @@ fn a_missing_agent_says_how_to_fix_it_in_the_chat_and_autopilot_is_not_pretended
 #[test]
 fn the_mode_chip_says_what_an_external_agent_really_does_with_the_mode() {
     let (mut app, cx) = with_models("chatext-chip");
+    // a built-in model is set up (picked from the list)
+    app.handle(&Event::Key(Key::Ctrl('p')), &cx);
+    app.handle(&Event::Row(0), &cx);
     cx.services.ext_status.set("claude-code", status(true, Auth::Unknown));
     app.choose_agent(&cx, "claude-code".into());
     app.agent = true;
@@ -583,4 +586,53 @@ fn choosing_claude_code_sonnet_in_the_picker_with_no_provider_model_leaves_no_ge
     }
     assert!(app.msgs.iter().any(|m| m.content.contains("All done here.")));
     let _ = std::fs::remove_dir_all(&bin);
+}
+
+#[test]
+fn a_chat_answered_by_an_external_agent_has_a_one_click_chip_back_to_the_built_in_model_at_four_sizes() {
+    let (mut app, cx) = with_models("chatext-chip");
+    // a built-in model is set up (picked from the list) and answers: no chip
+    app.handle(&Event::Key(Key::Ctrl('p')), &cx);
+    app.handle(&Event::Row(0), &cx);
+    let g = render_with(&mut app, &cx, 1100, 650);
+    assert!(!g.hits.iter().any(|h| h.label == "Built-in model"));
+    assert!(app.ext_footer(&cx).is_none() || app.ext_id(&cx).is_none());
+    app.choose_agent(&cx, "claude-code".into());
+    assert!(app.ext_footer(&cx).unwrap().starts_with("agent: Claude Code"), "{:?}", app.ext_footer(&cx));
+    app.error = None; // the agent is not installed here: its fix text would replace the footer
+    for (w, h) in [(1280u32, 720u32), (1920, 1080), (1024, 600), (800, 480)] {
+        let g = render_with(&mut app, &cx, w, h);
+        let chip: Vec<_> = g.hits.iter().filter(|x| x.label.starts_with("Built-in")).collect();
+        if w == 800 {
+            // a narrow pane may leave the chip out; it is never drawn over the edge
+            assert!(chip.len() <= 1);
+            for c in &chip {
+                assert!(c.rect.x + c.rect.w <= w as f32 + 0.5, "800x480: inside the width");
+            }
+            continue;
+        }
+        assert_eq!(chip.len(), 1, "{w}x{h}: one chip; hits {:?}", g.hits.iter().map(|x| x.label.clone()).collect::<Vec<_>>());
+        assert!(chip[0].rect.x >= 0.0 && chip[0].rect.x + chip[0].rect.w <= w as f32 + 0.5 && chip[0].rect.y + chip[0].rect.h <= h as f32 + 0.5, "{w}x{h}: inside the window");
+        assert!(g.hits.iter().any(|x| x.label == "Model ▾"), "the model button is still there");
+    }
+    // one click: the agent is dropped, the footer names the model again, the choice is audited
+    app.handle(&Event::Tab(USE_BUILTIN), &cx);
+    assert_eq!(app.ext_id(&cx), None);
+    assert_eq!(app.ext_footer(&cx), None, "the footer line of an agent is gone");
+    let g = render_with(&mut app, &cx, 1100, 650);
+    assert!(!g.hits.iter().any(|h| h.label == "Built-in model"), "the chip goes away with the agent");
+    assert!(cx.audit.recent(10).iter().any(|l| l.contains("chat.agent") && l.contains("builtin")));
+}
+
+#[test]
+fn the_chip_needs_a_built_in_model_to_go_back_to_and_is_not_offered_while_the_agent_works() {
+    let (mut app, cx) = with_models("chatext-chip2");
+    app.handle(&Event::Key(Key::Ctrl('p')), &cx);
+    app.handle(&Event::Row(0), &cx);
+    app.choose_agent(&cx, "claude-code".into());
+    assert!(app.builtin_chip_shown(&cx));
+    cx.services.settings.lock().unwrap().update(|s| s.chat = None).unwrap();
+    assert!(!app.builtin_chip_shown(&cx), "no built-in model is set up: nothing to go back to");
+    app.handle(&Event::Tab(USE_BUILTIN), &cx);
+    assert!(app.ext_id(&cx).is_some(), "a click does nothing then");
 }

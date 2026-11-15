@@ -11,6 +11,7 @@ pub mod a11y_nav;
 pub mod a11y_style;
 pub mod blocker;
 pub mod blocker_json;
+pub mod badsites;
 pub mod blocker_lists;
 pub mod blocker_state;
 pub mod cache;
@@ -23,6 +24,7 @@ pub mod gif;
 pub mod headerfetch;
 pub mod html;
 pub mod image;
+pub mod imgsel;
 pub mod jpeg;
 pub mod media;
 pub mod net;
@@ -38,3 +40,8 @@ pub use cookies::{Cookie, CookieStore};
 pub use doc::{Block, Control, ControlKind, Doc, Form, ImageRef, SelectOption, Span, Style, TextBlock};
 pub use fetch::{fetch_following, load, load_request, load_with, Fetch, Jar, ExtraHeaders, Loaded, Renderer, Request, Response};
 pub use url::{form_urlencode, SearchEngine, Url};
+
+#[cfg(test)]
+mod fuzzkit;
+#[cfg(test)]
+mod fuzz_tests;

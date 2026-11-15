@@ -1,0 +1,17 @@
+# Deprecation table (docs/development/CORE-COMPATIBILITY-DESIGN.md section 6 and gate 6 of section 8).
+#
+# One row per deprecated name: a capability, a contract call, a manifest field, a message id, a file name. Tab separated:
+#   name  kind  since  not_before  alias_test  note
+#   name        what is deprecated, as written in the code or the file
+#   kind        capability | call | field | message | file | other
+#   since       the release that announced it (for example 0.1.0-alpha.3)
+#   not_before  the first day it may be removed, YYYY-MM-DD: the later of "two releases" and "90 days" after the announcement
+#               (alpha: at least one release; the release notes say so)
+#   alias_test  the path of a test (crate::module::test_name) that proves the old name still works through its alias
+#   note        what replaces it and where the release notes say so
+# The gate (crates/iyakki-core-api/tests/compat_deprecations.rs) fails when
+#   * a row is malformed, its date is not a date, or its alias test does not exist in the code;
+#   * a row is past its not_before date and still listed (remove the name and the row together, in a major release, with the migration
+#     already shipped; or move not_before out with a reason in the note).
+# Rows below.
+stream.chunk.data_as_numbers	other	0.1.0-alpha.3	2027-02-15	iyakki-remote::core_contract::flows_run_over_the_channel_and_a_large_frame_is_read_in_chunks_that_resume	stream/read answers with the bytes as a JSON list of numbers when `encoding` is not given; ask for encoding base64 (contract 0.2). The list form is served until the not_before date and a later release.

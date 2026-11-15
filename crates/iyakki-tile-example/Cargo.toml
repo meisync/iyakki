@@ -3,7 +3,11 @@ name = "iyakki-tile-example"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Example tile: a counter with a button and a text field. tile.wat is the verified build; src/lib.rs is the same app in Rust (wasm32 build unverified)."
+description = "Example tile: a counter with a button and a text field. tile.wat is the verified build; src/lib.rs is the same app in Rust, built for wasm32 by src/guest.rs."
+
+[lib]
+# cdylib: the wasm32 build is the tile (src/guest.rs); on the host the crate is an ordinary library for the tests.
+crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 iyakki-tile-abi = { path = "../iyakki-tile-abi" }

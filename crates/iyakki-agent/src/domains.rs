@@ -283,6 +283,8 @@ pub struct Deps {
     /// The port of the web desktop when it is on (for the list of this device's own services).
     pub web_port: Arc<dyn Fn() -> Option<u16> + Send + Sync>,
     pub audit: AuditFn,
+    /// Who may use a members route (the listener refuses everybody else). None: not enforced.
+    pub members: Option<Arc<dyn crate::cloudlisten::MemberGate>>,
     pub now: Arc<dyn Fn() -> i64 + Send + Sync>,
 }
 
@@ -711,6 +713,7 @@ impl Manager {
             Arc::new(NoGate)
         };
         let mut o = Options { bind, redirect_port: want.http_port, cert_reload: Some(Duration::from_secs(60)), ..Options::default() };
+        o.members = self.deps.members.clone();
         let log = self.log.clone();
         o.log = Arc::new(move |l| {
             let mut q = log.lock().unwrap_or_else(|e| e.into_inner());
@@ -911,7 +914,7 @@ pub fn target_text(t: &Target) -> String {
 
 pub fn access_text(a: Access) -> &'static str {
     match a {
-        Access::Members => "people of this device (not enforced by the listener)",
+        Access::Members => "people of this device who are signed in (the listener checks the session)",
         Access::Public => "anyone who can reach the port",
     }
 }
@@ -992,6 +995,7 @@ pub fn real_deps(svc: &Arc<crate::services::Services>, user: &str, audit: AuditF
         web_port: Arc::new(move || Some(crate::webaccess::read_status(&web_dir)).filter(|s| s.listening && s.port != 0).map(|s| s.port)),
         audit,
         now: Arc::new(crate::clock::now_unix),
+        members: Some(Arc::new(crate::cloudmembers::RegistryGate)),
     }
 }
 

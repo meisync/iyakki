@@ -30,9 +30,18 @@ pub fn handle(c: &Ctx, id: &str) -> Out {
     let caller = Caller { user: &who.user, roles: roles.as_ref() };
     let sink = Sink(c.sh.deps.audit.as_ref());
     let env = Env { dir: &dir, vault: crate::tenantconfig::vault::for_user(&dir, &who.user), audit: &sink };
+    let kind = c.params.first().map(String::as_str).unwrap_or("");
+    if let Some(op) = id.strip_prefix("tcfgme_") {
+        let (v, detail) = match op.split('_').next().unwrap_or("") {
+            "get" => (crate::tenantconfig::person::get(&env, &caller, kind), String::new()),
+            "put" => (crate::tenantconfig::person::put(&env, &caller, kind, json_body(c.req)?), format!("kind={kind}")),
+            "delete" => (crate::tenantconfig::person::delete(&env, &caller, kind, c.params.get(1).map(String::as_str)), format!("kind={kind}")),
+            _ => return Err(Fail::new(501, "unsupported", "not implemented")),
+        };
+        return v.map(|v| (200, v, detail.chars().filter(|ch| ch.is_ascii_alphanumeric() || "=._-".contains(*ch)).collect())).map_err(fail);
+    }
     let op = id.strip_prefix("tcfg_").unwrap_or(id).split('_').next().unwrap_or("");
     let body = || -> Result<Value, Fail> { json_body(c.req) };
-    let kind = c.params.first().map(String::as_str).unwrap_or("");
     let rest = c.params.get(1..).unwrap_or(&[]);
     let (v, detail) = match op {
         "list" => (api::list(&env, &caller), String::new()),
@@ -188,4 +197,47 @@ pub fn provider_entry_gate(c: &Ctx, provider: &str, model: &str, team: Option<&s
         crate::tenantconfig::enforce::AgentUse::Allowed { .. } => Ok(()),
         crate::tenantconfig::enforce::AgentUse::Refused(why) => Err(Fail::new(403, "denied", &why)),
     }
+}
+
+/// The backend of a run that names a team's own `models.local` or `models.provider` entry (F-TCFG-14, F-TCFG-09): `None` when the
+/// provider is not such an entry (or outside the cloud profile), so the ordinary start goes on. The person must belong to the team; the
+/// model list, role and counters are checked by the backend on every call.
+pub fn team_backend(c: &Ctx, provider: &str, model: &str, team: Option<&str>) -> Result<Option<std::sync::Arc<dyn crate::chat::ChatBackend>>, Fail> {
+    use crate::tenantconfig::localchat::{real_streamer, real_transport, OwnedTeamChat, TeamKind};
+    if !c.sh.profile.is_cloud() {
+        return Ok(None);
+    }
+    let Some(team) = team else { return Ok(None) };
+    let dir = c.data_dir();
+    let Ok(cfg) = crate::tenantconfig::store::Store::new(&dir).load() else { return Ok(None) };
+    let entries = cfg.entries();
+    let Some(en) = entries.iter().find(|e| matches!(e.item.kind.as_str(), "models.local" | "models.provider") && e.item.name == provider && e.item.namespace.as_deref() == Some(team)) else { return Ok(None) };
+    let kind = if en.item.kind == "models.local" { TeamKind::Local } else { TeamKind::Provider };
+    let me = c.who().user.clone();
+    let roles = Access::new(&dir).roles().ok().flatten();
+    if !roles.as_ref().is_some_and(|r| r.ns_role(team, &me).is_some() || r.tenant_role(&me).is_some_and(|x| x >= crate::cloudroles::TenantRole::Admin)) {
+        return Err(Fail::new(404, "not_found", "no such team"));
+    }
+    let rank = Caller { user: &me, roles: roles.as_ref() }.rank(team);
+    struct ArcSink(std::sync::Arc<dyn iyakki_core_api::AuditSink>);
+    impl ConfigAudit for ArcSink {
+        fn record(&self, who: &str, event: &str, detail: &str) {
+            self.0.record(who, event, detail);
+        }
+    }
+    let vault = crate::tenantconfig::vault::for_user(&dir, &me);
+    Ok(Some(std::sync::Arc::new(OwnedTeamChat {
+        kind,
+        dir: dir.clone(),
+        vault,
+        audit: std::sync::Arc::new(ArcSink(c.sh.deps.audit.clone())),
+        team: team.to_string(),
+        name: provider.to_string(),
+        user: me,
+        user_rank: rank,
+        model: model.to_string(),
+        transport: real_transport(),
+        streamer: (kind == TeamKind::Local).then(real_streamer),
+        clock: std::sync::Arc::new(crate::tenantconfig::now_secs),
+    })))
 }

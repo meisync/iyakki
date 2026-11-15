@@ -671,6 +671,21 @@ fn a_damaged_radio_file_is_set_aside_with_its_bytes_and_the_next_station_starts_
 }
 
 #[test]
+fn a_radio_or_header_rules_file_a_newer_release_reshaped_is_kept_byte_for_byte_and_never_saved_over() {
+    use crate::radio::StationStore;
+    let d = data("alpha1", "radio-newer");
+    let p = d.join("radio-amy.json");
+    let newer = br#"{"schema": 2, "stations": [{"name": "Example Jazz", "url": "https://radio.example.org/jazz.mp3", "codec": "opus"}]}"#;
+    fs::write(&p, newer).unwrap();
+    let s = StationStore::new(&d, "amy");
+    assert!(s.list().is_empty(), "this release cannot read the new layout");
+    let e = s.add("Example Talk", "https://talk.example.org/live").unwrap_err();
+    assert!(e.contains("newer IYAKKI") && e.contains("schema 2"), "{e}");
+    assert_eq!(bytes(&p), newer.to_vec(), "byte for byte");
+    assert!(corrupt_copies(&d, "radio-amy.json").is_empty(), "a newer file is not a damaged one: nothing is set aside");
+}
+
+#[test]
 fn a_damaged_browser_header_rules_file_is_set_aside_and_the_old_bytes_are_kept() {
     use crate::browserheaders::{Store, Values};
     struct Nothing;

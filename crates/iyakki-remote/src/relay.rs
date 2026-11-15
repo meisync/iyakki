@@ -119,6 +119,8 @@ fn accept(l: TcpListener, stop: Arc<AtomicBool>, tls: Arc<rustls::ServerConfig>)
 }
 
 fn connection(stream: TcpStream, peer: SocketAddr, tls: Arc<rustls::ServerConfig>) {
+    // a socket accepted from a non-blocking listener is non-blocking too on macOS and the BSDs (not on Linux): the TLS code below expects to block
+    let _ = stream.set_nonblocking(false);
     if !relay::lan_peer(peer.ip()) {
         return; // not even a TLS handshake for a stranger
     }

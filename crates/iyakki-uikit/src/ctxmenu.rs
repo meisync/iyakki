@@ -270,7 +270,7 @@ mod tests {
     use super::*;
 
     fn items() -> Vec<Item> {
-        vec![Item::new(CUT, "Cut", "Ctrl+X").enabled(false), Item::new(COPY, "Copy", "Ctrl+C"), Item::new(PASTE, "Paste", "Ctrl+V").needs_clip(), Item::separator(), Item::new(HISTORY, "Clipboard history…", "Ctrl+Shift+V")]
+        vec![Item::new(CUT, "Cut", "Ctrl+X").enabled(false), Item::new(COPY, "Copy", "Ctrl+C"), Item::new(PASTE, "Paste", crate::platform::paste_key()).needs_clip(), Item::separator(), Item::new(HISTORY, "Clipboard history…", "Ctrl+Shift+V")]
     }
 
     #[test]

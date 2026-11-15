@@ -83,6 +83,12 @@ impl ChatApp {
         }
     }
 
+    /// The one-click chip "Built-in model" is offered: an external agent answers this chat, nothing is running, and a built-in model is
+    /// set up to take over (Settings -> Models).
+    pub(super) fn builtin_chip_shown(&mut self, cx: &AppCx) -> bool {
+        self.run.is_none() && self.pending.is_none() && self.models.is_none() && self.ext_id(cx).is_some() && cx.services.settings.lock().unwrap_or_else(|e| e.into_inner()).get().chat.is_some()
+    }
+
     /// The person picked a built-in model: this chat (and new chats of the workspace) use it again.
     pub(super) fn choose_builtin(&mut self, cx: &AppCx) {
         self.ext_choice = Some(None);

@@ -51,14 +51,15 @@ pub(super) struct NamePanel {
     pub(super) etc: std::path::PathBuf,
     pub(super) cmdline: String,
     pub(super) writable: bool,
-    pub(super) apply: NameSetter,
+    /// A test seam; `None` is the real thing: the core changes the name (it asks) through `cx.os`.
+    pub(super) apply: Option<NameSetter>,
     /// The name being typed, not yet applied or saved.
     pub(super) draft: Option<String>,
 }
 
 impl Default for NamePanel {
     fn default() -> NamePanel {
-        NamePanel { conf: iyakki_zram::CONF_PATH.into(), etc: "/etc/hostname".into(), cmdline: iyakki_agent::sysinfo::cmdline(iyakki_agent::sysinfo::proc_root()), writable: !hf_on(), apply: Arc::new(|n, p| iyakki_devctl::apply_hostname(n, p)), draft: None }
+        NamePanel { conf: std::path::PathBuf::new(), etc: "/etc/hostname".into(), cmdline: iyakki_agent::sysinfo::cmdline(iyakki_agent::sysinfo::proc_root()), writable: !hf_on(), apply: None, draft: None }
     }
 }
 
@@ -85,7 +86,7 @@ impl SettingsApp {
 
     /// Use other files and seams for the Host name page (tests).
     pub fn with_host_name(mut self, conf: std::path::PathBuf, etc: std::path::PathBuf, cmdline: &str, writable: bool, apply: NameSetter) -> SettingsApp {
-        self.hn = NamePanel { conf, etc, cmdline: cmdline.into(), writable, apply, draft: None };
+        self.hn = NamePanel { conf, etc, cmdline: cmdline.into(), writable, apply: Some(apply), draft: None };
         self
     }
 
@@ -96,7 +97,7 @@ impl SettingsApp {
     }
 
     fn time_update(&mut self, cx: &AppCx, what: &str, f: impl FnOnce(&mut iyakki_agent::settings::TimeSettings)) -> bool {
-        let r = Self::svc(cx).settings.lock().unwrap().update(|s| f(&mut s.time));
+        let r = Self::svc(cx).settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| f(&mut s.time));
         match r {
             Ok(()) => {
                 if self.time.global_zone {
@@ -209,7 +210,7 @@ impl SettingsApp {
             Some(f) => {
                 let r = f();
                 let mut changed = None;
-                let saved = Self::svc(cx).settings.lock().unwrap().update(|s| changed = iyakki_agent::tzdetect::apply(&mut s.time, &r, clock::now_unix()));
+                let saved = Self::svc(cx).settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| changed = iyakki_agent::tzdetect::apply(&mut s.time, &r, clock::now_unix()));
                 if let Err(e) = saved {
                     return self.fail(e.to_string());
                 }
@@ -327,6 +328,11 @@ impl SettingsApp {
 
     // ------------------------------------------------------------------------------------------------ Host name
 
+    /// The file that keeps the name for the next boots: the one given (tests), else the core's `system.conf`.
+    fn hn_conf(&self, cx: &AppCx) -> std::path::PathBuf {
+        if self.hn.conf.as_os_str().is_empty() { cx.os.memory().conf_path() } else { self.hn.conf.clone() }
+    }
+
     fn hn_locked(&self) -> Option<String> {
         crate::hostname::locked_by(&self.hn.cmdline)
     }
@@ -355,8 +361,16 @@ impl SettingsApp {
                     return self.fail("Press e and type a new name first.");
                 };
                 let apply_now = matches!(k, Key::Char('y'));
-                let saved = crate::hostname::save(&self.hn.conf, &name);
-                let applied = if apply_now { Some((self.hn.apply)(&name, &self.hn.etc)) } else { None };
+                let conf = self.hn_conf(cx);
+                let saved = crate::hostname::save(&conf, &name);
+                let applied = if apply_now {
+                    Some(match &self.hn.apply {
+                        Some(f) => f(&name, &self.hn.etc),
+                        None => cx.os.hardware().set_hostname(&name, &self.hn.etc),
+                    })
+                } else {
+                    None
+                };
                 cx.audit.record(&cx.session.user, if apply_now { "hostname.apply" } else { "hostname.save" }, &name);
                 match (saved, applied) {
                     (Err(e), _) => self.fail(format!("Could not save: {e}")),
@@ -381,7 +395,7 @@ impl SettingsApp {
         Ok(format!("{name} is ready. Press Apply now to use it, or Save for next boots."))
     }
 
-    pub(super) fn render_host_name(&mut self, g: &mut Gfx, a: R, s: f32, _cx: &AppCx) {
+    pub(super) fn render_host_name(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
         let mut y = a.y;
         if !self.hn.writable {
             for l in g.wrap(13.0 * s, "A desktop window shows the name of the computer it runs on, read-only. The host name is changed on the IYAKKI system itself.", Face::Sans, a.w).iter().take(2) {
@@ -398,7 +412,7 @@ impl SettingsApp {
             *y += 24.0 * s;
         };
         row(g, &mut y, "Host name now", &crate::hostname::current("iyakki"), TEXT);
-        let saved = crate::hostname::saved(&self.hn.conf);
+        let saved = crate::hostname::saved(&self.hn_conf(cx));
         row(g, &mut y, "Kept for next boots", saved.as_deref().unwrap_or("not set (the image's own name)"), TEXT);
         if let Some(d) = &self.hn.draft {
             row(g, &mut y, "Typed, not applied", d, crate::fx::AMBER);

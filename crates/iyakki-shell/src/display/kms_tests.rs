@@ -90,3 +90,36 @@ fn the_fake_card_hands_out_buffers_shows_them_and_records_it() {
     d.destroy_buffer(b);
     assert!(d.pixels(&b).is_err());
 }
+
+fn timing(clock: u32, htotal: u16, vtotal: u16, vrefresh: u32) -> ModeInfo {
+    ModeInfo { clock, htotal, vtotal, vrefresh, hdisplay: 2560, vdisplay: 1600, ..Default::default() }
+}
+
+#[test]
+fn a_mode_whose_vrefresh_is_zero_gets_its_rate_from_the_timing() {
+    // 2560x1600 laptop panels as amdgpu reports them: vrefresh 0, the rate only in the timing
+    assert_eq!(timing(345_000, 2720, 1646, 0).refresh_hz(), Some(77));
+    assert_eq!(timing(268_000, 2720, 1646, 0).refresh_hz(), Some(60));
+    assert_eq!(timing(738_800, 2720, 1646, 0).refresh_hz(), Some(165));
+    assert_eq!(timing(1_070_000, 2720, 1646, 0).refresh_hz(), Some(239));
+    // the kernel's own number wins when it is there
+    assert_eq!(timing(268_000, 2720, 1646, 59).refresh_hz(), Some(59));
+    // the classic 1080p60 timing (148.5 MHz, 2200 x 1125) is 60
+    assert_eq!(timing(148_500, 2200, 1125, 0).refresh_hz(), Some(60));
+}
+
+#[test]
+fn flags_change_how_the_rate_is_worked_out_and_an_unknown_rate_is_none() {
+    // 1080i: 74.25 MHz over a 2200 x 1125 frame is 30 frames, which the kernel reports as 60 (fields) per second
+    let mut i = timing(74_250, 2200, 1125, 0);
+    i.flags = MODE_FLAG_INTERLACE;
+    assert_eq!(i.refresh_hz(), Some(60));
+    let mut d = timing(25_175, 800, 525, 0); // 640x480 at 60 Hz
+    assert_eq!(d.refresh_hz(), Some(60));
+    d.flags = MODE_FLAG_DBLSCAN; // double scan: each line twice, half the rate
+    assert_eq!(d.refresh_hz(), Some(30));
+    assert_eq!(timing(0, 2720, 1646, 0).refresh_hz(), None, "no clock");
+    assert_eq!(timing(345_000, 0, 1646, 0).refresh_hz(), None, "no htotal");
+    assert_eq!(timing(345_000, 2720, 0, 0).refresh_hz(), None, "no vtotal");
+    assert_eq!(ModeInfo::default().refresh_hz(), None);
+}

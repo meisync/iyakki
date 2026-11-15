@@ -48,6 +48,9 @@ impl HostIo for OsIo {
     fn random_nonce(&mut self) -> Result<[u8; 32], String> {
         random32()
     }
+    fn install_gtk(&mut self, id: u8, gtk: &[u8; 16]) -> Result<(), String> {
+        self.ap.install_gtk(self.ifindex, id, gtk).map_err(|e| format!("NEW_KEY (group): {}", nl_text(e, self.ap.transport())))
+    }
 }
 
 fn random32() -> Result<[u8; 32], String> {
@@ -126,6 +129,8 @@ fn setup(ifindex: u32, bssid: Mac, pmk: [u8; 32]) -> Result<(Nl80211Socket, OsIo
 fn run(mut events: Nl80211Socket, mut io: OsIo, mut host: HostAp, stop: &AtomicBool) {
     let t0 = Instant::now();
     let now = || t0.elapsed().as_millis() as u64;
+    // the group key is changed after a station left and on a timer (F-HOTSPOT-04), decided by `iyakki_hotspot::rotation`
+    let mut rot = iyakki_hotspot::rotation::Rotation::new(iyakki_hotspot::rotation::RotationPolicy::default(), 0);
     while !stop.load(Ordering::SeqCst) {
         let ready = poll_readable(&[events.as_raw_fd(), io.eap.raw_fd()], 100);
         if ready[0] {
@@ -137,6 +142,7 @@ fn run(mut events: Nl80211Socket, mut io: OsIo, mut host: HostAp, stop: &AtomicB
                                 host.station_added(&mut io, sta, now());
                             } else {
                                 host.station_removed(sta);
+                                rot.station_left();
                             }
                         }
                         _ => {}
@@ -163,5 +169,24 @@ fn run(mut events: Nl80211Socket, mut io: OsIo, mut host: HostAp, stop: &AtomicB
             }
         }
         host.tick(&mut io, now());
+        let (connected, key_id) = (host.connected_count(), host.group_key_id());
+        let ms = now();
+        let fresh = || -> Result<[u8; 16], String> {
+            let r = random32()?;
+            let mut g = [0u8; 16];
+            g.copy_from_slice(&r[..16]);
+            Ok(g)
+        };
+        iyakki_hotspot::rotation::step(
+            &mut rot,
+            ms / 1000,
+            connected,
+            key_id,
+            &mut |id| {
+                let gtk = fresh()?;
+                host.rotate_group_key(&mut io, gtk, id, ms)
+            },
+            &mut |l| log::info!("{l}"),
+        );
     }
 }

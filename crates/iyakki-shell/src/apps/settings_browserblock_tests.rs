@@ -93,6 +93,7 @@ fn the_page_draws_at_five_sizes_with_nothing_outside_the_screen_and_the_new_butt
     let mut a = SettingsApp::new(&cx);
     a.go_to(Tab::Browser);
     let mut shown_somewhere = false;
+    let mut shown_ublock = false;
     for &(w, h) in &[(360u32, 740u32), (800, 480), (1280, 720), (1920, 1080), (2560, 1600)] {
         let g = draw(&mut a, &cx, w, h);
         for hit in &g.hits {
@@ -101,12 +102,14 @@ fn the_page_draws_at_five_sizes_with_nothing_outside_the_screen_and_the_new_butt
             assert!(r.y + r.h <= h as f32 + 0.5 || hit.label.contains("tab"), "{w}x{h}: {} inside the height: {r:?}", hit.label);
         }
         shown_somewhere |= g.hits.iter().any(|h| h.label == "Download lists (l)");
+        shown_ublock |= g.hits.iter().any(|h| h.label == "uBlock filters (v)" && matches!(h.ev, Event::Key(Key::Char('v'))));
         // every shown button is a key that exists
-        for hit in g.hits.iter().filter(|h| h.label.ends_with("(l)") || h.label.ends_with("(n)") || h.label.ends_with("(u)") || h.label.ends_with("(o)") || h.label.ends_with("(r)")) {
-            assert!(matches!(hit.ev, Event::Key(Key::Char('l' | 'n' | 'u' | 'o' | 'r'))), "{}", hit.label);
+        for hit in g.hits.iter().filter(|h| h.label.ends_with("(l)") || h.label.ends_with("(v)") || h.label.ends_with("(n)") || h.label.ends_with("(u)") || h.label.ends_with("(o)") || h.label.ends_with("(r)")) {
+            assert!(matches!(hit.ev, Event::Key(Key::Char('l' | 'v' | 'n' | 'u' | 'o' | 'r'))), "{}", hit.label);
         }
     }
     assert!(shown_somewhere, "at least the large sizes show the list buttons");
+    assert!(shown_ublock, "the uBlock filters button (v) is shown at the large sizes");
     store.remove("easylist");
 }
 

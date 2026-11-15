@@ -147,3 +147,60 @@ fn disconnect_and_pairing_act_and_the_pairing_card_says_who_answers_the_number()
     t.call("bluetooth_audio_pairing", &json!({"on": false})).unwrap();
     assert_eq!(a.calls.lock().unwrap().clone(), vec!["disconnect", "pairing true", "pairing false"]);
 }
+
+#[test]
+fn the_keys_of_a_phone_change_the_volume_and_the_player_only_when_something_can_change_and_clearing_stops_them() {
+    use iyakki_devctl::avrcp::{Act, MediaKey};
+    struct Off;
+    impl iyakki_proxy::Upstream for Off {
+        fn request(&self, _: &str, _: &str, _: &[(String, String)], _: &[u8]) -> Result<iyakki_proxy::UpstreamResponse, String> {
+            Err("offline".into())
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("iyakki-btremote-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let svc = crate::services::Services::open(&dir.join("svc"), Arc::new(Off), Arc::new(Off)).unwrap();
+    svc.master_set(40).unwrap();
+    assert_eq!(do_remote(&svc, Act::Step(5)), "volume 45");
+    assert_eq!(do_remote(&svc, Act::Step(-100)), "volume 0");
+    assert_eq!(do_remote(&svc, Act::SetPercent(60)), "volume 60");
+    assert_eq!(do_remote(&svc, Act::ToggleMute), "muted");
+    assert_eq!(svc.master().percent, 60);
+    // nothing plays: the player keys take nothing (and say nothing)
+    for k in [MediaKey::Play, MediaKey::Pause, MediaKey::Stop] {
+        assert_eq!(do_remote(&svc, Act::Media(k)), "", "{k:?}");
+    }
+    // next and previous step the shared queue: nothing without an active queue, then one track at a time, never past either end
+    {
+        use crate::media::tests::FakeLauncher;
+        let l = Arc::new(FakeLauncher::default());
+        let p = crate::media::MediaPlayer::new(l.clone());
+        assert_eq!(do_remote_with(&svc, &p, Act::Media(MediaKey::Next)), "");
+        p.set_queue("alice", vec!["/m/a.mp3".into(), "/m/b.mp3".into(), "/m/c.mp3".into()], 0, false);
+        assert_eq!(do_remote_with(&svc, &p, Act::Media(MediaKey::Next)), "", "an inactive queue is left alone");
+        p.set_queue("alice", vec!["/m/a.mp3".into(), "/m/b.mp3".into(), "/m/c.mp3".into()], 0, true);
+        assert_eq!(do_remote_with(&svc, &p, Act::Media(MediaKey::Previous)), "", "no track before the first");
+        assert_eq!(do_remote_with(&svc, &p, Act::Media(MediaKey::Next)), "next b.mp3");
+        assert_eq!(l.launched.lock().unwrap().as_slice(), ["/m/b.mp3"]);
+        assert_eq!((p.queue_state().pos, p.queue_state().active, p.now_playing().as_deref()), (1, true, Some("b.mp3")));
+        assert_eq!(do_remote_with(&svc, &p, Act::Media(MediaKey::Next)), "next c.mp3");
+        assert_eq!(do_remote_with(&svc, &p, Act::Media(MediaKey::Next)), "", "no track after the last");
+        assert_eq!(do_remote_with(&svc, &p, Act::Media(MediaKey::Previous)), "previous b.mp3");
+        assert_eq!(l.launched.lock().unwrap().as_slice(), ["/m/b.mp3", "/m/c.mp3", "/m/b.mp3"]);
+        assert!(l.procs.lock().unwrap()[0].lock().unwrap().1 && l.procs.lock().unwrap()[1].lock().unwrap().1, "each step stops the one before");
+        *l.fail.lock().unwrap() = true;
+        assert_eq!(do_remote_with(&svc, &p, Act::Media(MediaKey::Next)), "", "a player that cannot start says nothing was done");
+        assert_eq!(p.queue_state().pos, 1, "and the queue stays where it was");
+    }
+    // the handler follows the session: with it installed a key reaches the services, cleared it does nothing
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let s2 = seen.clone();
+    install_remote(&svc, "alice", move |who, what| s2.lock().unwrap().push(format!("{who}: {what}")));
+    iyakki_devctl::a2dp_sys::run_remote_for_test(Act::SetPercent(30));
+    assert_eq!(svc.master().percent, 30);
+    assert_eq!(seen.lock().unwrap().as_slice(), ["alice: bluetooth.remote volume 30"]);
+    clear_remote();
+    iyakki_devctl::a2dp_sys::run_remote_for_test(Act::SetPercent(90));
+    assert_eq!(svc.master().percent, 30, "after sign-out the keys change nothing");
+}

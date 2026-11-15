@@ -107,7 +107,7 @@ impl SettingsApp {
             Key::Char('i') => {
                 let f = Form::new("Import an SSH key")
                     .text("Name", "", "lower-case: github, work, gitea")
-                    .text("Private key (paste it, or give the path of the file)", "", "-----BEGIN OPENSSH PRIVATE KEY----- … or /path/to/id_ed25519")
+                    .path("Private key (paste it, or Browse for the file: Ctrl+O)", "", "-----BEGIN OPENSSH PRIVATE KEY----- … or /path/to/id_ed25519", crate::filepicker::PathKind::File, &[])
                     .secret("Passphrase of the key (empty if it has none)", "")
                     .choice("A passphrase is", &["asked once per session", "kept in my vault"], 0);
                 self.open_form(FormKind::Git(GitSetting::ImportKey), f);

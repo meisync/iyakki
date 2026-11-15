@@ -351,7 +351,7 @@ impl Manager {
             l.0 = key.clone();
         }
         let me = self.clone();
-        std::thread::spawn(move || {
+        let h = std::thread::spawn(move || {
             if let Some(text) = me.lead_summary() {
                 {
                     let mut l = me.inner.summary.lock().unwrap_or_else(|e| e.into_inner());
@@ -363,6 +363,9 @@ impl Manager {
                 me.notify("Parallel tasks finished: what to merge", &text);
             }
         });
+        let mut held = self.inner.summary_thread.lock().unwrap_or_else(|e| e.into_inner());
+        held.retain(|t| !t.is_finished());
+        held.push(h);
     }
 }
 

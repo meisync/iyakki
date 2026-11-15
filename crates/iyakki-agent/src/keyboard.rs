@@ -28,10 +28,16 @@ pub struct KeyboardSettings {
     pub swap_opt_cmd: Option<bool>,
     /// Trackpad: a short tap clicks; None = not chosen (on).
     pub trackpad_tap: Option<bool>,
+    /// Trackpad: three fingers moving drag (the left button is held while they move); None = not chosen (off).
+    pub three_finger_drag: Option<bool>,
     /// Trackpad: two-finger scrolling follows the fingers ("natural"); None = not chosen (on, like a phone and a Mac).
     pub trackpad_natural: Option<bool>,
     /// Scrolling speed in percent for the wheel and the trackpad (50 to 300); 0 = not chosen (100).
     pub scroll_speed_pct: u32,
+    /// Pointer speed of a mouse (relative device) in percent (25 to 300); 0 = not chosen (100).
+    pub pointer_speed_pct: u32,
+    /// Pointer speed of a touchpad in percent (25 to 300), on top of the pad's own acceleration; 0 = not chosen (100).
+    pub touchpad_speed_pct: u32,
     /// Mouse wheel: rolling towards you moves the page up ("natural"); None = not chosen (off: the classic direction).
     pub wheel_natural: Option<bool>,
     /// Scrolling eases to its target instead of jumping; None = not chosen (on).
@@ -56,6 +62,10 @@ pub struct KeyboardSettings {
 /// Limits of [`KeyboardSettings::scroll_speed_pct`] and [`KeyboardSettings::wheel_lines`], and what "not chosen" means.
 pub const SCROLL_SPEED_RANGE: (u32, u32) = (50, 300);
 pub const SCROLL_SPEED_DEFAULT: u32 = 100;
+/// Limits of [`KeyboardSettings::pointer_speed_pct`] and [`KeyboardSettings::touchpad_speed_pct`]; the Settings page steps by [`POINTER_SPEED_STEP`].
+pub const POINTER_SPEED_RANGE: (u32, u32) = (25, 300);
+pub const POINTER_SPEED_DEFAULT: u32 = 100;
+pub const POINTER_SPEED_STEP: u32 = 5;
 pub const WHEEL_LINES_RANGE: (u32, u32) = (1, 10);
 pub const WHEEL_LINES_DEFAULT: u32 = 3;
 
@@ -113,6 +123,11 @@ impl KeyboardSettings {
         if self.scroll_speed_pct != 0 && !(SCROLL_SPEED_RANGE.0..=SCROLL_SPEED_RANGE.1).contains(&self.scroll_speed_pct) {
             return Err("the scrolling speed must be between 50 and 300 percent".into());
         }
+        for (v, what) in [(self.pointer_speed_pct, "mouse"), (self.touchpad_speed_pct, "touchpad")] {
+            if v != 0 && !(POINTER_SPEED_RANGE.0..=POINTER_SPEED_RANGE.1).contains(&v) {
+                return Err(format!("the {what} speed must be between 25 and 300 percent"));
+            }
+        }
         if self.wheel_lines != 0 && !(WHEEL_LINES_RANGE.0..=WHEEL_LINES_RANGE.1).contains(&self.wheel_lines) {
             return Err("a mouse wheel click must move between 1 and 10 lines".into());
         }
@@ -148,6 +163,11 @@ impl KeyboardSettings {
         }
     }
 
+    /// Three-finger drag with the default (off) for what was not chosen.
+    pub fn three_finger_drag_on(&self) -> bool {
+        self.three_finger_drag.unwrap_or(false)
+    }
+
     /// (tap to click, natural scrolling) with the defaults for what was not chosen.
     pub fn trackpad(&self) -> (bool, bool) {
         (self.trackpad_tap.unwrap_or(true), self.trackpad_natural.unwrap_or(true))
@@ -165,6 +185,13 @@ impl KeyboardSettings {
             momentum: self.scroll_momentum.unwrap_or(true),
             wheel_lines: pick(self.wheel_lines, WHEEL_LINES_RANGE, WHEEL_LINES_DEFAULT),
         }
+    }
+
+    /// (mouse, touchpad) pointer speed in percent with the default for what was not chosen; a hand-edited value outside the limits is
+    /// pulled back inside them.
+    pub fn pointer_speeds(&self) -> (u32, u32) {
+        let pick = |v: u32| if v == 0 { POINTER_SPEED_DEFAULT } else { v.clamp(POINTER_SPEED_RANGE.0, POINTER_SPEED_RANGE.1) };
+        (pick(self.pointer_speed_pct), pick(self.touchpad_speed_pct))
     }
 
     /// The Touch Bar `mode` value for the choice (2 = media and brightness keys, 1 = function keys; automatic leaves it).
@@ -407,6 +434,21 @@ mod tests {
         assert_eq!(std::fs::read_to_string(bl.join("brightness")).unwrap(), "2");
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "900");
         assert!(apply_apple(&d, &KeyboardSettings::default()).unwrap().is_empty(), "written again only when it differs");
+    }
+
+    #[test]
+    fn pointer_speeds_have_defaults_limits_and_old_files_load() {
+        assert_eq!(KeyboardSettings::default().pointer_speeds(), (100, 100));
+        let k = KeyboardSettings { pointer_speed_pct: 150, touchpad_speed_pct: 25, ..Default::default() };
+        assert!(k.validate().is_ok());
+        assert_eq!(k.pointer_speeds(), (150, 25));
+        for (v, ok) in [(0, true), (24, false), (25, true), (300, true), (301, false)] {
+            assert_eq!(KeyboardSettings { pointer_speed_pct: v, ..Default::default() }.validate().is_ok(), ok, "mouse {v}");
+            assert_eq!(KeyboardSettings { touchpad_speed_pct: v, ..Default::default() }.validate().is_ok(), ok, "touchpad {v}");
+        }
+        assert_eq!(KeyboardSettings { pointer_speed_pct: 9000, touchpad_speed_pct: 3, ..Default::default() }.pointer_speeds(), (300, 25));
+        let old: KeyboardSettings = serde_json::from_str("{\"fn_mode\":\"media\"}").unwrap();
+        assert_eq!(old.pointer_speeds(), (100, 100), "a file written before the setting existed");
     }
 
     #[test]

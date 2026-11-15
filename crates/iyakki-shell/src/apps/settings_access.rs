@@ -65,7 +65,7 @@ impl SettingsApp {
                 let on = !acc::high_contrast(cx.services.dir(), &cx.session.user);
                 match acc::set_high_contrast(cx.services.dir(), &cx.session.user, on) {
                     Ok(()) => {
-                        crate::theme::apply(Some(crate::theme::load(cx.services.dir(), &cx.session.user)));
+                        crate::theme::apply_for(cx.services.dir(), &cx.session.user);
                         cx.audit.record(&cx.session.user, "settings.accessibility", &format!("high contrast {}", on_off(on)));
                         self.ok(format!("High contrast {}.", on_off(on)));
                     }
@@ -93,6 +93,11 @@ impl SettingsApp {
                     self.ok(format!("Sticky keys {}. {}", on_off(a.sticky_keys), if a.sticky_keys { "Press Shift, Ctrl, Alt or Super, let go, then the next key. Twice in a row keeps it on until a third press." } else { "Modifier keys are held again." }));
                 }
             }
+            'e' => {
+                if let Some(a) = self.ac_save(cx, "typing echo", |a| a.typing_echo = !a.typing_echo) {
+                    self.ok(format!("Typing echo {}: {}", on_off(a.typing_echo), if a.typing_echo { "each letter you type into a text field is spoken while the reader is on (a hidden password is never spoken)." } else { "typed letters are no longer spoken." }));
+                }
+            }
             'w' => {
                 let next = {
                     let cur = Self::ac_load(cx).slow_keys_ms;
@@ -108,7 +113,7 @@ impl SettingsApp {
     }
 
     pub(super) fn access_buttons(&self) -> Vec<Btn> {
-        vec![("Screen reader", ACCENT, 'r'), ("Test the voice", TEXT, 't'), ("High contrast", TEXT, 'c'), ("Bigger text", TEXT, 'u'), ("Large pointer", TEXT, 'p'), ("Focus ring", TEXT, 'f'), ("Reduce motion", TEXT, 'm'), ("Sticky keys", TEXT, 'k'), ("Slow keys", TEXT, 'w')]
+        vec![("Screen reader", ACCENT, 'r'), ("Test the voice", TEXT, 't'), ("High contrast", TEXT, 'c'), ("Bigger text", TEXT, 'u'), ("Large pointer", TEXT, 'p'), ("Focus ring", TEXT, 'f'), ("Reduce motion", TEXT, 'm'), ("Sticky keys", TEXT, 'k'), ("Slow keys", TEXT, 'w'), ("Typing echo", TEXT, 'e')]
     }
 
     pub(super) fn render_access(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
@@ -125,6 +130,7 @@ impl SettingsApp {
             ("Big focus ring".into(), "A thicker ring round the control that has the focus.".into(), cfg.big_ring, 'f'),
             ("Reduce motion".into(), "No moving background, no blinking caret.".into(), cfg.reduce_motion, 'm'),
             ("Sticky keys".into(), "Shift, Ctrl, Alt and Super stay on for the next key.".into(), cfg.sticky_keys, 'k'),
+            ("Typing echo".into(), "Say each letter as it is typed into a text field while the reader is on. A password field is never spoken.".into(), cfg.typing_echo, 'e'),
             (if cfg.slow_keys_ms == 0 { "Slow keys: off".into() } else { format!("Slow keys: {} ms", cfg.slow_keys_ms) }, "A key counts only after it was held a moment. W cycles the delay.".into(), cfg.slow_keys_ms > 0, 'w'),
         ];
         let cols = if a.w >= 760.0 * s { 2 } else { 1 };

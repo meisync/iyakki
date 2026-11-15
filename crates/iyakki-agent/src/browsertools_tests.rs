@@ -333,6 +333,8 @@ fn world(tag: &str, mode: BrowserAgent, edit: impl FnOnce(&mut Policy)) -> W {
     let d = std::env::temp_dir().join(format!("iyakki-browsertools-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(d.join("home")).unwrap();
+    // the write rule compares real paths: on macOS the temp folder is behind a link
+    let d = std::fs::canonicalize(&d).unwrap();
     let svc = Services::open(&d.join("svc"), Arc::new(Dead), Arc::new(Dead)).unwrap();
     let mut policy = Role::User.template();
     policy.net_hosts = vec!["*".into()];

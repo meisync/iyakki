@@ -12,6 +12,7 @@ crates/iyakki-gui/target/
 *.qcow2
 # local data, keys and logs
 *.log
+!tests/fixtures/**/*.log
 *.pem
 *.key
 authorized_keys
@@ -64,3 +65,4 @@ __pycache__/
 
 # built program (the Makefile makes it next to its sources): never tracked
 /dist/webview/wpe-helper/webview-helper
+!crates/*/tests/fixtures/*.img

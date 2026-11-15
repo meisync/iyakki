@@ -6,6 +6,7 @@
 //! strip still shows the volume, brightness, the clock, the recent apps and the agent's state, and the cycle chip, sliders and buttons
 //! simply never fire.
 
+use crate::stale_stats::mark_stale;
 use super::*;
 use crate::fnkeys::{self, FnKey};
 use crate::touchbar::{self, Action, AgentState, Bar, Choice, Ctx, Recent, SliderKind, Strip};
@@ -280,6 +281,7 @@ impl Shell {
                 self.handle(&Event::Fn(FnKey::VolumeMute, false));
             }
             Action::Key(k) => self.handle(&Event::Key(k)),
+            Action::Tab(n) => self.handle(&Event::Tab(n)),
             Action::Open(id) => self.tbar_open(&id),
             Action::Slider(kind, v) => {
                 self.tbar.pending = Some((kind, v));
@@ -288,7 +290,7 @@ impl Shell {
                 }
             }
         }
-        self.stale = true;
+        mark_stale!(self);
     }
 
     /// Open an app, or return to it. From another app this is "Esc, then open": an app that keeps the key (a question about unsaved work)

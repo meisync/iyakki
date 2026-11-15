@@ -241,8 +241,62 @@ impl crate::k3sdev::K3sDev {
             other => return Err(format!("k3s is {}", other.word())),
         }
         let out = self.kubectl_cap(args, cap);
-        if out.code == Some(0) { Ok(out.stdout) } else { Err(out.combined().trim().to_string()) }
+        kubectl_result(&out)
     }
+}
+
+/// The answer of one kubectl run as text or as a sentence that names the cause (KI-090). A run that was cut (timeout, size cap) never
+/// hands its half answer on, and a run whose exit status was taken by the PID-1 reaper (`status_lost`, output complete) is a success.
+pub fn kubectl_result(out: &crate::wsexec::Out) -> Result<String, String> {
+    if out.timed_out {
+        return Err("timeout: kubectl did not answer in time".into());
+    }
+    if out.missing {
+        return Err("kubectl is not available on this machine".into());
+    }
+    if out.truncated {
+        return Err("invalid output: the answer was cut because it was too large".into());
+    }
+    if out.code == Some(0) || (out.status_lost && out.code.is_none() && !out.stdout.trim().is_empty()) {
+        return Ok(out.stdout.clone());
+    }
+    let first = out.stderr.lines().chain(out.stdout.lines()).map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    if first.is_empty() || first.starts_with('{') || first.starts_with('[') {
+        return Err("invalid output: kubectl stopped before it finished its answer".into());
+    }
+    Err(first.to_string())
+}
+
+/// At most this many kubectl runs at once from one dashboard (each has its own timeout).
+pub const MAX_KUBECTL_AT_ONCE: usize = 4;
+
+struct Gate {
+    used: Mutex<usize>,
+    cv: std::sync::Condvar,
+}
+
+struct Permit<'a>(&'a Gate);
+impl Gate {
+    fn take(&self) -> Permit<'_> {
+        let mut n = self.used.lock().unwrap_or_else(|e| e.into_inner());
+        while *n >= MAX_KUBECTL_AT_ONCE {
+            n = self.cv.wait(n).unwrap_or_else(|e| e.into_inner());
+        }
+        *n += 1;
+        Permit(self)
+    }
+}
+impl Drop for Permit<'_> {
+    fn drop(&mut self) {
+        *self.0.used.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+        self.0.cv.notify_one();
+    }
+}
+
+/// A failure worth one more try: a cut or timed-out run, not a real refusal.
+fn transient(e: &str) -> bool {
+    let l = e.to_ascii_lowercase();
+    l.starts_with("timeout") || l.starts_with("invalid output") || l.contains("timed out") || l.contains("deadline") || l.starts_with('{')
 }
 
 /// [`ClusterApi`] over a [`Kubectl`], with a short memory.
@@ -253,14 +307,24 @@ pub struct KubeCluster {
     all: Mutex<Option<(Instant, Vec<SvcInfo>)>>,
     /// The `kube` data source's looks, one slot each so that panels asking at the same moment make one kubectl call.
     reads: Mutex<HashMap<KubeRead, Arc<Mutex<Option<(Instant, String)>>>>>,
+    gate: Gate,
 }
 
 impl KubeCluster {
     pub fn new(kube: Arc<dyn Kubectl>, ttl: Duration) -> KubeCluster {
-        KubeCluster { kube, ttl, one: Mutex::new(HashMap::new()), all: Mutex::new(None), reads: Mutex::new(HashMap::new()) }
+        KubeCluster { kube, ttl, one: Mutex::new(HashMap::new()), all: Mutex::new(None), reads: Mutex::new(HashMap::new()), gate: Gate { used: Mutex::new(0), cv: std::sync::Condvar::new() } }
+    }
+
+    fn run_gated(&self, a: &[&str]) -> Result<String, String> {
+        let _p = self.gate.take();
+        self.kube.kubectl_big(a)
     }
 
     fn fail(e: &str) -> DashError {
+        let first = e.lines().next().unwrap_or("").trim();
+        if first.starts_with('{') || first.starts_with('[') {
+            return DashError::new(ErrKind::Network, "kubectl gave an invalid or cut answer").fix("Refresh the board. If it keeps happening, check the cluster (Store > k3s).");
+        }
         let l = e.to_ascii_lowercase();
         if l.starts_with("k3s is") || l.contains("refused") || l.contains("unable to connect") || l.contains("timeout") || l.contains("deadline") || l.contains("no such file") {
             no_cluster(&format!("{}", super::frame::clip(e.lines().next().unwrap_or(""), 160)))
@@ -284,7 +348,7 @@ fn endpoints_ready(v: &Value) -> bool {
 impl ClusterApi for KubeCluster {
     fn service(&self, ns: &str, name: &str) -> Result<SvcInfo, DashError> {
         let key = (ns.to_string(), name.to_string());
-        if let Some((t, i)) = self.one.lock().unwrap().get(&key) {
+        if let Some((t, i)) = self.one.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key) {
             if t.elapsed() < self.ttl {
                 return Ok(i.clone());
             }
@@ -301,12 +365,12 @@ impl ClusterApi for KubeCluster {
         info.ns = ns.into();
         info.name = name.into();
         info.ready = self.kube.kubectl(&["-n", ns, "get", "endpoints", name, "-o", "json"]).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).map(|v| endpoints_ready(&v));
-        self.one.lock().unwrap().insert(key, (Instant::now(), info.clone()));
+        self.one.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, (Instant::now(), info.clone()));
         Ok(info)
     }
 
     fn services(&self) -> Result<Vec<SvcInfo>, DashError> {
-        if let Some((t, l)) = &*self.all.lock().unwrap() {
+        if let Some((t, l)) = &*self.all.lock().unwrap_or_else(std::sync::PoisonError::into_inner) {
             if t.elapsed() < self.ttl {
                 return Ok(l.clone());
             }
@@ -319,26 +383,30 @@ impl ClusterApi for KubeCluster {
                 s.ready = ep.get("items").and_then(Value::as_array).and_then(|a| a.iter().find(|e| e.pointer("/metadata/name").and_then(Value::as_str) == Some(&s.name) && e.pointer("/metadata/namespace").and_then(Value::as_str) == Some(&s.ns))).map(endpoints_ready);
             }
         }
-        *self.all.lock().unwrap() = Some((Instant::now(), list.clone()));
+        *self.all.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((Instant::now(), list.clone()));
         Ok(list)
     }
 
     fn forget(&self, ns: &str, name: &str) {
-        self.one.lock().unwrap().remove(&(ns.to_string(), name.to_string()));
-        *self.all.lock().unwrap() = None;
+        self.one.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&(ns.to_string(), name.to_string()));
+        *self.all.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
     fn kube_read(&self, what: &KubeRead) -> Result<String, DashError> {
         let args = what.args()?;
-        let slot = self.reads.lock().unwrap().entry(what.clone()).or_default().clone();
-        let mut slot = slot.lock().unwrap();
+        let slot = self.reads.lock().unwrap_or_else(std::sync::PoisonError::into_inner).entry(what.clone()).or_default().clone();
+        let mut slot = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some((t, text)) = &*slot {
             if t.elapsed() < self.ttl {
                 return Ok(text.clone());
             }
         }
         let a: Vec<&str> = args.iter().map(String::as_str).collect();
-        match self.kube.kubectl_big(&a) {
+        let mut tried = self.run_gated(&a);
+        if tried.as_ref().is_err_and(|e| transient(e)) {
+            tried = self.run_gated(&a);
+        }
+        match tried {
             Ok(text) => {
                 *slot = Some((Instant::now(), text.clone()));
                 Ok(text)
@@ -501,6 +569,67 @@ pub fn suggest(api: &dyn ClusterApi, kind: &str) -> Option<Suggestion> {
         Ok(_) => format!("no {} found in the cluster and nothing listens on this machine at port {port}", kind_label(kind)),
     };
     Some(Suggestion { url: String::new(), note: format!("{why}. Install it in Store (Quick install), or type its address; in-cluster ones are written cluster://<namespace>/<service>:{port}") })
+}
+
+/// [`suggest`] with a limit on how long the caller waits: the lookup runs on its own thread (kubectl may take its whole 10 s timeout) and
+/// the screen thread waits at most `wait`. When the answer is late the form gets an empty address and a note that says so; the lookup
+/// goes on and a late answer lands in the cluster API's short memory, so the same form opened again a moment later has it.
+pub fn suggest_within(api: &std::sync::Arc<dyn ClusterApi>, kind: &str, wait: std::time::Duration) -> Option<Suggestion> {
+    let mut l = Lookup::start(api, kind)?;
+    match l.wait(wait) {
+        Some(s) => s,
+        None => Some(l.late_note()),
+    }
+}
+
+/// A lookup for the Add source form that is running on its own thread. The screen thread waits a little ([`Lookup::wait`]); when the
+/// answer is late the form shows [`Lookup::late_note`] and the screen asks again on every tick ([`Lookup::poll`]), so the open form
+/// fills in when the cluster finally answers (only into an address the person has not typed).
+pub struct Lookup {
+    rx: std::sync::mpsc::Receiver<Option<Suggestion>>,
+    kind: String,
+    done: bool,
+}
+
+impl Lookup {
+    /// `None` for a kind that has no default port (nothing to look for).
+    pub fn start(api: &std::sync::Arc<dyn ClusterApi>, kind: &str) -> Option<Lookup> {
+        default_port(kind)?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (a, k) = (api.clone(), kind.to_string());
+        std::thread::spawn(move || {
+            let _ = tx.send(suggest(a.as_ref(), &k));
+        });
+        Some(Lookup { rx, kind: kind.into(), done: false })
+    }
+
+    /// Wait at most `wait`: `Some(answer)` once it is there, `None` while it is still being looked for.
+    pub fn wait(&mut self, wait: std::time::Duration) -> Option<Option<Suggestion>> {
+        if self.done {
+            return None;
+        }
+        match self.rx.recv_timeout(wait) {
+            Ok(s) => {
+                self.done = true;
+                Some(s)
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                self.done = true;
+                Some(None)
+            }
+        }
+    }
+
+    /// Without waiting: `Some(answer)` the first time it is there, then never again.
+    pub fn poll(&mut self) -> Option<Option<Suggestion>> {
+        self.wait(std::time::Duration::ZERO)
+    }
+
+    /// What the form says while the answer is late.
+    pub fn late_note(&self) -> Suggestion {
+        Suggestion { url: String::new(), note: format!("still looking in the cluster (it is slow to answer); the address fills in here when it answers, unless you type one first. In-cluster ones are written cluster://<namespace>/<service>:{}", default_port(&self.kind).unwrap_or(0)) }
+    }
 }
 
 /// The sentence for a refused connection to this machine's own `port`: where the instance really is.

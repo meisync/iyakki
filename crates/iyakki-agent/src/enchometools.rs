@@ -80,6 +80,12 @@ fn def(name: &str, desc: &str, risk: Risk, schema: Value) -> ToolDef {
 }
 
 impl Tools for EncHomeTools {
+
+    fn inner_tools(&self) -> Option<&dyn Tools> {
+
+        Some(&*self.inner)
+
+    }
     fn defs(&self) -> Vec<ToolDef> {
         let mut v = self.inner.defs();
         v.retain(|d| !is_enchome_tool(&d.spec.name));

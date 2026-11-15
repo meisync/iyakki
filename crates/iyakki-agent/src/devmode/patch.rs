@@ -499,7 +499,7 @@ impl Live for SysLive {
     fn bind(&self, src: &Path, target: &Path) -> Result<(), String> {
         let (s, t) = (c(src)?, c(target)?);
         // SAFETY: valid NUL-terminated paths; a failure is reported.
-        let r = unsafe { libc::mount(s.as_ptr(), t.as_ptr(), std::ptr::null(), libc::MS_BIND, std::ptr::null()) };
+        let r = unsafe { crate::oscompat::mount(s.as_ptr(), t.as_ptr(), std::ptr::null(), crate::oscompat::MS_BIND, std::ptr::null()) };
         if r != 0 {
             return Err(format!("bind mount {}: {}", target.display(), std::io::Error::last_os_error()));
         }
@@ -509,9 +509,9 @@ impl Live for SysLive {
     fn unbind(&self, target: &Path) -> Result<(), String> {
         let t = c(target)?;
         // SAFETY: valid path; a busy file is detached lazily (running programs keep their copy).
-        let r = unsafe { libc::umount2(t.as_ptr(), 0) };
+        let r = unsafe { crate::oscompat::umount2(t.as_ptr(), 0) };
         if r != 0 {
-            let r2 = unsafe { libc::umount2(t.as_ptr(), libc::MNT_DETACH) };
+            let r2 = unsafe { crate::oscompat::umount2(t.as_ptr(), crate::oscompat::MNT_DETACH) };
             if r2 != 0 {
                 return Err(format!("unmount {}: {}", target.display(), std::io::Error::last_os_error()));
             }
@@ -551,9 +551,9 @@ impl Live for SysLive {
 
     fn remount(&self, path: &str, rw: bool) -> Result<(), String> {
         let t = c(Path::new(path))?;
-        let flags = libc::MS_REMOUNT | if rw { 0 } else { libc::MS_RDONLY };
+        let flags = crate::oscompat::MS_REMOUNT | if rw { 0 } else { crate::oscompat::MS_RDONLY };
         // SAFETY: valid path.
-        if unsafe { libc::mount(std::ptr::null(), t.as_ptr(), std::ptr::null(), flags, std::ptr::null()) } != 0 {
+        if unsafe { crate::oscompat::mount(std::ptr::null(), t.as_ptr(), std::ptr::null(), flags, std::ptr::null()) } != 0 {
             return Err(format!("remount {path}: {}", std::io::Error::last_os_error()));
         }
         Ok(())
@@ -612,13 +612,13 @@ pub struct FakeLive {
 
 impl FakeLive {
     fn log(&self, s: String) -> Result<(), String> {
-        let bad = self.fail.lock().unwrap().contains(&s);
-        self.calls.lock().unwrap().push(s.clone());
+        let bad = self.fail.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains(&s);
+        self.calls.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(s.clone());
         if bad { Err(format!("{s} failed (test)")) } else { Ok(()) }
     }
 
     pub fn calls(&self) -> Vec<String> {
-        self.calls.lock().unwrap().clone()
+        self.calls.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 }
 
@@ -626,13 +626,13 @@ impl Live for FakeLive {
     fn bind(&self, src: &Path, target: &Path) -> Result<(), String> {
         self.log(format!("bind {}", target.display()))?;
         let orig = std::fs::read(target).map_err(|e| e.to_string())?;
-        self.originals.lock().unwrap().push((target.to_path_buf(), orig));
+        self.originals.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((target.to_path_buf(), orig));
         std::fs::copy(src, target).map(|_| ()).map_err(|e| e.to_string())
     }
 
     fn unbind(&self, target: &Path) -> Result<(), String> {
         self.log(format!("unbind {}", target.display()))?;
-        let mut o = self.originals.lock().unwrap();
+        let mut o = self.originals.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let i = o.iter().rposition(|(p, _)| p == target).ok_or("not bound")?;
         let (p, b) = o.remove(i);
         std::fs::write(p, b).map_err(|e| e.to_string())

@@ -231,3 +231,7 @@ pub(crate) mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "audiofmt_real_tests.rs"]
+mod real_tests;

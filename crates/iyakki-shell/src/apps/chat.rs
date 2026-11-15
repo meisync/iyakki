@@ -40,6 +40,9 @@ const SPEAK_PAUSE: usize = 49_900;
 const AP_PAUSE: usize = 49_901;
 /// The X on the chip that names the attached flow.
 pub(crate) const FLOW_CHIP_X: usize = 49_902;
+/// The chip that sends an external-agent chat back to the built-in model with one click.
+const USE_BUILTIN: usize = 49_903;
+const BUILTIN_CHIP: &str = "Built-in model";
 
 /// The reply being read aloud: which message, what is said (markup removed), its sentences, and how the words said match the
 /// words drawn (see `wordtime::align_words`).
@@ -226,6 +229,9 @@ pub struct ChatApp {
     tasks: Option<iyakki_agent::tasks::Manager>,
     /// The waker of pending work (F-AI-16): starts a turn when something the assistant waits for ends. Keyed by workspace name.
     waker: Option<(String, iyakki_agent::pending::Waker)>,
+    /// The Waiting strip: what the assistant waits for apart from detached jobs (they have their own strip), refreshed about every half second.
+    wait_line: Option<String>,
+    wait_n: u32,
     /// The model chosen for the agent in this chat (`""` = the CLI chooses); `None`: the agent's own setting.
     ext_model: Option<String>,
     /// Where an Autopilot run stands ("step 3 · row 2 of 7"), from the harness's notes, for the footer.
@@ -375,6 +381,8 @@ impl ChatApp {
             ext_choice: None,
             tasks: None,
             waker: None,
+            wait_line: None,
+            wait_n: 0,
             ext_model: None,
             ap_step: String::new(),
             cred: None,
@@ -936,7 +944,22 @@ impl ChatApp {
                 system.push_str(iyakki_agent::ragtools::PROMPT_RULE);
             }
             system.push_str(iyakki_agent::updatestools::PROMPT_RULE);
+            system.push_str(iyakki_agent::doctortools::PROMPT_RULE);
+            system.push_str(iyakki_agent::wizardtools::PROMPT_RULE);
+            system.push_str(iyakki_agent::imagebuildtools::PROMPT_RULE);
+            system.push_str(iyakki_agent::linuxpodtools::PROMPT_RULE);
+            system.push_str(iyakki_agent::mcpadmintools::PROMPT_RULE);
+            system.push_str(iyakki_agent::skillstools::PROMPT_RULE);
+            system.push_str(iyakki_agent::linuxappimagetools::PROMPT_RULE);
+            system.push_str(iyakki_agent::linuxsandboxtools::PROMPT_RULE);
+            system.push_str(iyakki_agent::k8sexptools::PROMPT_RULE);
+            system.push_str(iyakki_agent::sessionlogtools::PROMPT_RULE);
             system.push_str(iyakki_agent::lockscreentools::PROMPT_RULE);
+            system.push_str(&super::chat_settings::prompt_rules(cx.session.policy.manage_settings));
+            if cx.session.role == iyakki_sec::policy::Role::Admin {
+                system.push_str(iyakki_agent::clientmedia::devicetools::PROMPT_RULE);
+                system.push_str(iyakki_agent::devmode::restarttools::PROMPT_RULE);
+            }
             system.push_str(iyakki_agent::enchometools::PROMPT_RULE);
             system.push_str(iyakki_agent::accessibilitytools::PROMPT_RULE);
             system.push_str(iyakki_agent::browsera11y::PROMPT_RULE);
@@ -950,14 +973,21 @@ impl ChatApp {
                 system.push_str(iyakki_agent::componentstools::PROMPT_RULE);
             }
             system.push_str(iyakki_agent::pdftools::PROMPT_RULE);
+            if cx.session.policy.manage_settings {
+                system.push_str(iyakki_agent::pdfnativetools::PROMPT_RULE);
+            }
             system.push_str(iyakki_agent::tilestools::PROMPT_RULE);
             system.push_str(iyakki_agent::dictfixtools::PROMPT_RULE);
             system.push_str(iyakki_agent::voiceassisttools::PROMPT_RULE);
             system.push_str(iyakki_agent::sharetools::PROMPT_RULE);
+            system.push_str(iyakki_agent::browsershort::PROMPT_RULE);
             system.push_str(iyakki_agent::remotefilestools::PROMPT_RULE);
             if cx.session.policy.allows_app(iyakki_sec::policy::App::Cameras) {
                 system.push_str(iyakki_agent::camerastools::PROMPT_RULE);
                 system.push_str(iyakki_agent::camerastools::MOTION_RULE);
+            }
+            if cx.session.policy.cli == iyakki_sec::policy::CliLevel::Full {
+                system.push_str(iyakki_agent::sshsessiontools::PROMPT_RULE);
             }
             if cx.session.policy.manage_settings {
                 system.push_str(iyakki_agent::sshtunneltools::PROMPT_RULE);
@@ -974,6 +1004,7 @@ impl ChatApp {
                 system.push_str(iyakki_agent::vpntools::PROMPT_RULE);
                 system.push_str(iyakki_agent::bluetoothtools::PROMPT_RULE);
                 system.push_str(iyakki_agent::btaudiotools::PROMPT_RULE);
+                system.push_str(iyakki_agent::bluetoothpair::PROMPT_RULE);
             }
             if k8s.is_none() {
                 system.push_str("\nNo cluster is connected to this workspace. Never start, install or stop a cluster (k3s server, minikube, kind, kubeadm): it is refused. If the person wants to deploy, tell them to use the K8S panel's Change cluster, or to set a cluster up themselves.");
@@ -1075,6 +1106,22 @@ impl ChatApp {
             (Some(m), Some(_)) if cx.session.policy.cli == iyakki_sec::policy::CliLevel::Full => Arc::new(iyakki_agent::tasktools::TaskTools::new(tools_arc, m.clone(), ext.as_deref().unwrap_or("builtin"), "")),
             _ => tools_arc,
         };
+        // the interactive SSH login of the CLI tile: the list is free, a login asks every time; the person types in the session (full terminal only)
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.cli == iyakki_sec::policy::CliLevel::Full {
+            let (audit, user, svc, policy) = (cx.audit.clone(), cx.session.user.clone(), cx.services.clone(), cx.session.policy.clone());
+            let env_user = user.clone();
+            Arc::new(iyakki_agent::sshsessiontools::SshSessionTools::new(
+                tools_arc,
+                Arc::new(move || iyakki_agent::ssh::Env::for_services(&svc, &env_user)),
+                cx.services.dir(),
+                &cx.session.user,
+                true,
+                Arc::new(move |h| policy.allows_host(h)),
+                Arc::new(move |a, d| audit.record(&user, a, d)),
+            ))
+        } else {
+            tools_arc
+        };
         // SSH tunnels: the list is free, every change asks (administrators only: the tunnels are device settings)
         let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.manage_settings {
             let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
@@ -1088,6 +1135,12 @@ impl ChatApp {
             Arc::new(iyakki_agent::domainstools::DomainTools::new(tools_arc, iyakki_agent::domains::Manager::shared(&cx.services, &cx.session.user, Arc::new(move |a, d| audit.record(&user, a, d)))))
         } else {
             tools_arc
+        };
+        // the address bar's own short words: listing is free, each change asks (the person's own browser file, so every account has them)
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {
+            let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+            let backend = iyakki_agent::browsershort::FileBackend { data: cx.services.dir().to_path_buf(), user: user.clone(), audit: Arc::new(move |a, d| audit.record(&user, a, d)) };
+            Arc::new(iyakki_agent::browsershort::ShortTools::new(tools_arc, Arc::new(backend)))
         };
         // the browser's graphics mode: reading is free, changing asks every time (administrators only: it is a device setting)
         let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.manage_settings {
@@ -1140,11 +1193,82 @@ impl ChatApp {
             let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
             Arc::new(iyakki_agent::updatestools::UpdatesTools::new(tools_arc, Arc::new(iyakki_agent::updatestools::RealBackend { svc: cx.services.clone(), policy: cx.session.policy.clone(), user: cx.session.user.clone(), audit: Arc::new(move |a, d| audit.record(&user, a, d)) })))
         };
+        // building an image app from a folder: asks every time, administrators only
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {
+            let audit = cx.audit.clone();
+            let user = cx.session.user.clone();
+            Arc::new(iyakki_agent::imagebuildtools::ImageBuildTools::new(tools_arc, Arc::new(iyakki_agent::imagebuildtools::RealBackend { svc: cx.services.clone(), policy: cx.session.policy.clone(), user: cx.session.user.clone(), audit: Arc::new(move |a, d| audit.record(&user, a, d)) })))
+        };
+        // the cluster explorer's custom resources: read-only
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {
+            let audit = cx.audit.clone();
+            let user = cx.session.user.clone();
+            Arc::new(iyakki_agent::k8sexptools::K8sExpTools::new(tools_arc, Arc::new(iyakki_agent::k8sexptools::RealBackend { svc: cx.services.clone(), role: cx.session.role, user: cx.session.user.clone(), audit: Arc::new(move |a, d| audit.record(&user, a, d)) })))
+        };
+        // making and deleting Linux sandboxes: both ask every time
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {
+            let audit = cx.audit.clone();
+            let user = cx.session.user.clone();
+            Arc::new(iyakki_agent::linuxsandboxtools::LinuxSandboxTools::new(tools_arc, Arc::new(iyakki_agent::linuxsandboxtools::RealBackend { svc: cx.services.clone(), policy: cx.session.policy.clone(), user: cx.session.user.clone(), audit: Arc::new(move |a, d| audit.record(&user, a, d)) })))
+        };
+        // an archived sandbox root as an image app in the dev registry: asks every time, administrators only
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {
+            let audit = cx.audit.clone();
+            let user = cx.session.user.clone();
+            Arc::new(iyakki_agent::linuxappimagetools::LinuxAppImageTools::new(tools_arc, Arc::new(iyakki_agent::linuxappimagetools::RealBackend { svc: cx.services.clone(), policy: cx.session.policy.clone(), user: cx.session.user.clone(), audit: Arc::new(move |a, d| audit.record(&user, a, d)) })))
+        };
+        // skills: the list is free, adding and removing ask every time (the card shows the text)
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {
+            let audit = cx.audit.clone();
+            let user = cx.session.user.clone();
+            Arc::new(iyakki_agent::skillstools::SkillsTools::new(tools_arc, Arc::new(iyakki_agent::skillstools::RealBackend { svc: cx.services.clone(), policy: cx.session.policy.clone(), user: cx.session.user.clone(), audit: Arc::new(move |a, d| audit.record(&user, a, d)) })))
+        };
+        // the MCP servers of the MCP tile: the list is free, adding and removing ask every time (administrators only)
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {
+            let audit = cx.audit.clone();
+            let user = cx.session.user.clone();
+            Arc::new(iyakki_agent::mcpadmintools::McpAdminTools::new(tools_arc, Arc::new(iyakki_agent::mcpadmintools::RealBackend { svc: cx.services.clone(), policy: cx.session.policy.clone(), user: cx.session.user.clone(), file_servers: cx.mcp_servers.clone(), audit: Arc::new(move |a, d| audit.record(&user, a, d)) })))
+        };
+        // a Linux app root as a pod in the dev cluster: starting and stopping ask every time, administrators only
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {
+            let audit = cx.audit.clone();
+            let user = cx.session.user.clone();
+            Arc::new(iyakki_agent::linuxpodtools::LinuxPodTools::new(tools_arc, Arc::new(iyakki_agent::linuxpodtools::RealBackend { svc: cx.services.clone(), policy: cx.session.policy.clone(), user: cx.session.user.clone(), audit: Arc::new(move |a, d| audit.record(&user, a, d)) })))
+        };
+        // setup wizards of installed apps: listing and answering are free, running the checks and migrations asks every time
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {
+            let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+            Arc::new(iyakki_agent::wizardtools::WizardTools::new(tools_arc, Arc::new(iyakki_agent::wizardtools::RealBackend { svc: cx.services.clone(), user: cx.session.user.clone(), audit: Arc::new(move |a, d| audit.record(&user, a, d)) })))
+        };
+        // DOCTOR: the report is free (it only reads); detail lines are for administrators
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {
+            let audit = cx.audit.clone();
+            Arc::new(iyakki_agent::doctortools::DoctorTools::new(tools_arc, Arc::new(iyakki_agent::doctortools::RealBackend { svc: cx.services.clone(), policy: cx.session.policy.clone(), user: cx.session.user.clone(), audit_recent: Arc::new(move |n| audit.recent(n)) })))
+        };
+        // the log of the last session: the status is free, copying it into the person's home asks every time (administrators)
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {
+            let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+            Arc::new(iyakki_agent::sessionlogtools::SessionLogTools::new(tools_arc, Arc::new(iyakki_agent::sessionlogtools::RealBackend { svc: cx.services.clone(), policy: cx.session.policy.clone(), user: cx.session.user.clone(), audit: Arc::new(move |a, d| audit.record(&user, a, d)) })))
+        };
         // the lock screen: lock_screen asks nothing (it only protects the person), changing the automatic lock asks
         let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {
             let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
             let guest = cx.session.role == iyakki_sec::policy::Role::Guest;
             Arc::new(iyakki_agent::lockscreentools::LockTools::new(tools_arc, Arc::new(iyakki_agent::lockscreentools::RealBackend { dir: cx.services.dir().to_path_buf(), user: cx.session.user.clone(), guest, audit: Arc::new(move |a, d| audit.record(&user, a, d)) })))
+        };
+        // the Settings pages that every feature must also reach by chat (docs/development/CHAT-REACHABILITY.md): views, notifications, screen saver,
+        // Apps access, Connect a client, keyboard, time, browser headers, Home layout; reads are free, every change asks
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = super::chat_settings::wrap(cx, tools_arc);
+        // client devices (experimental): the list is free, a permission change or a revoke asks every time; administrators only
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {
+            let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+            let admin = cx.session.role == iyakki_sec::policy::Role::Admin;
+            Arc::new(iyakki_agent::clientmedia::devicetools::DeviceTools::new(tools_arc, Arc::new(iyakki_agent::clientmedia::devicetools::RealBackend { dir: cx.services.dir().to_path_buf(), user: cx.session.user.clone(), admin, audit: Arc::new(move |a, d| audit.record(&user, a, d)) })))
+        };
+        // the standing restart grant of developer mode: status is free, a change asks every time; administrators only
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {
+            let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+            Arc::new(iyakki_agent::devmode::restarttools::RestartTools::new(tools_arc, iyakki_agent::devmode::DevMode::open(cx.services.dir()), cx.session.policy.clone(), &cx.session.user, Arc::new(move |a, d| audit.record(&user, a, d))))
         };
         // the encrypted home folder (F-STORE-05): status and plan are free, everything else asks every time and opens a form on the screen
         let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {
@@ -1195,7 +1319,20 @@ impl ChatApp {
         // PDF files (docs/PDF.md): pdf_info and pdf_text are free (the person's file rules apply, the text is marked untrusted), page_save_pdf asks
         let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {
             let downloads = super::browser::BrowserApp::downloads_dir(&cx).unwrap_or_else(|_| cx.services.dir().join("downloads"));
-            Arc::new(iyakki_agent::pdftools::PdfTools::new(tools_arc, Arc::new(iyakki_agent::pdftools::RealBackend { policy: cx.session.policy.clone(), user: cx.session.user.clone(), web: cx.web.clone(), downloads })))
+            // pdf_create is offered unless the model or agent answering writes PDF files itself (`native_pdf_output` in its settings)
+            let native = {
+                // the agents' settings are read first: reading them takes the settings lock too
+                let agents = cx.services.agents_cfg();
+                let st = cx.services.settings.lock().unwrap_or_else(|e| e.into_inner());
+                iyakki_agent::pdfnativetools::is_native(st.get(), &agents, self.ext_choice.clone().flatten().as_deref())
+            };
+            Arc::new(iyakki_agent::pdftools::PdfTools::new(tools_arc, Arc::new(iyakki_agent::pdftools::RealBackend { policy: cx.session.policy.clone(), user: cx.session.user.clone(), web: cx.web.clone(), downloads, can_open_viewer: cx.session.policy.allows_app(iyakki_sec::policy::App::Pdf) })).native_pdf_output(native))
+        };
+        // the switch "this model or agent writes PDF files itself": status is free, a change asks every time (administrators only)
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.manage_settings {
+            Arc::new(iyakki_agent::pdfnativetools::PdfOutputTools::new(tools_arc, Arc::new(iyakki_agent::pdfnativetools::RealBackend { svc: cx.services.clone() })))
+        } else {
+            tools_arc
         };
         // WASM tiles in a browser (docs/development/TILE-ABI.md): tiles_list is free
         let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = Arc::new(iyakki_agent::tilestools::TilesTools::new(tools_arc, iyakki_agent::tilestools::TilesTools::builtin_catalog()));
@@ -1258,7 +1395,7 @@ impl ChatApp {
         let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {
             let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
             let msg = iyakki_agent::msg::MessageService::for_services(&cx.services, &cx.session.user, Arc::new(move |a, d| audit.record(&user, a, d)));
-            if msg.accounts().list().is_empty() { tools_arc } else { Arc::new(iyakki_agent::msg::tools::MessageTools::new(tools_arc, Arc::new(msg))) }
+            if msg.accounts().list().is_empty() { tools_arc } else { Arc::new(iyakki_agent::msg::tools::MessageTools::new(tools_arc, Arc::new(msg)).with_mirror(cx.services.clone(), &cx.session.user)) }
         };
         // which cryptography keeps the shared vault: reading is free, a change asks every time (administrators only)
         let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.manage_settings {
@@ -1266,6 +1403,8 @@ impl ChatApp {
         } else {
             tools_arc
         };
+        // how much space the person's cloud tenant folders use (read only, free)
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = Arc::new(iyakki_agent::cloudstoragetools::CloudStorageTools::new(tools_arc, cx.services.dir().to_path_buf(), &cx.session.user));
         // how tools are offered: reading is free, switching it for this person asks every time (the machine-wide switch is not a tool)
         let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = {
             let svc = cx.services.clone();
@@ -1287,7 +1426,7 @@ impl ChatApp {
             tools_arc
         };
         // Bluetooth keyboards, mice and game pads: the list is free, connecting, disconnecting and forgetting ask (administrators only)
-        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.manage_settings { Arc::new(iyakki_agent::btaudiotools::BtAudioTools::real(Arc::new(iyakki_agent::bluetoothtools::BluetoothTools::real(tools_arc)))) } else { tools_arc };
+        let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if cx.session.policy.manage_settings { Arc::new(iyakki_agent::bluetoothpair::BluetoothPairTools::real(Arc::new(iyakki_agent::btaudiotools::BtAudioTools::real(Arc::new(iyakki_agent::bluetoothtools::BluetoothTools::real(tools_arc)))))) } else { tools_arc };
         // the job tools sit outermost: an external agent gets them through the bridge like the others
         let tools_arc: Arc<dyn iyakki_agent::agent::Tools> = if iyakki_agent::jobtools::JobTools::offered(&cx.session.policy) {
             let cwd = workdir.clone().unwrap_or_else(|| std::path::PathBuf::from(format!("/home/{}", cx.session.user)));
@@ -1304,6 +1443,12 @@ impl ChatApp {
             let cwd = if cwd.is_dir() { cwd } else { std::path::PathBuf::from("/") };
             let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
             Arc::new(iyakki_agent::pendingtools::PendingTools::new(tools_arc, ledger, feed, pend_policy, &cwd).with_audit(Arc::new(move |k, d| audit.record(&user, k, d))))
+        };
+        // the live tool-use harness (chat_toolscore_tests.rs, ignored, needs a model server) swaps in tools that only record
+        #[cfg(test)]
+        let tools_arc = match toolscore_tests::hook() {
+            Some(f) => f(tools_arc),
+            None => tools_arc,
         };
         cx.audit.record(&cx.session.user, "agent.start", &format!("{} chars", text.len()));
         let browser = match cx.session.policy.browser_agent {
@@ -1331,7 +1476,8 @@ impl ChatApp {
         {
             // the thinking watchdog's limits (Settings; 0 = the defaults of 60 s of pure thinking and 120 s of silence)
             let st = cx.services.settings.lock().unwrap_or_else(|e| e.into_inner());
-            let (t, q) = (st.get().think_limit_secs, st.get().silence_limit_secs);
+            let provider = st.get().chat.as_ref().map(|c| c.provider.clone()).unwrap_or_default();
+            let (t, q) = st.get().stall_limits(&provider);
             if t > 0 {
                 assist.think_limit = std::time::Duration::from_secs(t as u64);
             }
@@ -1344,7 +1490,7 @@ impl ChatApp {
         self.mode_cell.set(self.live_mode());
         self.run_is_ap = false;
         self.ap_after_run = false;
-        let limits = browser_limits(&cx.session.policy, RunLimits { auto: self.approvals.is_auto() || self.autopilot, grants: Some(self.grants.clone()), live: Some(self.mode_cell.clone()), ..RunLimits::for_budget(&cx.session.policy.budget, cx.services.settings.lock().unwrap().get().token_price_cents_per_mtok) });
+        let limits = browser_limits(&cx.session.policy, RunLimits { auto: self.approvals.is_auto() || self.autopilot, grants: Some(self.grants.clone()), live: Some(self.mode_cell.clone()), ..RunLimits::for_budget(&cx.session.policy.budget, cx.services.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().token_price_cents_per_mtok) });
         if let (Some(id), false) = (ext.clone(), self.autopilot) {
             // an external coding agent answers: it gets the same tools, approvals and policy through the bridge
             let (workspace, prep) = (workdir.clone(), assist.prepare.clone());
@@ -1416,12 +1562,20 @@ impl ChatApp {
     fn poll_waker(&mut self, cx: &AppCx) {
         if !self.agent || !cx.session.policy.agent {
             self.waker = None;
+            self.wait_line = None;
             return;
         }
         let ws = self.project.as_ref().map(|p| p.name.clone()).unwrap_or_default();
         if self.waker.as_ref().is_none_or(|(k, _)| *k != ws) {
             let (ledger, feed) = self.pending_feed(cx);
-            self.waker = Some((ws, iyakki_agent::pending::Waker::start(ledger, feed)));
+            self.waker = Some((ws.clone(), iyakki_agent::pending::Waker::start(ledger, feed)));
+        }
+        self.wait_n = self.wait_n.wrapping_add(1);
+        if self.wait_n % 25 == 1 {
+            let (ledger, _) = self.pending_feed(cx);
+            let mut tickets = ledger.list(&ws);
+            tickets.retain(|t| t.source != iyakki_agent::pending::Source::Job);
+            self.wait_line = iyakki_agent::pendingplus::strip_text(&tickets, now_ms());
         }
         if self.run.is_some() || self.autopilot || self.ask.is_some() || self.askform_call.is_some() {
             return;
@@ -1889,7 +2043,7 @@ impl ChatApp {
 
     fn usage_text(&self) -> String {
         match self.usage {
-            Some((t, c, f, _)) => format!("~{} tokens{}{}", if t >= 1000 { format!("{:.1}k", t as f64 / 1000.0) } else { t.to_string() }, if c > 0.0 { format!(" · ${:.2}", c / 100.0) } else { String::new() }, if f > 0 { format!(" · {f} file{}", if f == 1 { "" } else { "s" }) } else { String::new() }),
+            Some((t, c, f, secs)) => format!("~{} tokens{}{}{}", if t >= 1000 { format!("{:.1}k", t as f64 / 1000.0) } else { t.to_string() }, if secs >= 3 && t >= 30 { format!(" · ~{} tok/s", (t / secs).max(1)) } else { String::new() }, if c > 0.0 { format!(" · ${:.2}", c / 100.0) } else { String::new() }, if f > 0 { format!(" · {f} file{}", if f == 1 { "" } else { "s" }) } else { String::new() }),
             None => String::new(),
         }
     }
@@ -2443,6 +2597,15 @@ impl ChatApp {
 }
 
 impl App for ChatApp {
+    /// The question under the conversation, in the words it shows (F-A11Y-02): what the assistant wants to do and needs a yes for, or the
+    /// credential that was caught before it left the computer. The screen reader says it once when it appears.
+    fn dialog_title(&self) -> Option<String> {
+        if let Some((_, tool, what)) = &self.approval {
+            return Some(format!("Approve {tool}? {what}"));
+        }
+        self.cred.as_ref().map(|c| format!("That looked like a {} and was not sent to the assistant", c.what))
+    }
+
     fn take_request(&mut self) -> Option<(String, String)> {
         self.take_link_request()
     }
@@ -2546,6 +2709,9 @@ impl App for ChatApp {
 
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
         self.sync_flow_thread(cx);
+        if self.links.user.is_empty() {
+            self.links.user = cx.session.user.clone();
+        }
         if self.link_card_event(ev) {
             return Flow::Stay;
         }
@@ -2912,7 +3078,7 @@ impl ChatApp {
     /// Open the model chooser: the models every enabled provider announced (Settings → Models, `t` fetches the list).
     fn open_models(&mut self, cx: &AppCx) {
         let (plain, chat) = {
-            let st = cx.services.settings.lock().unwrap();
+            let st = cx.services.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let s = st.get();
             (s.providers.iter().filter(|p| p.enabled).flat_map(|p| p.models.iter().map(move |m| (p.id.clone(), m.clone()))).collect::<Vec<_>>(), s.chat.clone())
         };
@@ -2960,7 +3126,7 @@ impl ChatApp {
             self.error = Some("Only an administrator can change the model (Settings → Models).".into());
             return;
         }
-        let r = cx.services.settings.lock().unwrap().set_chat(Some(iyakki_agent::settings::ModelChoice { provider: provider.clone(), model: model.clone() }));
+        let r = cx.services.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).set_chat(Some(iyakki_agent::settings::ModelChoice { provider: provider.clone(), model: model.clone() }));
         match r {
             Ok(()) => {
                 cx.audit.record(&cx.session.user, "settings.chat_model", &format!("{provider} {model}"));
@@ -3120,6 +3286,12 @@ impl ChatApp {
             // Ctrl+Shift+A: Autopilot on/off, also during a run (on: this turn finishes, then the plan; off: the step finishes, then it
             // stops with a summary); the Pause button pauses at once; Ctrl+Shift+R resumes a saved run
             Event::Key(Key::Ctrl('A')) => self.toggle_autopilot(cx),
+            Event::Tab(USE_BUILTIN) => {
+                if self.builtin_chip_shown(cx) {
+                    self.choose_builtin(cx);
+                    cx.audit.record(&cx.session.user, "chat.agent", "builtin");
+                }
+            }
             Event::Tab(AP_PAUSE) => {
                 if let (Some(r), true) = (&self.run, self.autopilot) {
                     r.pause();
@@ -3338,8 +3510,14 @@ impl ChatApp {
         }
         // the Jobs strip: detached jobs of this chat, just above the answer buttons and the composer; the conversation ends above it
         let jobs_fs = if in_ide { (m.font_small * is + 1.0 * is).max(12.0) } else { (14.0 * s).max(12.0) };
+        // the Waiting line: what the assistant waits for besides detached jobs, a single line above the Jobs strip
+        let wait_h = if self.wait_line.is_some() && log.h > 120.0 * s { jobs_fs * 1.5 } else { 0.0 };
+        let wait_rect = R::new(log.x, chips_top - 2.0 * s - wait_h, log.w, wait_h);
+        if wait_h > 0.0 {
+            log.h = (wait_rect.y - 2.0 * s - log.y).max(40.0 * s).min(log.h);
+        }
         let jobs_h = self.jobs_ui.strip_height(jobs_fs, s, (log.h * 0.45).max(0.0));
-        let jobs_rect = R::new(log.x, chips_top - 2.0 * s - jobs_h, log.w, jobs_h);
+        let jobs_rect = R::new(log.x, wait_rect.y - 2.0 * s - jobs_h, log.w, jobs_h);
         if jobs_h > 0.0 {
             log.h = (jobs_rect.y - 2.0 * s - log.y).max(40.0 * s).min(log.h);
         }
@@ -3376,6 +3554,10 @@ impl ChatApp {
         g.clipped(R::new(area.x, log.y, area.w, log.h), |g| view.draw(g, log, scroll_px, tick, s, ACCENT, &cev));
         if jobs_h > 0.0 {
             self.jobs_ui.draw_strip(g, jobs_rect, jobs_fs, s, tick);
+        }
+        if let (true, Some(line)) = (wait_h > 0.0, &self.wait_line) {
+            let t = g.fit(jobs_fs * 0.95, line, Face::Sans, wait_rect.w - 8.0 * s);
+            g.text(wait_rect.x + 4.0 * s, wait_rect.y + 2.0 * s, jobs_fs * 0.95, DIM, &t, Face::Sans);
         }
         if self.jobs_ui.log_open() {
             self.jobs_ui.draw_log(g, R::new(log.x, log.y, log.w, log.h), jobs_fs, s);
@@ -3469,7 +3651,19 @@ impl ChatApp {
         let sy = if in_ide { py - ctl_h - stat_h - 2.0 * s } else { py - 14.0 * s };
         // the action buttons of the status row: beside the status text in the full app, on the control row in the IDE
         let bty = if in_ide { py - ctl_h } else { sy - 8.0 * s };
-        let status_max = if in_ide { area.w - 2.0 * side } else { area.w * 0.62 };
+        let (status_max, room_max) = if in_ide {
+            (area.w - 2.0 * side, area.w - 2.0 * side)
+        } else {
+            // the status text leaves room for the Model chip (and the built-in chip) before the right-hand chips of the same row
+            let agent_w = if self.run.is_some() || (cx.session.policy.agent && self.rec.is_none()) { ["Stop run", "Agent: on", "Agent: off"].iter().map(|l| g.text_width(13.0 * s, l, Face::Bold) + 13.0 * s * 1.7).fold(0.0f32, f32::max) + 8.0 * s } else { 0.0 };
+            let chips = g.text_width(12.0 * s, "Model ▾", Face::Bold) + 12.0 * s * 1.7 + 16.0 * s + if self.builtin_chip_shown(cx) { g.text_width(12.0 * s, "Built-in", Face::Bold) + 12.0 * s * 1.7 + 6.0 * s } else { 0.0 };
+            let room = (area.w - 2.0 * side - agent_w - chips).max(60.0 * s);
+            ((area.w * 0.62).min(room), room)
+        };
+        // the Model chip of the plain chat is drawn after the right-hand chips, only where there is room left of them
+        let mut model_at: Option<f32> = None;
+        // the left edge of what a status branch puts at the right of the row (the Model chip stays left of it)
+        let mut right_used = f32::MAX;
         if let Some(rec) = &self.rec {
             let secs = rec.elapsed().as_secs();
             let pulse = (tick / 12) % 2 == 0;
@@ -3480,24 +3674,43 @@ impl ChatApp {
             g.rrect(bx, sy + 4.0 * s, bw, 10.0 * s, 5.0 * s, rgb(30, 36, 60));
             g.rrect(bx, sy + 4.0 * s, (bw * lvl).max(6.0 * s), 10.0 * s, 5.0 * s, if lvl > 0.8 { rgb(255, 150, 90) } else { OK });
         } else if self.stt_rx.is_some() {
-            g.text(area.x + side, sy, 15.0 * s, MUTED, &format!("{}{}", if self.stt_tidying.load(std::sync::atomic::Ordering::SeqCst) { "tidying the wording" } else { "transcribing" }, ".".repeat(1 + (tick / 10 % 3) as usize)), Face::Sans);
+            let t = format!("{}{}", if self.stt_tidying.load(std::sync::atomic::Ordering::SeqCst) { "tidying the wording" } else { "transcribing" }, ".".repeat(1 + (tick / 10 % 3) as usize));
+            g.text(area.x + side, sy, 15.0 * s, MUTED, &t, Face::Sans);
+            if !in_ide {
+                model_at = Some(area.x + side + g.text_width(15.0 * s, "tidying the wording...", Face::Sans) + 10.0 * s);
+            }
         } else if speaking {
             let paused = self.reader.status() == Status::Paused;
             let label = if paused { "paused".to_string() } else { format!("speaking{}", ".".repeat(1 + (tick / 10 % 3) as usize)) };
             g.text(area.x + side, sy, 15.0 * s, MUTED, &label, Face::Sans);
+            if !in_ide {
+                model_at = Some(area.x + side + g.text_width(15.0 * s, "speaking...", Face::Sans) + 10.0 * s);
+                right_used = area.x + area.w - side - 190.0 * s;
+            }
             g.button(area.x + area.w - side - 90.0 * s, bty, 13.0 * s, "Stop", ERR, cev(Key::Ctrl('k')));
             g.button(area.x + area.w - side - 190.0 * s, bty, 13.0 * s, if paused { "Resume" } else { "Pause" }, ACCENT, Event::Tab(SPEAK_PAUSE));
         } else if let Some(c) = &self.cred {
-            let t = g.fit(14.0 * s, &format!("That looked like a {} and was not sent to the assistant. Store it in your vault so it can be used safely.", c.what), Face::Sans, area.w - 2.0 * side - 190.0 * s);
+            let t = g.fit(14.0 * s, &format!("That looked like a {} and was not sent to the assistant. Store it in your vault so it can be used safely.", c.what), Face::Sans, area.w - 2.0 * side - 190.0 * s - if in_ide { 0.0 } else { 100.0 * s });
             g.text(area.x + side, sy, 14.0 * s, rgb(255, 184, 64), &t, Face::Sans);
+            if !in_ide {
+                model_at = Some(area.x + side + g.text_width(14.0 * s, &t, Face::Sans) + 10.0 * s);
+                right_used = area.x + area.w - side - 180.0 * s;
+            }
             g.button(area.x + area.w - side - 180.0 * s, bty, 13.0 * s, "Store in vault (v)", OK, cev(Key::Char('v')));
         } else if let Some(i) = &self.info {
-            let i = g.fit(15.0 * s, i, Face::Sans, area.w - 2.0 * side);
+            let i = g.fit(15.0 * s, i, Face::Sans, room_max);
             g.text(area.x + side, sy, 15.0 * s, OK, &i, Face::Sans);
+            if !in_ide {
+                model_at = Some(area.x + side + g.text_width(15.0 * s, &i, Face::Sans) + 10.0 * s);
+            }
         } else if let Some(e) = &self.error {
-            let e = iyakki_storage::loss::reword(e);
-            let e = g.fit(15.0 * s, &e, Face::Sans, area.w - 2.0 * side);
+            let e = cx.os.disks().reword_failure(e);
+            // the error keeps to the room left of the Model chip: a failed answer is when the person wants to pick another model
+            let e = g.fit(15.0 * s, &e, Face::Sans, room_max);
             g.text(area.x + side, sy, 15.0 * s, ERR, &e, Face::Sans);
+            if !in_ide {
+                model_at = Some(area.x + side + g.text_width(15.0 * s, &e, Face::Sans) + 10.0 * s);
+            }
         } else if self.run.is_some() && self.approval.is_none() {
             let lead = match (self.autopilot, self.ext_choice.clone().flatten()) {
                 // "autopilot · Claude Code · step 3 · row 2 of 7 · ~1.2k tokens · $0.12"
@@ -3515,7 +3728,7 @@ impl ChatApp {
             // idle: show which model is answering
             let label = match self.ext_footer(cx) {
                 Some(f) => f,
-                None => cx.services.settings.lock().unwrap().get().chat.as_ref().map_or("no model selected (Settings → Models, or sign in to Claude Code)".to_string(), |c| format!("model: {} · {}", c.provider, c.model)),
+                None => cx.services.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().chat.as_ref().map_or("no model selected (Settings → Models, or sign in to Claude Code)".to_string(), |c| format!("model: {} · {}", c.provider, c.model)),
             };
             let mut extra = self.ctx.summary();
             if !self.usage_text().is_empty() {
@@ -3542,7 +3755,7 @@ impl ChatApp {
                     super::ide_chrome::tooltip(g, R::new(area.x + side, sy, 0.0, stat_h), is, &full, area);
                 }
             } else {
-                g.button(area.x + side + lw + 10.0 * s, bty, 12.0 * s, "Model ▾", ACCENT, cev(Key::Ctrl('p')));
+                model_at = Some(area.x + side + lw + 10.0 * s);
             }
         }
         if in_ide {
@@ -3571,6 +3784,9 @@ impl ChatApp {
                 if x.get() + w <= limit {
                     x.set(x.get() + w + 2.0 * is);
                 }
+            }
+            if self.builtin_chip_shown(cx) {
+                put_ev(g, BUILTIN_CHIP, MUTED, Event::Tab(USE_BUILTIN), "Answer this chat with the built-in model again", 0.0);
             }
             // Stop run and Agent: on/off share one slot as wide as the widest of them
             let slot = ["Stop run", "Agent: on", "Agent: off"].iter().map(|l| bw(g, l)).fold(0.0f32, f32::max);
@@ -3643,11 +3859,29 @@ impl ChatApp {
                 }
             }
         }
+        let mut left_edge = rx;
         if !in_ide && allowed && has_tts && self.rec.is_none() && !speaking {
             let on = self.speak_enabled(cx);
             let label = if on { "Read aloud: on" } else { "Read aloud: off" };
             let w = g.text_width(13.0 * s, label, Face::Bold) + 13.0 * s * 1.7;
             g.button(rx - w, bty, 13.0 * s, label, if on { OK } else { MUTED }, cev(Key::Ctrl('o')));
+            left_edge = rx - w;
+        }
+        let left_edge = left_edge.min(right_used);
+        if let Some(mx) = model_at {
+            // never over the right-hand chips: at a narrow width the chip is left out (Ctrl+P still lists the models)
+            let mw = g.text_width(12.0 * s, "Model ▾", Face::Bold) + 12.0 * s * 1.7;
+            if mx + mw + 6.0 * s <= left_edge {
+                g.button(mx, bty, 12.0 * s, "Model ▾", ACCENT, cev(Key::Ctrl('p')));
+                if self.builtin_chip_shown(cx) {
+                    // the long label when it fits before the chips, the short one next, else none
+                    let x0 = mx + mw + 6.0 * s;
+                    let room = left_edge - 6.0 * s - x0;
+                    if let Some(l) = [BUILTIN_CHIP, "Built-in"].into_iter().find(|l| g.text_width(12.0 * s, l, Face::Bold) + 12.0 * s * 1.7 <= room) {
+                        g.button(x0, bty, 12.0 * s, l, MUTED, Event::Tab(USE_BUILTIN));
+                    }
+                }
+            }
         }
         let box_h = self.input.box_h;
         let mic_x = area.x + side;
@@ -3808,6 +4042,41 @@ mod tests {
         let (name, bytes) = app.take_host_save().expect("a file to save");
         assert_eq!((name.as_str(), String::from_utf8(bytes).unwrap().as_str()), ("result.csv", "a,b\n1,2\n"));
         iyakki_agent::hostfiles::set_enabled(false);
+    }
+
+    #[test]
+    fn an_error_or_a_note_in_the_status_line_never_hides_the_model_chip() {
+        // a failed answer is when the person wants to pick another model: the chip stays beside the message, and a long message is cut before it
+        let (mut app, cx, _h) = chat_with_answer("chaterrmodel");
+        for (w, h) in [(1100, 650), (800, 480), (480, 700)] {
+            app.error = Some("The model returned an error: the provider answered 503 and said the service is overloaded, please try again in a few minutes or use another provider".into());
+            app.info = None;
+            let g = render_with(&mut app, &cx, w, h);
+            assert!(g.hits.iter().any(|h| h.label == "Model ▾"), "{w}x{h}: the Model chip with an error showing");
+            app.error = None;
+            app.info = Some("Copied to the clipboard".into());
+            let g = render_with(&mut app, &cx, w, h);
+            assert!(g.hits.iter().any(|h| h.label == "Model ▾"), "{w}x{h}: the Model chip with a note showing");
+        }
+    }
+
+    #[test]
+    fn the_model_chip_stays_while_speaking_transcribing_or_a_credential_is_held_and_is_left_out_during_a_run() {
+        let (mut app, cx, _h) = chat_with_answer("chatmodelbranches");
+        for (w, h) in [(1100u32, 650u32), (800, 480)] {
+            let g = render_with(&mut app, &cx, w, h);
+            assert!(g.hits.iter().any(|h| h.label == "Model ▾"), "{w}x{h}: idle");
+            // a held credential: the chip stays left of the vault button
+            app.cred = Some(iyakki_agent::credguard::Found { what: "API key", value: "x".into(), redacted: String::new() });
+            let g = render_with(&mut app, &cx, w, h);
+            let chip = g.hits.iter().find(|h| h.label == "Model ▾").map(|h| h.rect);
+            let vault = g.hits.iter().find(|h| h.label == "Store in vault (v)").map(|h| h.rect);
+            assert!(chip.is_some(), "{w}x{h}: a held credential");
+            if let (Some(c), Some(v)) = (chip, vault) {
+                assert!(c.x + c.w <= v.x + 0.5, "{w}x{h}: the chip is left of the vault button");
+            }
+            app.cred = None;
+        }
     }
 
     #[test]
@@ -4145,6 +4414,7 @@ mod tests {
         app.handle(&Event::Key(Key::Ctrl('g')), &cx);
         ask(&mut app, &cx, "save v");
         run_until(&mut app, &cx, |a| a.pending_approval().is_some());
+        assert!(app.dialog_title().is_some_and(|t| t.starts_with("Approve write_file")), "the screen reader says the question once: {:?}", app.dialog_title());
         let g = render(&mut app, &cx);
         assert!(app.view.dots().iter().any(|d| d.1 == chat_view::Dot::Waiting));
         let ev = g.hits.iter().find(|h| h.label == "Allow for this session (Ctrl+U)").expect("the button is in the transcript").ev.clone();
@@ -5685,6 +5955,14 @@ mod form_tests;
 mod ask_tests;
 
 #[cfg(test)]
+#[path = "chat_wake_tests.rs"]
+mod wake_tests;
+
+#[cfg(test)]
+#[path = "chat_m66_tests.rs"]
+mod m66_tests;
+
+#[cfg(test)]
 #[path = "chat_box_tests.rs"]
 mod box_tests;
 
@@ -5703,3 +5981,11 @@ mod approval_tests;
 #[cfg(test)]
 #[path = "chat_live_mode_tests.rs"]
 mod live_mode_tests;
+
+#[cfg(test)]
+#[path = "chat_toolscore_tests.rs"]
+mod toolscore_tests;
+
+#[cfg(test)]
+#[path = "chat_live_read_tests.rs"]
+mod live_read_tests;

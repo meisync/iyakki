@@ -23,12 +23,12 @@ table inet iyakki_fw {
     meta nfproto ipv4 ip saddr 169.254.0.0/16 meta l4proto icmp icmp type 8 accept  # ping
     meta nfproto ipv6 ip6 saddr fe80::/10 meta l4proto icmpv6 icmpv6 type 128 accept  # ping
     meta nfproto ipv6 ip6 saddr fc00::/7 meta l4proto icmpv6 icmpv6 type 128 accept  # ping
-    meta nfproto ipv4 ip saddr 10.0.0.0/8 meta l4proto tcp th dport 8443 accept  # preset: remote desktop / web mode
-    meta nfproto ipv4 ip saddr 172.16.0.0/12 meta l4proto tcp th dport 8443 accept  # preset: remote desktop / web mode
-    meta nfproto ipv4 ip saddr 192.168.0.0/16 meta l4proto tcp th dport 8443 accept  # preset: remote desktop / web mode
-    meta nfproto ipv4 ip saddr 169.254.0.0/16 meta l4proto tcp th dport 8443 accept  # preset: remote desktop / web mode
-    meta nfproto ipv6 ip6 saddr fe80::/10 meta l4proto tcp th dport 8443 accept  # preset: remote desktop / web mode
-    meta nfproto ipv6 ip6 saddr fc00::/7 meta l4proto tcp th dport 8443 accept  # preset: remote desktop / web mode
+    meta nfproto ipv4 ip saddr 10.0.0.0/8 meta l4proto tcp th dport 8443 counter accept  # preset: remote desktop / web mode
+    meta nfproto ipv4 ip saddr 172.16.0.0/12 meta l4proto tcp th dport 8443 counter accept  # preset: remote desktop / web mode
+    meta nfproto ipv4 ip saddr 192.168.0.0/16 meta l4proto tcp th dport 8443 counter accept  # preset: remote desktop / web mode
+    meta nfproto ipv4 ip saddr 169.254.0.0/16 meta l4proto tcp th dport 8443 counter accept  # preset: remote desktop / web mode
+    meta nfproto ipv6 ip6 saddr fe80::/10 meta l4proto tcp th dport 8443 counter accept  # preset: remote desktop / web mode
+    meta nfproto ipv6 ip6 saddr fc00::/7 meta l4proto tcp th dport 8443 counter accept  # preset: remote desktop / web mode
     meta pkttype host ct state new counter  # count blocked attempts
     meta pkttype host ct state new limit rate 10/second burst 5 packets log group 217  # log blocked attempts (rate limited)
   }

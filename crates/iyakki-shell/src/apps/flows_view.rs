@@ -267,6 +267,9 @@ impl FlowsApp {
                 btn(g, &mut fl2, "From template (t)", CYAN, id::TEMPLATE, true);
                 btn(g, &mut fl2, "Import (i)", MUTED, id::IMPORT, true);
                 btn(g, &mut fl2, if self.book.offer() { "Agent help on failure: on (o)" } else { "Agent help on failure: off (o)" }, MUTED, id::OFFER, true);
+                btn(g, &mut fl2, if self.flows.get(self.list_sel).is_some_and(|f| self.book.flow_is_off(&f.id)) { "Agent help for this flow: off (O)" } else { "Agent help for this flow: on (O)" }, MUTED, id::OFFER_FLOW, !self.flows.is_empty());
+                btn(g, &mut fl2, "Assist settings (G)", MUTED, id::DEFAULTS, true);
+                btn(g, &mut fl2, if self.assist_off { "Assist: STOPPED, switch on (K)" } else { "Stop all assist (K)" }, if self.assist_off { ERR } else { MUTED }, id::ASSIST_KILL, true);
             }
             Tab::Run => {
                 let (run, node) = (self.run.as_ref(), self.run_node.as_ref());
@@ -341,6 +344,12 @@ impl FlowsApp {
             }
             if failed.contains(&f.id) {
                 tag(g, "last run failed", ERR, true);
+            }
+            if self.sug_flows.contains(&f.id) {
+                tag(g, "suggestion waiting", MAGENTA, true);
+            }
+            if self.book.flow_is_off(&f.id) {
+                tag(g, "no agent help", MUTED, false);
             }
             if f.agent_changed {
                 tag(g, "agent changed", MAGENTA, true);
@@ -590,6 +599,10 @@ impl FlowsApp {
             self.draw_suggestions(g, area, s);
             return;
         }
+        if matches!(self.modal, Some(Modal::Defaults(_))) {
+            self.draw_defaults(g, area, s);
+            return;
+        }
         if let Some(Modal::Webhook(_)) = &self.modal {
             if let Some(Modal::Webhook(p)) = self.modal.take() {
                 self.draw_hooks(&p, g, area, s);
@@ -638,7 +651,7 @@ impl FlowsApp {
                 }
                 g.button(x + 110.0 * s, by, 12.5 * s, "Cancel", MUTED, Event::Key(crate::ui::Key::Esc));
             }
-            Modal::Suggestions(_) => {}
+            Modal::Suggestions(_) | Modal::Defaults(_) => {}
             Modal::Webhook(_) => {}
             Modal::History(h) => {
                 let p = fx::modal(g, area, s, 760.0 * s, 520.0 * s, ACCENT, false);

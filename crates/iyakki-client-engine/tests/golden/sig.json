@@ -1,0 +1,25 @@
+{
+  "about": "Golden vectors for the IYAKKI-SIG answer of a client: made with iyakki_link::sigscheme (the code behind clientlink::sign_answer). Shared by the Rust and node tests.",
+  "vectors": [
+    {
+      "authorization": "IYAKKI-SIG id=dab12cd34ef56a78,ts=1700000000,nonce=00112233445566778899aabbccddeeff,sig=7443ffc478a3911f97d9a5b50dcab6b453598bb7adb27e95e3d17fa75c26ec13e71304ec4afa7dd589e26cb4fa20066312d1d7c1867cd49f48fcf5e590d43e0a",
+      "challenge": "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00",
+      "device": "dab12cd34ef56a78",
+      "nonce": "00112233445566778899aabbccddeeff",
+      "public": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+      "seed": "0707070707070707070707070707070707070707070707070707070707070707",
+      "text": "iyakki-vault-v2\ndab12cd34ef56a78\nGET\n/client/ws\n1700000000\nc2a0b37a262809b4bd4ff5a29f3c0823b5c09cbb4e6b0669e453aae71f10c0ea\n00112233445566778899aabbccddeeff",
+      "ts": 1700000000
+    },
+    {
+      "authorization": "IYAKKI-SIG id=d0000000000000001,ts=1800000123,nonce=ffeeddccbbaa99887766554433221100aabbccdd,sig=3dc5664c9dc523d9124e6934c341e3f1df7b71dbd2864c94785230f4c5f1e2aa89987f8eeebdaec8ae3dba8335e0e35ca5e16fab0725ea5d277814817455230e",
+      "challenge": "a challenge with spaces and unicode é",
+      "device": "d0000000000000001",
+      "nonce": "ffeeddccbbaa99887766554433221100aabbccdd",
+      "public": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+      "seed": "4242424242424242424242424242424242424242424242424242424242424242",
+      "text": "iyakki-vault-v2\nd0000000000000001\nGET\n/client/ws\n1800000123\n401263417357c59bcf579dbfd30f906a60cee5951e8691b97f2c369f99b81273\nffeeddccbbaa99887766554433221100aabbccdd",
+      "ts": 1800000123
+    }
+  ]
+}

@@ -297,6 +297,29 @@ pub fn cloud_mode(setting: Setting, facts: &Facts) -> CloudMode {
     }
 }
 
+static WINDOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// What About and Settings say in the window.
+pub const WINDOW_WHY: &str = "Window mode is always desktop mode.";
+
+/// The desktop window (`iyakki-desktop`, `./run.sh window`) says so once at the start: from then on cloud mode is off, whatever the
+/// machine's facts and the setting are (the same effect as the boot parameter `iyakki.mode=desktop`). Real images and cloud pods
+/// never call this.
+pub fn set_window_mode(on: bool) {
+    WINDOW.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn window_mode() -> bool {
+    WINDOW.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Desktop mode with the window's explanation.
+pub fn window_desktop() -> CloudMode {
+    let mut d = CloudMode::desktop();
+    d.why = WINDOW_WHY.into();
+    d
+}
+
 /// The kernel command line of this start (`/proc/cmdline`), empty when it cannot be read. The one reader of that file in the agent crate:
 /// other code asks here (the shared kernel-access rule, tests/kernel_single_reader.rs).
 pub fn kernel_cmdline() -> String {
@@ -305,6 +328,9 @@ pub fn kernel_cmdline() -> String {
 
 /// The real machine: `/sys`, `/proc/cmdline` and `/etc/iyakki-release`.
 pub fn detect(setting: Setting) -> CloudMode {
+    if window_mode() {
+        return window_desktop();
+    }
     let cmdline = kernel_cmdline();
     let variant = crate::relinfo::ReleaseInfo::load(Path::new(crate::relinfo::RELEASE_FILE)).map(|r| r.variant).unwrap_or_default();
     cloud_mode(setting, &Facts::probe(Path::new("/"), &cmdline, &variant))
@@ -433,6 +459,26 @@ mod tests {
         assert!(!c.hides_menu("mac"));
         let c = cloud_mode(Setting::On, &Facts::full());
         assert!(c.hides_menu("mac") && c.hides_menu("media"), "forced hides them even on a Mac");
+    }
+
+    #[test]
+    fn window_mode_is_always_desktop_mode_whatever_the_facts_and_the_setting() {
+        // (the flag is process-wide: this is the only test that sets it, and it puts it back)
+        let was = window_mode();
+        set_window_mode(true);
+        for setting in [Setting::Auto, Setting::On, Setting::Off] {
+            let m = detect(setting);
+            assert!(!m.on && !m.forced && m.hidden_apps.is_empty() && m.audio_services && m.camera_watch, "{setting:?}: {}", m.why);
+            assert_eq!(m.why, WINDOW_WHY);
+        }
+        for a in [App::Radio, App::Media, App::Tales, App::Voice, App::Camera, App::Disks] {
+            assert!(!detect(Setting::On).hides_app(a), "{a:?} stays listed in the window");
+        }
+        set_window_mode(false);
+        // a real image is unchanged: facts and setting decide as before
+        assert!(cloud_mode(Setting::Auto, &Facts::bare()).on && cloud_mode(Setting::On, &Facts::full()).on);
+        assert!(!cloud_mode(Setting::Auto, &Facts::full()).on);
+        set_window_mode(was);
     }
 
     #[test]

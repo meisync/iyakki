@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use super::catalog::{sha256_hex, Entry};
 use super::license::{Check as LicenseCheck, LicenseStore, Token};
 use super::manifest::{canonical_set, Meta, Permission};
+use iyakki_core_api::appcaps::{self, ApprovalBook, CapabilityRequest, CardLine};
+use iyakki_core_api::bundle::Member;
 use super::trust::{look_alikes, Level, Verdict};
 use super::Store;
 use crate::pkg::{self, newer, PkgError};
@@ -83,6 +85,14 @@ pub struct Review {
     pub verdict: Verdict,
     pub steps: Vec<Step>,
     pub permissions: Vec<Perm>,
+    /// The core capabilities (device and system access) the app asks for, as in its `app.json`.
+    pub core_requests: Vec<CapabilityRequest>,
+    /// The same, worded for the card, with the hard asks and (on an update) the new ones marked.
+    pub core_lines: Vec<CardLine>,
+    /// A bundle's members, grouped for the card (docs/development/CORE-ACCESS-MODEL.md section 6d); empty for an app without `contents`.
+    pub members: Vec<super::bundle::MemberCard>,
+    /// The refusal is "needs a newer IYAKKI" (the app's `requires` or manifest version is ahead of this IYAKKI).
+    pub needs_newer_iyakki: bool,
     pub warnings: Vec<String>,
     pub scope: Scope,
     /// Why it cannot be installed, if it cannot.
@@ -94,6 +104,8 @@ pub struct Review {
     pub preview: Vec<String>,
     pub sha256: String,
     pub size: usize,
+    /// The bundle members that will be installed, with their files (not shown; `install` uses it).
+    member_install: Vec<(Member, Vec<u8>)>,
     input: Input,
 }
 
@@ -120,7 +132,12 @@ impl Review {
     }
 
     pub fn is_sensitive(&self) -> bool {
-        self.permissions.iter().any(|p| p.sensitive)
+        self.permissions.iter().any(|p| p.sensitive) || self.core_lines.iter().any(|l| l.hard_ask) || self.members.iter().any(|m| m.lines.iter().any(|l| l.hard_ask))
+    }
+
+    /// The app or one of its members asks for device and system access, so the person must answer the card.
+    pub fn asks_core(&self) -> bool {
+        !self.core_lines.is_empty() || self.members.iter().any(|m| !m.lines.is_empty())
     }
 
     /// The whole review as text: the approval prompt of the assistant, `iyakki pkg verify`, and tests.
@@ -141,6 +158,16 @@ impl Review {
             s.push_str("permissions: none\n");
         } else {
             s.push_str(&format!("permissions: {}\n", self.permissions.iter().map(|p| p.words.clone()).collect::<Vec<_>>().join("; ")));
+        }
+        if !self.core_lines.is_empty() {
+            s.push_str(&format!("device and system access: {}\n", self.core_lines.iter().map(|l| format!("{}{}{}", if l.is_new && self.installed.is_some() { "NEW " } else { "" }, l.words, if l.hard_ask { " (every use asks)" } else { "" })).collect::<Vec<_>>().join("; ")));
+        }
+        for m in &self.members {
+            let state = match &m.state {
+                super::bundle::MemberState::Install => String::new(),
+                super::bundle::MemberState::Skip(t) => format!(" ({t}, left out)"),
+            };
+            s.push_str(&format!("member {} [{}]{state}{}\n", m.name(), m.kind, if m.lines.is_empty() { String::new() } else { format!(": {}", m.lines.iter().map(|l| format!("{}{}{}", if l.is_new && self.installed.is_some() { "NEW " } else { "" }, l.words, if l.hard_ask { " (every use asks)" } else { "" })).collect::<Vec<_>>().join("; ")) }));
         }
         for w in &self.warnings {
             s.push_str(&format!("warning: {w}\n"));
@@ -345,6 +372,11 @@ impl Store {
             verdict: Verdict { level: Level::Unsigned, signer: None, publisher: None, label: "unknown".into(), chain: vec![], warnings: vec![], refusal: None },
             steps: vec![],
             permissions: vec![],
+            core_requests: vec![],
+            core_lines: vec![],
+            members: vec![],
+            needs_newer_iyakki: false,
+            member_install: vec![],
             warnings: vec![],
             scope: scope.clone(),
             refusal: None,
@@ -494,6 +526,23 @@ impl Store {
             "tile" => match super::tile::Bundle::from_payload(&package.payload) {
                 Ok(b) => {
                     actual = b.manifest.caps.permissions();
+                    r.core_requests = b.manifest.core_caps.clone();
+                    // what this IYAKKI can serve: the manifest version and `requires` (docs/development/CORE-COMPATIBILITY-DESIGN.md section 7)
+                    if let Err(e) = b.manifest.ext.check_core(iyakki_core_api::bundle::CORE_INTERFACE) {
+                        r.needs_newer_iyakki = e.update == iyakki_core_api::bundle::UpdateSide::Core;
+                        refuse(&mut r, e.message);
+                    }
+                    let key = record_key(&m.kind, &scope, &m.name);
+                    let backend = super::bundle::LiveMembers::new(self, svc, actor, &scope);
+                    let held = |id: &str| self.approval(&super::bundle::member_key(&key, id)).map(|a| a.grants.iter().filter(|g| !a.revoked.contains(g)).cloned().collect::<Vec<_>>()).unwrap_or_default();
+                    if !b.manifest.ext.is_newer() {
+                        let plan = super::bundle::plan_members(&b, &backend, &held);
+                        r.members = plan.cards;
+                        r.member_install = plan.install;
+                        if let Some(why) = plan.refusal {
+                            refuse(&mut r, why);
+                        }
+                    }
                     let mf = &b.manifest;
                     r.preview.push(format!("A custom app: “{}” gets its own tile in your launcher (group “{}”), opens full screen on its own private page and runs in the same sandbox as the browser.", mf.name, mf.group));
                     r.preview.push(if actual.is_empty() { "It asks for nothing: no saved data, no network, no files.".to_string() } else { format!("It asks for: {}.", actual.join(", ")) });
@@ -526,6 +575,11 @@ impl Store {
             .filter_map(|p| Permission::parse(p).ok())
             .map(|p| Perm { canonical: p.canonical(), words: if p == Permission::Run("{self}".into()) { "run IYAKKI itself as a tool server".into() } else { p.words(&actor.user) }, sensitive: p.sensitive() })
             .collect();
+        if !r.core_requests.is_empty() {
+            // what the installed version was approved for decides which lines are new (a first install: all of them)
+            let held = self.approval(&record_key(&m.kind, &scope, &m.name)).map(|a| a.grants.iter().filter(|g| !a.revoked.contains(g)).cloned().collect::<Vec<_>>()).unwrap_or_default();
+            r.core_lines = appcaps::card_lines(&r.core_requests, &held);
+        }
         // names that look like other apps
         let la = look_alikes(&m.name, &r.verdict.publisher.as_ref().map_or_else(|| r.meta.publisher.id.clone(), |p| p.id.clone()), &input.known);
         if !la.is_empty() {
@@ -619,7 +673,7 @@ impl Store {
         if let Some(why) = &review.refusal {
             return Err(InstallError::Refused(why.clone()));
         }
-        if !review.permissions.is_empty() && !confirm.permissions {
+        if (!review.permissions.is_empty() || review.asks_core()) && !confirm.permissions {
             return Err(InstallError::NeedsConfirmation("Confirm the permissions first.".into()));
         }
         if review.needs_warning_ack() && !confirm.warnings {
@@ -629,7 +683,7 @@ impl Store {
         if let Some(why) = &again.refusal {
             return Err(InstallError::Changed(format!("Something changed while you were looking: {why}")));
         }
-        if again.verdict.level != review.verdict.level || again.permissions != review.permissions || again.sha256 != review.sha256 {
+        if again.verdict.level != review.verdict.level || again.permissions != review.permissions || again.core_requests != review.core_requests || again.members != review.members || again.sha256 != review.sha256 {
             return Err(InstallError::Changed("The package or its trust level changed while you were looking. Open it again.".into()));
         }
         let bytes = &review.input.bytes;
@@ -637,6 +691,16 @@ impl Store {
         let package = pkg::parse(&text).map_err(|e| InstallError::Failed(e.to_string()))?;
         let (can_shared, can_own) = (actor.can_shared, actor.can_own);
         let scope = review.scope.clone();
+        // a bundle's members go first and all or none; if anything after them fails they are taken back
+        let backend = super::bundle::LiveMembers::new(self, svc, actor, &scope);
+        let bkey = record_key(&package.manifest.kind, &scope, &package.manifest.name);
+        let tx = if package.manifest.kind == "tile" {
+            let by = super::bundle::Approver { who: &actor.user, bundle: &package.manifest.name, version: &package.manifest.version, sha256: &package.manifest.sha256, at: self.now() };
+            Some(super::bundle::apply(self, &bkey, &backend, &again.member_install, &by).map_err(InstallError::Failed)?)
+        } else {
+            None
+        };
+        let main = (|| -> Result<(), InstallError> {
         match package.manifest.kind.as_str() {
             "skill" => {
                 let r = svc.packages.review(&text, &scope).map_err(|e| InstallError::Failed(e.to_string()))?;
@@ -667,8 +731,16 @@ impl Store {
             }
             other => return Err(InstallError::Refused(format!("{other} packages cannot be installed by this version."))),
         }
+        write_private(&self.pkg_copy(&package.manifest.sha256), bytes).map_err(InstallError::Failed)?;
+        Ok(())
+        })();
+        if let Err(e) = main {
+            if let Some(tx) = tx {
+                tx.rollback(&backend);
+            }
+            return Err(e);
+        }
         let m = &package.manifest;
-        write_private(&self.pkg_copy(&m.sha256), bytes).map_err(InstallError::Failed)?;
         let rec = Record {
             kind: m.kind.clone(),
             name: m.name.clone(),
@@ -687,13 +759,35 @@ impl Store {
         };
         let mut all = self.records();
         let old = all.insert(rec.key(), rec.clone());
-        self.save_records(&all).map_err(InstallError::Failed)?;
+        if let Err(e) = self.save_records(&all) {
+            if let Some(tx) = tx {
+                tx.rollback(&backend);
+            }
+            return Err(InstallError::Failed(e));
+        }
         self.raise_highwater(&m.kind, &m.name, &m.version);
+        // who approved which core capabilities, for which version; an update that asked for nothing new keeps what was held
+        if !review.core_requests.is_empty() {
+            let mut book = super::approvals::FileBook(self);
+            let held = book.get(&rec.key());
+            let mut a = appcaps::record_approval(&actor.user, &m.name, &m.version, &m.sha256, self.now(), &review.core_requests);
+            if let Some(h) = held.filter(|h| matches!(appcaps::plan_ask(Some(h), &review.core_requests), appcaps::AskPlan::Nothing)) {
+                a.revoked = h.revoked;
+            }
+            book.put(&rec.key(), a);
+        } else {
+            super::approvals::FileBook(self).remove(&rec.key());
+        }
         // the replaced version is kept for one generation (rollback); anything older goes
         self.after_install(&old, &rec, review.input.rollback);
         // the badge and the grouped notice count what is still waiting, not what was just installed
         if super::updatecheck::forget_installed(svc.dir(), &rec.kind, &rec.name, &rec.version) {
             super::updatenotice::refresh_existing(svc, &actor.user);
+        }
+        // an app that brings a setup wizard: put the ones that apply on the person's waiting list (nothing runs by itself)
+        if rec.kind == "tile" {
+            let from = old.as_ref().map(|o| o.version.clone());
+            super::wizardhook::after_install(self, svc.dir(), &actor.user, &rec.name, from.as_deref(), self.now());
         }
         Ok(rec)
     }
@@ -729,6 +823,10 @@ impl Store {
                 Ok(())
             }
             _ => {
+                if kind == "tile" {
+                    // the bundle's members, all or none
+                    super::bundle::remove_all(self, &record_key(kind, scope, name), &super::bundle::LiveMembers::new(self, svc, actor, scope))?;
+                }
                 if kind == "extension" && super::drivers::Drivers::for_data(self.data_dir()).installed().iter().any(|r| r.id == name) {
                     if !actor.admin {
                         return Err("Only administrators can remove a driver pack.".into());
@@ -760,6 +858,7 @@ impl Store {
             self.save_records(&all)?;
             // its pin, history and kept copies (this version's and the previous one's) go with it
             self.after_remove(&r);
+            super::wizardhook::forget_app(svc.dir(), &actor.user, name);
         }
         Ok(())
     }

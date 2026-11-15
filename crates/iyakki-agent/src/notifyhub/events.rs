@@ -78,6 +78,24 @@ impl Bus {
         n
     }
 
+    /// Queue an event for every connection of this bus (everyone signed in to the volume). Only for events that carry no data of
+    /// anyone (`changed`: an area name); what changed is read afterwards through the API, which checks who may see it.
+    pub fn publish_all(&self, ev: &str) -> usize {
+        let mut g = self.lock();
+        let mut n = 0;
+        for s in g.subs.values_mut() {
+            if s.q.len() >= QUEUE_CAP {
+                s.q.pop_front();
+                s.dropped += 1;
+            }
+            s.q.push_back(ev.to_string());
+            n += 1;
+        }
+        drop(g);
+        self.cv.notify_all();
+        n
+    }
+
     /// Everything queued for the connection, waiting up to `wait` for the first. Empty on timeout; `None` when it is gone.
     pub fn drain(&self, id: u64, wait: Duration) -> Option<Vec<String>> {
         let mut g = self.lock();
@@ -92,6 +110,15 @@ impl Bus {
 
     pub fn dropped(&self, id: u64) -> u64 {
         self.lock().subs.get(&id).map_or(0, |s| s.dropped)
+    }
+
+    /// The people who have at least one open connection now (each once).
+    pub fn users(&self) -> Vec<String> {
+        let g = self.lock();
+        let mut v: Vec<String> = g.subs.values().map(|s| s.user.clone()).collect();
+        v.sort();
+        v.dedup();
+        v
     }
 
     pub fn open(&self) -> usize {

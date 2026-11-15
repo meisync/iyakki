@@ -15,7 +15,7 @@ fn guard() -> TableSpec {
     let tun = IfName::Exact("iyvpn0".into());
     TableSpec {
         name: "iyakki_vpn".into(),
-        sets: vec![SetSpec { name: "vpn_dest4".into(), v4: true, timeout: true, members: vec![] }, SetSpec { name: "vpn_dest6".into(), v4: false, timeout: true, members: vec![] }],
+        sets: vec![SetSpec { name: "vpn_dest4".into(), v4: true, timeout: true, members: vec![], ranges: vec![], concat: vec![] }, SetSpec { name: "vpn_dest6".into(), v4: false, timeout: true, members: vec![], ranges: vec![], concat: vec![] }],
         chains: vec![ChainSpec {
             name: "output".into(),
             kind: ChainKind::Filter,

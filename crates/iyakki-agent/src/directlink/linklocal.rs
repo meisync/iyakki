@@ -3,7 +3,7 @@
 //! tried when somebody else has it. Also the fixed private pair (10.77.0.1 and 10.77.0.2) the two ends can agree on without talking:
 //! the lower MAC address gets the lower number. The ARP frames are built and read here; the raw socket is in [`super::real`].
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use super::Env;
 
@@ -49,6 +49,20 @@ pub fn candidate(mac: &[u8; 6], attempt: u32) -> Ipv4Addr {
     let v = (h >> 16) % (254 * 256);
     Ipv4Addr::new(169, 254, 1 + (v / 256) as u8, (v % 256) as u8)
 }
+
+/// The IPv6 link-local address a computer takes from its MAC address (modified EUI-64, RFC 4291 appendix A): `fe80::` then the MAC
+/// with `ff:fe` in the middle and the universal/local bit flipped.
+pub fn eui64_link_local(mac: &[u8; 6]) -> Ipv6Addr {
+    Ipv6Addr::from([0xfe, 0x80, 0, 0, 0, 0, 0, 0, mac[0] ^ 0x02, mac[1], mac[2], 0xff, 0xfe, mac[3], mac[4], mac[5]])
+}
+
+/// Is this an IPv6 link-local unicast address (`fe80::/10`)? Only these are taken from a beacon.
+pub fn is_link_local6(a: Ipv6Addr) -> bool {
+    a.segments()[0] & 0xffc0 == 0xfe80
+}
+
+/// Where an IPv6 beacon is sent: the all-nodes group of the link (`ff02::1`) on the beacon's own port, on one interface only.
+pub const BEACON_GROUP6: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1);
 
 pub fn is_link_local(ip: Ipv4Addr) -> bool {
     ip.octets()[0] == 169 && ip.octets()[1] == 254

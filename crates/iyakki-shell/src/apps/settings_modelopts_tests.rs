@@ -227,12 +227,21 @@ fn the_page_has_the_option_controls_inside_the_screen_at_four_sizes_and_they_wor
         let _ = scale;
         let scale = crate::shell::scale_for(w, h);
         let mut a = models_page(&cx);
-        let g = draw(&mut a, &cx, w, h);
+        let find = |g: &Gfx, k: char| g.hits.iter().find(|x| x.ev == Event::Key(Key::Char(k))).map(|x| x.rect);
+        let mut g = draw(&mut a, &cx, w, h);
+        // a window too short for the page scrolls it (the page's own bar, whatever the font): scroll down until the option buttons show
+        for _ in 0..60 {
+            let whole = |k: char| find(&g, k).is_some_and(|r| r.h >= 18.0 * scale);
+            if whole('L') && whole('o') || !a.body_bar.scrolls() {
+                break;
+            }
+            a.body_bar.by(a.body_bar.row);
+            g = draw(&mut a, &cx, w, h);
+        }
         for hit in g.hits.iter().filter(|x| x.rect.w > 0.0 && x.rect.h > 0.0) {
             let r = hit.rect;
             assert!(r.x >= -0.5 && r.x + r.w <= w as f32 + 0.5 && r.y + r.h <= h as f32 + 0.5, "{w}x{h}: {:?} {r:?}", hit.label);
         }
-        let find = |g: &Gfx, k: char| g.hits.iter().find(|x| x.ev == Event::Key(Key::Char(k))).map(|x| x.rect);
         for k in ['L', 'o'] {
             let r = find(&g, k).unwrap_or_else(|| panic!("{w}x{h}: no control for {k}"));
             assert!(r.h >= 18.0 * scale, "{w}x{h}: {k} is {} px tall", r.h);

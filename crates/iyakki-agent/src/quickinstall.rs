@@ -1483,7 +1483,7 @@ pub fn configure_kokoro_voice(svc: &std::sync::Arc<crate::services::Services>) -
     svc.use_local_lemonade(&base, version.as_deref());
     let want = crate::lemonade::api_base(&base);
     let id = {
-        let st = svc.settings.lock().unwrap();
+        let st = svc.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         st.get().providers.iter().find(|p| p.kind == crate::providers::Kind::Lemonade && p.base_url.as_deref().is_some_and(|u| crate::lemonade::api_base(u) == want)).map(|p| p.id.clone())
     };
     let Some(id) = id else { return false };
@@ -1491,7 +1491,7 @@ pub fn configure_kokoro_voice(svc: &std::sync::Arc<crate::services::Services>) -
         Ok(list) if list.iter().any(|m| m.id == "kokoro-v1" && m.downloaded) => {}
         _ => return false,
     }
-    let chosen = svc.settings.lock().unwrap().get().voice.tts.is_some();
+    let chosen = svc.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().voice.tts.is_some();
     if !chosen {
         let _ = svc.use_lemonade_voice(&id, "kokoro-v1", None);
     }
@@ -3158,6 +3158,10 @@ impl StepEnv for RealEnv {
         if let Some(id) = item.cli_id().filter(|_| item != Item::Ollama || !ollama_cluster::is_cluster_detail(detail)) {
             return self.clis.verify_runs(id).map(|l| format!("verified: `{id}` ran and said \"{l}\""));
         }
+        // a registry in another cluster was checked by its own step (`localreg::create` asks it for /v2/); this cluster's kubectl cannot see it
+        if item == Item::Registry && self.registry.target.is_some() {
+            return Ok(String::new());
+        }
         // a Deployment: all its pods Ready and its Service has an address behind it (the pods' readiness probes ask the program itself)
         if let Some((ns, deploy, svc)) = verify::target(item) {
             let d = self.k3s.kubectl(&["-n", ns, "get", "deployment", deploy, "-o", "jsonpath={.spec.replicas} {.status.readyReplicas}"]);
@@ -3183,6 +3187,33 @@ impl StepEnv for RealEnv {
                 let o = self.k3s.kubectl(&["get", "nodes", "-o", "json"]);
                 let n = crate::gpu_workloads::node_resource_count(&o.stdout, res);
                 if n > 0 { Ok(format!("verified: the node reports {res} = {n}")) } else { Err(format!("the node does not report {res}")) }
+            }
+            // the cluster: every node reports Ready (the step waited for it; this asks again, independently, before the marker)
+            Item::K3s => {
+                let o = self.k3s.kubectl(&["get", "nodes", "-o", "jsonpath={range .items[*]}{.status.conditions[?(@.type==\"Ready\")].status}{\" \"}{end}"]);
+                if o.code != Some(0) {
+                    return Err(format!("the cluster does not answer: {}", o.combined().trim()));
+                }
+                verify::nodes_ready_from(&o.stdout).map(|n| format!("verified: {n} node(s) report Ready"))
+            }
+            // the voice pack: Lemonade lists both models
+            Item::VoicePack => verify::voice_pack_note(&self.lemonade_models()?),
+            // the Mac firmware: the packs it names are recorded and their files are in the firmware folder
+            Item::MacFirmware => {
+                let o = crate::macfw::read_outcome(&self.data).ok_or("the run left no result to check")?;
+                let (fs, _) = iyakki_drivers::apply::Fs::for_data(&self.data);
+                let look = |id: &str| {
+                    iyakki_drivers::apply::read_record(&fs, id).map(|r| (r.files.len(), r.files.iter().filter(|f| fs.fw_root.join(f).exists()).count()))
+                };
+                let (w, b) = (look(crate::macfw::PACK_WIFI), look(crate::macfw::PACK_BT));
+                verify::mac_firmware_note(o.installed, &[(crate::macfw::PACK_WIFI, o.wifi_files, w.map(|x| x.0), w.map_or(0, |x| x.1)), (crate::macfw::PACK_BT, o.bt_files, b.map(|x| x.0), b.map_or(0, |x| x.1))])
+            }
+            // a sandbox is listed by the Linux apps store
+            Item::LinuxApps | Item::LinuxWindows => {
+                let name = if item == Item::LinuxApps { "debian" } else { "gui" };
+                let exe = std::env::current_exe().map_err(|e| format!("cannot find this program: {e}"))?;
+                let la = crate::linuxapps::LinuxApps::new(&self.data, &self.user, &exe, std::sync::Arc::new(crate::wsexec::System));
+                verify::sandbox_note(name, la.get(name).map(|_| ()))
             }
             _ => Ok(String::new()),
         }

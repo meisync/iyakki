@@ -135,3 +135,7 @@ if [ -n "${IYAKKI_SB_KEY:-}" ] && [ -n "${IYAKKI_SB_CERT:-}" ]; then
   sh "$(dirname "$0")/../../secureboot.sh" sign-modules "$TARGET_DIR/lib/modules" || { echo "post-build: module signing failed" >&2; exit 1; }
   echo "SECURE_BOOT_CERT_SHA1=$(openssl x509 -in "$IYAKKI_SB_CERT" -noout -fingerprint -sha1 | sed 's/.*=//')" >> "$TARGET_DIR/etc/iyakki-release"
 fi
+
+# the builder's home folder must not ship (a package compiled from the build tree records it): last step, so it also covers what the steps above installed.
+# The web variant runs its own hook after this one and scrubs again (board/iyakki-web/web-post-build.sh).
+sh "$(dirname "$0")/scrub-paths.sh" "$TARGET_DIR"

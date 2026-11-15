@@ -191,3 +191,14 @@ fn the_page_draws_inside_the_window_at_the_four_sizes() {
         }
     }
 }
+
+#[test]
+fn only_a_changed_rule_file_that_was_loaded_before_counts_as_a_change() {
+    let p = std::path::PathBuf::from("a.json");
+    let prev = (p.clone(), "x".to_string());
+    assert!(!super::super::browser_headers::rules_changed(None, &p, "x", false), "the first load is no change");
+    assert!(!super::super::browser_headers::rules_changed(Some(&prev), &p, "x", false));
+    assert!(super::super::browser_headers::rules_changed(Some(&prev), &p, "y", false));
+    assert!(super::super::browser_headers::rules_changed(Some(&prev), &p, "x", true), "a forced read of the same text is a change");
+    assert!(!super::super::browser_headers::rules_changed(Some(&prev), std::path::Path::new("b.json"), "y", true), "another person is not a change");
+}

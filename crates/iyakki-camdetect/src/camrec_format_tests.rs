@@ -203,3 +203,51 @@ fn h264_units_and_the_key_text_round_trip() {
     assert!(w.append(1, F_KEY, &[]).is_err());
     assert!(w.append(1, F_KEY, &vec![1u8; MAX_FRAME + 1]).is_err());
 }
+
+// ------------------------------------------------------------------------------ golden fixture (F-CORE-23, finding F-8)
+
+fn fixture_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/compat/alpha3/recording-v1.hex")
+}
+
+/// Writes `tests/compat/alpha3/recording-v1.hex` (once, when the release is cut; never edited after): two frames under a made-up key.
+#[test]
+#[ignore]
+fn record_alpha3_recording() {
+    if std::env::var("IYAKKI_COMPAT_RECORD").is_ok() {
+        let d = dir("record");
+        let p = d.join("seg.rec");
+        let mut w = SegmentWriter::create(&p, &key(7), RecKind::Jpeg, 1_700_000_000_000).unwrap();
+        w.append(1_000, F_KEY, &pic(40)).unwrap();
+        w.append(2_000, F_KEY, &pic(10)).unwrap();
+        drop(w);
+        let hex: String = std::fs::read(&p).unwrap().iter().map(|b| format!("{b:02x}")).collect();
+        std::fs::write(fixture_path(), hex + "\n").unwrap();
+    }
+}
+
+#[test]
+fn the_recording_alpha3_wrote_is_still_read_with_its_key_and_the_wrong_key_or_a_flipped_byte_is_refused() {
+    let t = std::fs::read_to_string(fixture_path()).unwrap();
+    let t = t.trim();
+    let bytes: Vec<u8> = (0..t.len() / 2).map(|i| u8::from_str_radix(&t[2 * i..2 * i + 2], 16).unwrap()).collect();
+    assert_eq!(&bytes[..8], b"IYAKREC1");
+    let d = dir("golden");
+    let p = d.join("seg.rec");
+    std::fs::write(&p, &bytes).unwrap();
+    let s = Segment::open(&p, &key(7)).unwrap();
+    assert_eq!((s.scan.kind, s.scan.start_ms, s.len()), (RecKind::Jpeg, 1_700_000_000_000, 2));
+    assert_eq!(s.frame(0).unwrap(), Frame { ts_ms: 1_000, flags: F_KEY, data: pic(40) });
+    assert_eq!(s.frame(1).unwrap(), Frame { ts_ms: 2_000, flags: F_KEY, data: pic(10) });
+    assert!(matches!(Segment::open(&p, &key(8)), Err(ReadErr::WrongKey)));
+    // a byte flipped inside the first frame is caught when that frame is read, and the other frame is still good
+    let mut bad = bytes.clone();
+    let at = s.scan.frames[0].offset as usize + 20;
+    bad[at] ^= 1;
+    let q = d.join("bad.rec");
+    std::fs::write(&q, &bad).unwrap();
+    let sb = Segment::open(&q, &key(7)).unwrap();
+    assert!(matches!(sb.frame(0), Err(ReadErr::Tampered(0))));
+    assert!(sb.frame(1).is_ok());
+    let _ = std::fs::remove_dir_all(&d);
+}

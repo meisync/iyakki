@@ -23,6 +23,7 @@ pub struct State {
     pub now: u64,
     pub forward: String,
     pub rules: Option<TableSpec>,
+    pub bridge_rules: Option<TableSpec>,
     pub zone: Vec<String>,
     pub addrs: Vec<(String, Ipv4Addr)>,
     pub saved: Option<Saved>,
@@ -229,6 +230,22 @@ impl Os for FakeOs {
     }
     fn rules_present(&mut self) -> Result<bool, String> {
         Ok(self.st().rules.is_some())
+    }
+    fn apply_bridge_rules(&mut self, spec: &TableSpec) -> Result<(), String> {
+        let mut s = self.st();
+        s.calls.push(format!("bridge-rules+ {}", spec.name));
+        if s.fail == Some("bridge-rules") {
+            return Err("kernel said no".into());
+        }
+        s.bridge_rules = Some(spec.clone());
+        Ok(())
+    }
+    fn remove_bridge_rules(&mut self) -> Result<(), String> {
+        let mut s = self.st();
+        if s.bridge_rules.take().is_some() {
+            s.calls.push("bridge-rules-".into());
+        }
+        Ok(())
     }
     fn set_firewall_zone(&mut self, z: Vec<String>) {
         let mut s = self.st();

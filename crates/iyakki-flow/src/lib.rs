@@ -11,6 +11,8 @@
 //! * [`heal`]: patches the agent may propose and the harness's classification. [`templates`]: ready-made flows.
 
 pub mod assist;
+pub mod assist_activity;
+pub mod assist_profile;
 pub mod assist_run;
 pub mod assist_store;
 pub mod driver;
@@ -29,6 +31,7 @@ pub mod runstore;
 pub mod sched;
 pub mod store;
 pub mod templates;
+pub mod thrift;
 pub mod validate;
 
 pub use engine::{ApplyScope, CardDecision, Counts, Engine, EngineCfg, StartOutcome, StartRequest};
@@ -37,3 +40,6 @@ pub use kinds::Registry;
 pub use model::*;
 pub use retry::{Backoff, ErrClass, NodeError, RetryPolicy};
 pub use store::{FlowSource, FlowStore};
+
+#[cfg(test)]
+mod fuzzkit;

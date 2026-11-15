@@ -13,6 +13,7 @@
 pub mod engine;
 pub mod resample;
 pub mod sink;
+pub mod sink_audioqueue;
 pub mod tee;
 #[cfg(test)]
 mod tests;
@@ -66,6 +67,11 @@ pub struct MixerCfg {
     /// Periods of mixed audio kept written ahead of the card (absorbs scheduling stalls; adds this much latency to ducking and
     /// to a new source). 15 periods are 300 ms.
     pub lead_periods: u32,
+    /// While a live source (the browser's sound) is open: periods kept written ahead of the card, and the device buffer and period
+    /// asked of the sink, in ms. See [`MixerCfg::with_live_target_ms`].
+    pub live_lead_periods: u32,
+    pub live_sink_buffer_ms: u32,
+    pub live_sink_period_ms: u32,
     /// Ask for a higher scheduling priority for the mixer thread (failure is ignored and noted in the status).
     pub raise_priority: bool,
     /// Sleep to the period clock. Tests turn this off to mix faster than real time.
@@ -74,7 +80,33 @@ pub struct MixerCfg {
 
 impl Default for MixerCfg {
     fn default() -> Self {
-        MixerCfg { engine: EngineCfg::default(), idle_ms: 1500, lead_periods: 15, raise_priority: true, realtime: true }
+        MixerCfg { engine: EngineCfg::default(), idle_ms: 1500, lead_periods: 15, live_lead_periods: 2, live_sink_buffer_ms: 40, live_sink_period_ms: 10, raise_priority: true, realtime: true }
+    }
+}
+
+/// The end-to-end budget for the browser's sound, ms (pipe + ring + device), before the page's own decoder. Settable with the
+/// environment variable `IYAKKI_WEB_AUDIO_LATENCY_MS` (20 to 500), default [`DEFAULT_LIVE_TARGET_MS`].
+pub const DEFAULT_LIVE_TARGET_MS: u32 = 100;
+
+impl MixerCfg {
+    /// Derive the live-source numbers from one target in ms: the device buffer 40 %, the source's ring 20 %, the lead of the mixer
+    /// the same as the device buffer (rounded to periods, at least 1), the start level as the ring. At 100 ms: device 40 ms in 10 ms
+    /// periods, ring 20 ms (one period), lead 2 periods, and the pipe of the web engine one page (4 KB, 21 ms).
+    pub fn with_live_target_ms(mut self, target_ms: u32) -> MixerCfg {
+        let t = target_ms.clamp(20, 500);
+        let period_ms = self.engine.period().as_millis().max(1) as u32;
+        self.live_sink_buffer_ms = (t * 40 / 100).max(10);
+        self.live_sink_period_ms = (self.live_sink_buffer_ms / 4).clamp(5, 50);
+        self.live_lead_periods = (self.live_sink_buffer_ms / period_ms).max(1);
+        self.engine.live_ring_ms = (t * 20 / 100).max(period_ms);
+        self.engine.live_prefill_ms = self.engine.live_ring_ms.min(period_ms);
+        self
+    }
+
+    /// The configuration of the process-wide mixer: defaults, with the live target from the environment when it holds a number.
+    pub fn from_env() -> MixerCfg {
+        let t = std::env::var("IYAKKI_WEB_AUDIO_LATENCY_MS").ok().and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(DEFAULT_LIVE_TARGET_MS);
+        MixerCfg::default().with_live_target_ms(t)
     }
 }
 
@@ -194,6 +226,12 @@ pub struct Mixer {
     thread: Mutex<Option<JoinHandle<()>>>,
 }
 
+impl std::fmt::Debug for Mixer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Mixer")
+    }
+}
+
 impl Mixer {
     /// Start the mixer thread (it sleeps until the first source arrives).
     pub fn start(cfg: MixerCfg, sink: Box<dyn Sink>) -> Mixer {
@@ -240,6 +278,17 @@ impl Mixer {
     /// `label` names the holder in messages; `exclusive` refuses every other source except alarms while this one is open (and,
     /// at unity gain, same rate and channels, passes its samples through unchanged).
     pub fn open_source_with(&self, kind: SourceKind, rate: u32, channels: usize, label: &str, exclusive: bool) -> Result<SourceWriter, MixError> {
+        self.open_inner(kind, rate, channels, label, exclusive, false)
+    }
+
+    /// A low-latency source for sound that must stay with a picture (the browser): a ring of a few ms, a start level of one
+    /// period, a short write-ahead of the mixer and a small device buffer while it is open (`MixerCfg::live_*`). The writer waits
+    /// when the ring is full, so the program is paced by the speaker with at most the ring queued.
+    pub fn open_live_source(&self, kind: SourceKind, rate: u32, channels: usize, label: &str) -> Result<SourceWriter, MixError> {
+        self.open_inner(kind, rate, channels, label, false, true)
+    }
+
+    fn open_inner(&self, kind: SourceKind, rate: u32, channels: usize, label: &str, exclusive: bool, live: bool) -> Result<SourceWriter, MixError> {
         let i = &self.inner;
         if i.shutdown.load(Ordering::SeqCst) {
             return Err(MixError::Closed);
@@ -278,7 +327,7 @@ impl Mixer {
             }
         }
         let id = i.next_id.fetch_add(1, Ordering::SeqCst);
-        let shared = SourceShared::new(id, kind, label, rate, channels, exclusive, i.wake.clone());
+        let shared = SourceShared::new_with(id, kind, label, rate, channels, exclusive, i.wake.clone(), live.then_some(i.cfg.engine.live_ring_ms));
         shared.set_level(level_of(label));
         reg.push(shared.clone());
         drop(reg);
@@ -360,7 +409,7 @@ fn raise_thread_priority() -> String {
         }
         let mut sp: libc::sched_param = std::mem::zeroed();
         sp.sched_priority = 10;
-        if libc::sched_setscheduler(0, libc::SCHED_RR, &sp) == 0 {
+        if crate::oscompat::sched_setscheduler(0, libc::SCHED_RR, &sp) == 0 {
             what = "realtime 10".into();
         }
         what
@@ -375,7 +424,10 @@ fn run(inner: Arc<Inner>, mut sink: Box<dyn Sink>) {
     let mut engine = Engine::new(cfg.engine);
     let period = cfg.engine.period();
     let period_ms = period.as_secs_f32() * 1000.0;
-    let lead = period * cfg.lead_periods;
+    let normal_lead = period * cfg.lead_periods;
+    let live_lead = period * cfg.live_lead_periods.max(1).min(cfg.lead_periods.max(1));
+    let live_profile = (cfg.live_sink_buffer_ms, cfg.live_sink_period_ms);
+    let mut lead: Duration;
     let mut out: Vec<i16> = Vec::with_capacity(cfg.engine.period_frames * cfg.engine.channels);
     // the card's timeline: it began playing at `anchor` and has been given `written` of audio since
     let mut anchor = Instant::now();
@@ -425,6 +477,18 @@ fn run(inner: Arc<Inner>, mut sink: Box<dyn Sink>) {
             sink.close();
             inner.wake.end_us.store(0, Ordering::SeqCst);
         }
+        // a live source (the browser) wants a short lead and a small device buffer: a device opened with the big one is closed
+        // without play-out and opened again (a gap of a few tens of ms, once). The big one comes back only after the card slept
+        let want_live = engine.has_live();
+        if want_live && sink.is_open() && sink.low_latency().is_none() {
+            log::info!("mixer: a live source arrived; the sound device is reopened with a small buffer");
+            sink.abort();
+            inner.wake.end_us.store(0, Ordering::SeqCst);
+        }
+        if !sink.is_open() {
+            sink.set_low_latency(want_live.then_some(live_profile));
+        }
+        lead = if sink.is_open() && sink.low_latency().is_some() { live_lead } else { normal_lead };
         // the card must be open before audio is taken from the sources
         if !sink.is_open() && engine.wants_sink() {
             if retry_at.is_none_or(|t| Instant::now() >= t) {
@@ -435,9 +499,10 @@ fn run(inner: Arc<Inner>, mut sink: Box<dyn Sink>) {
                         // (some may hold less than the lead) are drained at the pace of the clock from the first sound on
                         anchor = Instant::now();
                         written = Duration::ZERO;
+                        lead = if sink.low_latency().is_some() { live_lead } else { normal_lead };
                         if cfg.realtime {
                             let zeros = vec![0i16; cfg.engine.period_frames * cfg.engine.channels];
-                            for _ in 0..cfg.lead_periods {
+                            for _ in 0..(lead.as_micros() / period.as_micros().max(1)) as u32 {
                                 if sink.write(&zeros).is_err() {
                                     break;
                                 }
@@ -590,7 +655,11 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 pub fn global() -> &'static Mixer {
     GLOBAL.get_or_init(|| {
         // the sound also goes to the web pages that listen to the session (nothing is sent when none does)
-        let m = Mixer::start(MixerCfg::default(), Box::new(tee::TeeSink::browser(Box::new(AplaySink::system()))));
+        #[cfg(target_os = "macos")]
+        let device: Box<dyn Sink> = Box::new(sink_audioqueue::AudioQueueSink::new());
+        #[cfg(not(target_os = "macos"))]
+        let device: Box<dyn Sink> = Box::new(AplaySink::system());
+        let m = Mixer::start(MixerCfg::from_env(), Box::new(tee::TeeSink::browser(device)));
         // the software volume lives in the `iyakki` PCM the mixer plays into; where players must scale themselves
         // (no softvol), the factor is applied here
         m.set_master_fn(|| crate::audioout::global().gain() as f32 / 100.0);
@@ -612,7 +681,8 @@ pub fn set_enabled(on: bool) {
 
 pub fn enabled() -> bool {
     // a page that listens to the session needs the mixer, whatever Settings -> Sound says: it is where the browser gets its sound
-    PINNED_OFF.load(Ordering::SeqCst) == 0 && (ENABLED.load(Ordering::SeqCst) || crate::browsermedia::audio_listeners())
+    // on a Mac the mixer is the only way to the speakers (there is no aplay): it is always on
+    PINNED_OFF.load(Ordering::SeqCst) == 0 && (cfg!(target_os = "macos") || ENABLED.load(Ordering::SeqCst) || crate::browsermedia::audio_listeners())
 }
 
 // Test isolation. The switch is process-wide and any test that changes sound settings flips it, so tests that need a known
@@ -625,6 +695,15 @@ static OWNER: Mutex<Option<std::thread::ThreadId>> = Mutex::new(None);
 /// False while another thread's test owns the sound switches ([`exclusive_route`]).
 pub(crate) fn may_change_switches() -> bool {
     OWNER.lock().unwrap_or_else(|e| e.into_inner()).is_none_or(|o| o == std::thread::current().id())
+}
+
+/// Tests only: one real-time mixer test at a time. Their mixer threads are paced by the wall clock (a period every 20 ms) and their
+/// assertions are about what the card heard in that time; several of them starting at once, with everything else the test run does,
+/// moves each other's timing by tens of milliseconds, so they take turns.
+#[cfg(test)]
+pub(crate) fn rt_serial() -> std::sync::MutexGuard<'static, ()> {
+    static RT: Mutex<()> = Mutex::new(());
+    RT.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// While alive, the mixer is off for every thread, whatever other tests set: sounds go to the play command.

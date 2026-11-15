@@ -51,7 +51,7 @@ fn header_role(h: &str) -> &'static str {
         "phase" | "milestone" | "stage" => "phase",
         "status" | "state" => "status",
         "pri" | "priority" | "prio" => "priority",
-        "progress" | "done %" | "percent" | "%" => "progress",
+        "progress" | "done %" | "percent" | "%" | "impl/test" => "progress",
         "tests" | "test" | "evidence" => "tests",
         "notes" | "comments" | "comment" | "note" | "remarks" => "notes",
         "blockers" | "blocker" | "blocked by" | "blocked" => "blockers",
@@ -198,8 +198,8 @@ impl Feature {
             }
             "planned" if p.is_some_and(|p| p != 0) => w.push("planned should be 0%".into()),
             "partial" => {
-                if p.is_some_and(|p| !(1..=99).contains(&p)) {
-                    w.push("partial should be 1%..99%".into());
+                if p.is_some_and(|p| p > 100) {
+                    w.push("partial should be at most 100".into());
                 }
                 if self.tests.is_empty() {
                     w.push("partial needs at least one test listed".into());
@@ -498,7 +498,8 @@ impl Board {
         let (tests, mut criteria): (Vec<String>, Vec<String>) = split_list(&tests_cell).into_iter().partition(|t| is_test_name(t));
         criteria.extend(split_list(&blank(get(c.acceptance))));
         let files: Vec<String> = split_list(&blank(get(c.files)));
-        let progress = blank(get(c.progress)).trim().trim_end_matches('%').trim().parse::<u32>().ok();
+        // `Impl/Test` cells (`100/60`) carry the implementation share first
+        let progress = blank(get(c.progress)).split('/').next().unwrap_or_default().trim().trim_end_matches('%').trim().parse::<u32>().ok();
         Feature {
             id: r.cells[c.id].clone(),
             title: get(c.title),
@@ -565,7 +566,28 @@ impl Board {
     pub fn totals_text(&self) -> String {
         let counts = self.count_by_status();
         let order = self.summary_order();
-        order.iter().map(|k| if k == "total" { format!("total {}", self.rows.len()) } else { format!("{k} {}", counts.get(k).copied().unwrap_or(0)) }).collect::<Vec<_>>().join(" · ")
+        order.iter().map(|k| if k == "total" { format!("total {}", self.rows.len()) } else { format!("{k} {}{}", counts.get(k).copied().unwrap_or(0), if k == "partial" { self.partial_split() } else { String::new() }) }).collect::<Vec<_>>().join(" · ")
+    }
+
+    /// ` (impl open N · unproven N)` for a table whose progress column is an `Impl/Test` column (cells `100/60`, the next column `Manual`), else nothing.
+    fn partial_split(&self) -> String {
+        let Some(c) = self.cols.as_ref() else { return String::new() };
+        let (Some(pc), sc) = (c.progress, c.status) else { return String::new() };
+        let (mut open, mut unproven, mut any) = (0, 0, false);
+        for r in &self.rows {
+            let Some((i, t)) = r.cells.get(pc).and_then(|x| x.split_once('/')) else { continue };
+            any = true;
+            if r.cells.get(sc).map(String::as_str) != Some("partial") {
+                continue;
+            }
+            let manual = r.cells.get(pc + 1).map(String::as_str).unwrap_or("");
+            if i.trim().parse::<u32>().unwrap_or(0) < 100 {
+                open += 1;
+            } else if t.trim().parse::<u32>().unwrap_or(0) < 100 || manual == "needed" || manual.starts_with("failed") {
+                unproven += 1;
+            }
+        }
+        if any { format!(" (impl open {open} · unproven {unproven})") } else { String::new() }
     }
 
     fn summary_span(&self) -> Option<(usize, usize, usize)> {
@@ -581,7 +603,7 @@ impl Board {
 
     fn summary_order(&self) -> Vec<String> {
         if let Some((n, a, b)) = self.summary_span() {
-            let words: Vec<String> = self.lines[n][a..b].split(" · ").filter_map(|p| p.split_whitespace().next().map(str::to_string)).collect();
+            let words: Vec<String> = self.lines[n][a..b].split(" · ").filter_map(|p| p.split_whitespace().next().map(str::to_string)).filter(|w| w != "unproven").collect();
             if !words.is_empty() {
                 return words;
             }
@@ -655,6 +677,14 @@ impl Board {
         Ok(())
     }
 
+    /// The text for a progress cell: `NN%`, or `NN/<test>` where the column is an `Impl/Test` column (the test part is kept).
+    fn progress_text(&self, row: usize, col: usize, p: u32) -> String {
+        match self.rows[row].cells.get(col).and_then(|c| c.split_once('/')) {
+            Some((_, t)) => format!("{p}/{}", t.trim()),
+            None => format!("{p}%"),
+        }
+    }
+
     /// Change fields of a feature. Moving to `done` sets 100%, to `planned` sets 0% and to `partial` keeps a value in
     /// 1..99 (else 50%) when the table has a percentage. Returns the warnings the row has afterwards (nothing is refused
     /// for them; the board asks the person for a comment first).
@@ -683,7 +713,8 @@ impl Board {
                     _ => None,
                 };
                 if let (Some(p), true) = (new, u.progress.is_none()) {
-                    self.write_cell(row, pc, &format!("{p}%"))?;
+                    let v = self.progress_text(row, pc, p);
+                    self.write_cell(row, pc, &v)?;
                 }
             }
         }
@@ -697,7 +728,8 @@ impl Board {
         }
         if let Some(p) = u.progress {
             let col = c.progress.ok_or("this table has no progress column")?;
-            self.write_cell(row, col, &format!("{}%", p.min(100)))?;
+            let v = self.progress_text(row, col, p.min(100));
+            self.write_cell(row, col, &v)?;
         }
         if let Some(t) = &u.title {
             let col = c.title.ok_or("this table has no title column")?;

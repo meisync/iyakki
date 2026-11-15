@@ -69,6 +69,11 @@
     session = null;
   }
 
+  // is the event stream up right now? (the pages slow their timers down while it is)
+  function live() {
+    return !!(session && session.connected());
+  }
+
   // Draw the bell into `slot` and keep it fresh. env: {api, el, slot, location, WebSocket, setTimeout, clearTimeout, setInterval, clearInterval, go}
   function mount(env) {
     stop();
@@ -115,7 +120,9 @@
         const msg = parseMessage(m.data);
         if (!msg) return;
         if (msg.type === "ready") { live = true; attempt = 0; refresh(); return; }
-        if (msg.type === "notification" || msg.type === "count" || msg.type === "approval") { refresh(); fire(msg); }
+        if (msg.type === "notification" || msg.type === "count" || msg.type === "approval") { refresh(); fire(msg); return; }
+        // the server says some data of the page area changed (no data in the message: the page asks the API again)
+        if (msg.type === "changed") fire(msg);
       };
       s.onclose = () => {
         live = false;
@@ -143,7 +150,7 @@
     return session;
   }
 
-  const exported = { mount, stop, subscribe, badgeText, label, socketUrl, retryDelay, parseMessage, tokenOf, POLL_MS };
+  const exported = { mount, stop, live, subscribe, badgeText, label, socketUrl, retryDelay, parseMessage, tokenOf, POLL_MS };
   if (typeof module !== "undefined" && module.exports) module.exports = exported;
   else root.iyakkiBell = exported;
 })(typeof window !== "undefined" ? window : globalThis);

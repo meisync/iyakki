@@ -95,3 +95,13 @@ run and stop is in the audit log (`imageapp.run`, `imageapp.stop`).
 Catalog parsing, the refusal of a tag without a digest and of malformed references, the placeholder rule, the generated Namespace/Deployment/Service
 (no host network, no host path, no privilege, capabilities dropped, read-only root with volumes, the digest in the image), the exact `kubectl`
 arguments for run and stop, and the import of a tarball (including a hostile one) are in `crates/iyakki-agent/src/linuxapps_tests.rs`. A real cluster was not used.
+
+## Route D: build the image on this computer, in the dev cluster (written 2026-11-13, never run on a cluster)
+
+The assistant tool `image_build` (administrators; it asks every time) packs a folder of your home that holds a `Containerfile` or `Dockerfile` into a ConfigMap and runs a
+build Job in the namespace `iyakki-build` of the dev cluster: a builder image runs `buildah bud` and `buildah push` to the in-cluster registry (`localhost:30500`), prints the image
+digest, and the result is written as an image app (`<data>/image-apps/<id>.json`, pinned by that digest, with the licence and port you gave). The folder may weigh 700 KB and hold 400
+files; `.env*`, key files, `.git`, `node_modules` and links are left out and listed on the card. The Job has no service-account token, runs at most 15 minutes with 2 GB of memory
+and removes itself and its ConfigMap. **It needs a builder image pinned by digest** in `<data>/image-builder.json` (`{"image": "name@sha256:..."}`); none is chosen yet, so
+nothing builds until an administrator sets one. Code: `imagebuild.rs`, `imagebuildtools.rs`.
+\n

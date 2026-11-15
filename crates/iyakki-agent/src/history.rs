@@ -41,6 +41,15 @@ pub struct Snippet {
     pub text: String,
 }
 
+/// One workspace's history, for Settings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceMemory {
+    pub id: String,
+    pub name: String,
+    pub entries: usize,
+    pub chats: usize,
+}
+
 #[derive(Clone)]
 pub struct History {
     kb: Arc<Mutex<KnowledgeBase>>,
@@ -141,6 +150,13 @@ impl History {
         let _ = self.kb.lock().unwrap_or_else(|e| e.into_inner()).drop_namespace(&self.ns);
     }
 
+    /// Forget what the session this history was made for did.
+    pub fn forget_current_session(&self) {
+        if !self.session.is_empty() {
+            self.forget_session(&self.session.clone());
+        }
+    }
+
     /// Forget what one session did (when its chat is deleted).
     pub fn forget_session(&self, session: &str) {
         let s = slug(session);
@@ -163,6 +179,67 @@ impl History {
                 if parse_tag(&d.title).2 == s && kb.remove_document(&ns, &d.id).is_ok() {
                     n += 1;
                 }
+            }
+        }
+        n
+    }
+
+    /// The workspaces of `user` that have a history: (id, workspace name as stored, entries, chats).
+    pub fn workspaces_of(kb: &Arc<Mutex<KnowledgeBase>>, user: &str) -> Vec<WorkspaceMemory> {
+        let prefix = format!("workspace/{}/", slug(user));
+        let kb = kb.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out = Vec::new();
+        for ns in kb.namespaces().into_iter().filter(|n| n.starts_with(&prefix)) {
+            let docs = kb.docs(&ns);
+            if docs.is_empty() {
+                continue;
+            }
+            let mut sessions: Vec<String> = docs.iter().map(|d| parse_tag(&d.title).2).filter(|s| !s.is_empty()).collect();
+            sessions.sort();
+            sessions.dedup();
+            out.push(WorkspaceMemory { name: ns[prefix.len()..].to_string(), id: ns.clone(), entries: docs.len(), chats: sessions.len() });
+        }
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+
+    /// The chats that left entries in one workspace of `user` (by the workspace name `workspaces_of` gave): (chat id as stored, entries).
+    pub fn sessions_of(kb: &Arc<Mutex<KnowledgeBase>>, user: &str, workspace: &str) -> Vec<(String, usize)> {
+        let ns = format!("workspace/{}/{}", slug(user), slug(workspace));
+        let kb = kb.lock().unwrap_or_else(|e| e.into_inner());
+        let mut m: std::collections::BTreeMap<String, usize> = Default::default();
+        for d in kb.docs(&ns) {
+            let s = parse_tag(&d.title).2;
+            if !s.is_empty() {
+                *m.entry(s).or_default() += 1;
+            }
+        }
+        m.into_iter().collect()
+    }
+
+    /// The name a workspace has in the lists of [`History::workspaces_of`].
+    pub fn workspace_key(name: &str) -> String {
+        slug(name)
+    }
+
+    /// Forget all of one workspace's history (the person's own namespace only); how many entries went.
+    pub fn forget_workspace_of(kb: &Arc<Mutex<KnowledgeBase>>, user: &str, workspace: &str) -> usize {
+        let ns = format!("workspace/{}/{}", slug(user), slug(workspace));
+        let mut kb = kb.lock().unwrap_or_else(|e| e.into_inner());
+        let n = kb.docs(&ns).len();
+        let _ = kb.drop_namespace(&ns);
+        n
+    }
+
+    /// Forget what one chat did in one workspace of `user`; how many entries went.
+    pub fn forget_session_of(kb: &Arc<Mutex<KnowledgeBase>>, user: &str, workspace: &str, session: &str) -> usize {
+        let ns = format!("workspace/{}/{}", slug(user), slug(workspace));
+        let s = slug(session);
+        let mut kb = kb.lock().unwrap_or_else(|e| e.into_inner());
+        let mut n = 0;
+        for d in kb.docs(&ns) {
+            if parse_tag(&d.title).2 == s && kb.remove_document(&ns, &d.id).is_ok() {
+                n += 1;
             }
         }
         n

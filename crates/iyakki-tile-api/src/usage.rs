@@ -66,3 +66,15 @@ pub trait UsageSource {
     /// The chart data for `range` ending at `now_unix`, for one person (`Some(name)`) or for everyone (`None`).
     fn series(&self, range: Range, now_unix: i64, user: Option<&str>) -> Series;
 }
+
+/// A source with no numbers, for the tiles that are not the usage chart (their `TileCx` carries it).
+pub struct NoUsage;
+
+impl UsageSource for NoUsage {
+    fn now_unix(&self) -> i64 {
+        0
+    }
+    fn series(&self, _: Range, _: i64, _: Option<&str>) -> Series {
+        Series { models: Vec::new(), buckets: Vec::new(), totals: Vec::new(), input: 0, output: 0, calls: 0 }
+    }
+}

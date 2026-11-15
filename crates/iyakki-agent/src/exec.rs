@@ -165,6 +165,8 @@ pub fn run_prepared(mut cmd: Command, program: &str, seconds: u64, sink: Option<
         }
     }
     let mut child = spawned.ok_or_else(|| format!("could not start `{program}`"))?;
+    // a program started for a person is hers in SYSTEM's "My processes" while it runs (see `procowner`)
+    let _claim = crate::procowner::current_user().map(|u| crate::procowner::claim(child.id(), &u, program.rsplit('/').next().unwrap_or(program)));
     let out = read_capped(child.stdout.take().ok_or("no output pipe")?, sink.clone());
     let err = read_capped(child.stderr.take().ok_or("no error pipe")?, sink);
     let limit = Duration::from_secs(seconds.clamp(1, MAX_SECONDS));

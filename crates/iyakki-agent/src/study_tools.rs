@@ -11,10 +11,10 @@ use crate::clock::{now_unix, Zone};
 use crate::services::Services;
 use crate::study::{plan_line, plan_text, quiz_line, results_text, PlanSpec};
 
-pub const NAMES: [&str; 15] = [
+pub const NAMES: [&str; 16] = [
     "study_plan_create", "study_plan_list", "study_plan_progress", "study_plan_to_calendar", "study_plan_calendar_remove", "study_plan_delete",
     "quiz_create", "quiz_list", "quiz_results", "quiz_next", "quiz_answer", "quiz_report", "quiz_open", "quiz_delete",
-    "study_lesson_open",
+    "study_lesson_open", "study_export_pdf",
 ];
 
 fn def(name: &str, desc: &str, props: Value, required: &[&str], risk: Risk) -> ToolDef {
@@ -40,6 +40,8 @@ pub fn defs(calendar: bool) -> Vec<ToolDef> {
         def("quiz_report", "The person says a question is wrong (a wrong answer key or a bad question): leave it out of the score from now on (`wrong` false takes the report back). `question` is its number.", json!({"id": s, "question": i, "wrong": {"type": "boolean"}}), &["id", "question"], Risk::Safe),
         def("quiz_open", "Bring the person to the LEARN tile: leaves a note in their inbox that opens a quiz (`id` of a quiz) or a plan (`plan` with a plan id). Say you did.", json!({"id": s, "plan": s}), &[], Risk::Safe),
         def("study_lesson_open", "Bring the person to the lesson of one day of a study plan in the LEARN tile: leaves a note in their inbox that opens it. `plan` is the plan id, `session` the day's number (1, 2, ...). The tile writes the lesson (text with pictures) itself the first time and keeps it, so you do not write it; the person can also click any day of a plan there. Say you did.", json!({"plan": s, "session": i}), &["plan", "session"], Risk::Safe),
+        def("study_export_pdf", "Make a PDF file of a study plan (syllabus and day list), a quiz (questions; `answer_key` true adds the key on its own page, default false) or a day's lesson (kind lesson, id = plan, session = day). Written by the program from the saved data. Asks first; never overwrites.",
+            json!({"kind": {"type": "string", "enum": ["plan", "quiz", "lesson"]}, "id": s, "session": i, "answer_key": {"type": "boolean"}, "path": s, "size": {"type": "string", "enum": ["A4", "Letter"]}}), &["kind", "id"], Risk::Ask),
         def("quiz_delete", "Delete a quiz and its results. Asks the user first.", json!({"id": s}), &["id"], Risk::Ask),
     ];
     if calendar {
@@ -56,6 +58,7 @@ pub fn describe(name: &str, args: &Value) -> Option<String> {
         "study_plan_calendar_remove" => format!("remove the calendar events of the study plan {}", s("id")),
         "study_plan_delete" => format!("delete the study plan {} and its calendar events", s("id")),
         "quiz_delete" => format!("delete the quiz {} and its results", s("id")),
+        "study_export_pdf" => format!("make a PDF of the {} {}{}", s("kind"), s("id"), if args.get("answer_key").and_then(Value::as_bool) == Some(true) { " with its answer key" } else { "" }),
         "study_plan_create" => format!("make a study plan “{}”", s("topic")),
         "quiz_create" => format!("save a quiz “{}”", s("topic")),
         _ => return None,

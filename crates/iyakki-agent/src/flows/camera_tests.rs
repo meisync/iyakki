@@ -27,11 +27,19 @@ impl iyakki_proxy::Upstream for Dead {
 struct FakeCam {
     taken: Mutex<Vec<PathBuf>>,
     none: bool,
+    /// Several cameras by their listed names (empty: the one "video0: Test camera").
+    names: Vec<String>,
+    /// The device each photo was asked for.
+    asked: Mutex<Vec<String>>,
 }
 
 impl CameraBackend for FakeCam {
     fn cameras(&self) -> Vec<String> {
-        if self.none { vec![] } else { vec!["video0: Test camera".into()] }
+        if self.none { vec![] } else if !self.names.is_empty() { self.names.clone() } else { vec!["video0: Test camera".into()] }
+    }
+    fn photo_from(&self, dir: &Path, device: &str) -> Result<PathBuf, String> {
+        self.asked.lock().unwrap().push(device.to_string());
+        self.photo(dir)
     }
     fn photo(&self, dir: &Path) -> Result<PathBuf, String> {
         let p = dir.join(format!("photo-{}.jpg", self.taken.lock().unwrap().len() + 1));
@@ -526,4 +534,57 @@ fn an_agent_step_that_shows_a_picture_with_no_vision_model_asks_for_a_choice_and
     assert!(r.nodes["ask"].needs_person && r.nodes["ask"].permission == "choice");
     // no permission request is made for a choice
     assert!(c.env.svc.browser.consent.pending(&c.env.user).is_empty());
+}
+
+#[test]
+fn the_camera_a_node_names_is_the_one_the_backend_is_asked_for_and_an_unknown_name_takes_no_picture() {
+    let cam = FakeCam { names: vec!["video0: HD 4MP WEBCAM".into(), "video2: Desk Camera".into()], ..Default::default() };
+    let c = setup("named", cam, "qwen2.5vl:7b", crate::providers::Kind::Ollama);
+    let req = |device: &str| iyakki_flow::host::CamPhotoRequest { flow_id: "f".into(), run_id: "r1".into(), node_id: "shot".into(), device: device.into(), keep: false, allowed: true, unattended: false, attended: true, needs_vision: false };
+    let cancel = iyakki_flow::Cancel::new();
+    let r = c.env.host.cam_photo_impl(&req("desk"), &cancel).unwrap();
+    assert_eq!(r.device, "video2: Desk Camera", "the result names the camera that was used");
+    let r = c.env.host.cam_photo_impl(&req(""), &cancel).unwrap();
+    assert_eq!(r.device, "video0: HD 4MP WEBCAM", "no name: the usual one");
+    assert_eq!(*c.cam.asked.lock().unwrap(), vec!["desk".to_string(), String::new()], "the backend was asked for the named camera");
+    let e = c.env.host.cam_photo_impl(&req("nonesuch"), &cancel).unwrap_err();
+    assert!(e.message.contains("no connected camera called") && e.message.contains("Desk Camera"), "{}", e.message);
+    assert_eq!(c.cam.taken.lock().unwrap().len(), 2, "no third picture was taken");
+}
+
+#[test]
+fn the_assistants_camera_list_and_the_flow_node_see_exactly_the_same_cameras() {
+    let names = vec!["video0: HD 4MP WEBCAM".to_string(), "video2: Desk Camera".to_string()];
+    let cam = FakeCam { names: names.clone(), ..Default::default() };
+    let c = setup("samelist", cam, "qwen2.5vl:7b", crate::providers::Kind::Ollama);
+    let mut p = Role::User.template();
+    p.apps.insert(iyakki_sec::policy::App::Camera);
+    let listed = crate::camtools::call("camera_list", &json!({}), &c.env.svc, &p, &c.env.user).unwrap();
+    assert_eq!(listed, format!("2 camera(s):\n{}", names.join("\n")));
+    // the flow node's message for a name that matches none carries the same strings, in the same order
+    let req = iyakki_flow::host::CamPhotoRequest { flow_id: "f".into(), run_id: "r1".into(), node_id: "shot".into(), device: "nonesuch".into(), keep: false, allowed: true, unattended: false, attended: true, needs_vision: false };
+    let e = c.env.host.cam_photo_impl(&req, &iyakki_flow::Cancel::new()).unwrap_err();
+    assert!(e.message.contains(&format!("Connected: {}.", names.join("; "))), "{}", e.message);
+    // and with nothing plugged in both say so
+    let none = setup("samelist-none", FakeCam { none: true, ..Default::default() }, "qwen2.5vl:7b", crate::providers::Kind::Ollama);
+    assert!(crate::camtools::call("camera_list", &json!({}), &none.env.svc, &p, &none.env.user).unwrap().starts_with("No camera is connected."));
+    assert!(none.env.host.cam_photo_impl(&req, &iyakki_flow::Cancel::new()).unwrap_err().message.starts_with("No camera is connected."));
+}
+
+#[test]
+fn the_assistant_and_a_flow_node_see_the_same_list_of_cameras_the_camera_tile_lists() {
+    let names = vec!["video0: HD 4MP WEBCAM".to_string(), "video2: Desk Camera".to_string()];
+    let c = setup("samelist-tile", FakeCam { names: names.clone(), ..Default::default() }, "qwen2.5vl:7b", crate::providers::Kind::Ollama);
+    // the assistant's tool
+    let mut p: iyakki_sec::policy::Policy = iyakki_sec::policy::Role::User.template();
+    p.net_hosts = vec!["*".into()];
+    let said = crate::camtools::call("camera_list", &serde_json::json!({}), &c.env.svc, &p, &c.env.user).unwrap();
+    assert!(said.starts_with("2 camera(s):") && names.iter().all(|n| said.contains(n.as_str())), "{said}");
+    // the flow node: an unknown camera is refused with the very same list
+    let req = iyakki_flow::host::CamPhotoRequest { flow_id: "f".into(), run_id: "r".into(), node_id: "shot".into(), device: "nonesuch".into(), keep: false, allowed: true, unattended: false, attended: true, needs_vision: false };
+    let e = c.env.host.cam_photo_impl(&req, &iyakki_flow::Cancel::new()).unwrap_err();
+    assert!(e.message.contains(&names.join("; ")), "{}", e.message);
+    // and the node's own choice among them is one of the listed names
+    let ok = c.env.host.cam_photo_impl(&iyakki_flow::host::CamPhotoRequest { device: "desk".into(), ..req }, &iyakki_flow::Cancel::new()).unwrap();
+    assert!(names.contains(&ok.device));
 }

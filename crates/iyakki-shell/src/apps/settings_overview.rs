@@ -41,7 +41,7 @@ impl SettingsApp {
                 Status::On | Status::Pending { .. } => {}
             }
         }
-        if has(Tab::Models) && Self::svc(cx).settings.lock().unwrap().get().chat.is_none() {
+        if has(Tab::Models) && Self::svc(cx).settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().chat.is_none() {
             out.push(Attn { tab: Tab::Models, title: "No AI model is chosen".into(), why: "The assistant needs one to answer. Add a service or pick a model that runs here.".into() });
         }
         if has(Tab::Time) && iyakki_agent::clock::looks_wrong(iyakki_agent::clock::now_unix()) {
@@ -51,11 +51,15 @@ impl SettingsApp {
             out.push(Attn { tab: Tab::Bluetooth, title: "Bluetooth needs firmware".into(), why: "The adapter is found but cannot work until its firmware is installed.".into() });
         }
         if has(Tab::SessionLog) {
-            if let Some(u) = self.crash_note() {
-                out.push(Attn { tab: Tab::SessionLog, title: format!("The last session ended unexpectedly ({})", iyakki_storage::crashlog::wall(u.started).split(' ').next().unwrap_or("")), why: "Open the log to see the last kernel messages before it stopped.".into() });
+            if let Some(u) = self.crash_note(cx) {
+                out.push(Attn { tab: Tab::SessionLog, title: format!("The last session ended unexpectedly ({})", iyakki_core_api::memory::wall(u.started).split(' ').next().unwrap_or("")), why: "Open the log to see the last kernel messages before it stopped.".into() });
             }
         }
         if has(Tab::Updates) {
+            let waiting = iyakki_agent::store::wizardhook::pending(cx.services.dir(), &cx.session.user).len();
+            if waiting > 0 {
+                out.push(Attn { tab: Tab::Updates, title: format!("{waiting} setup wizard{} waiting", if waiting == 1 { "" } else { "s" }), why: "An app you installed or updated brings setup steps. Open System update to see which; the assistant runs them with you.".into() });
+            }
             let data = &self.storage.data_dir;
             if let Some(t) = iyakki_agent::devmode::update::interrupted_text(data) {
                 out.push(Attn { tab: Tab::Updates, title: "A system update did not finish".into(), why: t });
@@ -66,7 +70,7 @@ impl SettingsApp {
                 out.push(Attn { tab: Tab::Updates, title: format!("{b} available"), why: "The last check found newer versions. Open System update to see which; nothing is installed until you do it.".into() });
             }
         }
-        if has(Tab::Storage) && self.storage.virtual_disks.is_none() && matches!(iyakki_storage::data_location(&self.storage.roots, &self.storage.data_dir), iyakki_storage::DataLocation::Memory) {
+        if has(Tab::Storage) && self.storage.virtual_disks.is_none() && cx.os.memory().data_place(&self.storage.data_dir) == iyakki_core_api::memory::DataPlace::Memory {
             out.push(Attn { tab: Tab::Storage, title: "Your data is kept in memory only".into(), why: "Accounts, settings and files are forgotten at power-off. Choose a disk to keep them.".into() });
         }
         out

@@ -9,7 +9,7 @@ use super::manager::{Io, Manager, Os};
 use super::plan::resolvers_from;
 use super::{valid_iface, IfaceInfo, LinkKind, Saved, TABLE};
 use crate::fwextra_net::{classify, gateways_from_route, Kind};
-use iyakki_fw::nl::tablegen::TableSpec;
+use iyakki_fw::nl::tablegen::{Family, TableSpec};
 use iyakki_hotspot::subnet::Cidr;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::path::{Path, PathBuf};
@@ -79,6 +79,19 @@ pub fn wifi_ap_available() -> bool {
     pr.phys.iter().any(|p| can_host_ap(p, &Want { concurrent_sta: true, ..Want::new(BAND_2GHZ, &pr.country) }).is_ok_and(|plan| plan.mode == ApMode::PskOffload))
 }
 
+/// Why [`wifi_ap_available`] is false, in plain words for the Settings page (`None`: it is available). Asks the kernel about every radio.
+pub fn wifi_ap_why() -> Option<String> {
+    use crate::nl80211_os::{probe, wifi_hardware_seen, Nl80211Socket};
+    let mut sock = match Nl80211Socket::open(std::time::Duration::from_secs(2)) {
+        Ok(s) => s,
+        Err(_) => return Some(iyakki_hotspot::caps::no_card_reason(wifi_hardware_seen()).to_string()),
+    };
+    match probe(&mut sock) {
+        Ok(pr) => iyakki_hotspot::caps::hotspot_unavailable(&pr.phys, &pr.country, wifi_hardware_seen()),
+        Err(_) => Some("The kernel did not describe its Wi-Fi radios.".to_string()),
+    }
+}
+
 /// The hotspot's name and password, kept in the sharing folder (readable by root only). Created with a generated password the first time.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct HotspotFile {
@@ -87,6 +100,12 @@ struct HotspotFile {
     /// "auto" (the client's band), "2.4" or "5"
     #[serde(default)]
     band: String,
+    /// The regulatory country as two capital letters, or empty (the radio's own rules).
+    #[serde(default)]
+    country: String,
+    /// "wpa2" (default), "transition" (WPA2 and WPA3) or "wpa3".
+    #[serde(default)]
+    security: String,
 }
 
 /// The band the hotspot should use: "auto", "2.4" or "5".
@@ -104,7 +123,39 @@ pub fn set_hotspot_band(data: &Path, band: &str) -> Result<(), String> {
         return Err("the band is auto, 2.4 or 5".into());
     }
     let (ssid, passphrase) = hotspot_credentials(data)?;
-    write_hotspot(data, &HotspotFile { ssid, passphrase, band: band.into() })
+    write_hotspot(data, &HotspotFile { ssid, passphrase, band: band.into(), country: hotspot_country(data), security: hotspot_security(data) })
+}
+
+/// The regulatory country the hotspot asks the radio to use (two capital letters), empty when none was chosen.
+pub fn hotspot_country(data: &Path) -> String {
+    let c = std::fs::read_to_string(hotspot_path(data)).ok().and_then(|t| serde_json::from_str::<HotspotFile>(&t).ok()).map(|h| h.country).unwrap_or_default();
+    if iyakki_hotspot::rsn::valid_country(&c) { c } else { String::new() }
+}
+
+/// Save the country (two capital letters, for example DE), or "" to leave the radio's own rules.
+pub fn set_hotspot_country(data: &Path, country: &str) -> Result<(), String> {
+    if !country.is_empty() && !iyakki_hotspot::rsn::valid_country(country) {
+        return Err("a country code is two capital letters, for example DE or US".into());
+    }
+    let (ssid, passphrase) = hotspot_credentials(data)?;
+    write_hotspot(data, &HotspotFile { ssid, passphrase, band: hotspot_band(data), country: country.into(), security: hotspot_security(data) })
+}
+
+/// The security the person asked for: "wpa2", "transition" or "wpa3".
+pub fn hotspot_security(data: &Path) -> String {
+    let s = std::fs::read_to_string(hotspot_path(data)).ok().and_then(|t| serde_json::from_str::<HotspotFile>(&t).ok()).map(|h| h.security).unwrap_or_default();
+    match s.as_str() {
+        "transition" | "wpa3" => s,
+        _ => "wpa2".into(),
+    }
+}
+
+pub fn set_hotspot_security(data: &Path, security: &str) -> Result<(), String> {
+    if !matches!(security, "wpa2" | "transition" | "wpa3") {
+        return Err("the security is wpa2, transition or wpa3".into());
+    }
+    let (ssid, passphrase) = hotspot_credentials(data)?;
+    write_hotspot(data, &HotspotFile { ssid, passphrase, band: hotspot_band(data), country: hotspot_country(data), security: security.into() })
 }
 
 fn hotspot_path(data: &Path) -> PathBuf {
@@ -137,7 +188,7 @@ pub fn hotspot_credentials_for(data: &Path, device_id: &str, now: u64) -> Result
         Err(e) => return Err(format!("{}: {e}; it is left as it is", p.display())),
     }
     let s = iyakki_hotspot::settings::HotspotSettings::new_default(device_id).map_err(|e| format!("making a password: {e:?}"))?;
-    write_hotspot(data, &HotspotFile { ssid: s.ssid.clone(), passphrase: s.passphrase.clone(), band: String::new() })?;
+    write_hotspot(data, &HotspotFile { ssid: s.ssid.clone(), passphrase: s.passphrase.clone(), band: String::new(), country: String::new(), security: String::new() })?;
     Ok((s.ssid, s.passphrase))
 }
 
@@ -145,7 +196,7 @@ pub fn hotspot_credentials_for(data: &Path, device_id: &str, now: u64) -> Result
 pub fn set_hotspot_credentials(data: &Path, ssid: &str, passphrase: &str) -> Result<(), String> {
     iyakki_hotspot::settings::validate_ssid(ssid).map_err(|e| format!("the network name: {e:?}"))?;
     iyakki_hotspot::settings::validate_passphrase(passphrase).map_err(|e| format!("the password: {e:?}"))?;
-    write_hotspot(data, &HotspotFile { ssid: ssid.into(), passphrase: passphrase.into(), band: hotspot_band(data) })
+    write_hotspot(data, &HotspotFile { ssid: ssid.into(), passphrase: passphrase.into(), band: hotspot_band(data), country: hotspot_country(data), security: hotspot_security(data) })
 }
 
 fn write_hotspot(data: &Path, f: &HotspotFile) -> Result<(), String> {
@@ -214,6 +265,23 @@ fn restore_with(ip: &dyn IpRoute, parked: &mut Vec<String>) {
 #[cfg(test)]
 mod credential_tests {
     use super::*;
+
+    #[test]
+    fn the_country_and_security_are_kept_checked_and_survive_a_new_name_or_band() {
+        let d = dir("country");
+        assert_eq!((hotspot_country(&d), hotspot_security(&d).as_str()), (String::new(), "wpa2"));
+        set_hotspot_country(&d, "DE").unwrap();
+        set_hotspot_security(&d, "transition").unwrap();
+        set_hotspot_band(&d, "5").unwrap();
+        set_hotspot_credentials(&d, "Mine", "a long password").unwrap();
+        assert_eq!((hotspot_country(&d).as_str(), hotspot_security(&d).as_str(), hotspot_band(&d).as_str()), ("DE", "transition", "5"));
+        assert!(set_hotspot_country(&d, "de").is_err() && set_hotspot_country(&d, "DEU").is_err() && set_hotspot_country(&d, "00").is_err());
+        assert!(set_hotspot_security(&d, "wep").is_err());
+        set_hotspot_country(&d, "").unwrap();
+        assert_eq!(hotspot_country(&d), "");
+        assert_eq!(hotspot_security(&d), "transition", "unrelated settings are kept");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     fn dir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("iyakki-hotspot-cred-{}-{tag}", std::process::id()));
@@ -334,12 +402,32 @@ mod route_tests {
     }
 
     #[test]
+    fn a_needed_pause_that_fails_fails_the_start_cleanly_and_no_cable_needs_no_pause() {
+        assert_eq!(pause_decision(false, || Err("never called".into()), "wlan0"), Ok(false));
+        assert_eq!(pause_decision(true, || Ok(()), "wlan0"), Ok(true));
+        let e = pause_decision(true, || Err("wpa_supplicant said FAIL".into()), "wlan0").unwrap_err();
+        assert!(e.contains("not started") && e.contains("wlan0") && e.contains("Nothing was changed"), "{e}");
+    }
+
+    #[test]
     fn several_default_routes_are_all_parked_and_blank_lines_are_ignored() {
         let ip = fake(Some("default via 10.0.0.1 dev wlan0 metric 100\n\ndefault via 10.0.0.2 dev wlan0 metric 200\n"), false);
         let mut parked = Vec::new();
         park_with(&ip, &mut parked, "wlan0");
         assert_eq!(parked.len(), 2);
     }
+}
+
+/// Whether the Wi-Fi client is paused for the hotspot. No cable carrying the internet: no pause needed (`Ok(false)`).
+/// A needed pause that fails ends the start with a plain sentence instead of starting a hotspot next to a roaming client.
+fn pause_decision(cable_has_internet: bool, pause: impl FnOnce() -> Result<(), String>, client: &str) -> Result<bool, String> {
+    if !cable_has_internet {
+        return Ok(false);
+    }
+    pause().map(|()| true).map_err(|e| {
+        log::warn!("hotspot: not pausing {client}: {e}");
+        format!("The hotspot was not started: the Wi-Fi card {client} could not be paused while the internet comes from a cable ({e}). Nothing was changed.")
+    })
 }
 
 /// The Wi-Fi client interface the hotspot is made next to: the wireless interface with the internet route, else the first one.
@@ -355,6 +443,31 @@ pub struct RealOs {
     ports: Ports,
 }
 
+/// Stands where the netfilter socket stands on Linux; `nf()` never hands one out elsewhere, so these are never reached.
+#[cfg(not(target_os = "linux"))]
+struct NoNf;
+#[cfg(not(target_os = "linux"))]
+impl NoNf {
+    fn apply_table(&mut self, _: &TableSpec) -> Result<(), String> {
+        Err(crate::oscompat::UNAVAILABLE.into())
+    }
+    fn remove_table(&mut self, _: &str) -> Result<(), String> {
+        Err(crate::oscompat::UNAVAILABLE.into())
+    }
+    fn table_exists(&mut self, _: &str) -> Result<bool, String> {
+        Err(crate::oscompat::UNAVAILABLE.into())
+    }
+    fn apply_table_in(&mut self, _: &TableSpec, _: Family) -> Result<(), String> {
+        Err(crate::oscompat::UNAVAILABLE.into())
+    }
+    fn remove_table_in(&mut self, _: Family, _: &str) -> Result<(), String> {
+        Err(crate::oscompat::UNAVAILABLE.into())
+    }
+    fn table_exists_in(&mut self, _: Family, _: &str) -> Result<bool, String> {
+        Err(crate::oscompat::UNAVAILABLE.into())
+    }
+}
+
 impl RealOs {
     pub fn new(data: &Path) -> RealOs {
         RealOs { data: data.to_path_buf(), makers: sys::SysSockets, ports: Ports::default() }
@@ -362,9 +475,26 @@ impl RealOs {
     fn saved_path(&self) -> PathBuf {
         control::dir(&self.data).join("session.json")
     }
+    #[cfg(not(target_os = "linux"))]
+    fn nf(&self) -> Result<NoNf, String> {
+        Err(format!("the sharing firewall is {}", crate::oscompat::UNAVAILABLE))
+    }
+    #[cfg(target_os = "linux")]
     fn nf(&self) -> Result<iyakki_fw::nl::NfSocket, String> {
         iyakki_fw::nl::NfSocket::open(5).map_err(|e| e.to_string())
     }
+}
+
+/// The kernel's IPv4 forwarding switch: the one place it is read and written (internet sharing and the outbound-only Linux apps network).
+pub fn ip_forward_get() -> Result<String, String> {
+    std::fs::read_to_string("/proc/sys/net/ipv4/ip_forward").map(|s| s.trim().to_string()).map_err(|e| format!("ip_forward: {e}"))
+}
+
+pub fn ip_forward_set(value: &str) -> Result<(), String> {
+    if !matches!(value, "0" | "1") {
+        return Err("not a forwarding value".into());
+    }
+    std::fs::write("/proc/sys/net/ipv4/ip_forward", value).map_err(|e| format!("ip_forward: {e}"))
 }
 
 impl Os for RealOs {
@@ -391,12 +521,13 @@ impl Os for RealOs {
         let mut lines = Vec::new();
         // internet from a cable: the Wi-Fi client is not needed, and its roaming on the card's one radio makes the hotspot deaf
         let cable_has_internet = list_interfaces().iter().any(|i| i.default_route && i.kind != LinkKind::Wifi && i.name != crate::wifi_ap::AP_IFACE);
-        let paused = cable_has_internet && crate::wifi_ap::pause_client(&client).map_err(|e| log::warn!("hotspot: not pausing {client}: {e}")).is_ok();
+        // owner decision 2026-11-13: when the pause is needed and fails, the start fails cleanly (nothing was changed yet)
+        let paused = pause_decision(cable_has_internet, || crate::wifi_ap::pause_client(&client), &client)?;
         if paused {
             log::info!("hotspot: {client} let go of its router while sharing (the internet comes from a cable)");
             park_default_routes(&client);
         }
-        let started = crate::wifi_ap::start(&client, &ssid, &pass, &hotspot_band(&self.data), paused, &mut |l| lines.push(l));
+        let started = crate::wifi_ap::start(&client, &ssid, &pass, &hotspot_band(&self.data), &hotspot_country(&self.data), &hotspot_security(&self.data), paused, &mut |l| lines.push(l));
         if started.is_err() && paused {
             restore_default_routes();
             let _ = crate::wifi_ap::resume_client(&client);
@@ -418,13 +549,10 @@ impl Os for RealOs {
         super::policy::read(&self.data)
     }
     fn forward_get(&mut self) -> Result<String, String> {
-        std::fs::read_to_string("/proc/sys/net/ipv4/ip_forward").map(|s| s.trim().to_string()).map_err(|e| format!("ip_forward: {e}"))
+        ip_forward_get()
     }
     fn forward_set(&mut self, value: &str) -> Result<(), String> {
-        if !matches!(value, "0" | "1") {
-            return Err("not a forwarding value".into());
-        }
-        std::fs::write("/proc/sys/net/ipv4/ip_forward", value).map_err(|e| format!("ip_forward: {e}"))
+        ip_forward_set(value)
     }
     fn link_up(&mut self, iface: &str) -> Result<(), String> {
         sys::link_up(iface)
@@ -447,6 +575,20 @@ impl Os for RealOs {
     }
     fn rules_present(&mut self) -> Result<bool, String> {
         self.nf()?.table_exists(TABLE).map_err(|e| e.to_string())
+    }
+    fn apply_bridge_rules(&mut self, spec: &TableSpec) -> Result<(), String> {
+        if spec.name != super::BRIDGE_TABLE {
+            return Err("sharing only writes its own table".into());
+        }
+        self.nf()?.apply_table_in(spec, Family::Bridge).map_err(|e| format!("the bridge firewall: {e}"))
+    }
+    fn remove_bridge_rules(&mut self) -> Result<(), String> {
+        let mut s = self.nf()?;
+        // a kernel without the bridge family has nothing to remove
+        if s.table_exists_in(Family::Bridge, super::BRIDGE_TABLE).map_err(|e| e.to_string())? {
+            s.remove_table_in(Family::Bridge, super::BRIDGE_TABLE).map_err(|e| e.to_string())?;
+        }
+        Ok(())
     }
     fn set_firewall_zone(&mut self, ifaces: Vec<String>) {
         iyakki_fw::service::set_share_zone(ifaces);

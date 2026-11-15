@@ -38,6 +38,14 @@ pub trait Os {
     /// Delete the table `iyakki_share` (nothing else). Not an error when it is not there.
     fn remove_rules(&mut self) -> Result<(), String>;
     fn rules_present(&mut self) -> Result<bool, String>;
+    /// Load the bridge-family table `iyakki_share_br` (replacing a stale one). Only asked for when the downstream is a bridge.
+    fn apply_bridge_rules(&mut self, _spec: &TableSpec) -> Result<(), String> {
+        Ok(())
+    }
+    /// Delete the bridge-family table (nothing else). Not an error when it, or the kernel's bridge family, is not there.
+    fn remove_bridge_rules(&mut self) -> Result<(), String> {
+        Ok(())
+    }
     /// The Firewall's own table learns which interface is the shared one (DHCP and DNS in, nothing else).
     fn set_firewall_zone(&mut self, ifaces: Vec<String>);
     fn open_io(&mut self, device: &str, gateway: Ipv4Addr, resolvers: &[Ipv4Addr]) -> Result<Box<dyn Io>, String>;
@@ -118,6 +126,7 @@ impl Manager {
         let saved = os.load_saved();
         if had_rules || saved.is_some() {
             let _ = os.remove_rules();
+            let _ = os.remove_bridge_rules();
             os.set_firewall_zone(Vec::new());
             if let Some(s) = &saved {
                 if s.downstream == crate::wifi_ap::AP_IFACE {
@@ -209,6 +218,9 @@ impl Manager {
             let io = os.open_io(&plan.down, gw, &plan.resolvers).map_err(ShareError::Socket)?;
             os.apply_rules(&table_spec(&plan)).map_err(ShareError::Firewall)?;
             did_rules = true;
+            if let Some(b) = super::rules::bridge_table_spec(&plan) {
+                os.apply_bridge_rules(&b).map_err(ShareError::Firewall)?;
+            }
             os.set_firewall_zone(vec![plan.down.clone()]);
             os.forward_set("1").map_err(ShareError::Machine)?;
             Ok(io)
@@ -218,6 +230,7 @@ impl Manager {
             Err(e) => {
                 if did_rules {
                     let _ = os.remove_rules();
+                    let _ = os.remove_bridge_rules();
                 }
                 os.set_firewall_zone(Vec::new());
                 let _ = os.forward_set(prev);
@@ -363,6 +376,7 @@ impl Manager {
         let Some(s) = self.session.take() else { return };
         let _ = os.forward_set(&s.saved.previous_forward);
         let _ = os.remove_rules();
+        let _ = os.remove_bridge_rules();
         os.set_firewall_zone(Vec::new());
         let n = s.dhcp.leases(os.now_ms() / 1000).len();
         drop(s.io);

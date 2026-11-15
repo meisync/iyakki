@@ -63,3 +63,32 @@ fn switch_moves_to_another_tenant_says_what_the_server_stopped_and_refuses_one_t
     let (res, _) = go(&c, "\n", &["switch", addr, common::USER, "beta"]);
     assert!(matches!(res, Err(Fail::Error(m)) if m.contains("no password")));
 }
+
+#[test]
+fn login_signs_in_with_the_password_from_standard_input_says_so_and_never_echoes_it() {
+    let r = common::start_remote();
+    let d = std::env::temp_dir().join(format!("iyakki-connect-test-login-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    let c = Ctx { store: Store::new(&d), timeout: Duration::from_secs(5), interactive: false };
+    let addr = &r.target.addr;
+    // not pinned: nothing is sent, the password is not read as a secret to try
+    let (res, out) = go(&c, "right\n", &["login", addr, common::USER]);
+    assert!(matches!(res, Err(Fail::Error(m)) if m.contains("not pinned")) && out.is_empty());
+    go(&c, "", &["pin", addr, "--yes"]).0.unwrap();
+    // the right password: a success line naming the account, and the password is nowhere in the output
+    let (res, out) = go(&c, "right\n", &["login", addr, common::USER]);
+    res.unwrap();
+    assert!(out.starts_with("signed in to ") && out.contains(&format!("as {}", common::USER)), "{out}");
+    assert!(!out.contains("right"), "the password is never printed: {out}");
+    // a Windows line ending after the password is not part of it
+    let (res, _) = go(&c, "right\r\n", &["login", addr, common::USER]);
+    res.unwrap();
+    // the wrong password is refused with the server's reason and prints no success line
+    let (res, out) = go(&c, "wrong\n", &["login", addr, common::USER]);
+    assert!(matches!(res, Err(Fail::Error(m)) if m.contains("sign-in refused")), "a wrong password is refused");
+    assert!(out.is_empty(), "{out}");
+    // an empty line is not sent as a password, and a password in the arguments is not accepted
+    assert!(matches!(go(&c, "\n", &["login", addr, common::USER]).0, Err(Fail::Error(m)) if m.contains("no password")));
+    assert!(matches!(go(&c, "", &["login", addr, common::USER, "right"]).0, Err(Fail::Error(m)) if m.contains("usage")));
+    let _ = std::fs::remove_dir_all(&d);
+}

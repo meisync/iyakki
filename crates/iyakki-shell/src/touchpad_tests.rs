@@ -2,7 +2,7 @@ use super::*;
 
 /// The Apple SPI pad as the 14,1 reports it (ranges are typical, from the driver's defaults for this family).
 const PAD: PadRange = PadRange { x_min: -5087, x_max: 8270, y_min: -182, y_max: 6749, major_max: 5000 };
-const CFG: PadConfig = PadConfig { tap_to_click: true };
+const CFG: PadConfig = PadConfig { tap_to_click: true, speed_pct: 100, three_finger_drag: false };
 const W: i32 = 1920;
 
 /// Replays frames onto a touchpad with a clock.
@@ -264,4 +264,47 @@ fn a_physical_click_with_one_finger_in_the_bottom_right_corner_is_a_right_click(
     r.ev(EV_KEY, BTN_LEFT, 1);
     r.ev(EV_KEY, BTN_LEFT, 0);
     assert_eq!(r.take(), vec![PadOut::LeftDown, PadOut::LeftUp]);
+}
+
+fn three(r: &mut Rig, ms: u64, dx: i32) {
+    r.frame(ms, &[(0, 1, 1000 + dx, 3000, 600), (1, 2, 2000 + dx, 3000, 600), (2, 3, 3000 + dx, 3000, 600)]);
+}
+
+#[test]
+fn three_fingers_drag_when_the_choice_is_on_hold_the_button_and_drop_when_one_lifts() {
+    let mut r = Rig::new();
+    r.cfg.three_finger_drag = true;
+    three(&mut r, 0, 0);
+    three(&mut r, 20, 0);
+    three(&mut r, 30, 100);
+    three(&mut r, 20, 300);
+    three(&mut r, 20, 600);
+    let o = r.take();
+    assert_eq!(o.iter().filter(|p| **p == PadOut::LeftDown).count(), 1, "the button goes down once: {o:?}");
+    assert!(!o.contains(&PadOut::LeftUp), "and stays down while three fingers move");
+    assert!(moves(&o).0 > 0, "the pointer follows the fingers to the right: {o:?}");
+    r.frame(20, &[(2, -1, 0, 0, 0)]); // one finger lifts
+    assert!(r.take().contains(&PadOut::LeftUp), "the drag drops");
+    r.lift(20, &[0, 1]);
+    let tail = r.take();
+    assert!(!tail.contains(&PadOut::RightClick) && !tail.contains(&PadOut::LeftUp), "nothing more happens: {tail:?}");
+}
+
+#[test]
+fn three_fingers_do_nothing_when_the_choice_is_off_and_turning_it_off_mid_drag_drops_it() {
+    let mut r = Rig::new();
+    three(&mut r, 0, 0);
+    three(&mut r, 60, 400);
+    three(&mut r, 20, 800);
+    assert!(moves(&r.take()) == (0, 0), "off by default: three fingers move nothing");
+    r.lift(20, &[0, 1, 2]);
+    r.take();
+    r.cfg.three_finger_drag = true;
+    three(&mut r, 0, 0);
+    three(&mut r, 60, 0);
+    three(&mut r, 20, 300);
+    assert!(r.take().contains(&PadOut::LeftDown));
+    r.cfg.three_finger_drag = false;
+    three(&mut r, 20, 600);
+    assert!(r.take().contains(&PadOut::LeftUp), "the drag is dropped when the choice goes off");
 }

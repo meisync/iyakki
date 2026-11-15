@@ -66,7 +66,7 @@
   }
 
   async function render(ctx, host) {
-    const { api, el, say } = ctx;
+    const { api, el, say, poll } = ctx;
     const body = el("div");
     host.appendChild(body);
     let flows = [], state = "loading", msg = "", filter = "", open = null, def = null, defState = "", runs = null, runsPage = 0, starting = false;
@@ -85,9 +85,9 @@
       draw();
     }
 
-    async function loadRuns(f, p) {
+    async function loadRuns(f, p, quiet) {
       runsPage = Math.max(0, p);
-      runs = { state: "loading", msg: "", data: null }; draw();
+      if (!quiet) { runs = { state: "loading", msg: "", data: null }; draw(); }
       const r = await api.get("/api/v1/flows/" + encodeURIComponent(f.id) + "/runs" + runsQuery(runsPage));
       if (open !== f.id) return;
       runs = r.ok ? { state: "ok", msg: "", data: r.data } : { state: C.stateKind(r.status), msg: r.message, data: null };
@@ -159,6 +159,8 @@
       body.appendChild(el("p", { class: "muted" }, ["Agent runs, their log and the questions waiting for you are on the page ", el("a", { href: "#/runs", text: "Runs" }), "."]));
     }
     await load();
+    // a run of an open flow that moves (the stream says `flowrun`) refreshes its list at once; the timer is the fallback
+    if (poll) poll(async () => { const f = flows.find((x) => x.id === open); if (f && state === "ok" && !starting) await loadRuns(f, runsPage, true); }, 20000, { push: true });
   }
 
   const exported = { page, flowBadges, describeFlow, sortFlows, definitionText, runState, runLine, runNote, runsQuery, runBody, RUNS_PER };

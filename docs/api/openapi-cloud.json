@@ -333,6 +333,53 @@
       "Flow": {
         "type": "object"
       },
+      "FlowImport": {
+        "additionalProperties": false,
+        "properties": {
+          "flow": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "flow"
+        ],
+        "type": "object"
+      },
+      "FlowImported": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "type": "object"
+      },
+      "FlowIssues": {
+        "additionalProperties": false,
+        "properties": {
+          "issues": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "ok": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok",
+          "issues"
+        ],
+        "type": "object"
+      },
       "FlowList": {
         "additionalProperties": false,
         "properties": {
@@ -428,6 +475,19 @@
           "flow",
           "status"
         ],
+        "type": "object"
+      },
+      "FlowValidate": {
+        "additionalProperties": false,
+        "properties": {
+          "flow": {
+            "type": "object"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [],
         "type": "object"
       },
       "GitBranches": {
@@ -1059,6 +1119,35 @@
         ],
         "type": "object"
       },
+      "TenantAudit": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "type": "integer"
+          },
+          "lines": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "more": {
+            "type": "boolean"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "total": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "lines",
+          "total",
+          "more"
+        ],
+        "type": "object"
+      },
       "TenantConfig": {
         "type": "object"
       },
@@ -1234,6 +1323,9 @@
           "namespaces"
         ],
         "type": "object"
+      },
+      "Text": {
+        "type": "string"
       },
       "TileEvents": {
         "additionalProperties": false,
@@ -2185,7 +2277,7 @@
             "bearer": []
           }
         ],
-        "summary": "WebSocket (Upgrade; the upgrade itself is answered before the ordinary sign-in, because a browser cannot send a header, and signs in by its first message). The first message is {\"type\":\"auth\",\"token\":...}; the token is never in the address. Then only the caller's own `notification`, `count` and `approval` events, a ping every 25 seconds. Capped per person and per tenant.",
+        "summary": "WebSocket (Upgrade; the upgrade itself is answered before the ordinary sign-in, because a browser cannot send a header, and signs in by its first message). The first message is {\"type\":\"auth\",\"token\":...}; the token is never in the address. Then the caller's own `notification`, `count` and `approval` events and `changed` (an area name, after any change made through the API), a ping every 25 seconds. Capped per person and per tenant.",
         "x-access": "user"
       }
     },
@@ -2810,6 +2902,156 @@
         "x-access": "user"
       }
     },
+    "/api/v1/flows/import": {
+      "post": {
+        "operationId": "flows_import",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FlowImport"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowImported"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "No or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The role does not allow this"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Bring a flow in (the JSON that `flows_get` gives, as `flow`) as a SAFE DRAFT of the caller's own: not production, nothing auto-published, its triggers off, a free id if the id is taken. Returns the new id and name.",
+        "x-access": "user",
+        "x-audited": true
+      }
+    },
+    "/api/v1/flows/validate": {
+      "post": {
+        "operationId": "flows_validate",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FlowValidate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowIssues"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "No or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The role does not allow this"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "What is wrong with a flow: give `id` (one of the caller's own) or a whole `flow` as JSON. Returns each problem with its step, its level (error or warning) and a sentence; `ok` is true when there is no error.",
+        "x-access": "user",
+        "x-audited": true
+      }
+    },
     "/api/v1/flows/{id}": {
       "get": {
         "operationId": "flows_get",
@@ -3123,6 +3365,89 @@
         ],
         "summary": "One run of a flow: status, steps done, the error or what it waits for, and each step's state.",
         "x-access": "user"
+      }
+    },
+    "/api/v1/flows/{id}/runs/{run}/stop": {
+      "post": {
+        "operationId": "flows_run_stop",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "run",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ok"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "No or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The role does not allow this"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Stop one run of one of the caller's own flows.",
+        "x-access": "user",
+        "x-audited": true
       }
     },
     "/api/v1/git/branches": {
@@ -3556,7 +3881,7 @@
           }
         },
         "security": [],
-        "summary": "Sign in with a machine account; returns a bearer token.",
+        "summary": "Sign in with a machine account; returns a bearer token. A program of a paired computer signs the request with its developer key instead and gets a token limited to its api scopes.",
         "x-access": "public",
         "x-audited": true
       }
@@ -5985,6 +6310,70 @@
         "x-audited": true
       }
     },
+    "/api/v1/tenant/audit": {
+      "get": {
+        "operationId": "tenant_audit",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantAudit"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "No or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The role does not allow this"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "The trail of role changes in the tenant (who made whom what), newest first, paged: query `limit` (default 100, at most 200) and `offset`; the answer says `total` and `more`. Tenant owners and administrators only.",
+        "x-access": "user"
+      }
+    },
     "/api/v1/tenant/bootstrap": {
       "post": {
         "operationId": "tenant_bootstrap",
@@ -6112,6 +6501,319 @@
         ],
         "summary": "The tenant configuration: every item the caller may see with its effective state (ready, secret_missing, vault_locked, disabled, invalid), its source (file or api) and what the caller may do; tenant admins also get the registry of kinds and fields.",
         "x-access": "user"
+      }
+    },
+    "/api/v1/tenant/config-me/{kind}": {
+      "delete": {
+        "operationId": "tcfgme_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantConfig"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "No or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The role does not allow this"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Remove the caller's own layer of a single-value kind.",
+        "x-access": "user",
+        "x-audited": true
+      },
+      "get": {
+        "operationId": "tcfgme_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantConfig"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "No or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The role does not allow this"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "The caller's own layer of a kind that lets a person narrow it (media.policy, agent kinds): only their own items are ever returned.",
+        "x-access": "user"
+      },
+      "put": {
+        "operationId": "tcfgme_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TenantConfigPut"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantConfig"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "No or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The role does not allow this"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Set the caller's own layer of a kind: enabled and values (`name` in the body for a collection). It can only narrow what the tenant configured, holds no secrets and passes the same schema and safety checks.",
+        "x-access": "user",
+        "x-audited": true
+      }
+    },
+    "/api/v1/tenant/config-me/{kind}/{name}": {
+      "delete": {
+        "operationId": "tcfgme_delete_n",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantConfig"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "No or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The role does not allow this"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Remove the caller's own layer of a named entry.",
+        "x-access": "user",
+        "x-audited": true
       }
     },
     "/api/v1/tenant/config/export": {
@@ -8107,6 +8809,70 @@
         "security": [],
         "summary": "Liveness: the process is up (for a load balancer).",
         "x-access": "public"
+      }
+    },
+    "/metrics": {
+      "get": {
+        "operationId": "metrics",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Text"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "No or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The role does not allow this"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limit"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "The service's own numbers as Prometheus text: requests by route and status class, time spent, sign-ins by outcome, sessions, connections and runs. Administrators only; no user names, addresses or tokens.",
+        "x-access": "admin"
       }
     },
     "/readyz": {

@@ -36,7 +36,7 @@ pub const RATE_PER_SEC: u32 = 200;
 pub const MAX_PENDING: usize = 4;
 
 const TEXT_EXT: [&str; 9] = ["html", "js", "mjs", "css", "json", "svg", "txt", "md", "csv"];
-const BIN_EXT: [&str; 7] = ["png", "jpg", "jpeg", "gif", "webp", "woff2", "ico"];
+const BIN_EXT: [&str; 8] = ["png", "jpg", "jpeg", "gif", "webp", "woff2", "ico", "wasm"];
 
 // ------------------------------------------------------------------------------------------------ manifest
 
@@ -54,6 +54,11 @@ pub struct Caps {
     pub llm: bool,
     /// `iyakki.speech.say`: reads text aloud.
     pub speech: bool,
+    /// The capabilities of SDK 1.1 and later that are not flags above (`markdown`, `embed` and its hosts, `dash`, `flows`, `k3s`, `media`, `audio`,
+    /// `microphone`, `money`): key -> the normalised value (`iyakki_core_api::sdkbridge`). Unknown keys are never kept here.
+    pub v2: std::collections::BTreeMap<String, Value>,
+    /// Capabilities of a newer IYAKKI that the app listed as optional: not granted, not shown, written back untouched.
+    pub kept: std::collections::BTreeMap<String, Value>,
 }
 
 impl Caps {
@@ -66,16 +71,48 @@ impl Caps {
             }
         }
         v.extend(self.network.iter().map(|h| format!("net:{h}")));
+        v.extend(self.v2.iter().map(|(k, val)| iyakki_core_api::sdkbridge::permission_string(k, val)));
         v
+    }
+
+    /// Does the app hold this capability key (the original flags, `network` when it lists a host, or an SDK 1.2 grant)?
+    pub fn holds(&self, key: &str) -> bool {
+        match key {
+            "storage" => self.storage,
+            "clipboard" => self.clipboard,
+            "notifications" => self.notifications,
+            "files" => self.files,
+            "agent" => self.agent,
+            "llm" => self.llm,
+            "speech" => self.speech,
+            "network" => !self.network.is_empty(),
+            k => self.v2.contains_key(k),
+        }
+    }
+
+    /// What these older flags mean in the core capability catalogue (`appcaps::map_legacy`); shown, never enforced from.
+    pub fn catalogue_view(&self) -> iyakki_core_api::appcaps::LegacyMap {
+        let flags: Vec<&str> = [(self.storage, "storage"), (self.clipboard, "clipboard"), (self.notifications, "notifications"), (self.files, "files"), (self.agent, "agent"), (self.llm, "llm"), (self.speech, "speech")].into_iter().filter(|(on, _)| *on).map(|(_, n)| n).collect();
+        iyakki_core_api::appcaps::map_legacy(&flags, &self.network)
     }
 
     pub fn from_permissions(perms: &[String]) -> Caps {
         let has = |n: &str| perms.iter().any(|p| p == &format!("tile:{n}"));
-        Caps { storage: has("storage"), clipboard: has("clipboard"), notifications: has("notifications"), files: has("files"), agent: has("agent"), llm: has("llm"), speech: has("speech"), network: perms.iter().filter_map(|p| p.strip_prefix("net:").map(str::to_string)).collect() }
+        Caps { storage: has("storage"), clipboard: has("clipboard"), notifications: has("notifications"), files: has("files"), agent: has("agent"), llm: has("llm"), speech: has("speech"), network: perms.iter().filter_map(|p| p.strip_prefix("net:").map(str::to_string)).collect(), v2: perms.iter().filter_map(|p| p.strip_prefix("tile:").and_then(iyakki_core_api::sdkbridge::parse_permission)).collect(), kept: Default::default() }
     }
 
     pub fn all() -> Caps {
-        Caps { storage: true, network: vec![], clipboard: true, notifications: true, files: true, agent: true, llm: true, speech: true }
+        Caps { storage: true, network: vec![], clipboard: true, notifications: true, files: true, agent: true, llm: true, speech: true, v2: Default::default(), kept: Default::default() }
+    }
+
+    /// Every SDK 1.2 capability, with the widest parameter each takes (tests).
+    pub fn all_v2() -> Caps {
+        use serde_json::json;
+        let mut c = Caps::all();
+        for (k, v) in [("markdown", json!(true)), ("embed", json!(["markdown", "browser", "media", "dash"])), ("embed_hosts", json!(["docs.example.com"])), ("dash", json!(["prom"])), ("flows", json!(["backup"])), ("k3s", json!("manage")), ("media", json!(true)), ("audio", json!(true)), ("microphone", json!(true)), ("money", json!("USD"))] {
+            c.v2.insert(k.into(), v);
+        }
+        c
     }
 }
 
@@ -88,6 +125,11 @@ pub struct TileManifest {
     pub icon: String,
     pub group: String,
     pub caps: Caps,
+    /// The core capability catalogue list (`"capabilities": [{"name": "camera.view", "why": "..."}]`, docs/development/CORE-ACCESS-MODEL.md).
+    /// `capabilities` in `app.json` is either this list or the older tile object (`caps`), never both.
+    pub core_caps: Vec<iyakki_core_api::appcaps::CapabilityRequest>,
+    /// `manifest_version`, `requires`, the bundle `contents`, `wizards` and every field this IYAKKI does not know (kept and written back).
+    pub ext: iyakki_core_api::bundle::ManifestExt,
 }
 
 fn host_ok(h: &str) -> bool {
@@ -104,19 +146,29 @@ impl TileManifest {
         let v: Value = serde_json::from_str(text).map_err(|e| format!("{MANIFEST} is not valid JSON: {e}"))?;
         let obj = v.as_object().ok_or_else(|| format!("{MANIFEST} must be a JSON object"))?;
         let s = |k: &str| obj.get(k).and_then(Value::as_str).unwrap_or("").trim().to_string();
-        for k in obj.keys() {
-            if !["id", "name", "version", "icon", "group", "capabilities", "description"].contains(&k.as_str()) {
-                return Err(format!("{MANIFEST}: unknown field {k:?}"));
-            }
-        }
-        let m = TileManifest { id: s("id"), name: s("name"), version: if s("version").is_empty() { "0.1.0".into() } else { s("version") }, icon: s("icon"), group: if s("group").is_empty() { DEFAULT_GROUP.into() } else { s("group") }, caps: Self::caps(obj.get("capabilities"))? };
+        let ext = iyakki_core_api::bundle::ManifestExt::from_object(obj, &["id", "name", "version", "icon", "group", "capabilities"]).map_err(|e| format!("{MANIFEST}: {e}"))?;
+        let m = TileManifest { id: s("id"), name: s("name"), version: if s("version").is_empty() { "0.1.0".into() } else { s("version") }, icon: s("icon"), group: if s("group").is_empty() { DEFAULT_GROUP.into() } else { s("group") }, caps: Self::caps(obj.get("capabilities"), ext.requires.as_ref().map_or(&[][..], |r| &r.capabilities_optional[..]))?, core_caps: Self::core_caps(obj.get("capabilities"))?, ext };
         m.validate()?;
         Ok(m)
     }
 
-    fn caps(v: Option<&Value>) -> Result<Caps, String> {
+    /// The list form of `capabilities`: names from the core catalogue, a reason each; an unknown name is refused.
+    fn core_caps(v: Option<&Value>) -> Result<Vec<iyakki_core_api::appcaps::CapabilityRequest>, String> {
+        let Some(v) = v.filter(|v| v.is_array()) else { return Ok(vec![]) };
+        let list: Vec<iyakki_core_api::appcaps::CapabilityRequest> = serde_json::from_value(v.clone()).map_err(|e| format!("capabilities: each entry is {{\"name\": ..., \"why\": ...}} ({e})"))?;
+        iyakki_core_api::appcaps::validate_requests(&list).map_err(|e| e.to_string())?;
+        for n in iyakki_core_api::appcaps::unknown_request_fields(&list) {
+            iyakki_schema::report(format!("app.json capabilities: fields this release does not know were kept ({n})"));
+        }
+        Ok(list)
+    }
+
+    fn caps(v: Option<&Value>, optional: &[String]) -> Result<Caps, String> {
         let mut c = Caps::default();
         let Some(v) = v else { return Ok(c) };
+        if v.is_array() {
+            return Ok(c);
+        }
         let o = v.as_object().ok_or("capabilities must be an object, like {\"storage\": true}")?;
         for (k, val) in o {
             let on = || val.as_bool().ok_or_else(|| format!("capability {k:?} is true or false"));
@@ -143,7 +195,20 @@ impl TileManifest {
                 }
                 "vault" => return Err("tile apps may not use the vault: ask the person to type what they need, or keep it in iyakki.storage".into()),
                 "js-eval" | "eval" => return Err("tile apps may not make code from text (eval, new Function): write the code in a script file".into()),
-                other => return Err(format!("unknown capability {other:?}: storage, network, clipboard, notifications, files, agent, llm, speech")),
+                other => match iyakki_core_api::sdkbridge::capability(other).filter(|c| !c.legacy) {
+                    // SDK 1.2 and later: checked and normalised by the manifest table
+                    Some(_) => {
+                        if let Some(g) = iyakki_core_api::sdkbridge::normalize_grant(other, val)? {
+                            c.v2.insert(other.to_string(), g);
+                        }
+                    }
+                    // a newer app's capability this IYAKKI does not know, which the app listed as optional: ignored (it finds out with iyakki.has)
+                    None if optional.iter().any(|o| o == other) => {
+                        iyakki_schema::report(format!("app.json capabilities: {other:?} is not known to this IYAKKI and was ignored (the app lists it as optional)"));
+                        c.kept.insert(other.to_string(), val.clone());
+                    }
+                    None => return Err(format!("unknown capability {other:?}: {} (a capability of a newer IYAKKI goes under requires.capabilities_optional too)", iyakki_core_api::sdkbridge::CAPABILITIES.iter().map(|c| c.key).collect::<Vec<_>>().join(", "))),
+                },
             }
         }
         Ok(c)
@@ -165,7 +230,17 @@ impl TileManifest {
         if !self.icon.is_empty() && !emoji_like(&self.icon) && !((self.icon.ends_with(".png") || self.icon.ends_with(".svg")) && path_ok(&self.icon)) {
             return Err("icon: one emoji, or the path of a small .png or .svg in the app".into());
         }
+        self.ext.validate(&self.core_caps).map_err(|e| format!("{MANIFEST}: {e}"))?;
+        if let Some(w) = self.ext.extra.get("sdk") {
+            let w = w.as_str().ok_or("sdk: the least SDK version the app needs, like \"1.2\"")?;
+            iyakki_core_api::sdkbridge::needs_ok(iyakki_core_api::sdkbridge::Version::CURRENT, w).map_err(|e| format!("sdk: {e}"))?;
+        }
         Ok(())
+    }
+
+    /// The path of the `.wasm` module this app declares (`"wasm"` in `app.json`), if any.
+    pub fn wasm_path(&self) -> Option<&str> {
+        self.ext.extra.get("wasm").and_then(Value::as_str)
     }
 
     pub fn to_json(&self) -> Value {
@@ -178,7 +253,15 @@ impl TileManifest {
         if !self.caps.network.is_empty() {
             caps.insert("network".into(), json!(self.caps.network));
         }
-        json!({"id": self.id, "name": self.name, "version": self.version, "icon": self.icon, "group": self.group, "capabilities": caps})
+        for (k, v) in self.caps.v2.iter().chain(self.caps.kept.iter()) {
+            caps.insert(k.clone(), v.clone());
+        }
+        let caps = if self.core_caps.is_empty() { Value::Object(caps) } else { json!(self.core_caps) };
+        let mut out = json!({"id": self.id, "name": self.name, "version": self.version, "icon": self.icon, "group": self.group, "capabilities": caps});
+        if let Some(o) = out.as_object_mut() {
+            self.ext.write_into(o);
+        }
+        out
     }
 
     /// The private origin of the app.
@@ -229,6 +312,7 @@ pub fn content_type(p: &str) -> &'static str {
         "json" => "application/json",
         "svg" => "image/svg+xml",
         "png" => "image/png",
+        "wasm" => "application/wasm",
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
         "webp" => "image/webp",
@@ -271,7 +355,7 @@ impl Bundle {
             Some(FileData::Text(t)) => TileManifest::parse(t)?,
             Some(_) => return Err(format!("{MANIFEST} must be text")),
             None => {
-                let m = TileManifest { id: fallback_id.to_string(), name: if fallback_title.is_empty() { super::author::title_of(fallback_id) } else { fallback_title.to_string() }, version: "0.1.0".into(), icon: String::new(), group: DEFAULT_GROUP.into(), caps: Caps::default() };
+                let m = TileManifest { id: fallback_id.to_string(), name: if fallback_title.is_empty() { super::author::title_of(fallback_id) } else { fallback_title.to_string() }, version: "0.1.0".into(), icon: String::new(), group: DEFAULT_GROUP.into(), caps: Caps::default(), core_caps: vec![], ext: Default::default() };
                 m.validate()?;
                 m
             }
@@ -299,7 +383,32 @@ impl Bundle {
         if self.total() > MAX_BUNDLE_BYTES {
             return Err(format!("the app is larger than {} KB in all", MAX_BUNDLE_BYTES / 1024));
         }
+        self.check_wasm()?;
+        if !self.manifest.ext.is_newer() {
+            iyakki_core_api::bundle::validate_member_files(&self.manifest.ext.contents, &|p| self.files.get(p).map(FileData::len), MAX_FILE_BYTES)?;
+        }
         Ok(())
+    }
+
+    /// The WebAssembly module of a `wasm` tile (F-WASM-09, F-APPS-45): `app.json` names it in `"wasm": "tile.wasm"`. `None` for an ordinary
+    /// web tile app. Only the binary form is accepted (it starts with `\0asm`); the shell runs it only while Settings -> Developer mode ->
+    /// WASM tiles (experimental) is on.
+    pub fn wasm_module(&self) -> Option<&[u8]> {
+        let path = self.manifest.wasm_path()?;
+        match self.files.get(path) {
+            Some(FileData::Bytes(b)) => Some(b),
+            _ => None,
+        }
+    }
+
+    fn check_wasm(&self) -> Result<(), String> {
+        let Some(path) = self.manifest.ext.extra.get("wasm") else { return Ok(()) };
+        let path = path.as_str().filter(|p| p.ends_with(".wasm") && path_ok(p)).ok_or("wasm: the path of the .wasm module in the app, like \"tile.wasm\"")?;
+        match self.files.get(path) {
+            None => Err(format!("wasm: {path} is not in the app")),
+            Some(FileData::Bytes(b)) if b.starts_with(b"\0asm") => Ok(()),
+            Some(_) => Err(format!("wasm: {path} is not a WebAssembly module (it must be the binary .wasm form)")),
+        }
     }
 
     /// Read a project folder. `tests/`, the README, the change log, the project file and anything hidden or private are left out.
@@ -332,7 +441,7 @@ impl Bundle {
                 } else if BIN_EXT.contains(&x.as_str()) {
                     out.insert(rel, FileData::Bytes(bytes));
                 } else {
-                    return Err(format!("{rel}: this kind of file is not allowed in a tile app (html, js, css, json, svg, txt, md, csv, png, jpg, gif, webp, woff2, ico)"));
+                    return Err(format!("{rel}: this kind of file is not allowed in a tile app (html, js, css, json, svg, txt, md, csv, png, jpg, gif, webp, woff2, ico, wasm)"));
                 }
             }
             Ok(())
@@ -700,6 +809,42 @@ impl TileHost {
         self.sdk.as_ref().ok_or_else(|| SdkError::new(code::UNAVAILABLE, "this build has no model or voice behind the bridge").encode())
     }
 
+    /// The SDK version this host speaks (an older one in tests).
+    fn level(&self) -> iyakki_core_api::sdkbridge::Version {
+        self.sdk.as_ref().map_or(iyakki_core_api::sdkbridge::Version::CURRENT, |s| s.v2().level())
+    }
+
+    /// SDK 1.1 and later calls that the original match above does not know: discovery, the generic door and the namespaces of 1.2.
+    fn sdk_call(&mut self, op: &str, a: &Value) -> Result<Value, String> {
+        use iyakki_core_api::sdkbridge as bridge;
+        let level = self.level();
+        if op == "sdk.call" {
+            let inner = s(a, "op", 60)?.to_string();
+            if inner == "sdk.call" || inner.starts_with("__test.") {
+                return Err(super::sdkv2::unsupported_encoded(&inner, level));
+            }
+            let args = match a.get("args") {
+                None | Some(Value::Null) => json!({}),
+                Some(v @ Value::Object(_)) => v.clone(),
+                Some(_) => return Err(SdkError::bad("args", "must be an object").encode()),
+            };
+            return self.call(&inner, &args);
+        }
+        let Some((n, o)) = bridge::find_op(op).filter(|(_, o)| bridge::known_at(level, o)) else {
+            // a name with a dot is a call of some SDK; this one does not know it
+            return if op.contains('.') && !op.starts_with("__test.") { Err(super::sdkv2::unsupported_encoded(op, level)) } else { Err(format!("no such bridge call: {}", op.chars().take(40).collect::<String>())) };
+        };
+        if let Some(cap) = bridge::capability_of(n, o) {
+            if !self.caps.holds(cap) {
+                return self.need_code(false, &format!("iyakki.{} (capability \"{cap}\")", n.name)).map(|_| Value::Null);
+            }
+        }
+        if let Some(r) = super::sdkv2::pure_call(op, a, &self.caps, level) {
+            return r.map_err(|e| e.encode());
+        }
+        self.sdk()?.v2().call(op, a, &self.caps).map_err(|e| e.encode())
+    }
+
     fn pending(&self, kind: &str, args: Value) -> Result<Value, String> {
         let mut o = self.out.lock().map_err(|_| "busy".to_string())?;
         if o.requests.len() >= MAX_PENDING {
@@ -737,6 +882,14 @@ impl Bridge for TileHost {
         self.window.1 += 1;
         if self.window.1 > RATE_PER_SEC {
             return Err(format!("too many calls: at most {RATE_PER_SEC} a second"));
+        }
+        {
+            let level = self.level();
+            if let Some((_, o)) = iyakki_core_api::sdkbridge::find_op(op) {
+                if !iyakki_core_api::sdkbridge::known_at(level, o) {
+                    return Err(super::sdkv2::unsupported_encoded(op, level));
+                }
+            }
         }
         match op {
             "app.info" => Ok(json!({"id": self.info.id, "name": self.info.name, "version": self.info.version, "publisher": self.info.publisher, "trust": self.info.trust, "dev": self.info.dev, "capabilities": self.caps.permissions()})),
@@ -836,7 +989,7 @@ impl Bridge for TileHost {
                 Some(s) => s.fake_op(&t["__test.".len()..], a),
                 None => Err("no such bridge call: __test".into()),
             },
-            other => Err(format!("no such bridge call: {}", other.chars().take(40).collect::<String>())),
+            other => self.sdk_call(other, a),
         }
     }
 }
@@ -1024,6 +1177,17 @@ globalThis.T = (function () {
         speech: { busy: (holder) => f('speech.busy', { holder }), said: () => f('speech.said') },
         notify: { sent: () => f('notify.sent') },
         approve: (mode) => f('approve.set', { mode }),
+        // SDK 1.2: the person's next answers, what the backends reply, what they were asked, events and a limit set as the person would
+        v2: {
+          answer: (allow) => f('v2.answer', { allow }),
+          reply: (op, value) => f('v2.reply', { op, value }),
+          fail: (op, code, message) => f('v2.fail', { op, code, message }),
+          calls: (op) => f('v2.calls', op === undefined ? {} : { op }),
+          heard: (text) => f('v2.heard', { text }),
+          event: (handle, event, payload) => f('v2.event', { handle, event, payload }),
+          limit: (currency, perDayMinor, confirmEach) => f('v2.limit', { currency, perDayMinor, confirmEach }),
+          pending: () => f('v2.pending'),
+        },
         budget: { set: (b) => f('budget.set', b) },
         clock: { advance: (ms) => f('clock.advance', { ms }) },
       };

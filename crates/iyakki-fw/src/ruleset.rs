@@ -17,6 +17,8 @@ pub const CHAIN: &str = "input";
 /// The nflog group the blocked-connection log listens on.
 pub const LOG_GROUP: u16 = 217;
 pub const MAX_RULES_OUT: usize = 3000;
+/// The note of the rule whose counter is the blocked total.
+pub const BLOCKED_NOTE: &str = "count blocked attempts";
 /// Where `iyakki-remote` listens unless told otherwise.
 pub const REMOTE_PORT: u16 = 8443;
 pub const SHARE_PORTS: (u16, u16) = (8081, 8180);
@@ -60,6 +62,10 @@ pub enum Step {
     Nfproto(u8),
     L4(u8),
     Saddr(Addr),
+    /// The source address is a member of the named set of the ruleset ([`AddrSet`]): one rule instead of one per address.
+    SaddrSet(String),
+    /// The source address and the destination port together are in a named `address . port` set ([`AddrSet::concat`]).
+    SaddrDportSet(String),
     Dport(u16, u16),
     IcmpType(u8, u8),
     Icmp6Type(u8, u8),
@@ -77,10 +83,32 @@ pub struct RuleSpec {
     pub note: String,
 }
 
+/// A named set of single addresses (one family) that rules look the source up in. Used when one rule would otherwise be
+/// written once per address (a host name with many answers): see [`SET_MIN`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AddrSet {
+    pub name: String,
+    pub v4: bool,
+    /// Single addresses (a plain set).
+    pub members: Vec<IpAddr>,
+    /// Address ranges (first and last, merged so none overlap or touch). A set with any is an interval set: network prefixes
+    /// and ranges of the rules it replaced, together with their single addresses, are kept here and `members` stays empty.
+    pub ranges: Vec<(IpAddr, IpAddr)>,
+    /// Source address spans each with the destination ports allowed from them (`address . port` interval set, F-FW-14). When not
+    /// empty it is the only content; the set is only made when [`BuildOptions::concat_sets`] is on (off by default).
+    pub concat: Vec<((IpAddr, IpAddr), (u16, u16))>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Ruleset {
     pub rules: Vec<RuleSpec>,
+    pub sets: Vec<AddrSet>,
 }
+
+/// From this many addresses that differ in nothing else, the rules are written as one rule and a set.
+pub const SET_MIN: usize = 16;
+/// The most addresses in one set (more are split over several sets).
+pub const SET_MAX: usize = 4096;
 
 /// What the machine looks like right now.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -100,11 +128,14 @@ pub struct Ctx {
     pub direct_allow_more: bool,
     /// The interface that internet sharing serves (`iyakki_agent::sharing`) while it is on: only DHCP (UDP 67) and DNS (UDP 53) come in on it.
     pub share_ifaces: Vec<String>,
+    /// The networks of the connected VPN tunnel (`service::set_vpn_networks`); they join "the local network" only when the
+    /// settings say `vpn_local`.
+    pub vpn_nets: Vec<Addr>,
 }
 
 impl Default for Ctx {
     fn default() -> Ctx {
-        Ctx { now: 0, ssh_boot: false, ipv6: true, cloud: false, remote_port: None, direct_ifaces: Vec::new(), direct_allow_more: false, share_ifaces: Vec::new() }
+        Ctx { now: 0, ssh_boot: false, ipv6: true, cloud: false, remote_port: None, direct_ifaces: Vec::new(), direct_allow_more: false, share_ifaces: Vec::new(), vpn_nets: Vec::new() }
     }
 }
 
@@ -193,7 +224,33 @@ fn allow(note: &str, sources: &[Option<Addr>], proto: Proto, ports: &[PortRange]
 }
 
 fn locals(ctx: &Ctx) -> Vec<Option<Addr>> {
-    local_networks(ctx.ipv6).into_iter().map(Some).collect()
+    local_networks(ctx.ipv6).into_iter().chain(ctx.vpn_nets.iter().filter(|a| a.is_v4() || ctx.ipv6).cloned()).map(Some).collect()
+}
+
+/// A VPN tunnel's network as the firewall will treat it: only private ranges (10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7) and
+/// nothing wider than a /8 (IPv4) or /16 (IPv6), so a tunnel can never make a public range "local". The host bits are cleared.
+pub fn vpn_network(text: &str) -> Result<Addr, String> {
+    let (a, p) = text.trim().split_once('/').ok_or_else(|| format!("{text}: write the network as address/length"))?;
+    let ip: IpAddr = a.trim().parse().map_err(|_| format!("{text}: not an address"))?;
+    let len: u8 = p.trim().parse().map_err(|_| format!("{text}: not a length"))?;
+    let (min, max, private): (u8, u8, bool) = match ip {
+        IpAddr::V4(v) => {
+            let o = v.octets();
+            (8, 32, o[0] == 10 || (o[0] == 172 && (16..=31).contains(&o[1])) || (o[0] == 192 && o[1] == 168) || (o[0] == 100 && (64..=127).contains(&o[1])))
+        }
+        IpAddr::V6(v) => (16, 128, (v.segments()[0] & 0xfe00) == 0xfc00),
+    };
+    if !private {
+        return Err(format!("{text}: only private ranges can count as the local network"));
+    }
+    if len < min || len > max {
+        return Err(format!("{text}: the length must be between {min} and {max}"));
+    }
+    let masked = match ip {
+        IpAddr::V4(v) => IpAddr::V4(Ipv4Addr::from(u32::from(v) & if len == 0 { 0 } else { u32::MAX << (32 - len as u32) })),
+        IpAddr::V6(v) => IpAddr::V6(Ipv6Addr::from(u128::from(v) & if len == 0 { 0 } else { u128::MAX << (128 - len as u32) })),
+    };
+    Ok(Addr::Cidr(masked, len))
 }
 
 fn preset_rules(p: Preset, ctx: &Ctx, out: &mut Vec<RuleSpec>) {
@@ -251,6 +308,34 @@ fn share_rules(name: &str, out: &mut Vec<RuleSpec>) {
 /// Build the rules. Rules that fail the checks are reported in `problems` and left out (the page validates before it saves,
 /// so this only happens for a hand-edited file).
 pub fn build(cfg: &Config, resolved: &Resolved, ctx: &Ctx) -> Result<Built, String> {
+    build_with(cfg, resolved, ctx, SET_MIN)
+}
+
+/// [`build`] with the number of same-looking rules from which a set is used (tests pass `usize::MAX` for the flat form).
+pub fn build_with(cfg: &Config, resolved: &Resolved, ctx: &Ctx, set_min: usize) -> Result<Built, String> {
+    build_opts(cfg, resolved, ctx, BuildOptions { set_min, ..BuildOptions::default() })
+}
+
+/// What the generator may do beyond the plain form. Everything here is off (or the usual value) by default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BuildOptions {
+    pub set_min: usize,
+    /// Rules that differ only in the source network and the destination port become one rule and an `address . port` interval set.
+    /// Off by default: the bytes are tested and the nft text is accepted by a real kernel, but nothing ships it until it has run in an image.
+    pub concat_sets: bool,
+}
+
+impl Default for BuildOptions {
+    fn default() -> Self {
+        BuildOptions { set_min: SET_MIN, concat_sets: false }
+    }
+}
+
+/// [`build_with`] with every option.
+pub fn build_opts(cfg: &Config, resolved: &Resolved, ctx: &Ctx, opts: BuildOptions) -> Result<Built, String> {
+    let set_min = opts.set_min;
+    // the tunnel's networks are "local" only when the person said so
+    let ctx = &Ctx { vpn_nets: if cfg.vpn_local { ctx.vpn_nets.clone() } else { Vec::new() }, ..ctx.clone() };
     let mut b = Built::default();
     let mut out: Vec<RuleSpec> = Vec::new();
     out.push(rule("replies to connections this machine started", vec![Step::CtState(CT_ESTABLISHED | CT_RELATED), Step::Accept]));
@@ -333,14 +418,294 @@ pub fn build(cfg: &Config, resolved: &Resolved, ctx: &Ctx) -> Result<Built, Stri
         };
         allow(&note, &sources, r.proto, &p.ports, p.iface.as_deref(), &mut out);
     }
+    // the rules the person or a preset made are counted, and long lists of addresses become one rule and a set
+    count_accepts(&mut out);
+    // pairs first: the plain address sets would otherwise take the single addresses and leave nothing for them
+    let mut pair_sets = Vec::new();
+    let out = if opts.concat_sets { collapse_concat(out, set_min, &mut pair_sets) } else { out };
+    let (mut out, mut sets) = collapse_long_lists(out, set_min);
+    sets.extend(pair_sets);
     // what is left is counted and (at a limited rate) logged, then the chain's policy drops it
-    out.push(rule("count blocked attempts", vec![Step::PktTypeHost, Step::CtState(CT_NEW), Step::Counter]));
+    out.push(rule(BLOCKED_NOTE, vec![Step::PktTypeHost, Step::CtState(CT_NEW), Step::Counter]));
     out.push(rule("log blocked attempts (rate limited)", vec![Step::PktTypeHost, Step::CtState(CT_NEW), Step::Limit { per_second: 10, burst: 5 }, Step::Log(LOG_GROUP)]));
     if out.len() > MAX_RULES_OUT {
         return Err(format!("These settings make {} rules; the limit is {MAX_RULES_OUT}. Use fewer ports per rule or CIDR ranges.", out.len()));
     }
     b.ruleset.rules = out;
+    b.ruleset.sets = sets;
     Ok(b)
+}
+
+/// A rule that only lets traffic in (no drop, no rate limit, no log): the order of such rules does not change any verdict.
+fn accept_only(r: &RuleSpec) -> bool {
+    r.steps.last() == Some(&Step::Accept) && !r.steps.iter().any(|s| matches!(s, Step::Drop | Step::Limit { .. } | Step::Log(_)))
+}
+
+/// Rules made by a person ("rule 3: ...") or a preset ("preset: SSH") count what they let in; the kernel keeps the counter in the rule.
+/// The invariant [`crate::nl::counters_of_dump`] relies on: the "count blocked attempts" rule comes last of all counted rules.
+fn count_accepts(out: &mut [RuleSpec]) {
+    for r in out.iter_mut() {
+        if (r.note.starts_with("rule ") || r.note.starts_with("preset: ")) && accept_only(r) && !r.steps.contains(&Step::Counter) {
+            let at = r.steps.len() - 1;
+            r.steps.insert(at, Step::Counter);
+        }
+    }
+}
+
+/// The one exact source address of a rule (and where it sits in the steps), when it has exactly one.
+fn exact_source(r: &RuleSpec) -> Option<(usize, IpAddr)> {
+    let mut f = r.steps.iter().enumerate().filter_map(|(k, s)| match s {
+        Step::Saddr(Addr::Exact(ip)) => Some((k, *ip)),
+        _ => None,
+    });
+    let one = f.next()?;
+    if f.next().is_some() {
+        return None;
+    }
+    Some(one)
+}
+
+/// Rules that are the same except for one exact source address, next to each other among the accept-only rules, become one rule
+/// with a set lookup when there are `set_min` or more of them. Accept-only rules can be merged in any order without changing a
+/// verdict (a packet is let in if any of them lets it in); a rule with a drop, limit or log in it is never touched and stays where it is.
+pub(crate) fn collapse_long_lists(out: Vec<RuleSpec>, set_min: usize) -> (Vec<RuleSpec>, Vec<AddrSet>) {
+    let mut res: Vec<RuleSpec> = Vec::new();
+    let mut sets: Vec<AddrSet> = Vec::new();
+    let mut i = 0;
+    while i < out.len() {
+        if !accept_only(&out[i]) {
+            res.push(out[i].clone());
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        while j < out.len() && accept_only(&out[j]) {
+            j += 1;
+        }
+        collapse_block(&out[i..j], set_min, &mut res, &mut sets);
+        i = j;
+    }
+    (res, sets)
+}
+
+fn collapse_block(block: &[RuleSpec], set_min: usize, res: &mut Vec<RuleSpec>, sets: &mut Vec<AddrSet>) {
+    // (steps with the source blanked, source position, family, note) -> indexes in the block
+    type Group<'a> = (Vec<Step>, usize, bool, &'a str, Vec<usize>);
+    let mut groups: Vec<Group> = Vec::new();
+    for (idx, r) in block.iter().enumerate() {
+        let Some((k, ip)) = exact_source(r) else { continue };
+        let mut key = r.steps.clone();
+        key[k] = Step::SaddrSet(String::new());
+        match groups.iter_mut().find(|g| g.0 == key && g.1 == k && g.2 == ip.is_ipv4() && g.3 == r.note) {
+            Some(g) => g.4.push(idx),
+            None => groups.push((key, k, ip.is_ipv4(), &r.note, vec![idx])),
+        }
+    }
+    let mut skip = vec![false; block.len()];
+    let mut put_at: BTreeMap<usize, Vec<RuleSpec>> = BTreeMap::new();
+    collapse_intervals(block, set_min, &mut groups_for_intervals(block), &mut skip, &mut put_at, sets);
+    for (key, k, v4, note, members) in &groups {
+        if members.iter().any(|m| skip[*m]) {
+            continue;
+        }
+        if members.len() < set_min {
+            continue;
+        }
+        let mut addrs: Vec<IpAddr> = members.iter().filter_map(|m| exact_source(&block[*m]).map(|(_, ip)| ip)).collect();
+        addrs.sort();
+        addrs.dedup();
+        let mut reps = Vec::new();
+        for chunk in addrs.chunks(SET_MAX) {
+            let name = format!("l{}", sets.len() + 1);
+            let mut steps = key.clone();
+            steps[*k] = Step::SaddrSet(name.clone());
+            reps.push(RuleSpec { steps, note: (*note).to_string() });
+            sets.push(AddrSet { name, v4: *v4, members: chunk.to_vec(), ranges: Vec::new(), concat: Vec::new() });
+        }
+        for m in members {
+            skip[*m] = true;
+        }
+        put_at.insert(members[0], reps);
+    }
+    for (idx, r) in block.iter().enumerate() {
+        if let Some(reps) = put_at.remove(&idx) {
+            res.extend(reps);
+        } else if !skip[idx] {
+            res.push(r.clone());
+        }
+    }
+}
+
+/// Rules that are the same except for one source (address, range or prefix) and one destination port range, next to each other
+/// among the accept-only rules, become one rule and an `address . port` interval set when there are `set_min` or more of them.
+/// A group whose elements overlap (different but intersecting in both address and port) is left as it is, so the kernel's set
+/// never has to take overlapping elements.
+pub(crate) fn collapse_concat(out: Vec<RuleSpec>, set_min: usize, sets: &mut Vec<AddrSet>) -> Vec<RuleSpec> {
+    let mut res: Vec<RuleSpec> = Vec::new();
+    let mut i = 0;
+    while i < out.len() {
+        if !accept_only(&out[i]) {
+            res.push(out[i].clone());
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        while j < out.len() && accept_only(&out[j]) {
+            j += 1;
+        }
+        concat_block(&out[i..j], set_min, &mut res, sets);
+        i = j;
+    }
+    res
+}
+
+type ConcatElem = (u128, u128, u16, u16);
+
+fn concat_parts(r: &RuleSpec) -> Option<(usize, usize, bool, ConcatElem)> {
+    let mut sa = r.steps.iter().enumerate().filter(|(_, s)| matches!(s, Step::Saddr(_)));
+    let mut dp = r.steps.iter().enumerate().filter(|(_, s)| matches!(s, Step::Dport(..)));
+    let (Some((k, Step::Saddr(a))), None) = (sa.next(), sa.next()) else { return None };
+    let (Some((d, Step::Dport(plo, phi))), None) = (dp.next(), dp.next()) else { return None };
+    let (v4, lo, hi) = addr_span(a)?;
+    Some((k, d, v4, (lo, hi, *plo, *phi)))
+}
+
+fn concat_block(block: &[RuleSpec], set_min: usize, res: &mut Vec<RuleSpec>, sets: &mut Vec<AddrSet>) {
+    // (steps without the source, with the port step turned into the lookup; positions; family; note) -> (indexes, elements)
+    type Group = (Vec<Step>, usize, bool, String, Vec<usize>, Vec<ConcatElem>);
+    let mut groups: Vec<Group> = Vec::new();
+    for (idx, r) in block.iter().enumerate() {
+        let Some((k, d, v4, e)) = concat_parts(r) else { continue };
+        let mut key = r.steps.clone();
+        key[d] = Step::SaddrDportSet(String::new());
+        key.remove(k);
+        let at = if k < d { d - 1 } else { d };
+        match groups.iter_mut().find(|g| g.0 == key && g.1 == at && g.2 == v4 && g.3 == r.note) {
+            Some(g) => {
+                g.4.push(idx);
+                g.5.push(e);
+            }
+            None => groups.push((key, at, v4, r.note.clone(), vec![idx], vec![e])),
+        }
+    }
+    let mut skip = vec![false; block.len()];
+    let mut put_at: BTreeMap<usize, RuleSpec> = BTreeMap::new();
+    for (key, at, v4, note, idxs, elems) in groups {
+        if idxs.len() < set_min {
+            continue;
+        }
+        let mut el = elems;
+        el.sort_unstable();
+        el.dedup();
+        let overlap = el.iter().enumerate().any(|(n, a)| el[n + 1..].iter().any(|b| a.0 <= b.1 && b.0 <= a.1 && a.2 <= b.3 && b.2 <= a.3));
+        if overlap || el.len() > SET_MAX {
+            continue;
+        }
+        let name = format!("c{}", sets.len() + 1);
+        let mut steps = key;
+        steps[at] = Step::SaddrDportSet(name.clone());
+        sets.push(AddrSet { name, v4, members: Vec::new(), ranges: Vec::new(), concat: el.iter().map(|(lo, hi, plo, phi)| ((num_ip(v4, *lo), num_ip(v4, *hi)), (*plo, *phi))).collect() });
+        for m in &idxs {
+            skip[*m] = true;
+        }
+        put_at.insert(idxs[0], RuleSpec { steps, note });
+    }
+    for (idx, r) in block.iter().enumerate() {
+        if let Some(rep) = put_at.remove(&idx) {
+            res.push(rep);
+        } else if !skip[idx] {
+            res.push(r.clone());
+        }
+    }
+}
+
+/// First and last address of a prefix or range, as numbers, with the family. `None` for "any" (`/0`), a range that runs backwards
+/// and a prefix longer than the family allows.
+fn addr_span(a: &Addr) -> Option<(bool, u128, u128)> {
+    fn n(i: &IpAddr) -> u128 {
+        match i {
+            IpAddr::V4(a) => u128::from(u32::from(*a)),
+            IpAddr::V6(a) => u128::from(*a),
+        }
+    }
+    let v4 = a.is_v4();
+    let bits: u32 = if v4 { 32 } else { 128 };
+    let all = if v4 { u128::from(u32::MAX) } else { u128::MAX };
+    match a {
+        Addr::Exact(ip) => Some((v4, n(ip), n(ip))),
+        Addr::Range(x, y) if x.is_ipv4() == y.is_ipv4() && n(x) <= n(y) => Some((v4, n(x), n(y))),
+        Addr::Range(..) => None,
+        Addr::Cidr(_, 0) => None,
+        Addr::Cidr(ip, l) if u32::from(*l) <= bits => {
+            let host = if u32::from(*l) == bits { 0 } else { all >> l };
+            let lo = n(ip) & !host & all;
+            Some((v4, lo, lo | host))
+        }
+        Addr::Cidr(..) => None,
+    }
+}
+
+fn num_ip(v4: bool, n: u128) -> IpAddr {
+    if v4 {
+        IpAddr::V4(std::net::Ipv4Addr::from(n as u32))
+    } else {
+        IpAddr::V6(std::net::Ipv6Addr::from(n))
+    }
+}
+
+/// Sort ranges and join those that overlap or touch (a kernel interval set refuses overlaps).
+pub fn merge_spans(mut spans: Vec<(u128, u128)>) -> Vec<(u128, u128)> {
+    spans.sort_unstable();
+    let mut out: Vec<(u128, u128)> = Vec::new();
+    for (lo, hi) in spans {
+        match out.last_mut() {
+            Some(last) if lo <= last.1.saturating_add(1) => last.1 = last.1.max(hi),
+            _ => out.push((lo, hi)),
+        }
+    }
+    out
+}
+
+/// A rule whose one source is a prefix, a range or a single address (any of them), with the source blanked.
+type IntervalGroup = (Vec<Step>, usize, bool, String, Vec<(usize, u128, u128)>);
+
+fn groups_for_intervals(block: &[RuleSpec]) -> Vec<IntervalGroup> {
+    let mut groups: Vec<IntervalGroup> = Vec::new();
+    for (idx, r) in block.iter().enumerate() {
+        let mut found = r.steps.iter().enumerate().filter(|(_, s)| matches!(s, Step::Saddr(_)));
+        let (Some((k, Step::Saddr(a))), None) = (found.next(), found.next()) else { continue };
+        let Some((v4, lo, hi)) = addr_span(a) else { continue };
+        let mut key = r.steps.clone();
+        key[k] = Step::SaddrSet(String::new());
+        match groups.iter_mut().find(|g| g.0 == key && g.1 == k && g.2 == v4 && g.3 == r.note) {
+            Some(g) => g.4.push((idx, lo, hi)),
+            None => groups.push((key, k, v4, r.note.clone(), vec![(idx, lo, hi)])),
+        }
+    }
+    groups
+}
+
+/// Groups of `set_min` or more rules with at least one prefix or range among them become one rule and an interval set.
+fn collapse_intervals(block: &[RuleSpec], set_min: usize, groups: &mut [IntervalGroup], skip: &mut [bool], put_at: &mut BTreeMap<usize, Vec<RuleSpec>>, sets: &mut Vec<AddrSet>) {
+    for (key, k, v4, note, members) in groups.iter() {
+        let has_span = members.iter().any(|(i, lo, hi)| lo != hi || !matches!(block[*i].steps[*k], Step::Saddr(Addr::Exact(_))));
+        if members.len() < set_min || !has_span {
+            continue;
+        }
+        let merged = merge_spans(members.iter().map(|(_, lo, hi)| (*lo, *hi)).collect());
+        let mut reps = Vec::new();
+        for chunk in merged.chunks(SET_MAX) {
+            let name = format!("l{}", sets.len() + 1);
+            let mut steps = key.clone();
+            steps[*k] = Step::SaddrSet(name.clone());
+            reps.push(RuleSpec { steps, note: note.clone() });
+            sets.push(AddrSet { name, v4: *v4, members: Vec::new(), concat: Vec::new(), ranges: chunk.iter().map(|(lo, hi)| (num_ip(*v4, *lo), num_ip(*v4, *hi))).collect() });
+        }
+        for (m, _, _) in members {
+            skip[*m] = true;
+        }
+        put_at.insert(members[0].0, reps);
+    }
 }
 
 fn state_words(m: u32) -> String {
@@ -382,6 +747,8 @@ impl Step {
             Step::Nfproto(_) => "meta nfproto ipv6".into(),
             Step::L4(p) => format!("meta l4proto {}", l4_name(*p)),
             Step::Saddr(a) => format!("{} saddr {}", if a.is_v4() { "ip" } else { "ip6" }, addr_text(a)),
+            Step::SaddrSet(n) => format!("saddr @{n}"),
+            Step::SaddrDportSet(n) => format!("ip saddr . th dport @{n}"),
             Step::Dport(a, b) if a == b => format!("th dport {a}"),
             Step::Dport(a, b) => format!("th dport {a}-{b}"),
             Step::IcmpType(a, b) if a == b => format!("icmp type {a}"),
@@ -400,13 +767,33 @@ impl Step {
 impl Ruleset {
     /// The ruleset in nft-like words (for the page, the export and the golden tests; the kernel gets the steps, not this text).
     pub fn to_text(&self) -> String {
-        let mut s = format!("table inet {TABLE} {{\n  chain {CHAIN} {{\n    type filter hook input priority filter; policy drop;\n");
+        let mut s = format!("table inet {TABLE} {{\n");
+        for set in self.sets.iter().filter(|s| !s.concat.is_empty()) {
+            s.push_str(&set.concat_text());
+        }
+        for set in self.sets.iter().filter(|s| s.concat.is_empty()) {
+            s.push_str(&format!("  set {} {{\n    type {}\n    elements = {{ {} }}\n  }}\n", set.name, format!("{}{}", if set.v4 { "ipv4_addr" } else { "ipv6_addr" }, if set.ranges.is_empty() { "" } else { "\n    flags interval" }), set.members.iter().map(|m| m.to_string()).chain(set.ranges.iter().map(|(a, b)| if a == b { a.to_string() } else { format!("{a}-{b}") })).collect::<Vec<_>>().join(", ")));
+        }
+        s.push_str(&format!("  chain {CHAIN} {{\n    type filter hook input priority filter; policy drop;\n"));
         for r in &self.rules {
             let note: String = r.note.chars().filter(|c| !c.is_control()).collect();
             s.push_str(&format!("    {}  # {}\n", r.steps.iter().map(Step::text).collect::<Vec<_>>().join(" "), note));
         }
         s.push_str("  }\n}\n");
         s
+    }
+}
+
+impl AddrSet {
+    /// The `address . port` set in nft's own words (only for a set with [`AddrSet::concat`]).
+    pub fn concat_text(&self) -> String {
+        let fam = if self.v4 { "ipv4_addr" } else { "ipv6_addr" };
+        let el: Vec<String> = self
+            .concat
+            .iter()
+            .map(|((a, b), (p, q))| format!("{} . {}", if a == b { a.to_string() } else { format!("{a}-{b}") }, if p == q { p.to_string() } else { format!("{p}-{q}") }))
+            .collect();
+        format!("  set {} {{\n    type {fam} . inet_service\n    flags interval\n    elements = {{ {} }}\n  }}\n", self.name, el.join(", "))
     }
 }
 
@@ -446,7 +833,16 @@ pub fn in_addr(a: &Addr, ip: IpAddr) -> bool {
 
 /// Run a packet through the chain: true if it is accepted, false if dropped (the policy).
 pub fn eval(rs: &Ruleset, p: &Packet) -> bool {
-    'rules: for r in &rs.rules {
+    eval_counting(rs, p, &mut Vec::new())
+}
+
+/// [`eval`] that also counts like the kernel does: every rule whose `counter` step is reached (all steps before it matched) adds
+/// one packet to its slot of `hits` (made as long as the rules). For tests that compare with what the kernel reports.
+pub fn eval_counting(rs: &Ruleset, p: &Packet, hits: &mut Vec<u64>) -> bool {
+    if hits.len() < rs.rules.len() {
+        hits.resize(rs.rules.len(), 0);
+    }
+    'rules: for (ri, r) in rs.rules.iter().enumerate() {
         for s in &r.steps {
             let ok = match s {
                 Step::Iif { name, prefix } => {
@@ -461,9 +857,15 @@ pub fn eval(rs: &Ruleset, p: &Packet) -> bool {
                 Step::Nfproto(f) => (*f == NFPROTO_IPV4) == p.src.is_ipv4(),
                 Step::L4(l) => p.l4 == *l,
                 Step::Saddr(a) => in_addr(a, p.src),
+                Step::SaddrSet(n) => rs.sets.iter().any(|set| &set.name == n && (set.members.contains(&p.src) || set.ranges.iter().any(|(lo, hi)| in_addr(&Addr::Range(*lo, *hi), p.src)))),
+                Step::SaddrDportSet(n) => matches!(p.l4, 6 | 17) && rs.sets.iter().any(|set| &set.name == n && set.concat.iter().any(|((lo, hi), (plo, phi))| in_addr(&Addr::Range(*lo, *hi), p.src) && (*plo..=*phi).contains(&p.dport))),
                 Step::Dport(a, b) => (*a..=*b).contains(&p.dport) && matches!(p.l4, 6 | 17),
                 Step::IcmpType(a, b) | Step::Icmp6Type(a, b) => (*a..=*b).contains(&p.icmp_type),
-                Step::Limit { .. } | Step::Log(_) | Step::Counter => true,
+                Step::Counter => {
+                    hits[ri] += 1;
+                    true
+                }
+                Step::Limit { .. } | Step::Log(_) => true,
                 Step::Accept => return true,
                 Step::Drop => return false,
             };
@@ -473,4 +875,41 @@ pub fn eval(rs: &Ruleset, p: &Packet) -> bool {
         }
     }
     false
+}
+
+/// What one rule (all the kernel rules that came from it, under one note) has let in or counted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuleCount {
+    pub note: String,
+    pub packets: u64,
+    pub bytes: u64,
+}
+
+/// Put the per-rule counters of the kernel (one entry per rule of the chain, in order, `None` for a rule without a counter) next to
+/// the rules they belong to, summed by note. The "count blocked attempts" rule is left out (it is the blocked total). A list of a
+/// different length (the table changed since it was built) gives nothing rather than a wrong answer.
+pub fn rule_counts(rs: &Ruleset, per_rule: &[Option<(u64, u64)>]) -> Vec<RuleCount> {
+    if per_rule.len() != rs.rules.len() {
+        return Vec::new();
+    }
+    let mut out: Vec<RuleCount> = Vec::new();
+    for (r, c) in rs.rules.iter().zip(per_rule) {
+        let Some((pk, by)) = c else { continue };
+        if r.note == BLOCKED_NOTE {
+            continue;
+        }
+        match out.iter_mut().find(|x| x.note == r.note) {
+            Some(x) => {
+                x.packets = x.packets.saturating_add(*pk);
+                x.bytes = x.bytes.saturating_add(*by);
+            }
+            None => out.push(RuleCount { note: r.note.clone(), packets: *pk, bytes: *by }),
+        }
+    }
+    out
+}
+
+/// The id of a rule made on the Firewall page, from a counted note ("rule 3: office").
+pub fn rule_id_of_note(note: &str) -> Option<u32> {
+    note.strip_prefix("rule ")?.split([':', ' ']).next()?.parse().ok()
 }

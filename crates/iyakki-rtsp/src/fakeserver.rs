@@ -3,12 +3,12 @@
 //! enough of each protocol to exercise a client; it is not a camera.
 
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::auth::{digest_response, params};
+use crate::auth::{digest_response_with, params};
 use crate::hash::base64_encode;
 use crate::packetize::{interleave, packetize_jpeg, rtp_packet, split_jpeg};
 
@@ -18,6 +18,8 @@ pub struct Config {
     pub user: Option<(String, String)>,
     /// Digest (true) or Basic (false) when `user` is set.
     pub digest: bool,
+    /// With Digest: ask for `algorithm=SHA-256` instead of MD5.
+    pub sha256: bool,
     /// Complete baseline 4:2:0 JPEG files, sent in turn.
     pub frames: Vec<Vec<u8>>,
     pub interval_ms: u64,
@@ -28,11 +30,17 @@ pub struct Config {
     pub path: String,
     /// Send this instead of the RTSP answer to DESCRIBE (hostile server tests): raw bytes.
     pub raw_describe: Option<Vec<u8>>,
+    /// Refuse video over the same connection (`461`) and send it over UDP to the port the client names (the way some cameras are).
+    pub udp_only: bool,
+    /// With `udp_only`: also send junk from a second socket (another port of the same address) that a client must ignore.
+    pub udp_decoys: bool,
+    /// Answer DESCRIBE of this path with a `302` to the given place (a path or a full address).
+    pub moved: Option<(String, String)>,
 }
 
 impl Default for Config {
     fn default() -> Config {
-        Config { user: None, digest: true, frames: vec![], interval_ms: 20, h264: false, max_frames: None, path: "/live".into(), raw_describe: None }
+        Config { user: None, digest: true, sha256: false, frames: vec![], interval_ms: 20, h264: false, max_frames: None, path: "/live".into(), raw_describe: None, udp_only: false, udp_decoys: false, moved: None }
     }
 }
 
@@ -86,12 +94,12 @@ fn authorized(cfg: &Config, method: &str, hs: &[(String, String)]) -> bool {
         return false;
     }
     let qop = if get("qop").is_empty() { None } else { Some((format!("{}:{}", get("nc"), get("cnonce")), get("qop"))) };
-    let want = digest_response(u, REALM, p, method, &get("uri"), NONCE, qop.as_ref().map(|(a, b)| (a.as_str(), b.as_str())));
+    let want = digest_response_with(cfg.sha256, u, REALM, p, method, &get("uri"), NONCE, qop.as_ref().map(|(a, b)| (a.as_str(), b.as_str())));
     get("response") == want
 }
 
 fn challenge(cfg: &Config) -> String {
-    if cfg.digest { format!("WWW-Authenticate: Digest realm=\"{REALM}\", nonce=\"{NONCE}\", qop=\"auth\"\r\n") } else { format!("WWW-Authenticate: Basic realm=\"{REALM}\"\r\n") }
+    if cfg.digest { format!("WWW-Authenticate: Digest realm=\"{REALM}\", nonce=\"{NONCE}\", qop=\"auth\"{}\r\n", if cfg.sha256 { ", algorithm=SHA-256" } else { "" }) } else { format!("WWW-Authenticate: Basic realm=\"{REALM}\"\r\n") }
 }
 
 impl FakeCamera {
@@ -135,6 +143,7 @@ fn reply(s: &mut TcpStream, code: u16, reason: &str, cseq: &str, extra: &str, bo
 fn serve_rtsp(mut s: TcpStream, cfg: Config, stop: Arc<AtomicBool>, log: Arc<Mutex<Vec<String>>>, streams: Arc<AtomicU64>, refused: Arc<AtomicU64>) {
     let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
     let mut sdp_sent = false;
+    let mut udp: Option<(UdpSocket, SocketAddr)> = None;
     while let Some((first, hs)) = read_head(&mut s) {
         let mut it = first.split(' ');
         let (method, uri) = (it.next().unwrap_or("").to_string(), it.next().unwrap_or("").to_string());
@@ -147,6 +156,10 @@ fn serve_rtsp(mut s: TcpStream, cfg: Config, stop: Arc<AtomicBool>, log: Arc<Mut
         }
         match method.as_str() {
             "OPTIONS" => reply(&mut s, 200, "OK", &cseq, "Public: OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN\r\n", ""),
+            "DESCRIBE" if cfg.moved.as_ref().is_some_and(|(from, _)| uri.split_once("://").and_then(|(_, r)| r.find('/').map(|i| &r[i..])).unwrap_or(&uri) == from) => {
+                let to = cfg.moved.as_ref().map(|m| m.1.clone()).unwrap_or_default();
+                reply(&mut s, 302, "Moved Temporarily", &cseq, &format!("Location: {to}\r\n"), "");
+            }
             "DESCRIBE" => {
                 if let Some(raw) = &cfg.raw_describe {
                     let _ = s.write_all(raw);
@@ -162,6 +175,19 @@ fn serve_rtsp(mut s: TcpStream, cfg: Config, stop: Arc<AtomicBool>, log: Arc<Mut
             }
             "SETUP" if sdp_sent => {
                 let tr = hs.iter().find(|h| h.0 == "transport").map(|h| h.1.clone()).unwrap_or_default();
+                if cfg.udp_only {
+                    let port = tr.split(';').find_map(|p| p.trim().strip_prefix("client_port=")).and_then(|v| v.split('-').next()).and_then(|v| v.parse::<u16>().ok());
+                    let (Some(port), false) = (port, tr.contains("TCP")) else {
+                        reply(&mut s, 461, "Unsupported Transport", &cseq, "", "");
+                        continue;
+                    };
+                    let Ok(sock) = UdpSocket::bind("127.0.0.1:0") else { return };
+                    let sp = sock.local_addr().map(|a| a.port()).unwrap_or(0);
+                    let to = SocketAddr::new(s.peer_addr().map(|a| a.ip()).unwrap_or_else(|_| "127.0.0.1".parse().expect("literal")), port);
+                    reply(&mut s, 200, "OK", &cseq, &format!("Session: 4711;timeout=60\r\nTransport: RTP/AVP;unicast;client_port={port}-{};server_port={sp}-{}\r\n", port + 1, sp.wrapping_add(1)), "");
+                    udp = Some((sock, to));
+                    continue;
+                }
                 if !tr.contains("TCP") {
                     reply(&mut s, 461, "Unsupported Transport", &cseq, "", "");
                     continue;
@@ -171,7 +197,10 @@ fn serve_rtsp(mut s: TcpStream, cfg: Config, stop: Arc<AtomicBool>, log: Arc<Mut
             "PLAY" if sdp_sent => {
                 reply(&mut s, 200, "OK", &cseq, "Session: 4711\r\n", "");
                 streams.fetch_add(1, Ordering::SeqCst);
-                stream_rtp(&mut s, &cfg, &stop);
+                match udp.take() {
+                    Some((sock, to)) => stream_rtp_udp(&mut s, &sock, to, &cfg, &stop),
+                    None => stream_rtp(&mut s, &cfg, &stop),
+                }
                 return;
             }
             "TEARDOWN" => {
@@ -183,39 +212,58 @@ fn serve_rtsp(mut s: TcpStream, cfg: Config, stop: Arc<AtomicBool>, log: Arc<Mut
     }
 }
 
+fn one_picture(cfg: &Config, n: usize, seq: &mut u16, ts: u32) -> Option<Vec<Vec<u8>>> {
+    let mut wire: Vec<Vec<u8>> = Vec::new();
+    if cfg.h264 {
+        let (sps, pps) = (vec![0x67u8, 0x64, 0, 0x1f], vec![0x68u8, 0xeb, 0xe3]);
+        let idr: Vec<u8> = std::iter::once(0x65u8).chain((0..2500u32).map(|i| (i % 200) as u8 + 1)).collect();
+        let mut stap = vec![24u8];
+        for x in [&sps, &pps] {
+            stap.extend_from_slice(&(x.len() as u16).to_be_bytes());
+            stap.extend_from_slice(x);
+        }
+        wire.push(rtp_packet(96, false, *seq, ts, 9, &stap));
+        *seq = seq.wrapping_add(1);
+        let chunks: Vec<&[u8]> = idr[1..].chunks(1000).collect();
+        for (i, c) in chunks.iter().enumerate() {
+            let mut v = vec![(idr[0] & 0xe0) | 28, (if i == 0 { 0x80 } else { 0 }) | (if i == chunks.len() - 1 { 0x40 } else { 0 }) | (idr[0] & 0x1f)];
+            v.extend_from_slice(c);
+            wire.push(rtp_packet(96, i == chunks.len() - 1, *seq, ts, 9, &v));
+            *seq = seq.wrapping_add(1);
+        }
+    } else if let Some(j) = cfg.frames.get(n % cfg.frames.len().max(1)) {
+        let Some((w, h, qt, scan)) = split_jpeg(j) else { return None };
+        for (last, p) in packetize_jpeg(w, h, 1, 255, Some(&qt), &scan, 1000) {
+            wire.push(rtp_packet(26, last, *seq, ts, 9, &p));
+            *seq = seq.wrapping_add(1);
+        }
+    } else {
+        return None;
+    }
+    Some(wire)
+}
+
 fn stream_rtp(s: &mut TcpStream, cfg: &Config, stop: &AtomicBool) {
     let (mut seq, mut ts, mut n) = (1000u16, 90_000u32, 0usize);
+    let _ = s.set_read_timeout(Some(Duration::from_millis(1)));
     loop {
         if stop.load(Ordering::SeqCst) || cfg.max_frames.is_some_and(|m| n >= m) {
             return;
         }
-        let mut wire: Vec<Vec<u8>> = Vec::new();
-        if cfg.h264 {
-            let (sps, pps) = (vec![0x67u8, 0x64, 0, 0x1f], vec![0x68u8, 0xeb, 0xe3]);
-            let idr: Vec<u8> = std::iter::once(0x65u8).chain((0..2500u32).map(|i| (i % 200) as u8 + 1)).collect();
-            let mut stap = vec![24u8];
-            for x in [&sps, &pps] {
-                stap.extend_from_slice(&(x.len() as u16).to_be_bytes());
-                stap.extend_from_slice(x);
+        // a real camera answers the client's keep-alive and its TEARDOWN while the pictures run (the answer comes between two packets)
+        let mut b = [0u8; 512];
+        if let Ok(k @ 1..) = s.read(&mut b) {
+            let text = String::from_utf8_lossy(&b[..k]).into_owned();
+            let cseq = text.lines().find_map(|l| l.strip_prefix("CSeq:")).map(|v| v.trim().to_string()).unwrap_or_default();
+            if text.starts_with("TEARDOWN") {
+                reply(s, 200, "OK", &cseq, "", "");
+                return;
             }
-            wire.push(rtp_packet(96, false, seq, ts, 9, &stap));
-            seq = seq.wrapping_add(1);
-            let chunks: Vec<&[u8]> = idr[1..].chunks(1000).collect();
-            for (i, c) in chunks.iter().enumerate() {
-                let mut v = vec![(idr[0] & 0xe0) | 28, (if i == 0 { 0x80 } else { 0 }) | (if i == chunks.len() - 1 { 0x40 } else { 0 }) | (idr[0] & 0x1f)];
-                v.extend_from_slice(c);
-                wire.push(rtp_packet(96, i == chunks.len() - 1, seq, ts, 9, &v));
-                seq = seq.wrapping_add(1);
+            if text.starts_with("OPTIONS") {
+                reply(s, 200, "OK", &cseq, "Public: OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN\r\n", "");
             }
-        } else if let Some(j) = cfg.frames.get(n % cfg.frames.len().max(1)) {
-            let Some((w, h, qt, scan)) = split_jpeg(j) else { return };
-            for (last, p) in packetize_jpeg(w, h, 1, 255, Some(&qt), &scan, 1000) {
-                wire.push(rtp_packet(26, last, seq, ts, 9, &p));
-                seq = seq.wrapping_add(1);
-            }
-        } else {
-            return;
         }
+        let Some(wire) = one_picture(cfg, n, &mut seq, ts) else { return };
         // an RTCP-looking packet on the odd channel now and then, which a client must skip
         let mut out = vec![];
         if n % 3 == 0 {
@@ -226,6 +274,38 @@ fn stream_rtp(s: &mut TcpStream, cfg: &Config, stop: &AtomicBool) {
         }
         if s.write_all(&out).is_err() {
             return;
+        }
+        n += 1;
+        ts = ts.wrapping_add(3000);
+        std::thread::sleep(Duration::from_millis(cfg.interval_ms));
+    }
+}
+
+/// The same pictures as datagrams to the port the client named, until the control connection ends or the camera is stopped.
+fn stream_rtp_udp(control: &mut TcpStream, sock: &UdpSocket, to: SocketAddr, cfg: &Config, stop: &AtomicBool) {
+    let _ = control.set_read_timeout(Some(Duration::from_millis(1)));
+    let decoy = if cfg.udp_decoys { UdpSocket::bind("127.0.0.1:0").ok() } else { None };
+    let (mut seq, mut ts, mut n) = (1000u16, 90_000u32, 0usize);
+    loop {
+        if stop.load(Ordering::SeqCst) || cfg.max_frames.is_some_and(|m| n >= m) {
+            return;
+        }
+        // the client leaving (TEARDOWN) or the connection closing ends the stream
+        let mut b = [0u8; 256];
+        match control.read(&mut b) {
+            Ok(0) => return,
+            Ok(_) if b.starts_with(b"TEARDOWN") => return,
+            _ => {}
+        }
+        let Some(wire) = one_picture(cfg, n, &mut seq, ts) else { return };
+        if let Some(d) = &decoy {
+            // valid-looking packets from the wrong port: a client that takes them would show a picture nobody sent
+            for p in &wire {
+                let _ = d.send_to(p, to);
+            }
+        }
+        for p in &wire {
+            let _ = sock.send_to(p, to);
         }
         n += 1;
         ts = ts.wrapping_add(3000);
@@ -250,6 +330,28 @@ fn serve_http(mut s: TcpStream, cfg: Config, stop: Arc<AtomicBool>, log: Arc<Mut
             streams.fetch_add(1, Ordering::SeqCst);
             let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", first_frame.len()).as_bytes());
             let _ = s.write_all(first_frame);
+        }
+        "/snapshot-chunked.jpg" => {
+            streams.fetch_add(1, Ordering::SeqCst);
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n");
+            for c in first_frame.chunks(97) {
+                let _ = s.write_all(format!("{:x}\r\n", c.len()).as_bytes());
+                let _ = s.write_all(c);
+                let _ = s.write_all(b"\r\n");
+            }
+            let _ = s.write_all(b"0\r\n\r\n");
+        }
+        "/moved.jpg" | "/moved-twice.jpg" | "/moved-away.jpg" | "/moved-secure.jpg" | "/moved-loop.jpg" | "/moved-nowhere.jpg" => {
+            let to = match path.as_str() {
+                "/moved.jpg" => "/snapshot.jpg",
+                "/moved-twice.jpg" => "/moved.jpg",
+                "/moved-away.jpg" => "http://192.0.2.1/snapshot.jpg",
+                "/moved-secure.jpg" => "https://192.0.2.1/snapshot.jpg",
+                "/moved-loop.jpg" => "/moved-loop.jpg",
+                _ => "",
+            };
+            let loc = if to.is_empty() { String::new() } else { format!("Location: {to}\r\n") };
+            let _ = s.write_all(format!("HTTP/1.1 302 Found\r\n{loc}Content-Length: 0\r\nConnection: close\r\n\r\n").as_bytes());
         }
         "/video.mjpg" | "/video-nolength.mjpg" | "/video-chunked.mjpg" => {
             streams.fetch_add(1, Ordering::SeqCst);

@@ -45,13 +45,17 @@ fn the_cluster_tools_path_answers_a_missing_kubectl_in_words() {
     if crate::wsexec::System.has("kubectl") {
         assert!(v.is_ok() || v.unwrap_err().contains("kubectl is installed but failed"));
     } else {
-        assert!(v.unwrap().contains("says so in words"));
+        assert!(v.as_ref().is_ok_and(|m| m.contains("say so in words")), "{v:?}");
     }
     use crate::wsexec::Runner;
 }
 
 #[test]
 fn the_doctor_probe_path_sees_the_listener_and_the_loopback_address() {
+    // the path reads the kernel's own files (/proc/uptime, /proc/meminfo); on another system they are not there and nothing is wrong
+    if !std::path::Path::new("/proc/uptime").exists() {
+        return;
+    }
     let lo = real();
     let v = check("doctor-probes", &lo);
     assert!(v.is_ok(), "{v:?}");

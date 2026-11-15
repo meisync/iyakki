@@ -47,6 +47,9 @@ struct Entry {
     /// The tenant this session works in after a switch (`None`: the one this service was started for). Never saved: a restart
     /// puts everybody back in their home tenant.
     tenant: Option<String>,
+    /// The paired computer a program signed in with (F-WEBSVC-06): its `api:*` scopes limit what the token may call, read afresh at
+    /// every request. Such a token is never saved: after a restart the program signs in again.
+    program: Option<String>,
 }
 
 pub struct Tokens {
@@ -78,13 +81,13 @@ impl Tokens {
         let now = (self.now)();
         let mut m = self.map.lock().unwrap_or_else(|e| e.into_inner());
         for s in list.into_iter().filter(|s| now.saturating_sub(s.created) < self.lifetime).take(MAX_TOKENS) {
-            m.insert(s.h, Entry { user: s.user, created: s.created, last: Instant::now(), tenant: None });
+            m.insert(s.h, Entry { user: s.user, created: s.created, last: Instant::now(), tenant: None, program: None });
         }
     }
 
     fn save(&self, m: &HashMap<String, Entry>) {
         let Some(p) = &self.path else { return };
-        let list: Vec<Saved> = m.iter().map(|(h, e)| Saved { h: h.clone(), user: e.user.clone(), created: e.created }).collect();
+        let list: Vec<Saved> = m.iter().filter(|(_, e)| e.program.is_none()).map(|(h, e)| Saved { h: h.clone(), user: e.user.clone(), created: e.created }).collect();
         let Ok(text) = serde_json::to_string(&list) else { return };
         if let Some(d) = p.parent() {
             let _ = std::fs::create_dir_all(d);
@@ -113,9 +116,34 @@ impl Tokens {
             return Err("too many people are signed in".into());
         }
         let t = new_token()?;
-        m.insert(hash_token(&t), Entry { user: user.into(), created: (self.now)(), last: Instant::now(), tenant: None });
+        m.insert(hash_token(&t), Entry { user: user.into(), created: (self.now)(), last: Instant::now(), tenant: None, program: None });
         self.save(&m);
         Ok(t)
+    }
+
+    /// A token for a program that signed in with the developer key of the paired computer `computer`, acting as `user`.
+    pub fn issue_program(&self, user: &str, computer: &str) -> Result<String, String> {
+        let mut m = self.map.lock().map_err(|_| "busy".to_string())?;
+        let dead: Vec<String> = m.iter().filter(|(_, e)| self.expired(e)).map(|(h, _)| h.clone()).collect();
+        for h in dead {
+            m.remove(&h);
+        }
+        if m.len() >= MAX_TOKENS {
+            return Err("too many people are signed in".into());
+        }
+        let t = new_token()?;
+        m.insert(hash_token(&t), Entry { user: user.into(), created: (self.now)(), last: Instant::now(), tenant: None, program: Some(computer.into()) });
+        Ok(t)
+    }
+
+    /// The paired computer behind a token that a program signed in with (`None`: an ordinary person's token).
+    pub fn program_of(&self, token: &str) -> Option<String> {
+        let m = self.map.lock().ok()?;
+        let e = m.get(&hash_token(token))?;
+        if self.expired(e) {
+            return None;
+        }
+        e.program.clone()
     }
 
     /// The person a token belongs to; touches its idle clock.

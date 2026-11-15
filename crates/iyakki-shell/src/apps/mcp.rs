@@ -5,11 +5,11 @@
 use crate::safeclamp::SafeClamp;
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use iyakki_agent::mcp::{McpClient, ServerSpec, StoredServer, Tool};
+use iyakki_agent::mcp::{ServerSpec, StoredServer, Tool};
 
 use super::widgets::{render_confirm, Form, FormEvent};
+use super::mcp_port::{Connected, CxPort, McpPort, McpSession};
 use super::{blink, App, AppCx, Flow};
 use crate::gfx::{rgb, Face, Gfx, Icon};
 use crate::ui::{Event, Key, TextField, ERR, MUTED, OK, R, TEXT};
@@ -26,8 +26,6 @@ pub enum Stage {
     Result,
 }
 
-type Connected = (McpClient, Vec<Tool>);
-
 enum Dialog {
     None,
     Add(Form),
@@ -42,7 +40,7 @@ pub struct McpApp {
     stage: Stage,
     tools: Vec<Tool>,
     tsel: usize,
-    client: Option<Arc<Mutex<McpClient>>>,
+    client: Option<Arc<Mutex<Box<dyn McpSession>>>>,
     connect_rx: Option<Receiver<Result<Connected, String>>>,
     call_rx: Option<Receiver<Result<String, String>>>,
     args: TextField,
@@ -53,8 +51,8 @@ pub struct McpApp {
 }
 
 impl McpApp {
-    pub fn new(cx: &AppCx) -> McpApp {
-        let servers = Self::visible(cx);
+    pub fn new(p: &dyn McpPort) -> McpApp {
+        let servers = p.visible();
         McpApp {
             request: None,
             dialog: Dialog::None,
@@ -73,32 +71,13 @@ impl McpApp {
         }
     }
 
-    /// The servers this account may use: the administrator's file and the ones added in this tile.
-    fn visible(cx: &AppCx) -> Vec<ServerSpec> {
-        let stored = cx.services.mcp.list();
-        let mut v: Vec<ServerSpec> = cx.mcp_servers.iter().filter(|s| !stored.iter().any(|x| x.name == s.name)).cloned().collect();
-        v.extend(stored.iter().map(StoredServer::spec));
-        v.retain(|s| cx.session.policy.allows_mcp(&s.name));
-        v
-    }
-
-    fn can_manage(cx: &AppCx) -> bool {
-        cx.session.policy.manage_settings
-    }
-
     fn add_form() -> Form {
         Form::new("Add an MCP server").text("Name", "", "e.g. files").text("Command", "", "/usr/bin/mcp-files").text("Arguments", "", "optional, separated by spaces")
     }
 
-    /// `sample`, `added here` or `mcp.json`.
-    fn origin(cx: &AppCx, name: &str) -> &'static str {
-        match cx.services.mcp.list().iter().find(|s| s.name == name) {
-            Some(s) if s.sample => "sample",
-            Some(_) => "added here",
-            None => "mcp.json",
-        }
+    pub fn status_text(&self) -> Option<&str> {
+        self.status.as_ref().map(|s| s.0.as_str())
     }
-
     pub fn stage(&self) -> Stage {
         self.stage
     }
@@ -112,34 +91,26 @@ impl McpApp {
         self.servers.iter().map(|s| s.name.as_str()).collect()
     }
 
-    fn ask_remove(&mut self, cx: &AppCx) {
+    fn ask_remove(&mut self, p: &dyn McpPort) {
         let Some(sv) = self.servers.get(self.sel) else { return };
-        if !Self::can_manage(cx) {
+        if !p.can_manage() {
             self.status = Some(("Only administrators can add or remove servers.".into(), false));
-        } else if Self::origin(cx, &sv.name) == "mcp.json" {
+        } else if p.origin(&sv.name) == "mcp.json" {
             self.status = Some((format!("{} comes from the administrator's mcp.json; remove it from that file.", sv.name), false));
         } else {
             self.dialog = Dialog::Remove(sv.name.clone());
         }
     }
 
-    fn connect(&mut self, cx: &AppCx) {
+    fn connect(&mut self, p: &dyn McpPort) {
         let Some(spec) = self.servers.get(self.sel).cloned() else { return };
         self.error = None;
-        cx.audit.record(&cx.session.user, "mcp.connect", &spec.name);
-        let (tx, rx) = channel();
-        std::thread::spawn(move || {
-            let r = McpClient::connect(&spec, Duration::from_secs(10)).and_then(|mut c| {
-                let t = c.tools()?;
-                Ok((c, t))
-            });
-            let _ = tx.send(r);
-        });
-        self.connect_rx = Some(rx);
+        p.audit("mcp.connect", &spec.name);
+        self.connect_rx = Some(p.connect(spec));
         self.stage = Stage::Connecting;
     }
 
-    fn call(&mut self, cx: &AppCx) {
+    fn call(&mut self, p: &dyn McpPort) {
         let (Some(client), Some(tool)) = (self.client.clone(), self.tools.get(self.tsel).cloned()) else { return };
         let raw = if self.args.value.trim().is_empty() { "{}".to_string() } else { self.args.value.clone() };
         let args: serde_json::Value = match serde_json::from_str(&raw) {
@@ -150,7 +121,7 @@ impl McpApp {
             }
         };
         self.error = None;
-        cx.audit.record(&cx.session.user, "mcp.call", &format!("{}/{}", self.servers[self.sel].name, tool.name));
+        p.audit("mcp.call", &format!("{}/{}", self.servers[self.sel].name, tool.name));
         let (tx, rx) = channel();
         std::thread::spawn(move || {
             let r = client.lock().map_err(|_| "client lock poisoned".to_string()).and_then(|mut c| c.call(&tool.name, args));
@@ -217,8 +188,18 @@ impl App for McpApp {
     }
 
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
+        self.handle_with(ev, &CxPort(cx))
+    }
+
+    fn render(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx, tick: u64) {
+        self.render_with(g, area, s, &CxPort(cx), tick)
+    }
+}
+
+impl McpApp {
+    pub fn handle_with(&mut self, ev: &Event, p: &dyn McpPort) -> Flow {
         if !matches!(ev, Event::Tick) {
-            self.servers = Self::visible(cx);
+            self.servers = p.visible();
             self.sel = self.sel.min(self.servers.len().saturating_sub(1));
         }
         match &mut self.dialog {
@@ -228,12 +209,12 @@ impl App for McpApp {
                     FormEvent::Submit => {
                         let args: Vec<String> = f.value(2).split_whitespace().map(str::to_string).collect();
                         let s = StoredServer { name: f.value(0), command: f.value(1), args, sample: false };
-                        match cx.services.mcp.add(s) {
+                        match p.add(s) {
                             Ok(()) => {
-                                cx.audit.record(&cx.session.user, "mcp.add", &f.value(0));
+                                p.audit("mcp.add", &f.value(0));
                                 self.status = Some((format!("Added {}.", f.value(0)), true));
                                 self.dialog = Dialog::None;
-                                self.servers = Self::visible(cx);
+                                self.servers = p.visible();
                             }
                             Err(e) => f.error = Some(e),
                         }
@@ -245,9 +226,9 @@ impl App for McpApp {
             Dialog::Remove(name) => {
                 let name = name.clone();
                 if matches!(ev, Event::Key(Key::Char('y')) | Event::Key(Key::Enter)) {
-                    match cx.services.mcp.remove(&name) {
+                    match p.remove(&name) {
                         Ok(()) => {
-                            cx.audit.record(&cx.session.user, "mcp.remove", &name);
+                            p.audit("mcp.remove", &name);
                             self.status = Some((format!("Removed {name}."), true));
                             self.servers.retain(|s| s.name != name);
                             self.sel = self.sel.min(self.servers.len().saturating_sub(1));
@@ -264,7 +245,7 @@ impl App for McpApp {
         }
         match ev {
             Event::Tab(40) if self.stage == Stage::Servers => {
-                if Self::can_manage(cx) {
+                if p.can_manage() {
                     self.dialog = Dialog::Add(Self::add_form());
                 } else {
                     self.status = Some(("Only administrators can add or remove servers.".into(), false));
@@ -272,7 +253,7 @@ impl App for McpApp {
                 return Flow::Stay;
             }
             Event::Tab(41) if self.stage == Stage::Servers => {
-                self.ask_remove(cx);
+                self.ask_remove(p);
                 return Flow::Stay;
             }
             Event::Tick => {
@@ -316,15 +297,15 @@ impl App for McpApp {
                 Key::Esc => return Flow::Back,
                 Key::Up => self.sel = self.sel.saturating_sub(1),
                 Key::Down => self.sel = (self.sel + 1).min(self.servers.len().saturating_sub(1)),
-                Key::Enter => self.connect(cx),
+                Key::Enter => self.connect(p),
                 Key::Char('n') => {
-                    if Self::can_manage(cx) {
+                    if p.can_manage() {
                         self.dialog = Dialog::Add(Self::add_form());
                     } else {
                         self.status = Some(("Only administrators can add or remove servers.".into(), false));
                     }
                 }
-                Key::Char('d') | Key::Delete => self.ask_remove(cx),
+                Key::Char('d') | Key::Delete => self.ask_remove(p),
                 Key::Char('u') => match self.servers.get(self.sel) {
                     Some(sv) => self.request = Some(("store".into(), format!("installed:mcp:{}", sv.name))),
                     None => self.status = Some(("There is no server to manage.".into(), false)),
@@ -354,7 +335,7 @@ impl App for McpApp {
             },
             Stage::Args => match k {
                 Key::Esc => self.stage = Stage::Tools,
-                Key::Enter => self.call(cx),
+                Key::Enter => self.call(p),
                 other => {
                     self.args.handle(other);
                 }
@@ -364,7 +345,7 @@ impl App for McpApp {
         Flow::Stay
     }
 
-    fn render(&mut self, g: &mut Gfx, area: R, s: f32, cx: &AppCx, tick: u64) {
+    pub fn render_with(&mut self, g: &mut Gfx, area: R, s: f32, p: &dyn McpPort, tick: u64) {
         let x = area.x + 24.0 * s;
         let w = area.w - 48.0 * s;
         let mut y = area.y + 8.0 * s;
@@ -380,14 +361,14 @@ impl App for McpApp {
         };
         match self.stage {
             Stage::Servers | Stage::Connecting => {
-                g.text(x, y, 15.0 * s, MUTED, &format!("{} server(s) available to {} ({})", self.servers.len(), cx.session.user, cx.session.role.name()), Face::Sans);
+                g.text(x, y, 15.0 * s, MUTED, &format!("{} server(s) available to {} ({})", self.servers.len(), p.account().0, p.account().1), Face::Sans);
                 y += 30.0 * s;
                 if self.servers.is_empty() {
-                    let msg = if cx.mcp_servers.is_empty() { "No MCP servers configured. Add them to /etc/iyakki/mcp.json." } else { "Your role has no access to the configured MCP servers." };
+                    let msg = if !p.configured() { "No MCP servers configured. Add them to /etc/iyakki/mcp.json." } else { "Your role has no access to the configured MCP servers." };
                     crate::fx::empty_state(g, R::new(x, y, w, 240.0 * s), s, Icon::Mcp, "No MCP servers", msg, ACCENT);
                 }
                 for (i, sv) in self.servers.iter().enumerate() {
-                    let tag = Self::origin(cx, &sv.name);
+                    let tag = p.origin(&sv.name);
                     row(g, i, y, &sv.name, &format!("{}{} {}", if tag == "mcp.json" { String::new() } else { format!("{} · ", tag.to_uppercase()) }, sv.command, sv.args.join(" ")), i == self.sel);
                     y += 72.0 * s;
                 }
@@ -431,10 +412,16 @@ impl App for McpApp {
                 if !self.servers.is_empty() {
                     add(g, "Connect", ACCENT, Key::Enter);
                 }
-                if Self::can_manage(cx) {
+                if p.can_manage() {
                     bx += g.button(bx, by, 14.0 * s, "Add server (n)", ACCENT, Event::Tab(40)) + 10.0 * s;
                     if !self.servers.is_empty() {
-                        g.button(bx, by, 14.0 * s, "Remove (d)", ERR, Event::Tab(41));
+                        // a row of buttons wider than the window continues on a row above it
+                        let rw = g.text_width(14.0 * s, "Remove (d)", Face::Bold) + 14.0 * s * 1.7;
+                        if bx + rw > x + w {
+                            g.button(x, by - 40.0 * s, 14.0 * s, "Remove (d)", ERR, Event::Tab(41));
+                        } else {
+                            g.button(bx, by, 14.0 * s, "Remove (d)", ERR, Event::Tab(41));
+                        }
                     }
                 }
             }
@@ -466,8 +453,13 @@ impl App for McpApp {
 }
 
 #[cfg(test)]
+#[path = "mcp_fake_tests.rs"]
+mod fake_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     use crate::apps::tests::cx_with_backend;
 
     fn wait(app: &mut McpApp, cx: &AppCx, until: impl Fn(&McpApp) -> bool) {
@@ -502,7 +494,7 @@ done
         let spec = |n: &str| ServerSpec { name: n.into(), command: "/bin/sh".into(), args: vec![script.display().to_string()], env: Default::default() };
         cx.mcp_servers = vec![spec("allowed"), spec("secret")];
         cx.session.policy.mcp_servers = vec!["allowed".into()];
-        let mut app = McpApp::new(&cx);
+        let mut app = McpApp::new(&CxPort(&cx));
         assert_eq!(app.server_names(), vec!["allowed"], "servers outside the policy are hidden");
 
         app.handle(&Event::Key(Key::Enter), &cx);
@@ -542,14 +534,14 @@ done
         cx.session.policy.mcp_servers = vec!["*".into()];
         // a sample put there by IYAKKI
         cx.services.mcp.add(StoredServer { name: "iyakki-demo".into(), command: "/bin/sh".into(), args: vec![], sample: true }).unwrap();
-        let mut app = McpApp::new(&cx);
+        let mut app = McpApp::new(&CxPort(&cx));
         assert_eq!(app.server_names(), vec!["from-file", "iyakki-demo"]);
         let mut g = Gfx::new(1000, 650);
         g.clear(rgb(0, 0, 0));
         app.render(&mut g, R::new(0.0, 46.0, 1000.0, 604.0), 1.0, &cx, 0);
         assert!(g.hits.iter().any(|h| h.ev == Event::Tab(40)) && g.hits.iter().any(|h| h.ev == Event::Tab(41)));
-        assert_eq!(McpApp::origin(&cx, "iyakki-demo"), "sample");
-        assert_eq!(McpApp::origin(&cx, "from-file"), "mcp.json");
+        assert_eq!(CxPort(&cx).origin("iyakki-demo"), "sample");
+        assert_eq!(CxPort(&cx).origin("from-file"), "mcp.json");
         // the file's server cannot be removed from here
         app.handle(&Event::Key(Key::Char('d')), &cx);
         assert!(matches!(app.dialog, Dialog::None) && app.status.as_ref().unwrap().0.contains("mcp.json"));
@@ -603,7 +595,7 @@ done
         app.handle(&Event::Key(Key::Esc), &cx);
         // someone who is not an administrator cannot
         cx.session.policy.manage_settings = false;
-        let mut app = McpApp::new(&cx);
+        let mut app = McpApp::new(&CxPort(&cx));
         app.handle(&Event::Key(Key::Char('n')), &cx);
         assert!(matches!(app.dialog, Dialog::None) && app.status.as_ref().unwrap().0.contains("Only administrators"));
     }
@@ -613,10 +605,10 @@ done
         let (mut cx, _d) = cx_with_backend("mcp2", iyakki_agent::chat::Unconfigured);
         cx.mcp_servers = vec![ServerSpec { name: "bad".into(), command: "/no/such".into(), args: vec![], env: Default::default() }];
         cx.session.policy.mcp_servers = vec![];
-        let mut app = McpApp::new(&cx);
+        let mut app = McpApp::new(&CxPort(&cx));
         assert!(app.server_names().is_empty(), "a role with no MCP access sees no servers");
         cx.session.policy.mcp_servers = vec!["*".into()];
-        let mut app2 = McpApp::new(&cx);
+        let mut app2 = McpApp::new(&CxPort(&cx));
         app2.handle(&Event::Key(Key::Enter), &cx);
         wait(&mut app2, &cx, |a| a.stage() == Stage::Servers);
         assert!(app2.error.as_deref().unwrap().contains("cannot start"));

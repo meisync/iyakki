@@ -73,7 +73,7 @@ pub struct Server {
     token: String,
 }
 
-fn rand_hex() -> Result<String, String> {
+pub(crate) fn rand_hex() -> Result<String, String> {
     let mut b = [0u8; 32];
     iyakki_sec::random_fill(&mut b).map_err(|e| format!("no random numbers: {e:?}"))?;
     Ok(iyakki_link::sigscheme::hex(&b))
@@ -158,24 +158,24 @@ pub struct Req {
     /// The path as sent (not decoded): only exact paths match.
     pub path: String,
     pub query: HashMap<String, String>,
-    headers: Vec<(String, String)>,
+    pub(crate) headers: Vec<(String, String)>,
     pub body: Vec<u8>,
 }
 
 impl Req {
-    fn header(&self, n: &str) -> Option<&str> {
+    pub(crate) fn header(&self, n: &str) -> Option<&str> {
         self.headers.iter().find(|(k, _)| k == n).map(|(_, v)| v.as_str())
     }
-    fn count(&self, n: &str) -> usize {
+    pub(crate) fn count(&self, n: &str) -> usize {
         self.headers.iter().filter(|(k, _)| k == n).count()
     }
 }
 
-struct Resp {
-    status: u16,
-    ctype: &'static str,
-    body: Vec<u8>,
-    extra: Vec<(String, String)>,
+pub(crate) struct Resp {
+    pub(crate) status: u16,
+    pub(crate) ctype: &'static str,
+    pub(crate) body: Vec<u8>,
+    pub(crate) extra: Vec<(String, String)>,
 }
 
 fn reason(s: u16) -> &'static str {
@@ -189,25 +189,26 @@ fn reason(s: u16) -> &'static str {
         409 => "Conflict",
         413 => "Payload Too Large",
         426 => "Upgrade Required",
+        502 => "Bad Gateway",
         _ => "Error",
     }
 }
 
 impl Resp {
-    fn new(status: u16, ctype: &'static str, body: impl Into<Vec<u8>>) -> Resp {
+    pub(crate) fn new(status: u16, ctype: &'static str, body: impl Into<Vec<u8>>) -> Resp {
         Resp { status, ctype, body: body.into(), extra: vec![] }
     }
-    fn err(status: u16, msg: &str) -> Resp {
+    pub(crate) fn err(status: u16, msg: &str) -> Resp {
         Resp::new(status, "application/json", json!({"error": msg}).to_string())
     }
-    fn json(v: Value) -> Resp {
+    pub(crate) fn json(v: Value) -> Resp {
         Resp::new(200, "application/json", v.to_string())
     }
-    fn header(mut self, k: &str, v: &str) -> Resp {
+    pub(crate) fn header(mut self, k: &str, v: &str) -> Resp {
         self.extra.push((k.into(), v.into()));
         self
     }
-    fn bytes(&self, csp: &str) -> Vec<u8> {
+    pub(crate) fn bytes(&self, csp: &str) -> Vec<u8> {
         let mut h = format!("HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n", self.status, reason(self.status), self.ctype, self.body.len());
         // on every answer, errors included
         h.push_str(&format!("Content-Security-Policy: {csp}\r\n"));
@@ -248,7 +249,7 @@ fn pct_decode(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-fn read_request(s: &mut TcpStream) -> Result<Req, Resp> {
+pub(crate) fn read_request(s: &mut TcpStream) -> Result<Req, Resp> {
     let started = Instant::now();
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
@@ -313,12 +314,12 @@ fn read_request(s: &mut TcpStream) -> Result<Req, Resp> {
     Ok(req)
 }
 
-fn same(a: &str, b: &str) -> bool {
+pub(crate) fn same(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
 }
 
-fn cookie<'a>(req: &'a Req, name: &str) -> Option<&'a str> {
+pub(crate) fn cookie<'a>(req: &'a Req, name: &str) -> Option<&'a str> {
     req.header("cookie")?.split(';').filter_map(|c| c.trim().split_once('=')).find(|(k, _)| *k == name).map(|(_, v)| v)
 }
 

@@ -717,29 +717,53 @@ impl BrowserMedia {
     }
 }
 
+type Entries = Vec<(String, Arc<BrowserMedia>)>;
+
 /// The signed-in people whose browser media is open, by user name (the shell finds its person's here).
-fn registry() -> &'static Mutex<Vec<(String, Arc<BrowserMedia>)>> {
-    static R: std::sync::OnceLock<Mutex<Vec<(String, Arc<BrowserMedia>)>>> = std::sync::OnceLock::new();
+fn registry() -> &'static Mutex<Entries> {
+    static R: std::sync::OnceLock<Mutex<Entries>> = std::sync::OnceLock::new();
     R.get_or_init(|| Mutex::new(Vec::new()))
 }
 
+thread_local! {
+    /// Tests: a registry of this thread's own (see [`isolate_for_this_thread`]).
+    static ISOLATED: std::cell::RefCell<Option<Entries>> = const { std::cell::RefCell::new(None) };
+}
+
+/// FOR TESTS. Every test of the shell signs in as `root`, and the registry is process wide: a test that registered `root`'s browser made the
+/// sign "your browser's microphone and camera are on" appear on every other test's screen at the same time (the overflow tests and the
+/// IDE tests failed now and then), and a test that unregistered `root` took it from another. A test that registers calls this first: from
+/// then on this thread's `register`, `unregister`, `for_user`, `audio_listeners` and the other readers use a registry of their own, and
+/// other threads never see it. Production code never calls it.
+pub fn isolate_for_this_thread() {
+    ISOLATED.with(|i| *i.borrow_mut() = Some(Vec::new()));
+}
+
+fn with_entries<R>(f: impl FnOnce(&mut Entries) -> R) -> R {
+    ISOLATED.with(|i| match i.borrow_mut().as_mut() {
+        Some(own) => f(own),
+        None => f(&mut registry().lock().unwrap_or_else(|e| e.into_inner())),
+    })
+}
+
 pub fn register(user: &str, m: Arc<BrowserMedia>) {
-    let mut r = registry().lock().unwrap_or_else(|e| e.into_inner());
-    r.retain(|(u, _)| u != user);
-    r.push((user.to_string(), m));
+    with_entries(|r| {
+        r.retain(|(u, _)| u != user);
+        r.push((user.to_string(), m));
+    });
 }
 
 pub fn unregister(user: &str) {
-    registry().lock().unwrap_or_else(|e| e.into_inner()).retain(|(u, _)| u != user);
+    with_entries(|r| r.retain(|(u, _)| u != user));
 }
 
 pub fn for_user(user: &str) -> Option<Arc<BrowserMedia>> {
-    registry().lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(u, _)| u == user).map(|(_, m)| m.clone())
+    with_entries(|r| r.iter().find(|(u, _)| u == user).map(|(_, m)| m.clone()))
 }
 
 /// Does any connected page listen to the session's sound? (The mixer sends nothing, and keeps nothing, when this is false.)
 pub fn audio_listeners() -> bool {
-    registry().lock().unwrap_or_else(|e| e.into_inner()).iter().any(|(_, m)| m.wants_audio())
+    with_entries(|r| r.iter().any(|(_, m)| m.wants_audio()))
 }
 
 /// Must the machine's own speakers stay silent right now? Only the controlling session decides: the live page (its connection
@@ -750,7 +774,7 @@ pub fn local_muted() -> bool {
 }
 
 pub fn local_muted_at(now: Instant) -> bool {
-    let all: Vec<Arc<BrowserMedia>> = registry().lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(_, m)| m.clone()).collect();
+    let all: Vec<Arc<BrowserMedia>> = with_entries(|r| r.iter().map(|(_, m)| m.clone()).collect());
     muted_by(&all, now)
 }
 
@@ -762,13 +786,13 @@ pub fn muted_by(sessions: &[Arc<BrowserMedia>], now: Instant) -> bool {
 /// The browser media whose camera the desktop should use: a registered page that may use the camera, one that has it on first, else
 /// the one that connected last.
 pub fn camera_session() -> Option<Arc<BrowserMedia>> {
-    let all: Vec<Arc<BrowserMedia>> = registry().lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(_, m)| m.clone()).filter(|m| m.policy().camera).collect();
+    let all: Vec<Arc<BrowserMedia>> = with_entries(|r| r.iter().map(|(_, m)| m.clone()).filter(|m| m.policy().camera).collect());
     all.iter().rev().find(|m| m.is_on(Kind::Camera)).or(all.last()).cloned()
 }
 
 /// Offer the mixer's output (16-bit interleaved PCM) to every page that started its sound. True when at least one took it.
 pub fn broadcast_audio(rate: u32, channels: u8, pcm: &[i16]) -> bool {
-    let all: Vec<Arc<BrowserMedia>> = registry().lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(_, m)| m.clone()).collect();
+    let all: Vec<Arc<BrowserMedia>> = with_entries(|r| r.iter().map(|(_, m)| m.clone()).collect());
     let mut any = false;
     for m in all {
         any |= m.push_audio(rate, channels, pcm);

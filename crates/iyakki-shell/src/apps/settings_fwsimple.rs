@@ -421,7 +421,8 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn render_firewall_simple(&mut self, g: &mut Gfx, a: R, s: f32, _cx: &AppCx) {
+    pub(super) fn render_firewall_simple(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
+        let vpn_line = self.fw_vpn_line(cx);
         let v = self.fw.handle.lock().view();
         let base = self.fw_base();
         let cfg = self.fw_cfg();
@@ -449,6 +450,9 @@ impl SettingsApp {
         };
         for (t, c) in simple_status(&v, changes, self.fw.writable) {
             line(g, &mut y, &t, c, 13.0 * s, Face::Sans);
+        }
+        if let Some(t) = &vpn_line {
+            line(g, &mut y, t, AMBER, 13.0 * s, Face::Sans);
         }
         // the three ways to run it
         y += 4.0 * s;

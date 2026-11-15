@@ -745,7 +745,20 @@ fn cut_words(s: &str, max: usize) -> String {
             t.truncate(i);
         }
     }
-    t.trim_end_matches([',', ';', ' ']).to_string()
+    // a cut must not leave half a sentence that runs into the words after it ("...shimmer under the Gentle, child-friendly"):
+    // drop dangling little words and end the sentence
+    let mut t = t.trim_end_matches([',', ';', ':', '-', ' ']).to_string();
+    while let Some((head, last)) = t.rsplit_once(' ') {
+        if matches!(last.to_lowercase().as_str(), "the" | "a" | "an" | "of" | "and" | "or" | "but" | "to" | "in" | "on" | "under" | "over" | "with" | "by" | "at" | "for" | "from" | "as" | "his" | "her" | "its" | "their" | "into" | "onto" | "while" | "that" | "which") {
+            t = head.trim_end_matches([',', ';', ':', '-', ' ']).to_string();
+        } else {
+            break;
+        }
+    }
+    if !t.ends_with(['.', '!', '?']) {
+        t.push('.');
+    }
+    t
 }
 
 /// A person of the story in photo words, from the character sheet (age, hair, clothing as the sheet says them).
@@ -895,6 +908,17 @@ pub fn timing_text(model: &str, d: Option<ImageDefaults>, count: usize, cpu_only
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cut_description_ends_its_sentence_and_does_not_run_into_the_words_after_it() {
+        // found by the live run with qwen3-8b: "...shimmer under the" + " Gentle, child-friendly..." read as one broken sentence
+        let long = "Finn curls on the pond bank, his red fur glowing softly as silver moonlight ripples across the water. Sparkling droplets shimmer under the old willow tree";
+        let cut = cut_words(long, 118);
+        assert!(cut.ends_with('.') && !cut.ends_with("the."), "{cut}");
+        assert!(chars(&cut) <= 119 && long.starts_with(cut.trim_end_matches('.')), "{cut}");
+        assert_eq!(cut_words("short one", 50), "short one", "an uncut text is left alone");
+        assert_eq!(cut_words("a b c d e f g h and the", 14), "a b c d e f g.");
+    }
     use crate::lemonade::ModelType;
     use crate::scene::CharacterSheet;
 

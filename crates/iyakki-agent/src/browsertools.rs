@@ -639,7 +639,7 @@ impl<'a> Actor<'a> {
             let file = if n == 0 { format!("browser-{stamp}.png") } else { format!("browser-{stamp}-{}.png", n + 1) };
             let path = crate::scope::resolve(&self.cwd, &file)?;
             crate::scope::check_write(self.policy, self.user, &path)?;
-            match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            match { use std::os::unix::fs::OpenOptionsExt; std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path) } {
                 Ok(mut f) => {
                     std::io::Write::write_all(&mut f, &png).map_err(|e| e.to_string())?;
                     return Ok(format!("Screenshot of {host} shown in the chat (saved as {}, {} KB).\nIMAGE: {}", path.display(), png.len().div_ceil(1024), path.display()));

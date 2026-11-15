@@ -351,8 +351,8 @@ fn a_yes_that_answers_the_assistants_question_needs_no_read_back() {
 }
 
 #[test]
-fn an_ordinary_approval_can_be_given_by_voice() {
-    let mut r = rig();
+fn an_ordinary_approval_can_be_given_by_voice_when_the_person_turned_spoken_approvals_on() {
+    let mut r = rig_with(Config { spoken_approvals: true, ..Config::default() }, false);
     r.tap_and_talk("set a timer for ten minutes", Some(0.9));
     r.push(approval("c1", "calendar_add"));
     r.run(200);
@@ -364,6 +364,52 @@ fn an_ordinary_approval_can_be_given_by_voice() {
     assert_eq!(r.decisions(), vec![("c1".to_string(), true)]);
     assert_eq!(r.state(), State::Thinking);
     assert!(r.a.status().approval.is_none());
+}
+
+#[test]
+fn by_default_a_spoken_yes_does_not_approve_even_an_ordinary_ask_but_a_spoken_no_denies_it() {
+    let mut r = rig();
+    assert!(!Config::default().spoken_approvals);
+    r.tap_and_talk("set a timer for ten minutes", Some(0.9));
+    r.push(approval("c1", "calendar_add"));
+    r.run(200);
+    let a = r.a.status().approval.unwrap();
+    assert!(!a.hard && !a.voice_ok, "ordinary, but voice cannot approve it while the setting is off");
+    r.run(1500);
+    assert!(r.spoken().iter().any(|s| s.contains("Tap Allow or press Y")), "{:?}", r.spoken());
+    r.talk("yes, do it", Some(0.99));
+    assert!(r.decisions().is_empty(), "a spoken yes must not approve: {:?}", r.decisions());
+    assert!(r.spoken().iter().any(|s| s == SAID_TAP_ONLY));
+    assert_eq!(r.state(), State::AwaitApproval);
+    // a tap does, and a spoken no denies
+    assert!(r.a.approve("c1", true));
+    assert_eq!(r.decisions(), vec![("c1".to_string(), true)]);
+    let mut r = rig();
+    r.tap_and_talk("set a timer", Some(0.9));
+    r.push(approval("c2", "calendar_add"));
+    r.run(1800);
+    r.talk("no", Some(0.9));
+    assert_eq!(r.decisions(), vec![("c2".to_string(), false)]);
+}
+
+#[test]
+fn with_spoken_approvals_on_the_hard_ask_list_still_refuses_a_spoken_yes() {
+    for tool in ["vpn_delete", "store_install", "voice_assistant_set", "voice_session_settings_set", "camera_photo", "screen_capture", "vault_request", "some_new_delete_thing"] {
+        assert!(is_hard(tool), "{tool}");
+        let mut r = rig_with(Config { spoken_approvals: true, ..Config::default() }, false);
+        r.tap_and_talk("please do it now", Some(0.9));
+        r.push(approval("h1", tool));
+        r.run(1800);
+        let a = r.a.status().approval.unwrap();
+        assert!(a.hard && !a.voice_ok, "{tool}");
+        r.talk("yes, do it", Some(0.99));
+        assert!(r.decisions().is_empty(), "{tool}: {:?}", r.decisions());
+        r.talk("yes", Some(0.99));
+        r.talk("approve", Some(0.99));
+        assert!(r.decisions().is_empty(), "{tool}");
+        assert!(r.a.approve("h1", true), "a tap does");
+        assert_eq!(r.decisions(), vec![("h1".to_string(), true)]);
+    }
 }
 
 #[test]
@@ -425,7 +471,7 @@ fn a_hard_ask_that_is_listening_still_refuses_a_spoken_yes() {
 
 #[test]
 fn an_unclear_answer_twice_denies_an_ordinary_ask() {
-    let mut r = rig();
+    let mut r = rig_with(Config { spoken_approvals: true, ..Config::default() }, false);
     r.tap_and_talk("do something useful", Some(0.9));
     r.push(approval("c2", "calendar_add"));
     r.run(1800);
@@ -438,7 +484,7 @@ fn an_unclear_answer_twice_denies_an_ordinary_ask() {
 
 #[test]
 fn no_answer_in_time_denies_an_ordinary_ask_but_keeps_a_hard_card_waiting() {
-    let mut r = rig();
+    let mut r = rig_with(Config { spoken_approvals: true, ..Config::default() }, false);
     r.tap_and_talk("do something useful", Some(0.9));
     r.push(approval("c3", "calendar_add"));
     r.run(1800);
@@ -594,7 +640,7 @@ fn the_worker_follows_taps_and_the_mute_setting() {
     let ports = Ports { audio: Box::new(FakeAudio(w.clone())), stt: Box::new(FakeStt(w.clone())), speaker: Box::new(FakeSpeaker(w.clone())), agent: Box::new(FakeAgent(w.clone())), log: Box::new(FakeLog(w.clone())) };
     let muted = Arc::new(AtomicBool::new(false));
     let m2 = muted.clone();
-    let worker = spawn(ports, Config::default(), Box::new(move || Live { muted: m2.load(Ordering::SeqCst), follow_ms: 8000, pause_ms: 1500 }), 5);
+    let worker = spawn(ports, Config::default(), Box::new(move || Live { muted: m2.load(Ordering::SeqCst), follow_ms: 8000, pause_ms: 1500, spoken_approvals: false }), 5);
     let wait = |f: &dyn Fn(&Status) -> bool| {
         for _ in 0..400 {
             if f(&worker.status()) {
@@ -612,4 +658,52 @@ fn the_worker_follows_taps_and_the_mute_setting() {
     assert!(!w.lock().unwrap().mic_open);
     drop(worker);
     assert!(!w.lock().unwrap().mic_open, "dropping the worker closes the microphone");
+}
+
+#[test]
+fn the_top_bar_glyph_follows_the_real_microphone_and_the_mute_and_the_strongest_worker_wins() {
+    use crate::voiceassist::{glyph_of, mic_glyph, new_worker_id, set_worker_glyph, MicGlyph};
+    let st = |mic_open: bool, muted: bool| Status { state: State::Idle, muted, mic_open, level: 0.0, heard: String::new(), said: String::new(), note: String::new(), approval: None, confirm: None };
+    assert_eq!(glyph_of(&st(false, false)), MicGlyph::Off);
+    assert_eq!(glyph_of(&st(true, false)), MicGlyph::Listening);
+    assert_eq!(glyph_of(&st(false, true)), MicGlyph::Muted);
+    assert_eq!(glyph_of(&st(true, true)), MicGlyph::Listening, "an open microphone is always shown");
+    assert!(MicGlyph::Listening > MicGlyph::Muted && MicGlyph::Muted > MicGlyph::Off);
+    let id = new_worker_id();
+    set_worker_glyph(id, MicGlyph::Listening);
+    assert_eq!(mic_glyph(), MicGlyph::Listening);
+    set_worker_glyph(id, MicGlyph::Off);
+}
+
+#[test]
+fn a_spoken_turn_is_marked_once_and_an_assistant_turn_is_not() {
+    use crate::voiceassist::{is_spoken_turn, spoken_turn, SPOKEN_MARK};
+    assert_eq!(spoken_turn("  what is the weather  "), "(spoken) what is the weather");
+    assert_eq!(spoken_turn(&spoken_turn("hello")), "(spoken) hello", "never marked twice");
+    assert!(is_spoken_turn(&spoken_turn("hello")) && !is_spoken_turn("typed later in the same thread"));
+    assert!(SPOKEN_MARK.starts_with('(') && SPOKEN_MARK.ends_with(' '));
+}
+
+#[test]
+fn finished_work_is_asked_of_the_agent_and_answered_aloud_only_when_the_assistant_is_free_and_not_muted() {
+    let mut r = rig();
+    assert!(r.a.wake_turn(r.t, "The backup you waited for has finished."));
+    assert_eq!(r.a.status().state, State::Thinking);
+    assert!(!r.a.status().mic_open, "no microphone opens for it");
+    {
+        let w = r.w.lock().unwrap();
+        assert_eq!(w.asked, ["The backup you waited for has finished."]);
+        assert!(w.log.is_empty(), "the system text is not a turn the person spoke");
+    }
+    // busy: a second wake is refused and nothing more is asked
+    assert!(!r.a.wake_turn(r.t, "another"));
+    r.w.lock().unwrap().events.push_back(AgentEvent::Final("Your backup finished without errors.".into()));
+    r.run(2_000);
+    assert!(r.w.lock().unwrap().spoken.iter().any(|s| s.contains("backup finished")), "{:?}", r.w.lock().unwrap().spoken);
+    // muted: never
+    let mut m = rig_with(Config::default(), true);
+    assert!(!m.a.wake_turn(m.t, "x") && m.w.lock().unwrap().asked.is_empty());
+    // empty text: nothing
+    let mut e = rig();
+    assert!(!e.a.wake_turn(e.t, "  "));
 }

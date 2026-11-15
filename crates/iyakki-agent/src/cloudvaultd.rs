@@ -980,7 +980,36 @@ pub fn run(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
             out(&format!("{name} is enrolled"));
             Ok(())
         }
-        _ => Err("usage: iyakki vault serve --listen ADDR --data DIR [--tls-cert F --tls-key F] | keygen --out FILE | enroll --data DIR --id ID --keys JSON | enroll-member --vault HOST:PORT --id TENANT/ADMIN --key FILE --name PERSON --keys JSON".into()),
+        Some("enroll-service") => {
+            // the tenant's admin gives the pod's own service identity (`_flows`: scheduled flows reading the secrets a team admin marked) its key:
+            // made here, kept in the tenant's volume at cloud/vault-keys/NAME.key (0600), its public half enrolled on the vault service
+            let usage = "usage: iyakki vault enroll-service --vault HOST:PORT [--fingerprint SHA256] --id TENANT/ADMIN --key FILE --data TENANT_DATA_DIR [--name _flows]";
+            let (hp, id, kf, data) = (opt(a, "--vault"), opt(a, "--id"), opt(a, "--key"), opt(a, "--data"));
+            let (Some(hp), Some(id), Some(kf), Some(data)) = (hp, id, kf, data) else { return Err(usage.into()) };
+            let name = opt(a, "--name").unwrap_or_else(|| crate::cloudflows::SERVICE_USER.to_string());
+            let (host, port) = hp.rsplit_once(':').and_then(|(h, p)| p.parse::<u16>().ok().map(|p| (h.to_string(), p))).ok_or("--vault is HOST:PORT")?;
+            let who = Principal::parse(&id).filter(|w| matches!(w, Principal::Member { .. })).ok_or("--id is TENANT/PERSON")?;
+            let mine = MemberKeys::from_hex(&std::fs::read_to_string(&kf).map_err(|e| format!("{kf}: {e}"))?)?;
+            let path = crate::cloudrotate::keys_path(Path::new(&data), &name).ok_or("that is not a usable service name")?;
+            if path.exists() {
+                return Err(format!("{} exists already: the service has its key. Remove it first only if the operator has replaced the key on the vault service", path.display()));
+            }
+            let k = MemberKeys::generate()?;
+            std::fs::create_dir_all(path.parent().ok_or("no folder")?).map_err(|e| e.to_string())?;
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+                f.write_all(k.seed_hex().as_bytes()).map_err(|e| format!("{}: {e}", path.display()))?;
+            }
+            // the key is on the volume before the service hears of it; if the service refuses, nothing is left behind
+            if let Err(e) = (Client { host, port, fingerprint: opt(a, "--fingerprint"), who, keys: mine }).enroll_member(&name, &k.public()) {
+                let _ = std::fs::remove_file(&path);
+                return Err(format!("the vault service did not enroll {name} (it must be a member of the tenant first, with a role not above yours): {e}"));
+            }
+            out(&format!("{name} is enrolled; its key is {}. Give it a wrap in the team vaults whose marked secrets scheduled flows may read (add the member to those scopes)", path.display()));
+            Ok(())
+        }
+        _ => Err("usage: iyakki vault serve --listen ADDR --data DIR [--tls-cert F --tls-key F] | keygen --out FILE | enroll --data DIR --id ID --keys JSON | enroll-member --vault HOST:PORT --id TENANT/ADMIN --key FILE --name PERSON --keys JSON | enroll-service --vault HOST:PORT --id TENANT/ADMIN --key FILE --data DIR".into()),
     }
 }
 
@@ -1652,4 +1681,45 @@ mod tests {
         assert_eq!((get(), get()), (200, 401));
         run.stop();
     }
+
+#[test]
+fn a_tenant_admin_enrolls_the_flows_service_key_once_and_a_refusal_leaves_no_key_behind() {
+    use crate::cloudroles::Roles;
+    let vdir = crate::testdir::unique("flowsenrol", "vault");
+    let s = Store::open(&vdir).unwrap();
+    let mut roles = Roles::new("alice").unwrap();
+    roles.add_tenant_member("alice", crate::cloudflows::SERVICE_USER, TenantRole::Member).unwrap();
+    crate::cloudroles::save(&crate::cloudroles::path(&vdir.join("tenants").join("acme")), &roles).unwrap();
+    let ak = MemberKeys::from_seed([1; 32]);
+    s.enroll(&Principal::Member { tenant: "acme".into(), user: "alice".into() }, &ak.public()).unwrap();
+    drop(s);
+    let run = start("127.0.0.1:0".parse().unwrap(), &vdir, None).unwrap();
+    let port = run.local_addr().port();
+    let pod = crate::testdir::unique("flowsenrol", "pod");
+    let kf = pod.join("alice.key");
+    std::fs::write(&kf, ak.seed_hex()).unwrap();
+    let args = |extra: &[&str]| -> Vec<String> {
+        let mut a: Vec<String> = ["enroll-service", "--vault", &format!("127.0.0.1:{port}"), "--fingerprint", &run.fingerprint, "--id", "acme/alice", "--key", &kf.display().to_string(), "--data", &pod.display().to_string()].map(String::from).to_vec();
+        a.extend(extra.iter().map(|s| s.to_string()));
+        a
+    };
+    let mut said = Vec::new();
+    crate::cloudvaultd::run(&args(&[]), &mut |l: &str| said.push(l.to_string())).unwrap();
+    assert!(said[0].contains("_flows is enrolled"), "{said:?}");
+    let key = pod.join("cloud/vault-keys/_flows.key");
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(std::fs::metadata(&key).unwrap().permissions().mode() & 0o777, 0o600);
+    // the key on the volume is the one the service knows: the pod's own lookup finds it and the service accepts its signature
+    let mine = crate::cloudrotate::actor_keys(&pod, "_flows").expect("the pod reads the key");
+    let c = Client { host: "127.0.0.1".into(), port, fingerprint: Some(run.fingerprint.clone()), who: Principal::Member { tenant: "acme".into(), user: "_flows".into() }, keys: mine };
+    assert!(c.public_keys("_flows").is_ok());
+    // a second run does not replace the key
+    let e = crate::cloudvaultd::run(&args(&[]), &mut |_: &str| {}).unwrap_err();
+    assert!(e.contains("exists already"), "{e}");
+    // a name that is not in the tenant: refused by the service, and no key file stays
+    let e = crate::cloudvaultd::run(&args(&["--name", "stranger"]), &mut |_: &str| {}).unwrap_err();
+    assert!(e.contains("did not enroll"), "{e}");
+    assert!(!pod.join("cloud/vault-keys/stranger.key").exists());
+    run.stop();
+}
 }

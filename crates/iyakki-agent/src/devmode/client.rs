@@ -353,6 +353,121 @@ pub fn https(host: &str, port: u16, expect: Option<&str>, method: &str, target: 
     Ok(Reply { status, content_type: ct, body, fingerprint: fp() })
 }
 
+/// A WebSocket to the device over the same pinned TLS (a plain Rust client of the service's `/api/v1/events` stream and of any other
+/// upgrade route). Frames are masked as RFC 6455 requires; the framing is the shared one in `iyakki_link::wsproto`.
+pub struct WsClient {
+    tls: rustls::StreamOwned<rustls::ClientConnection, TcpStream>,
+    parser: iyakki_link::wsproto::Parser,
+    /// The fingerprint of the certificate the device showed.
+    pub fingerprint: String,
+}
+
+impl WsClient {
+    pub fn send_text(&mut self, text: &str) -> Result<(), String> {
+        let mut mask = [0u8; 4];
+        iyakki_sec::random_fill(&mut mask).map_err(|e| e.to_string())?;
+        self.tls.write_all(&iyakki_link::wsproto::client_frame(0x1, text.as_bytes(), mask)).and_then(|_| self.tls.flush()).map_err(|e| format!("sending: {e}"))
+    }
+
+    pub fn send_close(&mut self) {
+        let mut mask = [0u8; 4];
+        let _ = iyakki_sec::random_fill(&mut mask);
+        let _ = self.tls.write_all(&iyakki_link::wsproto::client_frame(0x8, &[], mask));
+        let _ = self.tls.flush();
+    }
+
+    /// The next message, waiting up to `wait`; `None` when nothing came in time or the device closed the connection. Pings are
+    /// answered here and not returned.
+    pub fn recv(&mut self, wait: Duration) -> Result<Option<iyakki_link::wsproto::Message>, String> {
+        use iyakki_link::wsproto::Message;
+        let end = std::time::Instant::now() + wait;
+        let mut chunk = [0u8; 4096];
+        loop {
+            match self.parser.next().map_err(|e| format!("{e:?}"))? {
+                Some(Message::Ping(p)) => {
+                    let mut mask = [0u8; 4];
+                    let _ = iyakki_sec::random_fill(&mut mask);
+                    let _ = self.tls.write_all(&iyakki_link::wsproto::client_frame(0xA, &p, mask));
+                    let _ = self.tls.flush();
+                    continue;
+                }
+                Some(Message::Close) => return Ok(None),
+                Some(m) => return Ok(Some(m)),
+                None => {}
+            }
+            let left = end.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return Ok(None);
+            }
+            let _ = self.tls.sock.set_read_timeout(Some(left.max(Duration::from_millis(1))));
+            match self.tls.read(&mut chunk) {
+                Ok(0) => return Ok(None),
+                Ok(n) => self.parser.push(&chunk[..n]),
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => return Ok(None),
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+                Err(e) => return Err(format!("reading: {e}")),
+            }
+        }
+    }
+}
+
+/// Open a WebSocket at `target` (the certificate pinned to `expect`, or anything when None). Fails with the device's own answer when
+/// it does not switch protocols.
+pub fn websocket(host: &str, port: u16, expect: Option<&str>, target: &str, headers: &[(String, String)], timeout: Duration) -> Result<WsClient, String> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let seen = Arc::new(Mutex::new(None));
+    let cfg = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .map_err(|e| e.to_string())?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(Pin { expect: expect.map(str::to_string), seen: seen.clone(), provider }))
+        .with_no_client_auth();
+    let name = ServerName::try_from("iyakki-device").map_err(|e| e.to_string())?;
+    let conn = rustls::ClientConnection::new(Arc::new(cfg), name).map_err(|e| e.to_string())?;
+    let addr = (host, port).to_socket_addrs().map_err(|e| format!("{host}: {e}"))?.next().ok_or_else(|| format!("{host}: no address"))?;
+    let sock = TcpStream::connect_timeout(&addr, Duration::from_secs(8)).map_err(|e| format!("cannot reach {host}:{port}: {e}"))?;
+    let _ = sock.set_read_timeout(Some(timeout));
+    let _ = sock.set_write_timeout(Some(timeout));
+    let mut tls = rustls::StreamOwned::new(conn, sock);
+    let mut key = [0u8; 16];
+    iyakki_sec::random_fill(&mut key).map_err(|e| e.to_string())?;
+    let key = iyakki_link::wsproto::base64(&key);
+    let mut req = format!("GET {target} HTTP/1.1\r\nHost: {host}:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n");
+    for (k, v) in headers {
+        req.push_str(&format!("{k}: {v}\r\n"));
+    }
+    req.push_str("\r\n");
+    tls.write_all(req.as_bytes()).and_then(|_| tls.flush()).map_err(|e| format!("sending to {host}:{port}: {e}"))?;
+    // the answer head, byte by byte past the blank line (anything after it is the first frames and is kept)
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 2048];
+    let end = loop {
+        if let Some(h) = head_end(&buf) {
+            break h;
+        }
+        if buf.len() > 16 * 1024 {
+            return Err("the device's answer is not an HTTP answer".into());
+        }
+        match tls.read(&mut chunk) {
+            Ok(0) => return Err("the device closed the connection".into()),
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(e) => return Err(format!("reading from {host}:{port}: {e}")),
+        }
+    };
+    let head = String::from_utf8_lossy(&buf[..end]).into_owned();
+    if !head.starts_with("HTTP/1.1 101") {
+        return Err(format!("the device did not switch protocols: {}", head.lines().next().unwrap_or("")));
+    }
+    let want = iyakki_link::wsproto::accept_key(&key);
+    if !head.lines().any(|l| l.split_once(':').is_some_and(|(k, v)| k.trim().eq_ignore_ascii_case("sec-websocket-accept") && v.trim() == want)) {
+        return Err("the device's answer does not prove it understood the WebSocket handshake".into());
+    }
+    let mut parser = iyakki_link::wsproto::Parser::for_client(1 << 20);
+    parser.push(&buf[end + 4..]);
+    let fingerprint = seen.lock().ok().and_then(|s| s.clone()).unwrap_or_default();
+    Ok(WsClient { tls, parser, fingerprint })
+}
+
 fn head_end(b: &[u8]) -> Option<usize> {
     b.windows(4).position(|w| w == b"\r\n\r\n")
 }

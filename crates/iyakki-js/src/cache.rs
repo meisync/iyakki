@@ -20,22 +20,55 @@ pub fn checksum(bytes: &[u8]) -> u64 {
     h ^ bytes.len() as u64
 }
 
+/// Who we are. Linux says so in `/proc/self`; elsewhere (a development Mac) a file we create ourselves says so, once.
 #[cfg(unix)]
 fn my_uid() -> Option<u32> {
     use std::os::unix::fs::MetadataExt;
-    Some(std::fs::metadata("/proc/self").ok()?.uid())
+    if let Ok(m) = std::fs::metadata("/proc/self") {
+        return Some(m.uid());
+    }
+    static UID: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *UID.get_or_init(|| {
+        let probe = std::env::temp_dir().join(format!("iyakki-js-uid-{}", std::process::id()));
+        std::fs::write(&probe, b"").ok()?;
+        let uid = std::fs::metadata(&probe).ok().map(|m| m.uid());
+        let _ = std::fs::remove_file(&probe);
+        uid
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// For a test that counts the files of the cache: from now on, on this thread only, the cache is a new private folder, so nothing
+/// another test (or another run) stores can change the count (KI-662).
+#[cfg(all(test, unix))]
+pub fn use_private_dir_for_this_test() -> PathBuf {
+    use std::os::unix::fs::DirBuilderExt;
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let d = std::env::temp_dir().join(format!("iyakki-js-private-{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&d).expect("a private folder for the test");
+    TEST_DIR.with(|t| *t.borrow_mut() = Some(d.clone()));
+    d
 }
 
 /// The cache directory, created if need be; `None` when there is no safe place for it.
 #[cfg(unix)]
 pub fn dir() -> Option<PathBuf> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    #[cfg(test)]
+    if let Some(d) = TEST_DIR.with(|t| t.borrow().clone()) {
+        return Some(d);
+    }
     static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
         let me = my_uid()?;
         let base = match std::env::var_os("IYAKKI_JS_CACHE") {
             Some(d) => PathBuf::from(d),
-            None => match (std::env::var_os("XDG_CACHE_HOME"), std::env::var_os("HOME")) {
+            None => match (std::env::var_os("XDG_CACHE_HOME"), std::env::var_os("HOME")) { // home-ok: the cache folder of the real engine; the tests that count its files use a private folder (use_private_dir_for_this_test)
                 (Some(x), _) if !x.is_empty() => PathBuf::from(x).join("iyakki-js"),
                 (_, Some(h)) if !h.is_empty() => PathBuf::from(h).join(".cache").join("iyakki-js"),
                 _ => std::env::temp_dir().join(format!("iyakki-js-{me}")),

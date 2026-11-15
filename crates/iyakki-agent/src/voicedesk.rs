@@ -634,6 +634,11 @@ pub fn stt_engine(svc: &Services) -> Option<SpeechEngine> {
     if let Some(e) = svc.voice_settings().stt {
         return Some(e);
     }
+    lemonade_stt_engine(svc)
+}
+
+/// The Lemonade Whisper model, if one is set up (the automatic speech-to-text when Settings -> Voice chose none).
+pub fn lemonade_stt_engine(svc: &Services) -> Option<SpeechEngine> {
     let (prov, model) = svc.lemonade_models(ModelType::SpeechToText).into_iter().next()?;
     let p = providers(svc).into_iter().find(|p| p.id == prov)?;
     Some(lemonade::stt_engine(&p.base().ok()?, &model, p.key_ref.clone()))
@@ -652,6 +657,27 @@ pub fn transcribe(svc: &Services, engine: &SpeechEngine, pcm: &[i16]) -> Result<
         SpeechEngine::Http { model, .. } if speechtime::unreachable(&e) => format!("The speech-to-text server did not answer ({model}). Is it running?"),
         SpeechEngine::Http { model, .. } => lemonade::explain_error(model, &e),
         _ => e,
+    })?;
+    if text.is_empty() { Err(NO_SPEECH.into()) } else { Ok(text) }
+}
+
+/// Recorded samples to text through one voice backend (`voicebackend::VoiceBackend`): the same silence check and the same wording
+/// of failures as [`transcribe`], but the engine is the backend, so the voice session and the `voice_backends` tool name one place.
+pub fn transcribe_backend(b: &dyn crate::voicebackend::VoiceBackend, pcm: &[i16]) -> Result<String, String> {
+    if pcm.is_empty() {
+        return Err("Nothing was recorded.".into());
+    }
+    if voice::peak(pcm) < 150 {
+        return Err(ONLY_SILENCE.into());
+    }
+    let model = match b.engine() {
+        Some(SpeechEngine::Http { model, .. }) => Some(model.clone()),
+        _ => None,
+    };
+    let text = b.transcribe(&voice::encode_wav(pcm, voice::SAMPLE_RATE), "").map_err(|e| match &model {
+        Some(m) if speechtime::unreachable(&e) => format!("The speech-to-text server did not answer ({m}). Is it running?"),
+        Some(m) => lemonade::explain_error(m, &e),
+        None => e,
     })?;
     if text.is_empty() { Err(NO_SPEECH.into()) } else { Ok(text) }
 }

@@ -328,6 +328,31 @@ fn recommendations_follow_the_machine() {
 }
 
 #[test]
+fn a_recommended_tile_is_marked_and_its_popup_says_why_and_a_small_machine_gets_the_memory_note() {
+    let pc = Machine { gpus: 1, nvidia: true, ram_mb: 32_000, ..Default::default() };
+    let (mut a, cx) = rig("su-mark", Role::Admin, pc, facts(&[]));
+    let g = draw(&mut a, &cx, 1280, 720);
+    let label_of = |g: &Gfx, item: Item| g.hits.iter().find(|h| h.ev == Event::Tab(TILE + idx(item))).map(|h| h.label.clone());
+    // the tile of a recommended item is announced (and drawn with a star, the same condition) as recommended; another one is not
+    let l = label_of(&g, Item::K3s).expect("the k3s tile is on the page");
+    assert!(l.ends_with(", recommended"), "{l}");
+    assert!(a.setup.card(Item::K3s).reason.is_some() && a.setup.card(Item::Node).reason.is_none());
+    let l = label_of(&g, Item::Node).expect("the Node tile is on the page");
+    assert!(!l.contains("recommended"), "{l}");
+    // the popup carries the one-line reason
+    a.setup.open_popup(Item::K3s);
+    let g = draw(&mut a, &cx, 1280, 720);
+    assert!(g.text_log.iter().any(|(_, _, s)| s.contains("Recommended: Needed by Lemonade, Kokoro, DuckDB and Elasticsearch")), "{:?}", g.text_log.iter().map(|l| l.2.clone()).filter(|s| s.contains("ecommended")).collect::<Vec<_>>());
+    // a machine with too little memory: the heavy item says so on its popup and is not recommended
+    let small = Machine { gpus: 1, nvidia: true, ram_mb: 4096, ..Default::default() };
+    let (mut b, cx2) = rig("su-small", Role::Admin, small, facts(&[]));
+    assert!(b.setup.card(Item::Lemonade).reason.is_none());
+    b.setup.open_popup(Item::Lemonade);
+    let g = draw(&mut b, &cx2, 1280, 720);
+    assert!(g.text_log.iter().any(|(_, _, s)| s.contains("not recommended") && s.contains("GB of memory")), "{:?}", g.text_log.iter().map(|l| l.2.clone()).filter(|s| s.contains("memory")).collect::<Vec<_>>());
+}
+
+#[test]
 fn dependencies_are_said_on_the_tile_and_in_the_popup() {
     let (a, _cx) = rig("su-deps", Role::Admin, full_machine(), facts(&[]));
     assert_eq!(a.setup.card(Item::Elasticsearch).deps.as_deref(), Some("Installs k3s first"));
@@ -946,7 +971,7 @@ fn the_wheel_the_trackpad_and_the_scroll_bar_scroll_the_page() {
         assert!(a.setup.list.offset.abs() < 0.5, "{w}x{h}: wheel outside the list");
         // the trackpad: two fingers produce the same Event::Scroll through the touchpad driver
         let range = crate::touchpad::PadRange { x_min: -5087, x_max: 8270, y_min: -182, y_max: 6749, major_max: 5000 };
-        let cfg = crate::touchpad::PadConfig { tap_to_click: true };
+        let cfg = crate::touchpad::PadConfig { tap_to_click: true, speed_pct: 100, three_finger_drag: false };
         let mut pad = crate::touchpad::Touchpad::new();
         let mut now = 1000u64;
         let mut events: Vec<Event> = Vec::new();
@@ -1467,4 +1492,88 @@ fn an_item_installed_earlier_whose_last_attempt_failed_shows_failed_with_the_rea
     // a plain "installed earlier, not running" without a failed attempt is unchanged
     let (a, _cx) = rig("su-lastfail3", Role::Admin, full_machine(), facts(&[(Item::DuckDb, Presence::Earlier("cluster down".into()))]));
     assert_eq!(a.setup.card(Item::DuckDb).chip, "Installed earlier, not running");
+}
+
+#[test]
+fn a_finger_dragged_over_the_tiles_scrolls_the_page_and_opens_nothing_while_a_tap_opens_the_card_on_release() {
+    let (w, h) = (1280, 720);
+    let (mut a, cx) = rig("su-bodydrag", Role::Admin, full_machine(), facts(&[]));
+    draw(&mut a, &cx, w, h);
+    let l = a.setup.list.clone();
+    assert!(l.scrolls(), "{w}x{h}: the page scrolls");
+    let (x, y) = ((l.view.x + 40.0) as i32, (l.view.y + l.view.h / 2.0) as i32);
+    // a drag: press on a tile, move up by far more than the slop, release
+    a.handle(&Event::MouseMove(x, y), &cx);
+    a.handle(&Event::Tab(TILE + idx(Item::Node)), &cx);
+    assert!(a.setup.popup.is_none(), "the card waits for the release");
+    a.handle(&Event::MouseMove(x, y - 120), &cx);
+    a.handle(&Event::MouseMove(x, y - 200), &cx);
+    draw(&mut a, &cx, w, h);
+    assert!(a.setup.list.offset > 50.0, "the finger moved the list: {}", a.setup.list.offset);
+    a.handle(&Event::MouseUp(x, y - 200), &cx);
+    assert!(a.setup.popup.is_none(), "a drag opens no card");
+    // a tap: press and release without moving
+    a.setup.list.to_top();
+    draw(&mut a, &cx, w, h);
+    a.handle(&Event::MouseMove(x, y), &cx);
+    a.handle(&Event::Tab(TILE + idx(Item::Node)), &cx);
+    assert!(a.setup.popup.is_none());
+    a.handle(&Event::MouseUp(x, y), &cx);
+    assert_eq!(a.setup.popup, Some(Item::Node), "a tap opens the card when the pointer is released");
+}
+
+/// The text of every paragraph of an item's popup.
+fn paras_of(a: &StoreApp, item: Item) -> Vec<String> {
+    let mut g = Gfx::new(1280, 720);
+    let card = a.setup.card(item);
+    a.setup
+        .popup_body(&mut g, &card, false, 560.0, 1.0)
+        .into_iter()
+        .filter_map(|l| match l {
+            view::Line::Para(_, _, _, lines) => Some(lines.join(" ")),
+            view::Line::Row(k, v, _) => Some(format!("{k}: {}", v.join(" "))),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_recommended_tile_has_a_star_and_its_popup_gives_the_one_line_reason_and_the_memory_note() {
+    // k3s is recommended on a machine with a GPU and enough memory, and says why in its popup
+    let pc = Machine { gpus: 1, nvidia: true, ram_mb: 32_000, ..Default::default() };
+    let (a, _cx) = rig("su-star", Role::Admin, pc.clone(), facts(&[]));
+    let body = paras_of(&a, Item::K3s);
+    assert!(body.iter().any(|l| l == "Recommended: Needed by Lemonade, Kokoro, DuckDB and Elasticsearch"), "{body:?}");
+    // a tile that is not recommended has no such line
+    let body = paras_of(&a, Item::Node);
+    assert!(!body.iter().any(|l| l.starts_with("Recommended:")), "{body:?}");
+    // the star: amber pixels on the recommended tile's status row, none once the item is installed (no longer recommended)
+    let amber = |a: &mut StoreApp, cx: &AppCx, item: Item| -> usize {
+        let g = draw(a, cx, 1280, 720);
+        let r = g.hits.iter().find(|h| h.ev == Event::Tab(TILE + idx(item))).map(|h| h.rect).unwrap_or_else(|| panic!("the tile of {item:?}: {:?}", g.hits.iter().map(|h| h.label.clone()).collect::<Vec<_>>()));
+        let (x0, y0, x1, y1) = (r.x as u32, r.y as u32, (r.x + r.w) as u32, (r.y + r.h) as u32);
+        let mut n = 0;
+        for y in y0..y1.min(720) {
+            for x in x0..x1.min(1280) {
+                let i = ((y * 1280 + x) * 4) as usize;
+                let p = &g.rgba()[i..i + 3];
+                if (p[0] as i32 - AMBER[0] as i32).abs() < 20 && (p[1] as i32 - AMBER[1] as i32).abs() < 20 && (p[2] as i32 - AMBER[2] as i32).abs() < 20 {
+                    n += 1;
+                }
+            }
+        }
+        n
+    };
+    let (mut a, cx) = rig("su-star2", Role::Admin, pc.clone(), facts(&[]));
+    let with_star = amber(&mut a, &cx, Item::K3s);
+    let (mut b, cxb) = rig("su-star3", Role::Admin, pc, facts(&[(Item::K3s, Presence::Installed("v1.31 · running".into()))]));
+    assert!(b.setup.card(Item::K3s).reason.is_none());
+    let without = amber(&mut b, &cxb, Item::K3s);
+    assert!(with_star > without + 10, "the star is drawn: {with_star} amber pixels with it, {without} without");
+    // too little memory: a heavy tool is listed with the reason in words (the memory note), and is not recommended
+    let small = Machine { gpus: 1, nvidia: true, ram_mb: 4096, ..Default::default() };
+    let (a, _cx) = rig("su-heavy", Role::Admin, small, facts(&[]));
+    assert!(a.setup.card(Item::Lemonade).reason.is_none());
+    let note = a.setup.machine.heavy_note(Item::Lemonade).unwrap();
+    assert!(note.contains("Needs about") && note.contains("GB of memory") && note.contains("not recommended here"), "{note}");
 }

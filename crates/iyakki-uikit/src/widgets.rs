@@ -451,7 +451,8 @@ impl Form {
         let _ = sw;
         g.button(x + w - 26.0 * s - 90.0 * s - 100.0 * s, by, 14.0 * s, "Cancel", MUTED, Event::Key(Key::Esc));
         let help = if self.fields.get(self.focus).is_some_and(|f| !f.chips.is_empty()) { "Tab/click to move · click an example or Ctrl+←/→ then Ctrl+E · Ctrl+V paste" } else { if self.fields.get(self.focus).is_some_and(|f| matches!(f.kind, FieldKind::Path(..))) { "Tab/click to move · Ctrl+V paste or drop a file · Ctrl+O browse" } else { "Tab/click to move · Ctrl+V paste · Ctrl+Shift+V history" } };
-        let help = g.fit(12.0 * s, help, Face::Sans, w - 52.0 * s - 210.0 * s);
+        let help = crate::platform::keys(help);
+        let help = g.fit(12.0 * s, &help, Face::Sans, w - 52.0 * s - 210.0 * s);
         g.text(x + 26.0 * s, by + 8.0 * s, 12.0 * s, DIM, &help, Face::Sans);
         // the file picker, when Browse opened it, sits on top of the whole form
         if let Some(p) = self.picker.borrow_mut().as_mut() {

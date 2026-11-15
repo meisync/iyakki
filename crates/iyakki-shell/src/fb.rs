@@ -519,8 +519,14 @@ impl Framebuffer {
     /// over. Every later write fails with an error until a new [`Framebuffer`] is opened. Harmless to call twice.
     pub fn release(&mut self) {
         if !self.map.is_null() {
-            // SAFETY: unmapping the region mapped in `open`; the pointer is cleared so it is never used again.
-            unsafe { libc::munmap(self.map.cast(), self.len) };
+            // the screens of the tests are built over ordinary memory (a Vec of the test), never mapped by `open`: unmapping heap memory
+            // ends the test program with SIGSEGV on a Mac and corrupts the heap anywhere. No test opens a real device, so the tests
+            // never unmap.
+            let borrowed = cfg!(test);
+            if !borrowed {
+                // SAFETY: unmapping the region mapped in `open`; the pointer is cleared so it is never used again.
+                unsafe { libc::munmap(self.map.cast(), self.len) };
+            }
             self.map = std::ptr::null_mut();
             self.len = 0;
         }

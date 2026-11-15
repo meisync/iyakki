@@ -239,7 +239,7 @@ fn the_header_is_byte_compatible_with_the_vaults_scheme() {
     assert!(sigscheme::parse_authorization(&h).unwrap().verify(&public, "POST", LOGIN_PATH, b"body"));
     // signed by this one, verified by the vault's code
     let k = DeviceKey::from_seed([6; 32]);
-    let h = k.sign_request_with_nonce("acme/ann", "POST", LOGIN_PATH, 1234, b"body", &"cd".repeat(16));
+    let h = k.sign_request_with_nonce("acme/ann", "POST", LOGIN_PATH, 1234, b"body", &"cd".repeat(16)).unwrap();
     let keys = PublicKeys { wrap: "11".repeat(32), sign: k.public_hex() };
     assert!(cloudkeys::parse_authorization(&h).unwrap().verify(&keys, "POST", LOGIN_PATH, b"body"));
     assert!(!cloudkeys::parse_authorization(&h).unwrap().verify(&keys, "POST", LOGIN_PATH, b"other"));
@@ -306,4 +306,93 @@ fn a_signature_captured_before_a_restart_is_refused_by_the_restarted_server() {
     let second = start();
     assert_eq!(key_login(second.local_addr(), &h).0, 401, "replayed after a restart");
     assert_eq!(key_login(second.local_addr(), &k.sign_request("alice", "POST", LOGIN_PATH, now(), b"").unwrap()).0, 200);
+}
+
+fn put_string(out: &mut Vec<u8>, s: &[u8]) {
+    out.extend_from_slice(&(s.len() as u32).to_be_bytes());
+    out.extend_from_slice(s);
+}
+
+/// A pretend ssh-agent on a Unix socket holding `key`: lists it and signs for it (or signs garbage when `lie`), one request per connection.
+fn fake_agent(dir: &std::path::Path, key: DeviceKey, lie: bool, connections: usize) -> std::path::PathBuf {
+    // a Unix socket path must be shorter than SUN_LEN (104 bytes on macOS, 108 on Linux): under a long temp folder (a build tree's
+    // target/tmp) the socket goes to a short folder of /tmp instead
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let wanted = dir.join("agent.sock");
+    let sock = if wanted.as_os_str().len() < 90 {
+        wanted
+    } else {
+        let short = std::path::PathBuf::from(format!("/tmp/iyakki-fa-{}", std::process::id()));
+        std::fs::create_dir_all(&short).unwrap();
+        short.join(format!("a{}.sock", NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)))
+    };
+    let _ = std::fs::remove_file(&sock);
+    let l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+    std::thread::spawn(move || {
+        for _ in 0..connections {
+            let Ok((mut c, _)) = l.accept() else { return };
+            // accepted sockets may inherit the listener's mode on some systems
+            let _ = c.set_nonblocking(false);
+            let mut len = [0u8; 4];
+            if c.read_exact(&mut len).is_err() {
+                continue;
+            }
+            let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
+            let _ = c.read_exact(&mut body);
+            let mut reply = vec![];
+            match body[0] {
+                11 => {
+                    reply.push(12);
+                    reply.extend_from_slice(&1u32.to_be_bytes());
+                    let mut blob = Vec::new();
+                    put_string(&mut blob, b"ssh-ed25519");
+                    put_string(&mut blob, &key.public());
+                    put_string(&mut reply, &blob);
+                    put_string(&mut reply, b"laptop");
+                }
+                13 => {
+                    let key_len = u32::from_be_bytes(body[1..5].try_into().unwrap()) as usize;
+                    let at = 5 + key_len;
+                    let dlen = u32::from_be_bytes(body[at..at + 4].try_into().unwrap()) as usize;
+                    let data = &body[at + 4..at + 4 + dlen];
+                    let sig = if lie { [7u8; 64] } else { key.sign_bytes(data).unwrap() };
+                    let mut inner = Vec::new();
+                    put_string(&mut inner, b"ssh-ed25519");
+                    put_string(&mut inner, &sig);
+                    reply.push(14);
+                    put_string(&mut reply, &inner);
+                }
+                _ => reply.push(5),
+            }
+            let mut framed = (reply.len() as u32).to_be_bytes().to_vec();
+            framed.extend_from_slice(&reply);
+            let _ = c.write_all(&framed);
+        }
+    });
+    sock
+}
+
+#[test]
+fn a_key_held_by_an_ssh_agent_signs_in_to_the_real_server_and_a_lying_agent_does_not() {
+    let dir = std::env::temp_dir().join(format!("iyakki-devkey-agent-e2e-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let held = DeviceKey::from_seed([9; 32]);
+    let (s, keys) = plain();
+    keys.enroll("alice", &held.ssh_public_line("laptop")).unwrap();
+    // the connector side knows only the public key and where the agent is
+    let sock = fake_agent(&dir, DeviceKey::from_seed([9; 32]), false, 1);
+    let agent_key = DeviceKey::from_agent(held.public(), sock);
+    assert!(agent_key.is_agent() && agent_key.seed_hex().is_none(), "nothing secret is on this side");
+    let header = agent_key.sign_request("alice", "POST", LOGIN_PATH, now(), b"").unwrap();
+    let (code, head, body) = key_login(s.local_addr(), &header);
+    assert_eq!(code, 200, "{body}");
+    let (cookie, _) = cookie_and_csrf(&head, &body);
+    assert_eq!(with_cookie(s.local_addr(), "GET", "/api/session", &cookie, None, "").0, 200);
+    // an agent that returns a wrong signature is refused on the connector's side, before anything is sent
+    let dir2 = dir.join("liar");
+    std::fs::create_dir_all(&dir2).unwrap();
+    let liar = DeviceKey::from_agent(held.public(), fake_agent(&dir2, DeviceKey::from_seed([9; 32]), true, 1));
+    assert!(liar.sign_request("alice", "POST", LOGIN_PATH, now(), b"").is_err());
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -57,6 +57,7 @@ fn plan(cur: &Access, hc: bool, args: &Value) -> Result<(Access, bool), String> 
     flag("big_focus_ring", &mut a.big_ring)?;
     flag("reduce_motion", &mut a.reduce_motion)?;
     flag("sticky_keys", &mut a.sticky_keys)?;
+    flag("typing_echo", &mut a.typing_echo)?;
     flag("high_contrast", &mut hc)?;
     if let Some(v) = args.get("slow_keys_ms") {
         let ms = v.as_u64().and_then(|m| u32::try_from(m).ok()).filter(|m| SLOW_CHOICES.contains(m)).ok_or_else(|| format!("`slow_keys_ms` must be one of {SLOW_CHOICES:?} (0 = off)"))?;
@@ -64,7 +65,7 @@ fn plan(cur: &Access, hc: bool, args: &Value) -> Result<(Access, bool), String> 
         any = true;
     }
     if !any {
-        return Err("say what to change: screen_reader, speak_notices, large_pointer, big_focus_ring, reduce_motion, sticky_keys, slow_keys_ms or high_contrast".into());
+        return Err("say what to change: screen_reader, speak_notices, large_pointer, big_focus_ring, reduce_motion, sticky_keys, typing_echo, slow_keys_ms or high_contrast".into());
     }
     Ok((a, hc))
 }
@@ -87,6 +88,12 @@ impl AccessTools {
 }
 
 impl Tools for AccessTools {
+
+    fn inner_tools(&self) -> Option<&dyn Tools> {
+
+        Some(&*self.inner)
+
+    }
     fn defs(&self) -> Vec<ToolDef> {
         let mut v = self.inner.defs();
         v.retain(|d| !is_access_tool(&d.spec.name));
@@ -98,7 +105,7 @@ impl Tools for AccessTools {
                 schema: json!({"type": "object", "properties": {
                     "screen_reader": {"type": "boolean"}, "speak_notices": {"type": "boolean"}, "high_contrast": {"type": "boolean"},
                     "large_pointer": {"type": "boolean"}, "big_focus_ring": {"type": "boolean"}, "reduce_motion": {"type": "boolean"},
-                    "sticky_keys": {"type": "boolean"}, "slow_keys_ms": {"type": "integer", "enum": SLOW_CHOICES}
+                    "sticky_keys": {"type": "boolean"}, "typing_echo": {"type": "boolean"}, "slow_keys_ms": {"type": "integer", "enum": SLOW_CHOICES}
                 }}),
             },
             risk: Risk::Ask,

@@ -52,6 +52,8 @@ pub struct LinkState {
     pub card: Option<LinkCard>,
     menu: Option<LinkRef>,
     req: Option<(String, String)>,
+    /// Whose chat this is (known at the first event): the person tools ask the shell to open apps for.
+    pub(super) user: String,
 }
 
 pub const CARD_BASE: usize = 70_000;
@@ -101,7 +103,7 @@ impl ChatApp {
     }
 
     pub(super) fn take_link_request(&mut self) -> Option<(String, String)> {
-        self.links.req.take()
+        self.links.req.take().or_else(|| iyakki_agent::appopen::take(&self.links.user))
     }
 
     fn in_ide(&self) -> bool {

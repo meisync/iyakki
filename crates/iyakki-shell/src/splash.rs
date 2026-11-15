@@ -134,7 +134,13 @@ pub fn missing_nodes(sys_graphics: &std::path::Path, dev: &std::path::Path) -> V
 }
 
 /// Create the missing `/dev/fbN` nodes (needs root; best effort). Returns the names made.
-#[cfg(unix)]
+#[cfg(not(target_os = "linux"))]
+pub fn make_missing_nodes(_sys_graphics: &std::path::Path, _dev: &std::path::Path) -> Vec<String> {
+    Vec::new() // device nodes are the system's own business outside Linux
+}
+
+/// (the Linux version of the above: `mknod` of character devices)
+#[cfg(target_os = "linux")]
 pub fn make_missing_nodes(sys_graphics: &std::path::Path, dev: &std::path::Path) -> Vec<String> {
     use std::os::unix::ffi::OsStrExt;
     let mut made = Vec::new();

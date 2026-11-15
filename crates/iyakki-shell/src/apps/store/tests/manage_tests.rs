@@ -293,10 +293,10 @@ fn the_mcp_skills_and_cli_tiles_lead_to_the_same_actions() {
     let (cx, k, _d) = world("mg-tiles");
     install(&cx, &skill("weekly-report", "1.0.0", &k));
     cx.services.mcp.add(iyakki_agent::mcp::StoredServer { name: "files".into(), command: "/usr/bin/files".into(), args: vec![], sample: false }).unwrap();
-    let mut m = crate::apps::mcp::McpApp::new(&cx);
+    let mut m = crate::apps::mcp::McpApp::new(&crate::apps::mcp_port::CxPort(&cx));
     m.handle(&Event::Key(Key::Char('u')), &cx);
     assert_eq!(m.take_request(), Some(("store".into(), "installed:mcp:files".into())));
-    let mut sk = crate::apps::skills::SkillsApp::new(&cx);
+    let mut sk = crate::apps::skills::SkillsApp::new(&crate::apps::skills_port::CxPort(&cx));
     sk.handle(&Event::Key(Key::Char('u')), &cx);
     assert_eq!(sk.take_request().map(|r| r.0), Some("store".into()));
     // the STORE tile opens on that item's page
@@ -868,3 +868,24 @@ fn discover_shows_titles_tags_and_groups_filters_by_them_and_takes_drops_on_grou
 
 #[path = "rating_tests.rs"]
 mod rating_tests;
+
+#[test]
+fn the_install_card_of_an_app_that_asks_for_device_access_lists_it_marks_hard_asks_and_fits_every_size() {
+    let (cx, k, _d) = world("mg-corecaps");
+    let manifest = r#"{"id":"watcher","name":"Watcher","version":"1.0.0","icon":"🧮","capabilities":[{"name":"camera.view","why":"show the live view"},{"name":"camera.record","why":"save clips"}]}"#;
+    let b = iyakki_agent::store::tile::Bundle::from_files(&[("index.html", "<p>w</p>"), ("app.json", manifest)], "watcher").unwrap();
+    let m = meta("watcher", &[]);
+    let text = iyakki_agent::pkg::build_generic("tile", "watcher", "1.0.0", "MIT", &b.to_payload(), Some(&m.to_json()), None, Some(&k)).unwrap();
+    let st = Store::for_services(&cx.services);
+    let actor = Actor::from_policy(&cx.session.user, &cx.session.policy);
+    let rv = st.review_sideload(&cx.services, &actor, text.into_bytes(), iyakki_agent::skills::Scope::Shared, &[]);
+    assert_eq!(rv.core_lines.len(), 2, "{}", rv.summary());
+    let mut a = StoreApp::new(&cx);
+    a.show_review(rv, Purpose::Install);
+    let g = draw(&mut a, &cx, 1024, 700);
+    assert!(g.hits.iter().any(|h| h.label.starts_with("Install")), "{:?}", g.hits.iter().map(|h| &h.label).collect::<Vec<_>>());
+    for (w, h) in SIZES {
+        let g = draw(&mut a, &cx, w, h);
+        all_inside(&g, w, h, "the card with device access");
+    }
+}

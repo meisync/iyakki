@@ -111,7 +111,8 @@ impl Node {
     /// A text field. With `secret` the text is not kept: only its length is.
     pub fn field(name: &str, text: &str, secret: bool) -> Node {
         let state = if secret { State { secret_len: Some(text.chars().count()), ..State::default() } } else { State::default().value(text) };
-        Node { name: clean_name(name), role: Role::Field, state }
+        let name = clean_name(name);
+        Node { name: if name.is_empty() { "Text field".to_string() } else { name }, role: Role::Field, state }
     }
 
     pub fn is_secret(&self) -> bool {
@@ -156,6 +157,38 @@ impl Node {
     }
 }
 
+/// Typing echo: what a screen reader says when the text of the focused field changed by typing or deleting at the end. A typed character
+/// is said as it is ("space" for a blank), a deletion as "deleted" and the character. Never for a field that hides its text; nothing for
+/// two different fields or for a change that is not an append or a cut at the end (a paste says nothing here, the field is read on focus).
+pub fn typing_echo(old: &Node, new: &Node) -> Option<String> {
+    if old.role != Role::Field || new.role != Role::Field || old.name != new.name || old.is_secret() || new.is_secret() {
+        return None;
+    }
+    let (a, b) = (old.state.value_text()?, new.state.value_text()?);
+    let word = |s: &str| -> String {
+        let mut cs = s.chars();
+        match (cs.next(), cs.next()) {
+            (Some(c), None) => match c {
+                ' ' => "space".to_string(),
+                '\n' => "new line".to_string(),
+                '\t' => "tab".to_string(),
+                c => c.to_string(),
+            },
+            _ => s.to_string(),
+        }
+    };
+    if let Some(added) = b.strip_prefix(a) {
+        if !added.is_empty() && added.chars().count() <= 3 {
+            return Some(word(added));
+        }
+    } else if let Some(cut) = a.strip_prefix(b) {
+        if !cut.is_empty() && cut.chars().count() <= 3 {
+            return Some(format!("deleted {}", word(cut)));
+        }
+    }
+    None
+}
+
 /// The accessible name made from a visible label: symbols that a voice would skip or spell are put into words, a prefix the toolkit adds
 /// ("group Build") is dropped.
 pub fn clean_name(label: &str) -> String {
@@ -166,6 +199,8 @@ pub fn clean_name(label: &str) -> String {
         "−" | "-" => "minus",
         "×" | "✕" | "x" => "close",
         "←" => "back",
+        "‹" | "<" => "previous",
+        "›" | ">" => "next",
         "→" => "forward",
         "↑" => "up",
         "↓" => "down",
@@ -305,6 +340,45 @@ pub fn node_of(h: &Hit) -> Option<Node> {
         None => (default_role, State::default()),
     };
     Some(Node { name, role, state })
+}
+
+/// The hits of a frame that are clicked like a control (a key, a tab, a sub-action, a layout choice, a field) and are on the screen and big enough to
+/// press, but have no name: no label, no registered name, and not a backdrop. A person using a screen reader cannot reach them. Returns
+/// `(index in hits, the event as text)`; a test walks the tiles with it (F-A11Y-01).
+pub fn unnamed(hits: &[Hit], screen: (f32, f32)) -> Vec<(usize, String)> {
+    let area = screen.0 * screen.1;
+    let mut out = Vec::new();
+    for (i, h) in hits.iter().enumerate() {
+        let r = h.rect;
+        if r.w < 6.0 || r.h < 6.0 || r.w * r.h >= area * 0.8 || r.x + r.w / 2.0 < 0.0 || r.y + r.h / 2.0 < 0.0 || r.x + r.w / 2.0 >= screen.0 || r.y + r.h / 2.0 >= screen.1 {
+            continue;
+        }
+        let is_control = matches!(&h.ev, Event::Tab(_) | Event::Sub(..) | Event::Fn(..) | Event::Layout(_) | Event::Row(_) | Event::Focus(_) | Event::FocusAt(..) | Event::Area(_) | Event::AreaAt(..) | Event::MouseDown(..) | Event::Key(_));
+        if !is_control || !h.label.trim().is_empty() || meta_for(&h.label, &h.ev).is_some_and(|m| m.hidden || m.name.is_some()) || node_of(h).is_some() {
+            continue;
+        }
+        out.push((i, format!("{:?}", h.ev)));
+    }
+    out
+}
+
+/// A dialog a tile draws without telling the reader its title: the shared modal frame registers a whole-screen hit labelled `backdrop`; its buttons
+/// are the named controls registered after it. Returns the words to say, for example `Store. Install, Cancel`, so no dialog opens in silence (KI-141).
+/// `None` when no modal frame is on the screen.
+pub fn generic_dialog(hits: &[Hit], tile: &str) -> Option<String> {
+    let at = hits.iter().position(|h| h.label == "backdrop")?;
+    let mut names: Vec<String> = Vec::new();
+    for h in &hits[at + 1..] {
+        if let Some(n) = node_of(h).filter(|n| n.role == Role::Button) {
+            if !n.name.is_empty() && !names.contains(&n.name) {
+                names.push(n.name);
+            }
+        }
+        if names.len() == 4 {
+            break;
+        }
+    }
+    Some(if names.is_empty() { tile.to_string() } else { format!("{tile}. {}", names.join(", ")) })
 }
 
 // ------------------------------------------------------------------------------------------------- the keyboard walk

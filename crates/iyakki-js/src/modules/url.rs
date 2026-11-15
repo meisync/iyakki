@@ -43,14 +43,20 @@ impl WebModule for UrlModule {
     get size() { return this._l.length; }
     toString() { return this._l.map((p) => enc(p[0]) + '=' + enc(p[1])).join('&'); }
   }
-  const DEFAULT_PORT = { 'http:': '80', 'https:': '443' };
+  const DEFAULT_PORT = { 'http:': '80', 'https:': '443', 'ws:': '80', 'wss:': '443', 'ftp:': '21' };
+  // percent-encoding as the URL standard does it for each part: characters outside ASCII, controls, spaces and the few that must not stand are written as %XX of their UTF-8 bytes
+  const pct = (s, re) => s.replace(re, (c) => { try { return Array.from(new TextEncoder().encode(c)).map((b) => '%' + b.toString(16).toUpperCase().padStart(2, '0')).join(''); } catch (e) { return c; } });
+  const PATH_BAD = /[\u0000-\u0020"<>`{}\u007f-\u{10ffff}]/gu;
+  const QUERY_BAD = /[\u0000-\u0020"<>'\u007f-\u{10ffff}]/gu;
+  const HASH_BAD = /[\u0000-\u0020"<>`\u007f-\u{10ffff}]/gu;
+  const dotSeg = (s) => { const l = s.toLowerCase(); return l === '.' || l === '%2e' ? 1 : l === '..' || l === '.%2e' || l === '%2e.' || l === '%2e%2e' ? 2 : 0; };
   const norm = (path) => {
     const out = [];
     const segs = path.split('/');
     for (let i = 0; i < segs.length; i++) {
       const s = segs[i];
-      if (s === '..') { if (out.length > 1) out.pop(); if (i === segs.length - 1) out.push(''); }
-      else if (s === '.') { if (i === segs.length - 1) out.push(''); }
+      if (dotSeg(s) === 2) { if (out.length > 1) out.pop(); if (i === segs.length - 1) out.push(''); }
+      else if (dotSeg(s) === 1) { if (i === segs.length - 1) out.push(''); }
       else out.push(s);
     }
     let r = out.join('/');
@@ -61,26 +67,31 @@ impl WebModule for UrlModule {
     constructor(url, base) {
       url = String(url).trim();
       let m = /^([a-zA-Z][a-zA-Z0-9+.-]*):(\/\/)?([^/?#]*)([^?#]*)(\?[^#]*)?(#.*)?$/.exec(url);
-      if (m && (m[1].toLowerCase() === 'http' || m[1].toLowerCase() === 'https') && m[2]) {
+      if (m && ['http', 'https', 'ws', 'wss', 'ftp'].includes(m[1].toLowerCase()) && m[2]) {
+        if (!m[3] || /^(:\d*)?$/.test(m[3].slice(m[3].lastIndexOf('@') + 1))) throw new TypeError('Invalid URL: ' + url);
         this._init(m[1].toLowerCase() + ':', m[3], m[4] || '/', m[5] || '', m[6] || '');
-      } else if (m && !m[2] && /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(url) && !/^(https?):/i.test(url)) {
+      } else if (m && !m[2] && /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(url) && !/^(https?|wss?|ftp):/i.test(url)) {
         this._init(m[1].toLowerCase() + ':', '', m[3] + m[4], m[5] || '', m[6] || '', true);
       } else if (base !== undefined) {
         const b = base instanceof URL ? base : new URL(base);
         const r = /^([^?#]*)(\?[^#]*)?(#.*)?$/.exec(url);
         let path = r[1], search = r[2] || '', hash = r[3] || '';
-        if (url.startsWith('//')) { const mm = /^\/\/([^/?#]*)([^?#]*)(\?[^#]*)?(#.*)?$/.exec(url); return void this._init(b.protocol, mm[1], mm[2] || '/', mm[3] || '', mm[4] || ''); }
+        if (url.startsWith('//')) { const mm = /^\/\/([^/?#]*)([^?#]*)(\?[^#]*)?(#.*)?$/.exec(url); if (!mm[1]) throw new TypeError('Invalid URL: ' + url); return void this._init(b.protocol, mm[1], mm[2] || '/', mm[3] || '', mm[4] || ''); }
         if (path === '') { path = b.pathname; if (!r[2] && url[0] !== '?') search = b.search; }
         else if (path[0] !== '/') path = b.pathname.slice(0, b.pathname.lastIndexOf('/') + 1) + path;
         this._init(b.protocol, b.host, path, search, hash);
       } else throw new TypeError('Invalid URL: ' + url);
     }
     _init(protocol, host, path, search, hash, opaque) {
-      if (/@/.test(host)) host = host.slice(host.lastIndexOf('@') + 1);
+      this._user = ''; this._pass = '';
+      if (/@/.test(host)) { const ui = host.slice(0, host.lastIndexOf('@')); host = host.slice(host.lastIndexOf('@') + 1); const c = ui.indexOf(':'); this._user = c < 0 ? ui : ui.slice(0, c); this._pass = c < 0 ? '' : ui.slice(c + 1); }
       this._protocol = protocol; this._opaque = !!opaque;
       const pm = /^(.*?)(?::(\d*))?$/.exec(host.toLowerCase());
       this._hostname = pm[1]; this._port = pm[2] && pm[2] !== DEFAULT_PORT[protocol] ? pm[2] : '';
-      this._pathname = opaque ? path : norm(path);
+      if (this._port !== '' && (+this._port > 65535)) throw new TypeError('Invalid URL');
+      if (this._port !== '') this._port = String(+this._port) === DEFAULT_PORT[protocol] ? '' : String(+this._port);
+      this._pathname = opaque ? path : norm(pct(path, PATH_BAD));
+      search = pct(search, QUERY_BAD); hash = pct(hash, HASH_BAD);
       this._search = search === '?' ? '' : search; this._hash = hash === '#' ? '' : hash;
       this._sp = new URLSearchParams(this._search); this._sp._u = this;
     }
@@ -93,12 +104,12 @@ impl WebModule for UrlModule {
     get search() { return this._search; }
     get hash() { return this._hash; }
     get searchParams() { return this._sp; }
-    get username() { return ''; }
-    get password() { return ''; }
+    get username() { return this._user; }
+    get password() { return this._pass; }
     set search(v) { v = String(v); this._search = v && v[0] !== '?' ? '?' + v : v; this._sp._parse(this._search); }
     set hash(v) { v = String(v); this._hash = v && v[0] !== '#' ? '#' + v : v; }
     set pathname(v) { this._pathname = norm(String(v)); }
-    get href() { return this._opaque ? this._protocol + this._pathname + this._search + this._hash : this._protocol + '//' + this.host + this._pathname + this._search + this._hash; }
+    get href() { return this._opaque ? this._protocol + this._pathname + this._search + this._hash : this._protocol + '//' + (this._user ? this._user + (this._pass ? ':' + this._pass : '') + '@' : '') + this.host + this._pathname + this._search + this._hash; }
     toString() { return this.href; }
     toJSON() { return this.href; }
     static canParse(u, b) { try { new URL(u, b); return true; } catch (e) { return false; } }

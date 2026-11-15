@@ -15,6 +15,7 @@ log.workspace = true
 iyakki-sec.workspace = true
 # the SSH, SFTP and FTP protocol code (re-exported here under the old module paths)
 iyakki-sshfs.workspace = true
+iyakki-vt.workspace = true
 # camera motion detection, geometry, settings and the recording format (re-exported here under the old module paths)
 iyakki-camdetect.workspace = true
 # DISKS: the LUKS and BitLocker header parsers, the typed secret and the rate limit (re-exported as `disks_crypt`)
@@ -38,6 +39,7 @@ iyakki-wordtime.workspace = true
 # Wall-clock, zones, calendar and time-format helpers, split out of iyakki-agent.
 iyakki-clock.workspace = true
 iyakki-core-api.workspace = true
+iyakki-core-local.workspace = true
 iyakki-edit.workspace = true
 iyakki-vfs.workspace = true
 iyakki-wasm.workspace = true
@@ -66,9 +68,11 @@ iyakki-usb = { path = "../iyakki-usb" }
 iyakki-storage.workspace = true
 iyakki-flow.workspace = true
 # VPN profiles: importers, route and guard plans, WireGuard netlink messages (vpn_mgr.rs)
+iyakki-filter = { path = "../iyakki-filter" }
 iyakki-vpn = { path = "../iyakki-vpn" }
 # the guard and DNS-redirect tables go through the Firewall's own netlink writer (vpn_nft.rs); the images ship no nft
 iyakki-fw.workspace = true
+iyakki-zram.workspace = true
 # the Wi-Fi hotspot core (pure); the real nl80211 and packet sockets are in nl80211_os.rs
 iyakki-hotspot = { path = "../iyakki-hotspot" }
 iyakki-schema.workspace = true
@@ -78,7 +82,13 @@ iyakki-js.workspace = true
 # WASM tiles served to a browser (webservice/tiles.rs): the sandbox host, the ABI types and the example tile
 iyakki-tile-host = { path = "../iyakki-tile-host" }
 iyakki-tile-abi = { path = "../iyakki-tile-abi" }
+# the radio's plain data lives in the tile facade (RADIO-EXTRACTION-PLAN.md step 1); `radio.rs` re-exports it
+iyakki-tile-api = { path = "../iyakki-tile-api" }
 iyakki-tile-example = { path = "../iyakki-tile-example" }
+iyakki-tile-runs = { path = "../iyakki-tile-runs" }
+iyakki-tile-settings = { path = "../iyakki-tile-settings" }
+iyakki-tile-edit = { path = "../iyakki-tile-edit" }
+iyakki-tile-chat = { path = "../iyakki-tile-chat" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror.workspace = true

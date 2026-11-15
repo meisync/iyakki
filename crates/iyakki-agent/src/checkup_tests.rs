@@ -36,9 +36,9 @@ fn put(root: &Path, rel: &str, text: &str) {
 
 #[test]
 fn every_step_has_a_name_and_the_capture_steps_are_the_two_that_need_a_click() {
-    assert_eq!(StepId::ALL.len(), 12);
+    assert_eq!(StepId::ALL.len(), 14);
     let ids: std::collections::HashSet<_> = StepId::ALL.iter().map(|s| s.id()).collect();
-    assert_eq!(ids.len(), 12);
+    assert_eq!(ids.len(), 14);
     assert!(StepId::ALL.iter().all(|s| !s.title().is_empty()));
     assert_eq!(StepId::ALL.iter().filter(|s| s.is_capture()).map(|s| s.id()).collect::<Vec<_>>(), ["microphone", "camera"]);
 }
@@ -348,7 +348,7 @@ fn the_report_holds_verdicts_and_advice_and_never_sound_or_pictures() {
     rs[4] = speaker(&inv(), &Ok(()), Said::No);
     rs[5] = microphone(&inv(), &MicHeard::Samples(vec![1; 100]), "USB");
     let lines = report_lines(&rs);
-    assert_eq!(lines[0], "1 passed, 2 failed, 0 skipped, 9 not done yet");
+    assert_eq!(lines[0], "1 passed, 2 failed, 0 skipped, 11 not done yet");
     assert!(lines.iter().any(|l| l == "Screen: Pass - You could see the test picture, all four colour bars and the frame."));
     assert!(lines.iter().any(|l| l.starts_with("Speaker: Fail")) && lines.iter().any(|l| l.starts_with("  advice: Check that the volume")));
     assert!(lines.iter().any(|l| l == "Camera: Not done yet"));
@@ -368,4 +368,96 @@ fn the_real_readers_run_on_this_computer_without_panicking() {
     let i = Inventory::read(vec![]);
     let _ = (i.keyboards, i.route, i.power.laptop);
     let _ = Arc::new(i);
+}
+
+// ---- the graphics card and USB steps (F-CHECKUP-04), on made-up machines
+
+fn card(vendor: crate::gpu::Vendor, driver: Option<&str>, render: bool, name: &str) -> crate::gpu::Gpu {
+    crate::gpu::Gpu { pci: "0000:03:00.0".into(), vendor_id: 0x1002, device_id: 0x744C, vendor, name: name.into(), driver: driver.map(String::from), card: Some("card0".into()), render: render.then(|| "renderD128".to_string()), boot_vga: false, vram: None }
+}
+
+#[test]
+fn the_gpu_step_needs_the_cluster_to_see_the_card_before_it_passes_and_never_guesses() {
+    use crate::gpu::Vendor;
+    let mut i = Inventory::default();
+    assert_eq!(gpu(&i).outcome, Outcome::Skipped, "no card");
+    i.gpus = vec![card(Vendor::Other(0x1234), None, false, "Virtual display")];
+    assert_eq!(gpu(&i).outcome, Outcome::Skipped);
+    assert!(gpu(&i).note.contains("virtual"));
+    i.gpus = vec![card(Vendor::Amd, Some("amdgpu"), true, "AMD Radeon 780M")];
+    // the card is fine; what the cluster sees decides
+    i.k3s_gpu = K3sSees::NotAsked;
+    assert_eq!(gpu(&i).outcome, Outcome::Skipped);
+    i.k3s_gpu = K3sSees::NoCluster("stopped".into());
+    let r = gpu(&i);
+    assert!(r.outcome == Outcome::Skipped && r.note.contains("stopped") && r.advice.contains("Start the dev cluster"), "{r:?}");
+    i.k3s_gpu = K3sSees::Count(0);
+    let r = gpu(&i);
+    assert!(r.outcome == Outcome::Fail && r.note.contains("sees no GPU") && r.advice.contains("Store"), "{r:?}");
+    i.k3s_gpu = K3sSees::Count(1);
+    let r = gpu(&i);
+    assert!(r.outcome == Outcome::Pass && r.note.contains("sees 1 GPU.") && r.note.contains("amdgpu"), "{r:?}");
+    i.k3s_gpu = K3sSees::Unreadable("timeout".into());
+    assert!(gpu(&i).outcome == Outcome::Fail && gpu(&i).note.contains("timeout"));
+    // a card the kernel did not set up
+    i.gpus = vec![card(Vendor::Amd, Some("radeon"), false, "AMD Radeon HD")];
+    let r = gpu(&i);
+    assert!(r.outcome == Outcome::Fail && r.doctor == Some("gpu"), "{r:?}");
+}
+
+fn put_usb(root: &Path, dev: &str, v: &str, p: &str, class: &str, speed: &str, product: &str, ifaces: &[(&str, bool)]) {
+    let d = format!("sys/bus/usb/devices/{dev}");
+    put(root, &format!("{d}/idVendor"), &format!("{v}\n"));
+    put(root, &format!("{d}/idProduct"), &format!("{p}\n"));
+    put(root, &format!("{d}/bDeviceClass"), &format!("{class}\n"));
+    put(root, &format!("{d}/speed"), &format!("{speed}\n"));
+    if !product.is_empty() {
+        put(root, &format!("{d}/product"), &format!("{product}\n"));
+    }
+    for (n, driven) in ifaces {
+        put(root, &format!("sys/bus/usb/devices/{dev}:{n}/bInterfaceClass"), "00\n");
+        if *driven {
+            std::fs::create_dir_all(root.join(format!("sys/bus/usb/devices/{dev}:{n}/driver"))).unwrap();
+        }
+    }
+}
+
+#[test]
+fn the_usb_devices_are_read_without_hubs_and_the_step_names_a_device_nothing_drives_or_a_slow_stick() {
+    let d = tmp("usb");
+    put_usb(&d, "usb1", "1d6b", "0002", "09", "480", "xHCI Host Controller", &[]);
+    put_usb(&d, "1-1", "05e3", "0610", "09", "480", "USB Hub", &[("1.0", true)]);
+    put_usb(&d, "1-1.2", "046d", "c52b", "00", "12", "USB Receiver", &[("1.0", true), ("1.1", true)]);
+    put_usb(&d, "1-2", "0781", "5583", "08", "480", "Ultra Fit", &[("1.0", true)]);
+    let devs = read_usb(&d.join("sys"));
+    assert_eq!(devs.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), ["USB Receiver", "Ultra Fit"], "root hubs and hubs are left out");
+    assert_eq!((devs[1].ids.as_str(), devs[1].speed, devs[1].class, devs[1].driverless), ("0781:5583", 480, 8, 0));
+    let mut i = Inventory { usb: devs, ..Inventory::default() };
+    let r = crate::checkup::usb(&i);
+    assert!(r.outcome == Outcome::Pass && r.note.contains("2 USB devices") && r.note.contains("Ultra Fit (480 Mbit/s)"), "{r:?}");
+    // an interface with no driver
+    put_usb(&d, "1-3", "1234", "abcd", "ff", "480", "", &[("1.0", false)]);
+    i.usb = read_usb(&d.join("sys"));
+    let r = crate::checkup::usb(&i);
+    assert!(r.outcome == Outcome::Fail && r.note.contains("nothing drives it") && r.note.contains("USB device 1234:abcd"), "{r:?}");
+    // a storage stick on a USB 1.1 link
+    put_usb(&d, "1-4", "0951", "1666", "08", "12", "DataTraveler", &[("1.0", true)]);
+    i.usb = read_usb(&d.join("sys")).into_iter().filter(|x| x.ids != "1234:abcd").collect();
+    let r = crate::checkup::usb(&i);
+    assert!(r.outcome == Outcome::Fail && r.note.contains("USB 1.1") && r.note.contains("DataTraveler"), "{r:?}");
+    // nothing plugged in
+    assert_eq!(crate::checkup::usb(&Inventory::default()).outcome, Outcome::Skipped);
+    assert!(read_usb(&d.join("nowhere")).is_empty());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn the_signed_result_takes_the_gpu_cell_from_the_cluster_and_the_two_new_steps_add_no_matrix_cell() {
+    assert!(crate::checkup_result::cells(StepId::Gpu).is_empty() && crate::checkup_result::cells(StepId::Usb).is_empty());
+    let results: Vec<StepResult> = StepId::ALL.iter().map(|s| StepResult::pending(*s)).collect();
+    let extra = crate::checkup_result::Extra { k3s_state: Some("running".into()), gpu: Some(("AMD Radeon 780M: the dev cluster sees 1 GPU.".into(), true)) };
+    let body = crate::checkup_result::build(&results, &extra, "Example", "0.1.0", 1);
+    let gpu_cell = body.cells.iter().find(|c| c.capability == "GPU for k3s").unwrap();
+    assert_eq!(gpu_cell.status, "verified");
+    assert_eq!(body.cells.len(), 14, "one cell per capability of the ten matrix steps plus k3s and GPU, nothing for the new steps");
 }

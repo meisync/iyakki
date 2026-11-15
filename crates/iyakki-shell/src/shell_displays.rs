@@ -2,6 +2,7 @@
 //! pointer's display, moving an app to another display, and the picture of each display. The device side (which output shows
 //! what) is in `display/` and `backend_kms.rs`; here a display is a name, a size and a place.
 
+use crate::stale_stats::mark_stale;
 use super::*;
 use crate::display::outputs::{hub, now_ms, DispSpec, DisplayConfig};
 
@@ -204,7 +205,7 @@ impl Shell {
         if !closed.is_empty() {
             self.say(format!("A display was unplugged and there was no room for: {}", closed.join(", ")));
         }
-        self.stale = true;
+        mark_stale!(self);
     }
 
     /// Workspaces for every display once somebody is signed in (before that, other displays show the same sign-in screen).
@@ -286,7 +287,7 @@ impl Shell {
         if !closed.is_empty() {
             self.say(format!("Back to one display; there was no room for: {}", closed.join(", ")));
         }
-        self.stale = true;
+        mark_stale!(self);
     }
 
     /// Give the keyboard focus to another display.
@@ -315,7 +316,7 @@ impl Shell {
         let prev = std::mem::replace(&mut self.hits, h);
         self.panes.d.other_hits[active] = prev;
         self.ctx = None;
-        self.stale = true;
+        mark_stale!(self);
     }
 
     fn content_take(&mut self, d: usize, p: usize) -> Option<Content> {
@@ -351,7 +352,7 @@ impl Shell {
             pane.custom = c.1;
             pane.dirty = true;
         }
-        self.stale = true;
+        mark_stale!(self);
     }
 
     /// Swap what two panes hold (on the same display or not); an app keeps running.
@@ -425,16 +426,16 @@ impl Shell {
                             p.dirty = true;
                         }
                     }
-                    Err(_) => crashed.push((k, i, app.title())),
+                    Err(_) => crashed.push((k, i, app.title(), pa)),
                 }
             }
         }
-        for (k, i, name) in crashed {
+        for (k, i, name, pa) in crashed {
             if let Some(Some(w)) = others.get_mut(k) {
                 w.panes[i].content = None;
                 w.panes[i].dirty = true;
             }
-            self.app_crashed(&name);
+            self.app_crashed_with(&name, Some(pa));
         }
         self.panes.d.others = others;
     }

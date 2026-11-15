@@ -686,6 +686,34 @@ fn engine(ex: Vec<Arc<dyn Executor>>, rec: Arc<Rec>) -> Engine {
 }
 
 #[test]
+fn files_the_request_named_come_back_from_the_log_of_a_finished_job_and_the_command_is_wrapped() {
+    let mut st = JobState::default();
+    st.succeeded = true;
+    let mut logs = String::from("hello\n");
+    logs.push_str(&super::frames::frame("result.txt", b"data"));
+    logs.push_str(&super::frames::frame("extra.txt", b"not asked for"));
+    let k = FakeKube::finishing(st, &logs);
+    let e = engine(vec![job_exec(k.clone(), Ok(()))], Arc::new(Rec::default()));
+    let mut s = spec();
+    s.artifacts = vec!["result.txt".into()];
+    let r = e.run(&s, &who(), None).unwrap();
+    assert_eq!(r.stdout.trim(), "hello", "the frames are not part of what the program printed");
+    assert_eq!(r.artifacts.len(), 1);
+    assert!(r.artifacts[0].returned && r.artifacts[0].sha256 == crate::ocipush::sha256_hex(b"data") && r.artifacts[0].size == 4);
+    assert_eq!(r.files.len(), 1);
+    let job = k.applied.lock().unwrap().last().cloned().unwrap();
+    let cmd: Vec<String> = job.pointer("/spec/template/spec/containers/0/command").unwrap().as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+    assert_eq!(&cmd[..2], ["sh", "-c"]);
+    assert_eq!(&cmd[3..], ["iyakki-run", "aws", "s3", "ls"], "the request's own argv follows the script as separate words");
+    // without names the command is exactly the request's
+    let k2 = FakeKube::finishing(JobState { succeeded: true, ..Default::default() }, "x");
+    let e2 = engine(vec![job_exec(k2.clone(), Ok(()))], Arc::new(Rec::default()));
+    e2.run(&spec(), &who(), None).unwrap();
+    let job = k2.applied.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(job.pointer("/spec/template/spec/containers/0/command").unwrap(), &json!(["aws", "s3", "ls"]));
+}
+
+#[test]
 fn a_run_applies_policy_secret_job_in_order_returns_redacted_output_and_cleans_up() {
     let mut st = JobState::default();
     st.succeeded = true;
@@ -1008,6 +1036,26 @@ fn run_command_in_a_tenant_pod_never_runs_on_the_pod() {
     assert!(render(&r).contains("time limit"));
     let empty = SandboxResult { stdout: String::new(), stderr: String::new(), exit_code: Some(0), stderr_truncated: false, timed_out: false, ..r };
     assert_eq!(render(&empty), "(no output, exit status 0)");
+}
+
+#[test]
+fn the_real_door_takes_the_teams_binding_and_a_fake_or_a_kubectl_with_its_own_kubeconfig_does_not() {
+    use super::kube::Kubectl;
+    let (dir, vault, rec, mut roles) = cfg_env("forbind");
+    roles.add_tenant_member("olga", "adam", crate::cloudroles::TenantRole::Admin).unwrap();
+    roles.create_namespace("adam", "web").unwrap();
+    crate::cloudroles::save(&crate::cloudroles::path(&dir), &roles).unwrap();
+    let rec = Arc::new(rec);
+    let env = Env { dir: &dir, vault: vault.clone(), audit: rec.as_ref() };
+    let owner = Caller { user: "olga", roles: Some(&roles) };
+    let ack = crate::tenantconfig::safety::rules_table();
+    let cred = crate::tenantconfig::schema::SecretRef::parse("vault:k3s.cluster/web-dev-credential").unwrap();
+    vault.put(&cred, "eyJhbGciOiJSUzI1NiJ9.token-value-1234").unwrap();
+    api::put(&env, &owner, "k3s.cluster", &["web".into(), "dev".into()], json!({"enabled": true, "values": {"api_server": "https://k.example.com", "credential": "vault:k3s.cluster/web-dev-credential", "allowed_registries": ["registry.example.com"], "four_eyes": false, "quota_pods": 10, "deploy_role": "editor"}, "ack_warnings": ack})).unwrap();
+    assert!(Kubectl::new(None).for_binding(&env, "web", "dev").is_some(), "the binding's door");
+    assert!(Kubectl::new(None).for_binding(&env, "web", "prod").is_none(), "no such binding");
+    assert!(Kubectl::new(Some("/own/kubeconfig".into())).for_binding(&env, "web", "dev").is_none(), "a kubeconfig of its own wins");
+    assert!(FakeKube::default().for_binding(&env, "web", "dev").is_none(), "a fake stays itself");
 }
 
 #[test]

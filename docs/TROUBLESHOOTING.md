@@ -117,6 +117,8 @@ approved the site; passwords and codes are never typed by the model.
 
 ## Sound, voice and speech
 
+**Sound stayed on a monitor that was unplugged (or did not move to a new one).** IYAKKI reads the sound card's monitor pins (`/proc/asound/card*/eld#*`) twice a second and looks at the outputs again within a second of a change, then twice more (about 1 and 3 seconds later, the monitor's data turns valid a moment after it is plugged in). A monitor that has just been plugged in becomes the output only by the normal automatic order (speakers or headphones, monitor with speakers, USB, Bluetooth, built-in speaker). An HDMI/DP output whose pin reports no monitor is not played on while another output can play: in Automatic the next choice takes over at once, and an output chosen by hand in Settings -> Sound is set aside the same way (the first row says *has no monitor connected now, it comes back when one is*) and is used again when its pin has a monitor; the choice itself is kept. If nothing else can play, the chosen output stays. The log line `sound output: ...` names each change. Not yet confirmed on the Mac mini 2018 (KI-180).
+
 **No sound.** Open Settings -> Sound and read the first row: it names the output IYAKKI plays on and why, or why there is none.
 * *no sound output: connect a monitor with speakers over HDMI/DP or a USB audio device; built-in speakers on T2 Macs need the apple-bce
   driver of the Mac image*: the machine has only HDMI/DP outputs (Mac mini 2018 and other T2 Macs: devices 3, 7 and 8 of `HDA Intel PCH`,
@@ -185,6 +187,8 @@ Settings -> Voice -> `v` set the TTS command, `y` test. Without an engine the st
 needs a speech-to-text command (`s`). MEDIA needs mpv, VLC, ffplay or mplayer for formats other than MP3.
 
 ## Hardware, boot and network
+
+**A restart goes to Windows (or another system) instead of IYAKKI.** IYAKKI on a stick starts through the firmware's fallback path, so the computer has no boot entry for it and the other system is first in the boot order. Pick the stick once in the firmware's boot menu (F12, F10, Esc or Option at power-on, depending on the make), then, as an administrator, run `iyakki startup-disk register` and either `iyakki startup-disk first` (IYAKKI starts by default) or `iyakki startup-disk next` (only the next restart). Settings -> Startup disk and the chat do the same, after a confirmation. For restarts from a developer computer, switch on "Restart into IYAKKI" (`startup.reboot_into_iyakki`) so `iyakki dev reboot` sets the one-time next boot. `iyakki startup-disk revert` puts the old order back. If it says the firmware variables are read-only or missing, the firmware does not allow it and the boot menu is the only way.
 
 ### How do I power off or restart from the login screen?
 
@@ -257,7 +261,9 @@ clicked. Seen on a MacBookPro14,1 (framebuffer 2880x1800, panel 2560x1600).
 app) seems not to react to clicks because the app closes the moment the pointer reaches it. Seen on a MacBookPro14,1 (2560x1600):
 `PANIC in thread 'iyakki-shell': ... min > max, or either was NaN. min = 1908.4784, max = 1908.4783` (a layout calculation whose
 lower bound was 0.0001 above its upper bound). Every such calculation now uses a helper that cannot panic, but any other bug
-of this kind shows the same message. The shell catches the panic, closes only that app and keeps running.
+of this kind shows the same message. The shell catches the panic, closes only that app and keeps running. A card at the bottom
+of the screen says which app stopped; its **Open again** button starts that app afresh and **Dismiss** removes the card (it also
+goes away by itself after half a minute).
 
 1. **Where the log is:** the kernel log. Open a terminal tile (CLI) and run `dmesg | grep -E "PANIC|iyakki"`, or from a paired
    computer `iyakki dev dmesg --grep PANIC` and `iyakki dev logs --system` ([`DEVELOPER-MODE.md`](DEVELOPER-MODE.md)). The boot log is

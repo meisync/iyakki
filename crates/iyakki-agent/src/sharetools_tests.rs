@@ -152,6 +152,7 @@ fn start_stop_and_delete_have_their_cards_and_a_link_secret_is_never_printed() {
     assert!(!out.contains(&cfg.token) && out.contains("Address:"), "{out}");
     let list = t.call("share_list", &json!({})).unwrap();
     assert!(list.contains("RUNNING") && list.contains("Docs") && !list.contains(&cfg.token), "{list}");
+    assert!(list.contains("?zip"), "the list says how to get a folder as one zip: {list}");
     assert!(t.refusal("share_start", &json!({"share": "Docs"})).unwrap().contains("already running"));
     assert!(t.preview("share_stop", &json!({"share": "Docs"})).unwrap().contains("kept"));
     t.call("share_stop", &json!({"share": "Docs"})).unwrap();

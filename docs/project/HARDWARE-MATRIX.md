@@ -32,7 +32,7 @@ or `date not recorded`.
 |---|---|---|---|
 | A | Mac T2 MacBook Pro 2020 (MacBookPro16,2) | macweb image from a USB SSD, then installed to the internal disk | Gate machine |
 | B | Mac mini 2018 (Macmini8,1, T2) | macweb install image on a USB SSD (Samsung T7), 2026-10-18/19 | Gate machine |
-| C | Mac mini 2014 (Macmini7,1), "the older Mac mini" | none | Gate machine only if the owner means this one by "the older Mac mini" (decision 1, section 5) |
+| C | Mac mini 2014 (Macmini7,1), "the older Mac mini" | lean install image (0.1.0-alpha.3-dev4) over a cable; booted (owner report, 2026-11-12) | Gate machine only if the owner means this one by "the older Mac mini" (decision 1, section 5) |
 | D | AMD CPU + NVIDIA GPU PC | PC image 2026-10-26 not yet run on it; owner reports an AMD PC booted earlier | Gate machine (the AMD PC) |
 | E | Intel CPU + NVIDIA GPU PC: HP Pavilion Laptop 16-af0xxx (Core Ultra, Meteor Lake; NVIDIA 10de:25aa; Insyde F.11) | PC lean image 1107g (kernel with x2APIC) from a Samsung T7, 2026-11-07; the 1107e kernel stopped before stage 1 on it | Gate machine (the Intel PC) |
 | F | Generic Intel iGPU PC | none | Not a gate machine; a result is a bonus |
@@ -54,7 +54,7 @@ Column letters are the ids of section 1.
 
 | Capability | A | B | C | D | E | F | G | H | I | J | K | L | M |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| Boot from USB | verified | verified | untested | partly | untested | verified | untested | verified | verified | not supported | not supported | not supported | not supported |
+| Boot from USB | verified | verified | partly | partly | untested | verified | untested | verified | verified | not supported | not supported | not supported | not supported |
 | Install to internal disk | partly | untested | untested | untested | untested | untested | untested | verified | not supported | not supported | not supported | not supported | not supported |
 | Install to USB drive | untested | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported |
 | Upgrade from previous release | untested | untested | untested | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported |
@@ -66,12 +66,12 @@ Column letters are the ids of section 1.
 | Keyboard (and pointer) | verified | verified | untested | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported |
 | Touch Bar | partly | not supported | not supported | not supported | not supported | not supported | not supported | not supported | not supported | not supported | not supported | not supported | not supported |
 | Fn keys | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported |
-| Sound out | verified | verified | untested | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported |
+| Sound out | verified | verified | partly | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported |
 | Sound in (built-in) | not supported | not supported | not supported | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported |
 | USB camera | partly | verified | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported |
 | USB microphone | verified | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported |
 | Built-in camera | verified | not supported | not supported | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported |
-| Wi-Fi | verified | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported |
+| Wi-Fi | verified | untested | failing | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported |
 | Ethernet | partly | verified | untested | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported |
 | Bluetooth | mixed | 2026-11-10 | owner on a MacBook Pro 14,1 (2026-11-08): pair, phone sound and tether with internet; the Mac mini 2018 (BCM4364, no patch file in macOS images): the page scans and lists devices, pairing untried | In-house stack. MacBook Pro 14,1 works; on the Mac mini 2018 the controller runs in its ROM state, so a USB dongle is the fallback. |
 | USB-C link and internet sharing | untested | untested | untested | untested | untested | untested | untested | not supported | not supported | not supported | not supported | not supported | not supported |
@@ -94,9 +94,9 @@ Column letters are the ids of section 1.
 | Status | Cells |
 |---|---|
 | verified | 26 |
-| partly | 11 |
-| failing | 2 |
-| untested | 208 |
+| partly | 14 |
+| failing | 3 |
+| untested | 204 |
 | not supported | 169 |
 | waived | 0 |
 | **total** | **416** |
@@ -110,7 +110,7 @@ Per machine:
 |---|---|---|---|---|---|---|
 | A | 10 | 8 | 1 | 12 | 1 | 0 |
 | B | 8 | 1 | 1 | 17 | 5 | 0 |
-| C | 0 | 0 | 0 | 26 | 6 | 0 |
+| C | 0 | 3 | 1 | 22 | 6 | 0 |
 | D | 0 | 1 | 0 | 30 | 1 | 0 |
 | E | 2 | 0 | 0 | 29 | 1 | 0 |
 | F | 0 | 0 | 0 | 31 | 1 | 0 |
@@ -123,7 +123,7 @@ Per machine:
 | M | 0 | 0 | 0 | 0 | 32 | 0 |
 
 
-The machines that count for the gate are A to E. Their 146 cells that apply (no `no such part`) are: 20 verified, 10 partly, 2 failing, 114 untested.
+The machines that count for the gate are A to E. Their 146 cells that apply (no `no such part`) are: 20 verified, 13 partly, 3 failing, 110 untested (counts updated 2026-11-12 for machine C only; see section 10).
 
 ## 4. Evidence per machine
 
@@ -207,7 +207,7 @@ Status, date and evidence for every cell. The test step for each cell that is no
 
 | Capability | Status | Date | Evidence | Note |
 |---|---|---|---|---|
-| Boot from USB | untested | — | none | Never booted; docs/MAC-HARDWARE.md section 10 is the test list. |
+| Boot from USB | partly | 2026-11-12 | owner's report (lean image 0.1.0-alpha.3-dev4, over a cable); `iyakki dev info` and the kernel log were read, no diag file is named in the repository | Booted (UEFI). Nothing but the owner's word and the kernel log excerpt in KNOWN-ISSUES KI-094; an install to the internal disk and an upgrade are untested. |
 | Install to internal disk | untested | — | none | Never booted; docs/MAC-HARDWARE.md section 10 is the test list. |
 | Install to USB drive | untested | — | none | Never booted; docs/MAC-HARDWARE.md section 10 is the test list. |
 | Upgrade from previous release | untested | — | none | Never booted; docs/MAC-HARDWARE.md section 10 is the test list. |
@@ -219,14 +219,14 @@ Status, date and evidence for every cell. The test step for each cell that is no
 | Keyboard (and pointer) | untested | — | none | Never booted; docs/MAC-HARDWARE.md section 10 is the test list. |
 | Touch Bar | not supported | — | none | No Touch Bar. |
 | Fn keys | untested | — | none | Never booted; docs/MAC-HARDWARE.md section 10 is the test list. |
-| Sound out | untested | — | none | HDMI audio expected; analog needs the Mac variant (CS4206). |
+| Sound out | partly | 2026-11-12 | owner's report: sound works | No file holds more; which output was used is not recorded. |
 | Sound in (built-in) | not supported | — | none | No built-in microphone. |
 | USB camera | untested | — | none | Never booted; docs/MAC-HARDWARE.md section 10 is the test list. |
 | USB microphone | untested | — | none | Never booted; docs/MAC-HARDWARE.md section 10 is the test list. |
 | Built-in camera | not supported | — | none | No built-in camera. |
-| Wi-Fi | untested | — | none | BCM4360 needs Broadcom's wl built by the owner (F-DRIVERS-10, F-DRIVERS-16); never loaded on a Macmini7,1. |
+| Wi-Fi | failing | 2026-11-12 | owner's report and the kernel log (KNOWN-ISSUES KI-094) | Broadcom BCM4360: `b43` finds the card and fails with `FOUND UNSUPPORTED PHY (Type 11 (AC))`, error -95; `brcmfmac` does not support the chip, so there is no Wi-Fi device. Settings, Network now says so in plain words and the next image stops the `b43` probe. The `wl` route in the note above was never tried on this machine. |
 | Ethernet | untested | — | none | Never booted; docs/MAC-HARDWARE.md section 10 is the test list. |
-| Bluetooth | untested | — | none | btusb binds with built-in firmware; limited (MAC-HARDWARE section 4). |
+| Bluetooth | partly | 2026-11-12 | owner's report: Bluetooth works | No pairing or audio result is recorded for this machine; the MacBook Pro 14,1 has the written results. |
 | USB-C link and internet sharing | untested | — | none | Never booted; docs/MAC-HARDWARE.md section 10 is the test list. |
 | k3s start | untested | — | none | Never booted; docs/MAC-HARDWARE.md section 10 is the test list. |
 | GPU for k3s | untested | — | none | Haswell HD 5000. |
@@ -917,3 +917,14 @@ Scripts, not a sheet: `dist/buildroot/qemu-test.sh`, `qemu-install-test.sh`, `qe
 * Which exact built fixes are in which image: 'built, unverified' comes from the coordinator and is not checked against an image.
 * Whether the 13-inch MacBookPro16,2 has a usable Vulkan path on its Intel GPU, whether any gate PC has a Wi-Fi chip, a battery or a touch screen.
 
+
+## 10. Addendum, 2026-11-12: machines and results not in the tables above
+
+The tables above were written on 2026-10-27. Since then (sources: the owner's reports as written in KNOWN-ISSUES.md, `docs/development/HP-LAPTOP-PLAN.md`, `docs/development/HARDWARE-TEST-SHEET.md`, the Manual column of FEATURES.md):
+
+* **Machine C (Mac mini 2014)** was booted on 2026-11-12; four of its cells changed above (Boot from USB, Sound out and Bluetooth `partly` on the owner's word, Wi-Fi `failing`, KI-094). The hardware check scripts were run on it; the commit that records the sixth batch says 39 recipes passed on what was observed and 3 need a person. The per-recipe results are not in this page.
+* **Machine E (HP Pavilion 16)** also booted the alpha.2 final image (owner, 2026-11-10); its camera worked (alpha.2 release notes); a closed privacy shutter gave a black picture without a message (KI-082, fixed in code, not re-checked). No other cell of section 4.E changed.
+* **Machine B (Mac mini 2018)**: after 2026-10-27 the alpha.2 final image booted (owner, 2026-11-10) and the check scripts ran read-only page and state checks through developer mode (the sixth batch commit says 19 passed on what was observed; KI-095, the world-readable home folders, was found by it and is fixed in code). Manual `passed 2026-11-11 macmini` is on 11 rows of FEATURES.md. Its cells above are not changed because the per-capability results are not written per cell.
+* **Not in the matrix yet: a MacBook Pro 14,1** (13-inch 2017, no T2). Owner: booted the alpha.2 images (2026-11-09 and 2026-11-10); Bluetooth pairing, a phone's sound and tether with internet verified (2026-11-08, FEATURES F-NET-21, F-NET-24); its quiet speakers were measured (`docs/MAC-HARDWARE.md`). Every other capability: unknown.
+* **Not in the matrix yet: a Lenovo Legion Pro 5** (82WM; AMD Ryzen, Radeon iGPU, NVIDIA dGPU, Realtek codec, MediaTek Wi-Fi and Bluetooth). Owner: boots the PC image and the alpha.2 final image (2026-11-10). Seen working: a no-network driver download failing in seconds (KI-083), a flash drive written by `iyakki-usb` (F-PKG-06) and the lock keys (F-LOCK-02), both `passed 2026-11-11 lenovo`. Camera light stays on after leaving the Cameras tile (KI-080, KI-093; fixed in code, not confirmed). Every other capability: unknown.
+* **Unknown:** a 120 GB drive was named when this addendum was requested; nothing in the repository records it.

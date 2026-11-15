@@ -94,9 +94,16 @@ detector once more. Removed, replaced by `***` or a bracketed word:
 
 Address host names and paths stay, so a log can still be read. Redaction removes too much rather than too little.
 
+## `iyakki doctor` on the command line (alpha.3)
+
+`iyakki doctor [--detail]` (alias `-d`) prints the tile's checks as text, for a computer without a screen or a script. Exit 0: nothing wrong; 1: a problem or a warning;
+2: bad use. `--detail` adds the technical line of each finding. The facts come from the same reader as the tile (`iyakki_agent::doctor_gather`) but the command runs as its own
+process and does not hold the running system's state, so the dev cluster, the vault, the VPN and failed services are **not** checked, and the report says so. It reads the data
+folder (`IYAKKI_DATA`, `IYAKKI_AUDIT` override the default places). Tested with made-up machines and files.
+
 ## What is not built
 
-* `iyakki doctor` and `iyakki dev doctor` on the command line (plan P3), and `iyakki diag bundle -o FILE` (plan P4).
+* `iyakki dev doctor` (the command line over developer mode), and `iyakki diag bundle -o FILE` (plan P4). (`iyakki doctor` itself exists since alpha.3, see below.)
 * Sending the bundle (plan decision D5): file or stick only.
 * A "pending update" check beyond an unfinished one (no "update available" is known to DOCTOR), and a "missing firmware" and a "camera busy" finding from the live camera state (only the kept log is read for the camera).
 * Everything is tested with made-up machines and files; the tile has not been looked at on a real screen, with the real helper's

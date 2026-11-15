@@ -33,6 +33,8 @@ const T_STOP: usize = 3;
 const T_COPY: usize = 4;
 const T_PASTE: usize = 5;
 const T_INSTALL_BASE: usize = 6;
+const T_NEW: usize = 7;
+const T_SWITCH: usize = 30; // 30..: the other windows of the tile, by their place in the list
 const T_PROGRAM_INSTALL: usize = 10; // 10..: the offered test programs
 const START_WAIT: Duration = Duration::from_secs(40);
 const RESIZE_SETTLE: Duration = Duration::from_millis(300);
@@ -56,6 +58,41 @@ struct Started {
     link: Link,
 }
 
+/// Everything that belongs to one window of the tile. The tile holds one of these in its own fields (the one on screen) and the others here: they are swapped, so the
+/// code that draws and serves the window on screen is the same for each.
+pub struct Sess {
+    win: Option<Window>,
+    link: Option<Link>,
+    pm: Option<Pixmap>,
+    pressed: bool,
+    last_pos: Option<(i32, i32)>,
+    want: (u32, u32),
+    want_since: Instant,
+    sent: (u32, u32),
+    usage: Usage,
+    cpu: f32,
+    peak_kb: u64,
+    last_sample: Option<(Instant, Usage)>,
+    remote_clip: Option<String>,
+    program_name: String,
+    slot: u32,
+}
+
+impl Sess {
+    fn empty() -> Sess {
+        Sess { win: None, link: None, pm: None, pressed: false, last_pos: None, want: (0, 0), want_since: Instant::now(), sent: (0, 0), usage: Usage::default(), cpu: 0.0, peak_kb: 0, last_sample: None, remote_clip: None, program_name: String::new(), slot: 0 }
+    }
+
+    fn close(&mut self) {
+        if let Some(mut l) = self.link.take() {
+            l.close();
+        }
+        if let Some(mut w) = self.win.take() {
+            w.stop();
+        }
+    }
+}
+
 type StartResult = Result<Started, String>;
 
 /// What the tile uses that tests replace: the sandbox manager of the person, the spawner and the process table.
@@ -76,6 +113,10 @@ pub struct LinuxWinApp {
     win: Option<Window>,
     link: Option<Link>,
     pm: Option<Pixmap>,
+    /// The slot of the window on screen (or being started): its display and socket.
+    slot: u32,
+    /// The other windows of the tile, out of sight but alive.
+    parked: Vec<Sess>,
     /// Where the remote screen was drawn last (screen pixels).
     pub view: R,
     pressed: bool,
@@ -110,6 +151,13 @@ pub fn key_syms(k: &Key) -> Vec<(bool, u32)> {
         Key::Char(c) => (vec![], ks::from_char(*c)),
         Key::Ctrl(c) => {
             let mut m = vec![ks::CONTROL_L];
+            if c.is_ascii_uppercase() {
+                m.push(ks::SHIFT_L);
+            }
+            (m, ks::from_char(c.to_ascii_lowercase()))
+        }
+        Key::Alt(c) => {
+            let mut m = vec![ks::ALT_L];
             if c.is_ascii_uppercase() {
                 m.push(ks::SHIFT_L);
             }
@@ -157,6 +205,24 @@ pub fn key_syms(k: &Key) -> Vec<(bool, u32)> {
     mods.reverse();
     v.extend(mods.into_iter().map(|m| (false, m)));
     v
+}
+
+/// Program names (words of them) that are terminal emulators: there Ctrl+C is the interrupt and the copy is Ctrl+Shift+C.
+const TERMINAL_WORDS: [&str; 18] = ["xterm", "terminal", "konsole", "alacritty", "kitty", "foot", "wezterm", "urxvt", "rxvt", "tilix", "terminator", "tmux", "sakura", "guake", "st", "lxterminal", "qterminal", "console"];
+
+/// Is this program a terminal emulator (by its name)?
+pub fn terminal_like(program: &str) -> bool {
+    program.to_ascii_lowercase().split(|c: char| !c.is_ascii_alphanumeric()).any(|w| TERMINAL_WORDS.contains(&w))
+}
+
+/// The key to send to the program. With the Mac profile Command+C reaches the window as Ctrl+C and Command+V as Ctrl+V; a terminal program would take
+/// the first as an interrupt, so for a terminal they become Ctrl+Shift+C and Ctrl+Shift+V (its copy and paste). Control+C always stays the interrupt;
+/// every other program (an editor, an IDE) gets Ctrl+C and Ctrl+V, which are copy and paste there.
+pub fn key_for_program(k: &Key, program: &str, from_command: bool) -> Key {
+    match k {
+        Key::Ctrl(c @ ('c' | 'v')) if from_command && terminal_like(program) => Key::Ctrl(c.to_ascii_uppercase()),
+        other => other.clone(),
+    }
 }
 
 /// Ctrl+V as key events (what pasting into the program does after the text is on its clipboard).
@@ -221,6 +287,8 @@ impl LinuxWinApp {
             win: None,
             link: None,
             pm: None,
+            slot: 0,
+            parked: Vec::new(),
             view: R::new(0.0, 0.0, 0.0, 0.0),
             pressed: false,
             last_pos: None,
@@ -300,6 +368,8 @@ impl LinuxWinApp {
             Ok(s) => self.network = s.network,
             Err(e) => return self.say(e, false),
         }
+        let Some(slot) = self.free_slot() else { return self.say(format!("At most {} windows run at once in a tile; close one first.", lw::MAX_SLOTS), false) };
+        self.slot = slot;
         let (w, h) = wanted_size(self.view);
         let (w, h) = if self.view.w < 1.0 { (1024, 640) } else { (w, h) };
         let spawn = self.rig.spawn.clone();
@@ -315,7 +385,7 @@ impl LinuxWinApp {
         self.note = None;
         std::thread::spawn(move || {
             let r = (|| -> StartResult {
-                let mut win = Window::start(&la, &*spawn, &p, w, h)?;
+                let mut win = Window::start_slot(&la, &*spawn, &p, w, h, slot)?;
                 let c2 = cancel.clone();
                 win.wait_socket_or(START_WAIT, &std::thread::sleep, &move || c2.load(Ordering::SeqCst))?;
                 let link = Link::connect_unix(&win.socket(), Duration::from_secs(10))?;
@@ -357,8 +427,112 @@ impl LinuxWinApp {
         self.usage = Usage::default();
     }
 
+    /// Stop every window of the tile (the tile is closing).
+    pub fn stop_all(&mut self) {
+        self.stop();
+        for mut p in std::mem::take(&mut self.parked) {
+            p.close();
+        }
+    }
+
+    /// The slot of the window on screen (for tests and the tab row).
+    pub fn slot(&self) -> u32 {
+        self.slot
+    }
+
     pub fn running(&self) -> bool {
         self.phase == Phase::Running
+    }
+
+    /// How many windows the tile has: the one on screen (also while it starts) and the others.
+    pub fn windows(&self) -> usize {
+        self.parked.len() + usize::from(self.win.is_some() || self.phase == Phase::Starting)
+    }
+
+    /// The names of the other windows, in the order of the tabs.
+    pub fn parked_names(&self) -> Vec<String> {
+        self.parked.iter().map(|p| p.program_name.clone()).collect()
+    }
+
+    /// The lowest slot no window of the tile uses.
+    fn free_slot(&self) -> Option<u32> {
+        let used = |n: u32| self.parked.iter().any(|p| p.slot == n) || ((self.win.is_some() || self.phase == Phase::Starting) && self.slot == n);
+        (0..lw::MAX_SLOTS).find(|n| !used(*n))
+    }
+
+    fn swap_sess(&mut self, o: &mut Sess) {
+        std::mem::swap(&mut self.win, &mut o.win);
+        std::mem::swap(&mut self.link, &mut o.link);
+        std::mem::swap(&mut self.pm, &mut o.pm);
+        std::mem::swap(&mut self.pressed, &mut o.pressed);
+        std::mem::swap(&mut self.last_pos, &mut o.last_pos);
+        std::mem::swap(&mut self.want, &mut o.want);
+        std::mem::swap(&mut self.want_since, &mut o.want_since);
+        std::mem::swap(&mut self.sent, &mut o.sent);
+        std::mem::swap(&mut self.usage, &mut o.usage);
+        std::mem::swap(&mut self.cpu, &mut o.cpu);
+        std::mem::swap(&mut self.peak_kb, &mut o.peak_kb);
+        std::mem::swap(&mut self.last_sample, &mut o.last_sample);
+        std::mem::swap(&mut self.remote_clip, &mut o.remote_clip);
+        std::mem::swap(&mut self.program_name, &mut o.program_name);
+        std::mem::swap(&mut self.slot, &mut o.slot);
+    }
+
+    /// Put the window on screen aside (it keeps running) and show the list, to start another one beside it.
+    pub fn new_window(&mut self, cx: &AppCx) {
+        if !self.running() {
+            return;
+        }
+        if self.windows() >= lw::MAX_SLOTS as usize {
+            return self.say(format!("At most {} windows run at once in a tile; close one first.", lw::MAX_SLOTS), false);
+        }
+        let mut s = Sess::empty();
+        self.swap_sess(&mut s);
+        self.parked.push(s);
+        self.phase = Phase::Pick;
+        self.note = None;
+        self.refresh(cx);
+        self.redraw = true;
+    }
+
+    /// Bring the `i`-th other window onto the screen. The one that was on screen goes aside, unless nothing runs there.
+    pub fn switch_to(&mut self, i: usize) {
+        if i >= self.parked.len() || self.phase == Phase::Starting {
+            return;
+        }
+        if self.running() {
+            let mut p = self.parked.remove(i);
+            self.swap_sess(&mut p);
+            self.parked.insert(i, p);
+        } else {
+            let mut p = self.parked.remove(i);
+            self.swap_sess(&mut p);
+            p.close();
+        }
+        self.phase = Phase::Running;
+        self.note = None;
+        self.sync_frame();
+        self.redraw = true;
+    }
+
+    /// The other windows keep their picture and clipboard up to date; one whose program ended is dropped from the list.
+    fn serve_parked(&mut self) {
+        let mut i = 0;
+        while i < self.parked.len() {
+            let mut p = self.parked.remove(i);
+            self.swap_sess(&mut p);
+            self.sync_frame();
+            let dead = self.win.as_mut().is_some_and(|w| !w.alive()) || self.link.as_ref().is_some_and(|l| l.ended().is_some());
+            self.swap_sess(&mut p);
+            if dead {
+                let name = p.program_name.clone();
+                p.close();
+                self.say(format!("The window {name} ended."), false);
+            } else {
+                self.parked.insert(i, p);
+                i += 1;
+            }
+        }
     }
 
     /// The picture's size, when there is one.
@@ -421,12 +595,22 @@ impl LinuxWinApp {
                 Err(TryRecvError::Empty) => {}
             }
         }
+        if !self.parked.is_empty() {
+            self.serve_parked();
+        }
         if self.phase == Phase::Running {
             self.sync_frame();
             let dead = self.win.as_mut().is_some_and(|w| !w.alive());
             let ended = self.link.as_ref().and_then(|l| l.ended()).or_else(|| dead.then(|| "the program ended".to_string()));
             if let Some(why) = ended {
                 self.stop();
+                if !self.parked.is_empty() {
+                    let name = self.program_name.clone();
+                    self.phase = Phase::Pick;
+                    self.switch_to(self.parked.len() - 1);
+                    self.say(format!("The window {name} ended: {why}"), false);
+                    return;
+                }
                 self.phase = Phase::Ended(why);
                 self.redraw = true;
                 return;
@@ -521,7 +705,32 @@ impl LinuxWinApp {
     }
 
     fn draw_running(&mut self, g: &mut Gfx, area: R, s: f32) {
-        let (strip, view) = layout(area, s);
+        let (strip, mut view) = layout(area, s);
+        if !self.parked.is_empty() {
+            // one row of tabs: the window on screen is marked, a click on another brings it forward
+            let size = 11.0 * s;
+            let row_h = size * 2.4;
+            let row = R::new(view.x, view.y, view.w, row_h.min(view.h));
+            g.rect(row.x, row.y, row.w, row.h, crate::ui::CARD);
+            let mut x = row.x + 6.0 * s;
+            let by = row.y + (row.h - size * 2.1) / 2.0;
+            let mut tabs: Vec<(String, Option<usize>)> = self.parked.iter().enumerate().map(|(i, p)| (format!("{}: {}", p.slot + 1, p.program_name), Some(i))).collect();
+            tabs.push((format!("{}: {}", self.slot + 1, self.program_name), None));
+            tabs.sort_by_key(|(t, _)| t.clone());
+            for (label, which) in tabs {
+                let label = g.fit(size, &label, Face::Bold, 150.0 * s);
+                match which {
+                    Some(i) => x += g.button(x, by, size, &label, MUTED, Event::Tab(T_SWITCH + i)) + 6.0 * s,
+                    None => {
+                        let w = g.text_width(size, &label, Face::Bold) + size * 1.7;
+                        g.rrect(x, by, w, size * 2.1, 6.0 * s, crate::ui::CARD_SEL);
+                        g.text(x + size * 0.85, by + (size * 2.1 - g.line_height(size, Face::Bold)) / 2.0, size, TEXT, &label, Face::Bold);
+                        x += w + 6.0 * s;
+                    }
+                }
+            }
+            view = R::new(view.x, view.y + row.h, view.w, (view.h - row.h).max(0.0));
+        }
         self.view = view;
         g.rect(strip.x, strip.y, strip.w, strip.h, crate::ui::CARD);
         let size = 11.0 * s;
@@ -529,7 +738,7 @@ impl LinuxWinApp {
         let mut x = strip.x + strip.w - 6.0 * s;
         let by = strip.y + (strip.h - size * 2.1) / 2.0;
         let min_text = 110.0 * s;
-        for (label, ev, accent) in [("Stop", T_STOP, ERR), ("Paste into window", T_PASTE, ACCENT), ("Copy from window", T_COPY, ACCENT)] {
+        for (label, ev, accent) in [("Stop", T_STOP, ERR), ("New window", T_NEW, ACCENT), ("Paste into window", T_PASTE, ACCENT), ("Copy from window", T_COPY, ACCENT)] {
             let w = g.text_width(size, label, Face::Bold) + size * 1.7;
             if x - w < strip.x + min_text {
                 break;
@@ -585,6 +794,15 @@ impl LinuxWinApp {
             }
             *y += lh * 0.4;
         };
+        if !self.parked.is_empty() && self.phase != Phase::Starting {
+            let mut bx = x;
+            g.text(bx, y, size, MUTED, "Running:", Face::Sans);
+            bx += g.text_width(size, "Running:", Face::Sans) + 10.0 * size * 0.5;
+            for (i, p) in self.parked.iter().enumerate() {
+                bx += g.button(bx, y - size * 0.4, size, &format!("{}: {}", p.slot + 1, p.program_name), ACCENT, Event::Tab(T_SWITCH + i)) + 8.0 * s;
+            }
+            y += size * 3.0;
+        }
         match self.phase.clone() {
             Phase::NoAccess(m) => para(g, &mut y, &m, ERR),
             Phase::NotInstalled => {
@@ -697,7 +915,8 @@ fn copy_rect(pm: &mut Option<Pixmap>, fb: &iyakki_rfb::Framebuffer, x: u32, y: u
 
 impl Drop for LinuxWinApp {
     fn drop(&mut self) {
-        self.stop();
+        self.stop_all();
+        crate::input::set_alt_passthrough(false);
     }
 }
 
@@ -716,7 +935,7 @@ impl App for LinuxWinApp {
 
     fn hint(&self) -> String {
         if self.running() {
-            "Keys, mouse and wheel go to the program · Stop closes it".into()
+            "Keys (Alt too), mouse and wheel go to the program · New window opens another beside it · Stop closes this one".into()
         } else {
             "Up/Down choose · Enter start · R refresh · Esc back".into()
         }
@@ -724,6 +943,10 @@ impl App for LinuxWinApp {
 
     fn wants_redraw(&mut self) -> bool {
         std::mem::take(&mut self.redraw)
+    }
+
+    fn wants_alt(&self) -> bool {
+        self.running()
     }
 
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
@@ -739,9 +962,16 @@ impl App for LinuxWinApp {
             }
             Event::Tab(T_STOP) => {
                 self.stop();
-                self.phase = Phase::Pick;
-                self.refresh(cx);
+                if self.parked.is_empty() {
+                    self.phase = Phase::Pick;
+                    self.refresh(cx);
+                } else {
+                    self.phase = Phase::Pick;
+                    self.switch_to(self.parked.len() - 1);
+                }
             }
+            Event::Tab(T_NEW) => self.new_window(cx),
+            Event::Tab(i) if (T_SWITCH..T_SWITCH + lw::MAX_SLOTS as usize).contains(i) => self.switch_to(i - T_SWITCH),
             Event::Tab(T_COPY) => match self.remote_clip.clone().filter(|t| !t.is_empty()) {
                 Some(t) => {
                     clipboard::copy(&t);
@@ -773,7 +1003,7 @@ impl App for LinuxWinApp {
                 self.redraw = true;
             }
             Event::Key(k) if self.running() => {
-                let seq = key_syms(k);
+                let seq = key_syms(&key_for_program(k, &self.program_name, crate::inputprofile::last_press_was_command()));
                 self.send(|s| {
                     for (down, sym) in seq {
                         s.key_event(down, sym);

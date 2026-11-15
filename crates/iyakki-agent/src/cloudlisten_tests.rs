@@ -106,11 +106,19 @@ fn up_conn(name: &str, c: TcpStream, seen: Arc<Mutex<Vec<String>>>) {
             let mut l = String::new();
             r.read_line(&mut l).unwrap();
             let n = usize::from_str_radix(l.trim(), 16).unwrap();
-            let mut buf = vec![0u8; n + 2];
-            r.read_exact(&mut buf).unwrap();
             if n == 0 {
+                loop {
+                    let mut tl = String::new();
+                    r.read_line(&mut tl).unwrap();
+                    if tl == "\r\n" {
+                        break;
+                    }
+                    seen.lock().unwrap().push(format!("TRAILER {}", tl.trim_end()));
+                }
                 break;
             }
+            let mut buf = vec![0u8; n + 2];
+            r.read_exact(&mut buf).unwrap();
             body.extend_from_slice(&buf[..n]);
         }
     } else if let Some(l) = lower.lines().find_map(|l| l.strip_prefix("content-length: ")) {
@@ -128,6 +136,9 @@ fn up_conn(name: &str, c: TcpStream, seen: Arc<Mutex<Vec<String>>>) {
         }
         "/chunked" => {
             w.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nalpha\r\n4\r\nbeta\r\n5\r\ngamma\r\n0\r\n\r\n").unwrap();
+        }
+        "/trailers" => {
+            w.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTrailer: X-Checksum\r\nConnection: close\r\n\r\n4\r\ndata\r\n0\r\nX-Checksum: abc123\r\nSet-Cookie: x=1\r\nContent-Length: 99\r\n\r\n").unwrap();
         }
         "/big" => {
             let b: Vec<u8> = (0..3_000_000usize).map(|i| (i % 251) as u8).collect();
@@ -173,11 +184,20 @@ fn read_response<R: BufRead>(r: &mut R) -> Resp {
             let mut l = String::new();
             r.read_line(&mut l).unwrap();
             let n = usize::from_str_radix(l.trim(), 16).unwrap();
-            let mut buf = vec![0u8; n + 2];
-            r.read_exact(&mut buf).unwrap();
             if n == 0 {
+                loop {
+                    let mut tl = String::new();
+                    r.read_line(&mut tl).unwrap();
+                    if tl == "\r\n" {
+                        break;
+                    }
+                    let (k, v) = tl.trim_end().split_once(':').unwrap();
+                    headers.push((format!("trailer-{}", k.to_ascii_lowercase()), v.trim().to_string()));
+                }
                 break;
             }
+            let mut buf = vec![0u8; n + 2];
+            r.read_exact(&mut buf).unwrap();
             body.extend_from_slice(&buf[..n]);
         }
     } else if let Some(n) = h("content-length") {
@@ -280,6 +300,7 @@ fn requests_are_routed_by_host_and_path_to_two_upstreams_with_forwarding_headers
     let log = log.lock().unwrap().join("\n");
     assert!(log.contains("access public"), "{log}");
     assert!(log.contains("access members (not enforced by this listener)"), "{log}");
+    // (with a MemberGate set the same line says the people are checked: see a_members_route_needs_a_signed_in_person)
     drop(l);
 }
 
@@ -400,7 +421,8 @@ fn unknown_unreachable_malformed_and_oversized_requests_get_clear_answers() {
     let svc = http(p, &get("svc.example.org", "/"));
     assert_eq!((svc.0, text(&svc).contains("Kubernetes Service")), (502, true));
     assert!(log.lock().unwrap().iter().any(|l| l.contains("svc.example.org") && l.contains("NOT reachable from a local listener")));
-    assert_eq!(http(p, "GET / HTTP/1.0\r\n\r\n").0, 505);
+    assert_eq!(http(p, "GET / HTTP/1.2\r\n\r\n").0, 505);
+    assert_eq!(http(p, "GET / HTTP/1.0\r\n\r\n").0, 400, "HTTP/1.0 is read, and still needs a Host");
     assert_eq!(http(p, "GET / HTTP/1.1\r\n\r\n").0, 400, "no Host");
     assert_eq!(http(p, &format!("GET /a/../b HTTP/1.1\r\nHost: {A}\r\n\r\n")).0, 400, "a path with .. is refused");
     assert_eq!(http(p, &format!("POST / HTTP/1.1\r\nHost: {A}\r\nContent-Length: 3\r\nTransfer-Encoding: chunked\r\n\r\n")).0, 400, "both framings");
@@ -1138,6 +1160,12 @@ fn a_service_route_goes_through_a_port_forward_that_is_started_once_reused_and_r
     // dropping the dialer ends the forwards
     drop(l);
     drop(pf);
+    // the last reference to the forward may still be held for a moment by a connection thread that is finishing (the listener does not
+    // wait for its threads when it is dropped): poll, at most 10 s
+    let t0 = Instant::now();
+    while !k.procs.lock().unwrap().last().unwrap().1.load(Ordering::SeqCst) && t0.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
     assert!(k.procs.lock().unwrap().last().unwrap().1.load(Ordering::SeqCst), "the forward was killed with its owner");
 }
 
@@ -1265,6 +1293,19 @@ fn the_firewall_gate_opens_a_port_with_its_first_route_and_closes_it_with_its_la
     drop(l);
     assert!(g.open_ports().is_empty(), "stopping the listener closes everything");
     assert_eq!(calls.lock().unwrap().last().unwrap(), &Vec::<u16>::new());
+}
+
+#[test]
+fn a_run_killed_outright_leaves_rules_that_the_next_start_drops_before_it_opens_anything() {
+    use super::PortGate as _;
+    // clear_stale asks the firewall for "no gate ports at all" (the plan then removes every rule of the listener's own reason)
+    let (g, calls) = recording_gate(gate::GateReach::LocalNetwork, None);
+    g.clear_stale();
+    assert_eq!(calls.lock().unwrap().clone(), vec![Vec::<u16>::new()]);
+    assert!(g.open_ports().is_empty());
+    // a gate that cannot reach the firewall does not stop the start (the next change tries again)
+    let (g2, _) = recording_gate(gate::GateReach::LocalNetwork, Some(0));
+    g2.clear_stale();
 }
 
 #[test]
@@ -1580,7 +1621,9 @@ fn each_tenant_has_its_own_limit_and_a_route_without_a_tenant_is_refused() {
     release.send(()).unwrap();
     assert_eq!(first.join().unwrap(), 200);
     let t0 = Instant::now();
-    while l.tenant_open("acme") != 0 && t0.elapsed() < Duration::from_secs(5) {
+    // both tenants: the slot of the answered request (globex) is also given back by the connection thread a moment after the client
+    // has the answer, so the count is polled, not read once
+    while (l.tenant_open("acme") != 0 || l.tenant_open("globex") != 0) && t0.elapsed() < Duration::from_secs(10) {
         std::thread::sleep(Duration::from_millis(10));
     }
     assert_eq!((l.tenant_open("acme"), l.tenant_open("globex")), (0, 0), "slots are released");
@@ -1765,3 +1808,185 @@ fn a_route_file_names_a_client_ca_only_on_an_https_route_with_a_plain_name() {
     assert!(text.contains("\"client_ca\":\"ca1\""));
     assert!(!serde_json::to_string(&RouteTable { routes: vec![https_route(A, 8080, 8443, "appcert")], ingress_class: None }).unwrap().contains("client_ca"));
 }
+
+// ------------------------------------------------------------------------------------------------------------ members routes
+
+struct FakeGate;
+
+impl MemberGate for FakeGate {
+    fn check(&self, session: Option<&str>, tenant: Option<&str>) -> Member {
+        match (session, tenant) {
+            (Some("tok-ann"), None) => Member::Yes("ann".into()),
+            (Some("tok-ann"), Some("blue")) => Member::Yes("ann".into()),
+            _ => Member::No,
+        }
+    }
+}
+
+fn gated(routes: Vec<Route>, tenants: &[(&str, &str)]) -> (Listener, Log) {
+    let (mut o, log) = opts();
+    o.members = Some(Arc::new(FakeGate));
+    o.tenants = tenants.iter().map(|(h, t)| (h.to_string(), t.to_string())).collect();
+    (Listener::start(table(routes), Arc::new(FileCerts::new(tmp("none"))), Arc::new(NoGate), o).unwrap(), log)
+}
+
+#[test]
+fn the_session_comes_from_the_cookie_or_the_bearer_header() {
+    let h = |n: &str, v: &str| (n.to_string(), v.to_string());
+    assert_eq!(session_token(&[h("Cookie", "a=1; iyakki_session=abc; b=2")]).as_deref(), Some("abc"));
+    assert_eq!(session_token(&[h("Authorization", "Bearer xyz")]).as_deref(), Some("xyz"));
+    assert_eq!(session_token(&[h("Cookie", "other=1")]), None);
+    assert_eq!(session_token(&[h("Cookie", "iyakki_session=")]), None);
+    assert_eq!(session_token(&[h("Authorization", "Basic abc")]), None);
+}
+
+#[test]
+fn a_members_route_needs_a_signed_in_person_and_the_target_is_not_contacted_without_one() {
+    let (a, b) = (upstream("a"), upstream("b"));
+    let p = free_port();
+    let mut members = route(A, "/", a.port, p);
+    members.access = Access::Members;
+    let open = route(B, "/", b.port, p); // public
+    let (l, log) = gated(vec![members, open], &[]);
+    let r = http(p, &get(A, "/secret"));
+    assert_eq!(r.0, 401, "no session: refused");
+    assert!(header(&r, "www-authenticate").is_some());
+    assert!(saw(&a).is_empty(), "the target never heard of the request");
+    let bad = format!("GET /x HTTP/1.1\r\nHost: {A}\r\nCookie: iyakki_session=tok-bob\r\n\r\n");
+    assert_eq!(http(p, &bad).0, 401, "a token the gate does not know");
+    // a good cookie: served, and the person is named to the target, a made-up name from the client is replaced
+    let ok = format!("GET /x HTTP/1.1\r\nHost: {A}\r\nCookie: iyakki_session=tok-ann\r\nX-Iyakki-User: root\r\n\r\n");
+    let r = http(p, &ok);
+    assert_eq!((r.0, text(&r).as_str()), (200, "name=a path=/x"));
+    let head = saw(&a);
+    assert!(head.contains("X-Iyakki-User: ann\r\n") && !head.contains("root"), "{head}");
+    let bearer = format!("GET /y HTTP/1.1\r\nHost: {A}\r\nAuthorization: Bearer tok-ann\r\n\r\n");
+    assert_eq!(http(p, &bearer).0, 200);
+    // a public route on the same port needs nothing
+    assert_eq!(http(p, &get(B, "/")).0, 200);
+    assert!(!saw(&b).contains("X-Iyakki-User"), "nobody to name on a public route");
+    let log = log.lock().unwrap().join("\n");
+    assert!(log.contains("access members (signed-in people only)") && !log.contains("not enforced"), "{log}");
+    drop(l);
+}
+
+#[test]
+fn an_underscore_spelling_of_the_identity_header_is_dropped_and_the_session_token_never_reaches_the_target() {
+    let (a, b) = (upstream("a"), upstream("b"));
+    let p = free_port();
+    let mut members = route(A, "/", a.port, p);
+    members.access = Access::Members;
+    let open = route(B, "/", b.port, p);
+    let (l, _) = gated(vec![members, open], &[]);
+    let spoof = format!("GET /x HTTP/1.1\r\nHost: {A}\r\nCookie: theme=dark; iyakki_session=tok-ann; lang=en\r\nX_Iyakki_User: root\r\nX_Forwarded_For: 1.2.3.4\r\n\r\n");
+    assert_eq!(http(p, &spoof).0, 200);
+    let head = saw(&a);
+    assert!(head.contains("X-Iyakki-User: ann\r\n") && !head.to_ascii_lowercase().contains("x_iyakki") && !head.contains("root") && !head.to_ascii_lowercase().contains("x_forwarded"), "{head}");
+    assert!(!head.contains("tok-ann") && head.contains("theme=dark; lang=en"), "the session cookie stays with the listener, the other cookies pass: {head}");
+    let bearer = format!("GET /y HTTP/1.1\r\nHost: {A}\r\nAuthorization: Bearer tok-ann\r\n\r\n");
+    assert_eq!(http(p, &bearer).0, 200);
+    assert!(!saw(&a).contains("tok-ann"), "the bearer session is not handed to the target");
+    // a public route is not the listener's business: the target sees what the client sent, except the identity spellings
+    let plain = format!("GET /z HTTP/1.1\r\nHost: {B}\r\nX_Iyakki_User: root\r\nCookie: iyakki_session=mine\r\n\r\n");
+    assert_eq!(http(p, &plain).0, 200);
+    let seen = saw(&b);
+    assert!(!seen.to_ascii_lowercase().contains("x_iyakki_user") && seen.contains("iyakki_session=mine"), "{seen}");
+    drop(l);
+}
+
+#[test]
+fn a_tenant_route_is_only_for_people_switched_to_that_tenant() {
+    let a = upstream("a");
+    let p = free_port();
+    let mut r = route(A, "/", a.port, p);
+    r.access = Access::Members;
+    let (l, _) = gated(vec![r], &[(A, "red")]);
+    let ok = format!("GET /x HTTP/1.1\r\nHost: {A}\r\nCookie: iyakki_session=tok-ann\r\n\r\n");
+    assert_eq!(http(p, &ok).0, 401, "ann is not in tenant red (the gate said no)");
+    drop(l);
+}
+
+#[test]
+fn a_members_passthrough_route_is_closed_when_a_gate_is_set_because_a_tunnel_shows_no_cookie() {
+    let a = upstream("a");
+    let p = free_port();
+    let mut r = route("tunnel.example.org", "/", a.port, p);
+    r.scheme = Scheme::Passthrough;
+    r.access = Access::Members;
+    let (l, log) = gated(vec![r], &[]);
+    // a TLS ClientHello for the name is enough: the listener reads the name and closes
+    let mut s = connect(p);
+    s.write_all(&client_hello_for("tunnel.example.org")).unwrap();
+    let mut buf = [0u8; 16];
+    assert!(matches!(s.read(&mut buf), Ok(0) | Err(_)), "closed with no answer");
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(log.lock().unwrap().join("\n").contains("cannot be checked inside an untouched TLS tunnel"));
+    assert!(saw(&a).is_empty());
+    drop(l);
+}
+
+fn client_hello_for(name: &str) -> Vec<u8> {
+    let cfg = trusting(&[], &[&rustls::version::TLS13, &rustls::version::TLS12]);
+    let mut c = rustls::ClientConnection::new(cfg, ServerName::try_from(name.to_string()).unwrap()).unwrap();
+    let mut whole = Vec::new();
+    c.write_tls(&mut whole).unwrap();
+    whole
+}
+
+#[path = "cloudlisten_podtls_tests.rs"]
+mod podtls_tests;
+
+/// Everything the server sends until it closes the connection (an HTTP/1.0 client reads the body that way).
+fn until_close(port: u16, req: &str) -> (String, Vec<u8>) {
+    let mut s = connect(port);
+    s.write_all(req.as_bytes()).unwrap();
+    let mut all = Vec::new();
+    std::io::Read::read_to_end(&mut s, &mut all).unwrap();
+    let at = all.windows(4).position(|w| w == b"\r\n\r\n").map_or(all.len(), |i| i + 4);
+    (String::from_utf8_lossy(&all[..at]).to_string(), all[at..].to_vec())
+}
+
+#[test]
+fn an_http_1_0_client_is_served_without_keep_alive_and_a_chunked_answer_arrives_as_bare_data() {
+    let a = upstream("a");
+    let p = free_port();
+    let (_l, _) = start(vec![route(A, "/", a.port, p)]);
+    let (head, body) = until_close(p, &format!("GET /chunked HTTP/1.0\r\nHost: {A}\r\nConnection: keep-alive\r\n\r\n"));
+    assert!(head.starts_with("HTTP/1.1 200") && !head.to_lowercase().contains("transfer-encoding") && head.to_lowercase().contains("connection: close"), "{head}");
+    assert_eq!(body, b"alphabetagamma", "no chunk framing reaches an HTTP/1.0 client");
+    // a plain answer with a length, and the connection ends after it although the client asked to keep it
+    let (head, body) = until_close(p, &format!("GET /x HTTP/1.0\r\nHost: {A}\r\nConnection: keep-alive\r\n\r\n"));
+    assert!(head.to_lowercase().contains("connection: close") && String::from_utf8_lossy(&body).contains("path=/x"), "{head}");
+    // a body with Content-Length goes through; a chunked request and an Upgrade are not HTTP/1.0
+    let (head, body) = until_close(p, &format!("POST /echo HTTP/1.0\r\nHost: {A}\r\nContent-Length: 5\r\n\r\nhello"));
+    assert!(head.starts_with("HTTP/1.1 200") && body.starts_with(b"len=5"), "{head}");
+    let (head, _) = until_close(p, &format!("POST /echo HTTP/1.0\r\nHost: {A}\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"));
+    assert!(head.starts_with("HTTP/1.1 400"), "{head}");
+    let (head, _) = until_close(p, &format!("GET /ws HTTP/1.0\r\nHost: {A}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n"));
+    assert!(head.starts_with("HTTP/1.1 400"), "{head}");
+    // no 100 Continue is sent to an HTTP/1.0 client
+    let (head, _) = until_close(p, &format!("POST /echo HTTP/1.0\r\nHost: {A}\r\nContent-Length: 2\r\nExpect: 100-continue\r\n\r\nhi"));
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+}
+
+#[test]
+fn trailer_fields_are_passed_on_both_ways_except_those_that_must_never_travel_as_trailers() {
+    let a = upstream("a");
+    let p = free_port();
+    let (_l, _) = start(vec![route(A, "/", a.port, p)]);
+    let mut s = connect(p);
+    s.write_all(format!("POST /echo HTTP/1.1\r\nHost: {A}\r\nTransfer-Encoding: chunked\r\nTE: trailers\r\n\r\n5\r\nhello\r\n0\r\nX-Checksum: abc\r\nX-Iyakki-User: root\r\nX_Forwarded_For: 6.6.6.6\r\nAuthorization: Bearer x\r\nContent-Length: 1\r\nbad trailer\r\n\r\n").as_bytes()).unwrap();
+    let r = read_response(&mut BufReader::new(s));
+    assert_eq!(r.0, 200);
+    let seen = a.seen.lock().unwrap().clone();
+    assert!(seen.iter().any(|l| l == "TRAILER X-Checksum: abc"), "{seen:?}");
+    assert!(seen.iter().filter(|l| l.starts_with("TRAILER ")).count() == 1, "only the safe field reached the target: {seen:?}");
+    assert!(seen[0].contains("TE: trailers"), "the target is told trailers are welcome: {}", seen[0]);
+    // the target's trailers come back; the ones that may not are dropped
+    let r = http(p, &format!("GET /trailers HTTP/1.1\r\nHost: {A}\r\nTE: trailers\r\n\r\n"));
+    assert_eq!((r.2.as_slice(), header(&r, "trailer-x-checksum")), (&b"data"[..], Some("abc123")));
+    assert!(header(&r, "trailer-set-cookie").is_none() && header(&r, "trailer-content-length").is_none());
+}
+
+#[path = "cloudlisten_h2serve_tests.rs"]
+mod h2serve_tests;

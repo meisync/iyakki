@@ -17,8 +17,6 @@
 //!
 //! If the parent dies the child is killed (`PDEATHSIG`), and the whole namespace with it.
 
-use std::ffi::CString;
-use std::os::unix::process::CommandExt;
 use std::path::Path;
 
 pub const SUBCOMMAND: &str = "linuxapp-init";
@@ -50,6 +48,13 @@ pub struct Spec {
     pub idmap: IdMap,
     /// Outbound network (the host's network is shared); off: an empty network namespace with only a loopback.
     pub net: bool,
+    /// Outbound-only network (`linuxapps_net.rs`): the sandbox's slot. It has its own network namespace (so `net` is off) and the parent
+    /// joins it to the computer with a virtual pair, the table in `net_spec` and the resolver file `net_resolv`.
+    pub veth: Option<u16>,
+    /// Absolute path of the typed table (JSON) the parent loads for this sandbox.
+    pub net_spec: String,
+    /// Absolute path of the resolver file the sandbox gets.
+    pub net_resolv: String,
     pub binds: Vec<Bind>,
     pub tmp_mb: u32,
     pub cwd: String,
@@ -63,7 +68,7 @@ pub struct Spec {
 
 impl Spec {
     pub fn new(root: &str, name: &str, cmd: Vec<String>) -> Spec {
-        Spec { root: root.into(), name: name.into(), uid: 1000, gid: 1000, idmap: IdMap::Single, net: false, binds: vec![], tmp_mb: 256, cwd: "/".into(), env: vec![], mem_mb: 0, cpu_pct: 0, pids: 0, seccomp: true, cmd }
+        Spec { root: root.into(), name: name.into(), uid: 1000, gid: 1000, idmap: IdMap::Single, net: false, veth: None, net_spec: String::new(), net_resolv: String::new(), binds: vec![], tmp_mb: 256, cwd: "/".into(), env: vec![], mem_mb: 0, cpu_pct: 0, pids: 0, seccomp: true, cmd }
     }
 
     /// The argument array after the program name (`iyakki`).
@@ -76,6 +81,9 @@ impl Spec {
         });
         a.push("--net".into());
         a.push(if self.net { "on" } else { "off" }.into());
+        if let Some(slot) = self.veth {
+            a.extend(["--veth".into(), slot.to_string(), "--net-spec".into(), self.net_spec.clone(), "--net-resolv".into(), self.net_resolv.clone()]);
+        }
         for b in &self.binds {
             a.push(if b.rw { "--bind-rw" } else { "--bind-ro" }.into());
             a.push(b.src.clone());
@@ -121,6 +129,9 @@ impl Spec {
                     };
                 }
                 "--net" => s.net = val(&mut i)? == "on",
+                "--veth" => s.veth = Some(val(&mut i)?.parse::<u16>().map_err(|_| "--veth: not a slot".to_string())?),
+                "--net-spec" => s.net_spec = val(&mut i)?,
+                "--net-resolv" => s.net_resolv = val(&mut i)?,
                 "--seccomp" => s.seccomp = val(&mut i)? != "off",
                 flag @ ("--bind-ro" | "--bind-rw") => {
                     let rw = flag == "--bind-rw";
@@ -154,6 +165,14 @@ impl Spec {
         }
         if self.cmd.iter().any(|a| a.contains('\0')) {
             return Err("a NUL in the command".into());
+        }
+        if let Some(slot) = self.veth {
+            if self.net {
+                return Err("outbound-only networking needs the sandbox's own network namespace, not the computer's".into());
+            }
+            if u32::from(slot) >= super::linuxapps_net::Veth::SLOTS || !self.net_spec.starts_with('/') || !self.net_resolv.starts_with('/') {
+                return Err("outbound-only networking needs a slot and absolute paths for its rules and resolver file".into());
+            }
         }
         if self.name.is_empty() || self.name.len() > 40 || !self.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
             return Err("the sandbox name is not valid".into());
@@ -198,6 +217,12 @@ pub fn bind_dst_ok(dst: &str) -> Result<(), String> {
     }
     Ok(())
 }
+
+#[cfg(target_os = "linux")]
+mod linux_part {
+use super::*;
+use std::ffi::CString;
+use std::os::unix::process::CommandExt;
 
 // ------------------------------------------------------------------------------------------------ seccomp
 
@@ -358,12 +383,101 @@ fn run(spec: &Spec) -> Result<i32, String> {
         waitpid(pid);
         return Err(e.clone());
     }
+    let forward_before = match net_up(spec, pid) {
+        Ok(prev) => prev,
+        Err(e) => {
+        // the sandbox never starts without the network it was promised: no fallback to the computer's network
+        net_down(spec, None);
+        // SAFETY: stop the child that waits for the go-ahead.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        waitpid(pid);
+        return Err(e);
+        }
+    };
     write_byte(b_w);
     let code = waitpid(pid);
+    net_down(spec, forward_before);
     if let Some(dir) = cg {
         let _ = std::fs::remove_dir(dir);
     }
     Ok(code)
+}
+
+/// Run one `ip` step; `inside` steps run with this process switched into the sandbox's network namespace and back.
+fn run_step(step: &crate::linuxapps_net::Step, pid: i32) -> Result<(), String> {
+    let (Some(prog), args) = (step.argv.first(), &step.argv[1.min(step.argv.len())..]) else { return Ok(()) };
+    let home = if step.inside {
+        let own = std::fs::File::open("/proc/self/ns/net").map_err(|e| format!("own network namespace: {e}"))?;
+        let theirs = std::fs::File::open(format!("/proc/{pid}/ns/net")).map_err(|e| format!("the sandbox's network namespace: {e}"))?;
+        // SAFETY: setns on a descriptor this function holds open; this process has no other thread.
+        if unsafe { libc::setns(std::os::fd::AsRawFd::as_raw_fd(&theirs), libc::CLONE_NEWNET) } != 0 {
+            return Err(os("setns"));
+        }
+        Some(own)
+    } else {
+        None
+    };
+    let r = std::process::Command::new(prog).args(args).stdin(std::process::Stdio::null()).output();
+    if let Some(own) = home {
+        // SAFETY: back to the namespace saved above; if that fails nothing more is run by this process.
+        if unsafe { libc::setns(std::os::fd::AsRawFd::as_raw_fd(&own), libc::CLONE_NEWNET) } != 0 {
+            return Err(os("setns back"));
+        }
+    }
+    match r {
+        Ok(o) if o.status.success() => Ok(()),
+        Ok(o) => Err(format!("`{}` failed: {}", step.argv.join(" "), String::from_utf8_lossy(&o.stderr).trim())),
+        Err(e) => Err(format!("`{prog}`: {e}")),
+    }
+}
+
+/// Join the sandbox to the computer: the table first (so no packet is ever forwarded without its rules), then the pair and the routes.
+/// Returns the value of the kernel's forwarding switch before this sandbox switched it on (`None`: it did not change it).
+pub fn net_up(spec: &Spec, pid: i32) -> Result<Option<String>, String> {
+    use crate::linuxapps_net as net;
+    let Some(slot) = spec.veth else { return Ok(None) };
+    // SAFETY: a plain getter.
+    if unsafe { libc::geteuid() } != 0 {
+        return Err("outbound-only networking needs the program to run as root".into());
+    }
+    let veth = net::Veth::for_slot(slot);
+    let text = std::fs::read_to_string(&spec.net_spec).map_err(|e| format!("{}: {e}", spec.net_spec))?;
+    let table: iyakki_fw::nl::tablegen::TableSpec = serde_json::from_str(&text).map_err(|e| format!("the sandbox's rules are damaged: {e}"))?;
+    if table.name != net::table_name(&veth) {
+        return Err("the sandbox's rules belong to another sandbox".into());
+    }
+    table.check()?;
+    for m in ["nf_tables", "nft_ct", "nf_nat", "nft_chain_nat", "nft_masq"] {
+        let _ = std::process::Command::new("modprobe").arg(m).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+    }
+    iyakki_fw::nl::NfSocket::open(5).and_then(|mut s| s.apply_table(&table)).map_err(|e| format!("the sandbox's firewall rules could not be loaded: {e}"))?;
+    // masquerading needs the computer to forward; the previous value comes back when the last outbound-only sandbox ends
+    let before = crate::sharing::real::ip_forward_get().ok();
+    if before.as_deref() != Some("1") {
+        crate::sharing::real::ip_forward_set("1")?;
+    }
+    for step in net::setup_steps(&veth, pid as u32) {
+        run_step(&step, pid)?;
+    }
+    Ok(before.filter(|b| b == "0"))
+}
+
+/// Take the pair and the table down (best effort; the pair also goes when the namespace ends).
+pub fn net_down(spec: &Spec, forward_before: Option<String>) {
+    use crate::linuxapps_net as net;
+    let Some(slot) = spec.veth else { return };
+    let veth = net::Veth::for_slot(slot);
+    for step in net::teardown_steps(&veth) {
+        let _ = run_step(&step, 0);
+    }
+    if let Ok(mut s) = iyakki_fw::nl::NfSocket::open(5) {
+        let _ = s.remove_table(&net::table_name(&veth));
+    }
+    // switched on by this sandbox: switched off again unless another outbound-only sandbox is still running (internet sharing keeps its
+    // own copy of the value; running both at once can switch one off early, see docs/LINUX-APPS.md)
+    if forward_before.as_deref() == Some("0") && !net::interface_names().iter().any(|n| n.starts_with("ivh")) {
+        let _ = crate::sharing::real::ip_forward_set("0");
+    }
 }
 
 fn write_proc(pid: i32, file: &str, text: &str) -> Result<(), String> {
@@ -542,9 +656,11 @@ fn init(spec: &Spec) -> Result<Never, String> {
         }
         mnt("", &b.dst, "", flags, "")?;
     }
-    // name resolution: the host's resolver file, copied (a link inside the sandbox is replaced by a plain file)
-    if spec.net {
-        if let Ok(text) = std::fs::read(old("/etc/resolv.conf")) {
+    // name resolution: the host's resolver file, copied (a link inside the sandbox is replaced by a plain file); an outbound-only sandbox
+    // gets the file made for it (the host's stub resolver on the loopback is not reachable from its own namespace)
+    if spec.net || spec.veth.is_some() {
+        let from = if spec.veth.is_some() { old(&spec.net_resolv) } else { old("/etc/resolv.conf") };
+        if let Ok(text) = std::fs::read(from) {
             let _ = std::fs::remove_file("/etc/resolv.conf");
             let _ = std::fs::create_dir_all("/etc");
             let _ = std::fs::write("/etc/resolv.conf", text);
@@ -790,4 +906,18 @@ mod tests {
         assert_eq!(root_fstype(""), None);
         assert!(!root_cannot_pivot("garbage"));
     }
+}
+}
+#[cfg(target_os = "linux")]
+pub use linux_part::*;
+
+/// Not available outside Linux: the sandbox needs namespaces, `pivot_root` and seccomp. The desktop window on macOS never starts it.
+#[cfg(not(target_os = "linux"))]
+pub const UNAVAILABLE: &str = "Linux apps are not available on this platform (they need Linux namespaces and seccomp)";
+
+/// `iyakki linuxapp-init ...` outside Linux: says so and returns 125 (the code for "the sandbox itself could not be set up").
+#[cfg(not(target_os = "linux"))]
+pub fn main(_args: &[String]) -> i32 {
+    crate::qeprintln!("linuxapp-init: {UNAVAILABLE}");
+    125
 }

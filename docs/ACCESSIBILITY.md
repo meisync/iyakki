@@ -34,7 +34,7 @@ The walk works without the screen reader too, for a person who cannot use a mous
 ## What the reader says
 
 * The control you walked to: "Save, button", "Dark mode, switch, on", "Volume, slider, 40 percent", "Network, tab, selected".
-* A text field that took the focus, and its text: "Name, edit, Ann". Typing is **not** read back key by key (no typing echo yet).
+* A text field that took the focus, and its text: "Name, edit, Ann". Typing is read back one character at a time while Typing echo is on (Settings, Accessibility, key E, or the assistant: `typing_echo`; on by default, never for a hidden password field).
 * A **password** field says "Password, password field, 5 characters typed". The characters are never given to the speech queue; the
   model that carries them keeps only the count.
 * A new screen or page ("Settings, Display"), then the first control with the focus.
@@ -99,7 +99,7 @@ not a control calls `access::announce("Export finished")`. A chosen list row dra
   with labels; unlabelled regions are skipped, and a tile that draws pixels without regions is silent. A tile in a window of another
   program (a Linux app) is outside all of this.
 * **Braille is not supported** (no braille display driver, no braille output).
-* No typing echo (characters, words) and no spell-out; text is read when a field takes the focus.
+* Typing echo says characters only (no word echo, no spell-out); text is read when a field takes the focus.
 * The reader follows the focus of fields and chosen rows plus the walk. A tile that moves its own highlight without using the
   toolkit's row or field does not speak until it calls `announce` or `describe`.
 * Dialogs of tiles are not announced by title yet, only the ones the shell itself owns (sign-in, lock, Help, power menu) and the messages

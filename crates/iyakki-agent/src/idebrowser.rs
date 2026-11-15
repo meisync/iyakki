@@ -307,6 +307,12 @@ impl IdeBrowserTools {
 }
 
 impl Tools for IdeBrowserTools {
+
+    fn inner_tools(&self) -> Option<&dyn Tools> {
+
+        Some(&*self.inner)
+
+    }
     fn defs(&self) -> Vec<ToolDef> {
         let mut v = self.inner.defs();
         if !Self::offered(&self.policy) {

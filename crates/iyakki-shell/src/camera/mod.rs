@@ -218,7 +218,7 @@ pub mod fake {
             Ok(Some(RawFrame { pix: self.mode.pix, width: self.mode.width, height: self.mode.height, data }))
         }
         fn set_control(&mut self, id: u32, value: i32) -> Result<(), String> {
-            self.controls.lock().unwrap().push((id, value));
+            self.controls.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((id, value));
             Ok(())
         }
     }
@@ -248,7 +248,7 @@ pub mod fake {
             let modes = self.modes();
             // the fake's default stays small so tests are quick
             let mode = want.filter(|m| modes.contains(m)).unwrap_or(if self.yuyv_only { modes[0] } else { modes[2] });
-            self.opened.lock().unwrap().push((dev.node.clone(), mode));
+            self.opened.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((dev.node.clone(), mode));
             let controls = vec![
                 Control { id: v4l2::CID_BRIGHTNESS, name: "Brightness".into(), min: -64, max: 64, step: 1, default: 0, value: 0 },
                 Control { id: v4l2::CID_CONTRAST, name: "Contrast".into(), min: 0, max: 100, step: 1, default: 50, value: 50 },

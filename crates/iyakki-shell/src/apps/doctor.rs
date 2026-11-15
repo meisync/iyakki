@@ -156,10 +156,7 @@ impl DoctorApp {
     fn take_slow(&mut self) {
         let Some(rx) = &self.slow_rx else { return };
         if let Ok(out) = rx.try_recv() {
-            self.facts.models_unreachable = out.models_unreachable;
-            self.facts.exposure_unexpected = out.exposure;
-            self.facts.net = out.net;
-            self.facts.dev_port_answers = out.dev_port_answers;
+            out.apply(&mut self.facts);
             self.slow_rx = None;
             self.checking = false;
             self.rediagnose();

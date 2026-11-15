@@ -185,7 +185,7 @@ pub fn tar_one_file(name: &str, contents: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 /// One tar entry (header and padded contents, no end-of-archive blocks). `name` is at most 99 bytes.
-fn tar_entry(name: &str, mode: u64, contents: &[u8]) -> Vec<u8> {
+pub(crate) fn tar_entry(name: &str, mode: u64, contents: &[u8]) -> Vec<u8> {
     let mut h = [0u8; 512];
     h[..name.len()].copy_from_slice(name.as_bytes());
     octal(&mut h[100..108], mode);

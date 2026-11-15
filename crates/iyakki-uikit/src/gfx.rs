@@ -108,14 +108,21 @@ pub struct Gfx {
     /// Every rectangle the frame asked about with [`Gfx::hovered`]: only a pointer crossing one of their edges
     /// can change the picture.
     probes: std::cell::RefCell<Vec<R>>,
-    sans: Font,
-    bold: Font,
-    mono: Font,
+    /// The three bundled faces, parsed once for the whole program and shared by every frame buffer (parsing them took 27 ms of every new
+    /// buffer: a window resize or a new pane paid it each time).
+    sans: std::sync::Arc<Font>,
+    bold: std::sync::Arc<Font>,
+    mono: std::sync::Arc<Font>,
     cache: HashMap<GlyphKey, (fontdue::Metrics, Vec<u8>)>,
     /// The pixels outside a clip rectangle while [`Gfx::clipped`] runs (kept between calls so nothing is allocated per frame).
     clip_buf: Vec<u8>,
+    /// The clip rectangles of the [`Gfx::clipped`] calls that are running now (innermost last).
+    clip_now: Vec<R>,
+    /// The lowest point the text and click regions drawn since it was last cleared reach (those that start inside the innermost clip): lets
+    /// a page that does not scroll itself learn how tall it is. Cleared by the caller.
+    pub ink_bottom: f32,
     /// Made the first time text in a script that needs shaping appears (it parses a couple of MB of fonts).
-    shaper: Option<crate::shaping::Shaper>,
+    shaper: Option<std::sync::Arc<crate::shaping::Shaper>>,
     shaped_cache: HashMap<(usize, u16, u32), (fontdue::Metrics, Vec<u8>)>,
     /// Test builds only: every string passed to [`Gfx::text`] with its top-left position, for `TileHarness`.
     #[cfg(any(test, feature = "testing"))]
@@ -151,6 +158,47 @@ impl LayoutLog {
 
 fn load(bytes: &[u8]) -> Font {
     Font::from_bytes(bytes, FontSettings::default()).expect("bundled font is valid")
+}
+
+/// The script fonts, parsed on first use by any frame buffer and shared (a couple of MB of fonts: not parsed again for a new buffer).
+static SHAPER: std::sync::OnceLock<std::sync::Arc<crate::shaping::Shaper>> = std::sync::OnceLock::new();
+
+fn shared_shaper() -> std::sync::Arc<crate::shaping::Shaper> {
+    SHAPER.get_or_init(|| std::sync::Arc::new(crate::shaping::Shaper::new())).clone()
+}
+
+/// Does this text have characters of a script that needs shaping (Hebrew, Arabic, the Indic scripts, Thai and the like)? Cheap: only
+/// code points are looked at.
+pub fn needs_script_fonts(text: &str) -> bool {
+    text.chars().any(|c| matches!(c as u32, 0x0590..=0x0DFF | 0x0E00..=0x0EFF | 0x0F00..=0x109F | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF))
+}
+
+/// Parses the script fonts on a thread of their own if they are not yet (a couple of MB: 34 ms on a fast machine, several times that on
+/// an old one, which a person would otherwise feel as a stop the first time a page in such a script is drawn). Does nothing for plain
+/// English: call it only when [`needs_script_fonts`] says so.
+pub fn warm_script_fonts() {
+    if SHAPER.get().is_none() {
+        let _ = std::thread::Builder::new().name("iyakki-script-fonts".into()).spawn(|| {
+            let _ = shared_shaper();
+        });
+    }
+}
+
+/// Have the script fonts been parsed?
+pub fn script_fonts_ready() -> bool {
+    SHAPER.get().is_some()
+}
+
+/// Sans, bold and mono, parsed on first use.
+fn faces() -> &'static [std::sync::Arc<Font>; 3] {
+    static FACES: std::sync::OnceLock<[std::sync::Arc<Font>; 3]> = std::sync::OnceLock::new();
+    FACES.get_or_init(|| {
+        [
+            std::sync::Arc::new(load(include_bytes!("../../iyakki-shell/assets/DejaVuSans.ttf"))),
+            std::sync::Arc::new(load(include_bytes!("../../iyakki-shell/assets/DejaVuSans-Bold.ttf"))),
+            std::sync::Arc::new(load(include_bytes!("../../iyakki-shell/assets/DejaVuSansMono.ttf"))),
+        ]
+    })
 }
 
 /// Blend one glyph bitmap into premultiplied RGBA pixels (clipped to the pixmap).
@@ -217,11 +265,13 @@ impl Gfx {
             hits: Vec::new(),
             mouse: (-1, -1),
             probes: std::cell::RefCell::new(Vec::new()),
-            sans: load(include_bytes!("../../iyakki-shell/assets/DejaVuSans.ttf")),
-            bold: load(include_bytes!("../../iyakki-shell/assets/DejaVuSans-Bold.ttf")),
-            mono: load(include_bytes!("../../iyakki-shell/assets/DejaVuSansMono.ttf")),
+            sans: faces()[0].clone(),
+            bold: faces()[1].clone(),
+            mono: faces()[2].clone(),
             cache: HashMap::new(),
             clip_buf: Vec::new(),
+            clip_now: Vec::new(),
+            ink_bottom: 0.0,
             shaper: None,
             shaped_cache: HashMap::new(),
             #[cfg(any(test, feature = "testing"))]
@@ -234,6 +284,7 @@ impl Gfx {
 
     /// Register a clickable region. `ev` is delivered to the screen on click.
     pub fn hit(&mut self, rect: R, ev: Event, label: &str) {
+        self.note_ink(rect.y, rect.y + rect.h);
         self.hits.push(Hit { rect, ev, label: label.into() });
     }
 
@@ -263,7 +314,9 @@ impl Gfx {
         let start = self.hits.len();
         #[cfg(any(test, feature = "testing"))]
         self.layout_log.clips.push(clip);
+        self.clip_now.push(clip);
         let out = f(self);
+        self.clip_now.pop();
         #[cfg(any(test, feature = "testing"))]
         self.layout_log.clips.pop();
         if self.pm.data().len() == h * row {
@@ -318,7 +371,9 @@ impl Gfx {
         let start = self.hits.len();
         #[cfg(any(test, feature = "testing"))]
         self.layout_log.clips.push(clip);
+        self.clip_now.push(clip);
         let out = f(self);
+        self.clip_now.pop();
         #[cfg(any(test, feature = "testing"))]
         self.layout_log.clips.pop();
         let mut at = 0;
@@ -500,6 +555,23 @@ impl Gfx {
         w
     }
 
+    fn note_ink(&mut self, top: f32, bottom: f32) {
+        if !(top.is_finite() && bottom.is_finite()) {
+            return;
+        }
+        if self.clip_now.last().is_some_and(|c| top >= c.y + c.h || bottom <= c.y) {
+            return;
+        }
+        if bottom > self.ink_bottom {
+            self.ink_bottom = bottom;
+        }
+    }
+
+    /// The right edge of what can be seen now: the window's, or the nearest clip's when a [`Gfx::clipped`] call is running.
+    pub fn visible_right(&self) -> f32 {
+        self.clip_now.iter().fold(self.pm.width() as f32, |r, c| r.min(c.x + c.w))
+    }
+
     pub fn width(&self) -> u32 {
         self.pm.width()
     }
@@ -644,13 +716,14 @@ impl Gfx {
     pub fn text_width(&mut self, size: f32, s: &str, face: Face) -> f32 {
         let px = size.round().max(MIN_TEXT_PX);
         if crate::shaping::needs_shaping(s) {
-            return self.shaper.get_or_insert_with(crate::shaping::Shaper::new).layout(s, px).1;
+            return self.shaper.get_or_insert_with(shared_shaper).layout(s, px).1;
         }
         s.chars().map(|c| self.font(face).metrics(c, px).advance_width).sum()
     }
 
     /// Draw `s` with its top-left at (x, y). Returns the advance width. Text is clipped to the pixmap.
     pub fn text(&mut self, x: f32, y: f32, size: f32, color: [u8; 4], s: &str, face: Face) -> f32 {
+        self.note_ink(y, y + size * 1.3);
         #[cfg(any(test, feature = "testing"))]
         {
             self.text_log.push((x, y, s.to_string()));
@@ -715,7 +788,7 @@ impl Gfx {
     /// Draw a line in a script that needs shaping (see [`crate::shaping`]); `base` is the baseline.
     fn shaped_text(&mut self, x: f32, base: f32, px: f32, color: [u8; 4], s: &str) -> f32 {
         let (w, h) = (self.width() as i32, self.height() as i32);
-        let sh = self.shaper.get_or_insert_with(crate::shaping::Shaper::new);
+        let sh = self.shaper.get_or_insert_with(shared_shaper);
         let (glyphs, total) = sh.layout(s, px);
         for g in glyphs {
             let key = (g.font, g.glyph, px as u32);
@@ -1863,5 +1936,64 @@ mod tests {
         // a rectangle partly off the screen is cut to it
         g.in_region((40, 20, 30, 30), None, |g, ox, oy| g.rect(45.0 - ox, 25.0 - oy, 3.0, 3.0, rgb(7, 7, 7)));
         assert_eq!(px(&g, 46, 26)[0], 7);
+    }
+
+    #[test]
+    fn new_frame_buffers_share_the_parsed_fonts_and_the_script_fonts_and_draw_the_same() {
+        let (mut a, mut b) = (Gfx::new(200, 40), Gfx::new(200, 40));
+        assert!(std::sync::Arc::ptr_eq(&a.sans, &b.sans) && std::sync::Arc::ptr_eq(&a.bold, &b.bold) && std::sync::Arc::ptr_eq(&a.mono, &b.mono), "the faces are parsed once");
+        // making a buffer is cheap now (it was 27 ms of font parsing in a release build): a hundred of them take a fraction of a second
+        let t = std::time::Instant::now();
+        for _ in 0..100 {
+            let _ = Gfx::new(64, 64);
+        }
+        assert!(t.elapsed() < std::time::Duration::from_secs(5), "100 buffers took {:?}", t.elapsed());
+        a.text(4.0, 4.0, 16.0, [255, 255, 255, 255], "Same text", Face::Sans);
+        b.text(4.0, 4.0, 16.0, [255, 255, 255, 255], "Same text", Face::Sans);
+        assert_eq!(a.pm.data(), b.pm.data());
+        // the script fonts are shared as well, and plain English still never loads them
+        assert!(a.shaper.is_none());
+        a.text(4.0, 24.0, 16.0, [255, 255, 255, 255], "\u{928}\u{92e}\u{938}\u{94d}\u{924}\u{947}", Face::Sans);
+        b.text(4.0, 24.0, 16.0, [255, 255, 255, 255], "\u{928}\u{92e}\u{938}\u{94d}\u{924}\u{947}", Face::Sans);
+        if let (Some(x), Some(y)) = (&a.shaper, &b.shaper) {
+            assert!(std::sync::Arc::ptr_eq(x, y));
+        }
+    }
+
+    /// A measurement, not a check: what the first text in a script that needs shaping costs (the script fonts are parsed then).
+    /// `cargo test --release -p iyakki-uikit first_shaped_text_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a measurement"]
+    fn first_shaped_text_cost() {
+        let mut g = Gfx::new(300, 60);
+        let t = std::time::Instant::now();
+        g.text(4.0, 4.0, 16.0, [255, 255, 255, 255], "\u{928}\u{92e}\u{938}\u{94d}\u{924}\u{947}", Face::Sans);
+        println!("SHAPER first text in Devanagari: {:.1} ms", t.elapsed().as_secs_f64() * 1000.0);
+        let t = std::time::Instant::now();
+        g.text(4.0, 30.0, 16.0, [255, 255, 255, 255], "\u{928}\u{92e}\u{938}\u{94d}\u{924}\u{947}", Face::Sans);
+        println!("SHAPER the same text again: {:.2} ms", t.elapsed().as_secs_f64() * 1000.0);
+        let t = std::time::Instant::now();
+        let mut h = Gfx::new(300, 60);
+        h.text(4.0, 4.0, 16.0, [255, 255, 255, 255], "\u{628}\u{633}\u{645}", Face::Sans);
+        println!("SHAPER first Arabic text on a new buffer (fonts already parsed): {:.1} ms", t.elapsed().as_secs_f64() * 1000.0);
+    }
+
+    #[test]
+    fn the_script_fonts_are_warmed_only_for_text_that_needs_them_and_then_a_new_buffer_finds_them_ready() {
+        assert!(!needs_script_fonts("Plain English, caf\u{e9} and \u{65e5}\u{672c}\u{8a9e} and \u{1f600}"));
+        assert!(needs_script_fonts("\u{928}\u{92e}\u{938}\u{94d}\u{924}\u{947}") && needs_script_fonts("a \u{628}\u{633}\u{645} b") && needs_script_fonts("\u{5e9}\u{5dc}\u{5d5}\u{5dd}") && needs_script_fonts("\u{e2a}\u{e27}\u{e31}\u{e2a}\u{e14}\u{e35}"));
+        warm_script_fonts();
+        for _ in 0..2000 {
+            if script_fonts_ready() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(script_fonts_ready(), "the thread parsed them");
+        let mut g = Gfx::new(200, 40);
+        let t = std::time::Instant::now();
+        g.text(4.0, 4.0, 16.0, [255, 255, 255, 255], "\u{928}\u{92e}\u{938}\u{94d}\u{924}\u{947}", Face::Sans);
+        assert!(t.elapsed() < std::time::Duration::from_secs(2));
+        assert!(g.pm.data().iter().any(|&b| b != 0), "the text was drawn");
     }
 }

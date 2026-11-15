@@ -483,3 +483,24 @@ fn a_collection_on_another_machine_needs_the_yes_for_speech_before_anything_is_s
     svc.allow_speech_server(base).unwrap();
     assert!(svc.use_all_parts("lemonade-far", "LMX-Omni-5.5B-Lite", &store).is_ok());
 }
+
+#[test]
+fn a_download_started_for_a_person_is_pending_work_that_ends_in_the_ledger() {
+    let lem = serve("lemonade");
+    let (svc, d) = real_services("pullwait");
+    svc.use_local_lemonade(&lem.base(), None);
+    let ledger = crate::pending::Ledger::open(&svc.dir().join("pending"), "anna");
+    svc.pull_model_for("anna", "lemonade-local", "SDXL-Base-1.0").unwrap();
+    let mut ended = false;
+    for _ in 0..600 {
+        if ledger.list("").iter().any(|t| t.source == crate::pending::Source::Pull && t.state.finished()) {
+            ended = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(ended, "{:?}", ledger.list(""));
+    let t = ledger.list("").into_iter().find(|t| t.source == crate::pending::Source::Pull).unwrap();
+    assert_eq!((t.state, t.label.as_str()), (crate::pending::State::FinishedOk, "download of SDXL-Base-1.0"));
+    let _ = std::fs::remove_dir_all(d);
+}

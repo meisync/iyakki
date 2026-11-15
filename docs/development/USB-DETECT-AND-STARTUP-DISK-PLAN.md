@@ -74,6 +74,22 @@ Two places decide what starts: the firmware (which disk it picks) and, once a st
 
 Exit: with the T7 plugged in during a restart, the Mac mini starts the internal disk; holding Option still offers the stick.
 
+## 3. Register the running boot volume, first or next (M53, 2026-11-13)
+
+Case: the owner runs IYAKKI from a stick on a dual-boot laptop. A stick that starts through the removable-media path leaves no firmware entry,
+Windows is first in `BootOrder`, so every restart (also `iyakki dev reboot`) ends in Windows unless the boot menu is used. The built-in-disk rule
+above deliberately does nothing on a removable disk, so a person asks for it:
+
+* `iyakki startup-disk register`: our entry "IYAKKI" for the partition the system booted from (mounted at `/.stage1/boot`, `/boot` or
+  `/run/iyakki/boot`, else partition 1 of the disk with the data volume), partition GUID from the GPT (MBR signature for a plain table), loader
+  `\EFI\BOOT\BOOTX64.EFI`, appended to `BootOrder`. Only our own entry is created or replaced.
+* `first` = register if missing, then ours first, the others in their order; the earlier order is saved for `revert`.
+* `next` = `BootNext` set to our entry: one restart goes to IYAKKI, the order is unchanged.
+* Setting `startup.reboot_into_iyakki` (default off): a restart asked through `iyakki dev reboot` sets `BootNext` first, so a remote developer can restart a
+  dual-boot laptop into IYAKKI.
+* Refused with a plain message when there are no UEFI variables or `efivarfs` is read-only. Chat: `startup_disk_status` (free), `startup_disk_register`
+  and `startup_disk_set` (ask first). Not yet run on real firmware (KI-560).
+
 ## Risks
 
 * Writing firmware variables on a T2 Mac can change what the owner sees at the Apple picker. Reads first, a revert command, only our entry written,

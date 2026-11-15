@@ -73,7 +73,15 @@ pub fn slider_row(g: &mut Gfx, r: R, s: f32, sl: &Slider, accent: [u8; 4]) -> R 
     crate::fx::glass(g, r.x, r.y, r.w, r.h, 14.0 * s, accent);
     let split = (r.w * 0.44).min(380.0 * s).max(160.0 * s);
     let text_w = (split - 20.0 * s).max(60.0 * s);
-    let title = g.fit(16.0 * s, sl.title, Face::Bold, text_w);
+    // the value is drawn at the right end of the title's line: in a narrow card the two would run into each other, so the unit is left
+    // off first (the help line says what the number counts) and then the title is cut to what is left
+    let full_value = format!("{} {}", sl.value, sl.unit).trim().to_string();
+    let line_w = r.w - 36.0 * s;
+    let gap = 14.0 * s;
+    let title_full = g.text_width(16.0 * s, sl.title, Face::Bold).min(text_w);
+    let value = if title_full + gap + g.text_width(17.0 * s, &full_value, Face::Bold) > line_w { sl.value.to_string() } else { full_value };
+    let vw = g.text_width(17.0 * s, &value, Face::Bold);
+    let title = g.fit(16.0 * s, sl.title, Face::Bold, text_w.min((line_w - vw - gap).max(40.0 * s)));
     g.text(r.x + 18.0 * s, r.y + 12.0 * s, 16.0 * s, if sl.enabled { TEXT } else { MUTED }, &title, Face::Bold);
     for (i, l) in help_lines(g, sl.help, 13.0 * s, text_w, 2).iter().enumerate() {
         g.text(r.x + 18.0 * s, r.y + 38.0 * s + i as f32 * 17.0 * s, 13.0 * s, DIM, l, Face::Sans);
@@ -82,8 +90,6 @@ pub fn slider_row(g: &mut Gfx, r: R, s: f32, sl: &Slider, accent: [u8; 4]) -> R 
     let (cx0, cx1) = (r.x + split, r.x + r.w - 18.0 * s);
     let by = r.y + r.h - bs - 14.0 * s;
     let track = R::new(cx0 + bs + 12.0 * s, by + bs / 2.0 - 4.0 * s, (cx1 - cx0 - 2.0 * bs - 24.0 * s).max(40.0 * s), 8.0 * s);
-    let value = format!("{} {}", sl.value, sl.unit).trim().to_string();
-    let vw = g.text_width(17.0 * s, &value, Face::Bold);
     g.text(cx1 - vw, r.y + 12.0 * s, 17.0 * s, if sl.enabled { accent } else { MUTED }, &value, Face::Bold);
     let can_minus = sl.enabled && sl.value > sl.min;
     let can_plus = sl.enabled && sl.value < sl.max;
@@ -142,7 +148,19 @@ pub fn info_row(g: &mut Gfx, r: R, s: f32, title: &str, value: &str) {
 pub fn section_title(g: &mut Gfx, x: f32, y: f32, s: f32, title: &str) -> f32 {
     let h = crate::fx::section_title(g, x, y, 640.0 * s, s, title, crate::fx::CYAN);
     #[cfg(any(test, feature = "testing"))]
-    HEADINGS.with(|v| v.borrow_mut().push(R::new(x, y, 120.0 * s, h)));
+    {
+        // only the part of a heading a clip leaves is on the screen (a heading scrolled out of its pane covers nothing)
+        let (mut x0, mut y0, mut x1, mut y1) = (x, y, x + 120.0 * s, y + h);
+        for c in &g.layout_log.clips {
+            x0 = x0.max(c.x);
+            y0 = y0.max(c.y);
+            x1 = x1.min(c.x + c.w);
+            y1 = y1.min(c.y + c.h);
+        }
+        if x1 > x0 && y1 > y0 {
+            HEADINGS.with(|v| v.borrow_mut().push(R::new(x0, y0, x1 - x0, y1 - y0)));
+        }
+    }
     h
 }
 

@@ -149,22 +149,29 @@ impl App for UsageApp {
         for (i, (k, v)) in cards.iter().enumerate() {
             let cx0 = x + i as f32 * (cw + 10.0 * s);
             iyakki_uikit::fx::glass(g, cx0, y, cw, 62.0 * s, 12.0 * s, ACCENT);
-            g.text(cx0 + 14.0 * s, y + 9.0 * s, 11.0 * s, DIM, k, Face::Bold);
-            let v = g.fit(21.0 * s, v, Face::Bold, cw - 24.0 * s);
-            g.text(cx0 + 14.0 * s, y + 28.0 * s, 21.0 * s, TEXT, &v, Face::Bold);
+            // narrow windows: the words shrink with the card instead of leaving it
+            let pad = if cw < 90.0 * s { 6.0 * s } else { 14.0 * s };
+            let k = g.fit(11.0 * s, k, Face::Bold, cw - 2.0 * pad);
+            g.text(cx0 + pad, y + 9.0 * s, 11.0 * s, DIM, &k, Face::Bold);
+            let v = g.fit(21.0 * s, v, Face::Bold, cw - 2.0 * pad);
+            g.text(cx0 + pad, y + 28.0 * s, 21.0 * s, TEXT, &v, Face::Bold);
         }
         y += 74.0 * s;
         // chart and legend
-        let legend_w = (w * 0.26).clamp_safe(170.0 * s, 300.0 * s);
-        let chart = R::new(x, y, w - legend_w - 16.0 * s, area.y + area.h - y - 56.0 * s);
+        // a window too narrow for the chart and the legend side by side gives the whole width to the chart (the hover line names the models)
+        let legend_on = w - 170.0 * s - 16.0 * s >= 300.0 * s;
+        let legend_w = if legend_on { (w * 0.26).clamp_safe(170.0 * s, 300.0 * s) } else { 0.0 };
+        let chart = R::new(x, y, if legend_on { w - legend_w - 16.0 * s } else { w }, area.y + area.h - y - 56.0 * s);
         iyakki_uikit::fx::panel(g, chart, s, ACCENT);
         let (pl, pr, pt, pb) = (54.0 * s, 16.0 * s, 16.0 * s, 30.0 * s);
         let plot = R::new(chart.x + pl, chart.y + pt, chart.w - pl - pr, chart.h - pt - pb);
         let peak = ser.buckets.iter().map(|b| b.total()).max().unwrap_or(0);
         let top = nice_max(peak);
-        for i in 0..=4u64 {
-            let v = top * i / 4;
-            let gy = plot.y + plot.h - plot.h * i as f32 / 4.0;
+        // as many grid lines as the height leaves room for the numbers beside them
+        let ticks: u64 = if plot.h >= 4.0 * 20.0 * s { 4 } else if plot.h >= 2.0 * 20.0 * s { 2 } else { 1 };
+        for i in 0..=ticks {
+            let v = top * i / ticks;
+            let gy = plot.y + plot.h - plot.h * i as f32 / ticks as f32;
             g.rect(plot.x, gy, plot.w, 1.0, rgb(34, 42, 72));
             let t = fmt_tokens(v);
             let tw = g.text_width(11.0 * s, &t, Face::Sans);
@@ -201,7 +208,7 @@ impl App for UsageApp {
             if i % label_every == 0 || i == n - 1 && label_every == 1 {
                 let lw = g.text_width(11.0 * s, &b.label, Face::Sans);
                 if lw <= slot * label_every as f32 + 2.0 {
-                    g.text(plot.x + i as f32 * slot + (slot - lw) / 2.0, plot.y + plot.h + 8.0 * s, 11.0 * s, MUTED, &b.label, Face::Sans);
+                    g.text(plot.x + i as f32 * slot + (slot - lw) / 2.0, plot.y + plot.h + 10.0 * s, 11.0 * s, MUTED, &b.label, Face::Sans);
                 }
             }
         }
@@ -225,6 +232,9 @@ impl App for UsageApp {
             }
         }
         // legend
+        if !legend_on {
+            return;
+        }
         let lx = chart.x + chart.w + 16.0 * s;
         iyakki_uikit::fx::glass(g, lx, y, legend_w, chart.h, 14.0 * s, ACCENT);
         iyakki_uikit::fx::section_title(g, lx + 8.0 * s, y + 12.0 * s, legend_w - 24.0 * s, s, "Models", ACCENT);
@@ -307,7 +317,7 @@ mod tests {
     }
 
     fn cx_of<'a>(u: &'a FakeUsage, user: &'a str, admin: bool) -> TileCx<'a> {
-        TileCx { user, manage_settings: admin, usage: u, calendar: &iyakki_tile_api::calendar::NoCalendar, audit: &iyakki_tile_api::NoAudit, remote: &iyakki_tile_api::remote::NoRemote, cameras: &iyakki_tile_api::cameras::NoCameras }
+        TileCx { user, manage_settings: admin, usage: u, calendar: &iyakki_tile_api::calendar::NoCalendar, audit: &iyakki_tile_api::NoAudit, remote: &iyakki_tile_api::remote::NoRemote, cameras: &iyakki_tile_api::cameras::NoCameras, radio: &iyakki_tile_api::radio::NoRadio }
     }
 
     #[test]

@@ -10,7 +10,7 @@ hid-appletb-kbd and hid-appletb-bl from Linux v6.18 (Ronald Tschalar, Kerem Kara
 trackpad patch and the Radeon Pro 5300M fix from https://github.com/t2linux/linux-t2-patches (commits 7a48a744 and
 b3fac289; source and commit in each patch header).
 
-Apache License 2.0 — 335 crates
+Apache License 2.0 — 348 crates
 MIT License — 66 crates
 Unicode License v3 — 19 crates
 ISC License — 18 crates
@@ -5764,68 +5764,81 @@ limitations under the License.
 ================================================================================
 Apache License 2.0
 Used by:
-  - iyakki-agent 0.1.0-alpha.2
-  - iyakki-archive 0.1.0-alpha.2
-  - iyakki-battery 0.1.0-alpha.2
-  - iyakki-bindelta 0.1.0-alpha.2
-  - iyakki-camdetect 0.1.0-alpha.2
-  - iyakki-clock 0.1.0-alpha.2
-  - iyakki-clockfloor 0.1.0-alpha.2
-  - iyakki-core 0.1.0-alpha.2
-  - iyakki-core-api 0.1.0-alpha.2
-  - iyakki-core-fake 0.1.0-alpha.2
-  - iyakki-data 0.1.0-alpha.2
-  - iyakki-devctl 0.1.0-alpha.2
-  - iyakki-diskcrypt 0.1.0-alpha.2
-  - iyakki-drivers 0.1.0-alpha.2
-  - iyakki-edit 0.1.0-alpha.2
-  - iyakki-enchome 0.1.0-alpha.2
-  - iyakki-flow 0.1.0-alpha.2
-  - iyakki-fw 0.1.0-alpha.2
-  - iyakki-hotspot 0.1.0-alpha.2
-  - iyakki-hwinfo 0.1.0-alpha.2
-  - iyakki-js 0.1.0-alpha.2
-  - iyakki-ledger 0.1.0-alpha.2
-  - iyakki-link 0.1.0-alpha.2
-  - iyakki-lint 0.1.0-alpha.2
-  - iyakki-macrecovery 0.1.0-alpha.2
-  - iyakki-mem 0.1.0-alpha.2
-  - iyakki-netscan 0.1.0-alpha.2
-  - iyakki-openpgp 0.1.0-alpha.2
-  - iyakki-pdf 0.1.0-alpha.2
-  - iyakki-proxy 0.1.0-alpha.2
-  - iyakki-qr 0.1.0-alpha.2
-  - iyakki-regex 0.1.0-alpha.2
-  - iyakki-relcheck 0.1.0-alpha.2
-  - iyakki-remote 0.1.0-alpha.2
-  - iyakki-rfb 0.1.0-alpha.2
-  - iyakki-rtsp 0.1.0-alpha.2
-  - iyakki-schema 0.1.0-alpha.2
-  - iyakki-sec 0.1.0-alpha.2
-  - iyakki-shell 0.1.0-alpha.2
-  - iyakki-sshfs 0.1.0-alpha.2
-  - iyakki-stage1 0.1.0-alpha.2
-  - iyakki-storage 0.1.0-alpha.2
-  - iyakki-swarm 0.1.0-alpha.2
-  - iyakki-tile-abi 0.1.0-alpha.2
-  - iyakki-tile-api 0.1.0-alpha.2
-  - iyakki-tile-calendar 0.1.0-alpha.2
-  - iyakki-tile-cameras 0.1.0-alpha.2
-  - iyakki-tile-example 0.1.0-alpha.2
-  - iyakki-tile-host 0.1.0-alpha.2
-  - iyakki-tile-remotefiles 0.1.0-alpha.2
-  - iyakki-tile-usage 0.1.0-alpha.2
-  - iyakki-uikit 0.1.0-alpha.2
-  - iyakki-usb 0.1.0-alpha.2
-  - iyakki-vfs 0.1.0-alpha.2
-  - iyakki-volcrypt 0.1.0-alpha.2
-  - iyakki-vpn 0.1.0-alpha.2
-  - iyakki-wake 0.1.0-alpha.2
-  - iyakki-wasm 0.1.0-alpha.2
-  - iyakki-web 0.1.0-alpha.2
-  - iyakki-webview 0.1.0-alpha.2
-  - iyakki-wordtime 0.1.0-alpha.2
-  - iyakki-zram 0.1.0-alpha.2
+  - iyakki-accounts 0.1.0-alpha.3
+  - iyakki-agent 0.1.0-alpha.3
+  - iyakki-archive 0.1.0-alpha.3
+  - iyakki-battery 0.1.0-alpha.3
+  - iyakki-bindelta 0.1.0-alpha.3
+  - iyakki-camdetect 0.1.0-alpha.3
+  - iyakki-client-engine 0.1.0-alpha.3
+  - iyakki-clock 0.1.0-alpha.3
+  - iyakki-clockfloor 0.1.0-alpha.3
+  - iyakki-connect 0.1.0-alpha.3
+  - iyakki-core 0.1.0-alpha.3
+  - iyakki-core-api 0.1.0-alpha.3
+  - iyakki-core-fake 0.1.0-alpha.3
+  - iyakki-core-local 0.1.0-alpha.3
+  - iyakki-data 0.1.0-alpha.3
+  - iyakki-devctl 0.1.0-alpha.3
+  - iyakki-diskcrypt 0.1.0-alpha.3
+  - iyakki-drivers 0.1.0-alpha.3
+  - iyakki-edit 0.1.0-alpha.3
+  - iyakki-enchome 0.1.0-alpha.3
+  - iyakki-filter 0.1.0-alpha.3
+  - iyakki-flow 0.1.0-alpha.3
+  - iyakki-fw 0.1.0-alpha.3
+  - iyakki-hotspot 0.1.0-alpha.3
+  - iyakki-hwinfo 0.1.0-alpha.3
+  - iyakki-js 0.1.0-alpha.3
+  - iyakki-ledger 0.1.0-alpha.3
+  - iyakki-link 0.1.0-alpha.3
+  - iyakki-lint 0.1.0-alpha.3
+  - iyakki-macrecovery 0.1.0-alpha.3
+  - iyakki-mem 0.1.0-alpha.3
+  - iyakki-netscan 0.1.0-alpha.3
+  - iyakki-openpgp 0.1.0-alpha.3
+  - iyakki-pdf 0.1.0-alpha.3
+  - iyakki-proxy 0.1.0-alpha.3
+  - iyakki-qr 0.1.0-alpha.3
+  - iyakki-regex 0.1.0-alpha.3
+  - iyakki-relcheck 0.1.0-alpha.3
+  - iyakki-remote 0.1.0-alpha.3
+  - iyakki-rfb 0.1.0-alpha.3
+  - iyakki-rtsp 0.1.0-alpha.3
+  - iyakki-schema 0.1.0-alpha.3
+  - iyakki-sec 0.1.0-alpha.3
+  - iyakki-shell 0.1.0-alpha.3
+  - iyakki-sshfs 0.1.0-alpha.3
+  - iyakki-stage1 0.1.0-alpha.3
+  - iyakki-storage 0.1.0-alpha.3
+  - iyakki-swarm 0.1.0-alpha.3
+  - iyakki-tile-abi 0.1.0-alpha.3
+  - iyakki-tile-api 0.1.0-alpha.3
+  - iyakki-tile-calendar 0.1.0-alpha.3
+  - iyakki-tile-cameras 0.1.0-alpha.3
+  - iyakki-tile-chat 0.1.0-alpha.3
+  - iyakki-tile-edit 0.1.0-alpha.3
+  - iyakki-tile-example 0.1.0-alpha.3
+  - iyakki-tile-host 0.1.0-alpha.3
+  - iyakki-tile-kit 0.1.0-alpha.3
+  - iyakki-tile-pdf 0.1.0-alpha.3
+  - iyakki-tile-radio 0.1.0-alpha.3
+  - iyakki-tile-remotefiles 0.1.0-alpha.3
+  - iyakki-tile-runs 0.1.0-alpha.3
+  - iyakki-tile-settings 0.1.0-alpha.3
+  - iyakki-tile-usage 0.1.0-alpha.3
+  - iyakki-uikit 0.1.0-alpha.3
+  - iyakki-usb 0.1.0-alpha.3
+  - iyakki-vfs 0.1.0-alpha.3
+  - iyakki-volcrypt 0.1.0-alpha.3
+  - iyakki-vpn 0.1.0-alpha.3
+  - iyakki-vt 0.1.0-alpha.3
+  - iyakki-wake 0.1.0-alpha.3
+  - iyakki-wasm 0.1.0-alpha.3
+  - iyakki-web 0.1.0-alpha.3
+  - iyakki-webview 0.1.0-alpha.3
+  - iyakki-wordtime 0.1.0-alpha.3
+  - iyakki-zram 0.1.0-alpha.3
   - allocator-api2 0.2.21
   - anyhow 1.0.104
   - async-trait 0.1.92

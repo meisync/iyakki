@@ -158,7 +158,7 @@ fn layout_problems(a: &mut SettingsApp, cx: &AppCx, w: u32, h: u32) -> Vec<Strin
     let s = (w as f32 / 1280.0).min(h as f32 / 720.0).clamp(0.6, 3.0);
     let content_left = a.nav_rect.x + a.nav_rect.w + 1.0;
     let right = w as f32 - 20.0 * s + 1.0;
-    let hits: Vec<_> = g.hits.iter().filter(|x| x.rect.x >= content_left && x.rect.w > 0.0 && x.rect.h > 0.0 && !matches!(x.ev, Event::FocusAt(..))).collect();
+    let hits: Vec<_> = g.hits.iter().filter(|x| x.rect.x >= content_left && x.rect.w > 0.0 && x.rect.h > 0.0 && !matches!(x.ev, Event::FocusAt(..)) && !matches!(x.ev, Event::Area(id) if id == BODY_BAR || id == BTN_BAR)).collect(); // the scroll bars sit in the margin, by design
     let mut out = Vec::new();
     for (i, p) in hits.iter().enumerate() {
         if p.rect.x + p.rect.w > right {
@@ -229,4 +229,40 @@ fn a_search_with_no_match_shows_a_message_not_a_page_and_esc_gives_the_keys_back
     a.go_to(Tab::Browser); // typing moved to the first page that matched the first letter
     press(&mut a, &cx, 'P');
     assert!(a.has_modal(), "the page key works again");
+}
+
+#[test]
+fn the_certificate_of_a_site_is_asked_for_in_settings_and_shown_as_lines_with_the_account_rules() {
+    use iyakki_agent::iyakki_proxy::certview::View;
+    let _ = std::marker::PhantomData::<View>;
+    assert_eq!(SettingsApp::cert_target("www.Example.org").unwrap(), ("www.example.org".to_string(), 443));
+    assert_eq!(SettingsApp::cert_target("https://example.org:8443/").unwrap(), ("example.org".to_string(), 8443));
+    assert!(SettingsApp::cert_target("exa mple.org").is_err() && SettingsApp::cert_target("").is_err());
+    assert!(SettingsApp::cert_target("example.org:0").is_err() && SettingsApp::cert_target("example.org:99999").is_err());
+    assert!(SettingsApp::cert_target("example.org/path?x=1").is_err(), "an address with a path is not a site name");
+}
+
+#[test]
+fn the_certificate_page_opens_a_form_checks_the_account_rules_and_shows_the_answer_as_lines() {
+    let cx = admin("cert-page");
+    let mut a = SettingsApp::new(&cx).on(Tab::Browser);
+    press(&mut a, &cx, 'K');
+    assert!(a.has_modal(), "K opens the question");
+    assert_eq!(a.dialog_title().as_deref(), Some("Certificate of a site"));
+    for c in "no way".chars() {
+        a.handle(&Event::Key(Key::Char(c)), &cx);
+    }
+    a.handle(&Event::Key(Key::Enter), &cx);
+    assert!(a.has_modal(), "an address that is not a site name keeps the form open");
+    a.handle(&Event::Key(Key::Esc), &cx);
+    assert!(!a.has_modal());
+    // the answer of a probe is shown as lines, one per row of the list
+    a.cert_job_done(Ok(vec!["Certificate shown by shop.example".into(), "Issued to: CN=shop.example".into()]));
+    assert_eq!(a.dialog_title().as_deref(), Some("Certificate (Esc closes)"));
+    a.handle(&Event::Key(Key::Esc), &cx);
+    assert!(!a.has_modal());
+    a.cert_job_done(Err("shop.example:443: could not connect".into()));
+    assert!(!a.has_modal());
+    let g = draw(&mut a, &cx, 1280, 720);
+    assert!(g.text_log.iter().any(|(_, _, t)| t.contains("certificate")), "the row is on the page");
 }

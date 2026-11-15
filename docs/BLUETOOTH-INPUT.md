@@ -63,7 +63,9 @@ session started or stopped. No PIN, passkey or number is ever logged. These are 
 * **Settings, Bluetooth**: each paired device shows Connected, Connecting... or Not connected, with the reason in plain
   words, and buttons Connect or Disconnect and Forget (removes the keys); see "The Bluetooth page" above.
 * **Chat**: `bluetooth_list` (free), `bluetooth_connect`, `bluetooth_disconnect`, `bluetooth_forget` (each asks; forgetting
-  asks every time). Pairing needs you at the device, so it is only in Settings.
+  asks every time). New devices: `bluetooth_scan`, `bluetooth_pair`, `bluetooth_pair_status` and `bluetooth_pair_answer`
+  (each that acts asks). You still have to be at the device; a number it shows for you to type is typed in Settings,
+  never in the chat.
 
 ## Phones (tethering)
 

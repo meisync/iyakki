@@ -62,7 +62,7 @@ impl Emulator {
     /// Load the tile, start it at `size` and draw the first frame. A tile that cannot load (wrong ABI, missing function) is refused with
     /// the same sentence the device would show.
     pub fn new(project: Project, scratch: PathBuf, size: (i32, i32), mode: Mode, dark: bool) -> Result<Emulator, String> {
-        let services = Arc::new(FakeServices::new(scratch.clone(), project.config.clone()));
+        let services = Arc::new(FakeServices::new(scratch.clone(), project.config.clone()).with_caps(project.caps.clone()));
         let mut runner = load_runner(&project, &services)?;
         runner.init(size.0, size.1, 100, theme_event(dark)).map_err(|e| e.to_string())?;
         let mut e = Emulator { project, runner, services, scratch, size, mode, dark, history: Vec::new(), list: None, refused: None };

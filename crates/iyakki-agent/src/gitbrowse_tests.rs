@@ -597,6 +597,23 @@ fn working_copy_changes_are_parsed_with_status_and_staging() {
 }
 
 #[test]
+fn a_working_copy_with_more_than_500_changes_shows_500_and_counts_the_rest_from_one_status_call() {
+    let mut out = String::from("# branch.head main\n");
+    for i in 0..620 {
+        out.push_str(&format!("? file{i:04}.txt\n"));
+    }
+    let run = Arc::new(FakeRunner::new(&["git"]));
+    run.answer("status --porcelain=v2", &out);
+    let w = local(&run).working().unwrap();
+    assert_eq!((w.changes.len(), w.more), (500, 120));
+    let calls = run.calls();
+    assert_eq!(calls.len(), 1, "one git status, not one per file: {:?}", run.lines());
+    assert!(calls[0].line().contains("status --porcelain=v2"));
+    assert!(calls[0].env.iter().any(|(k, v)| k == "GIT_OPTIONAL_LOCKS" && v == "0"), "no lock is taken: {:?}", calls[0].env);
+    assert!(calls[0].env.iter().any(|(k, v)| k == "GIT_TERMINAL_PROMPT" && v == "0"), "no prompt for a credential");
+}
+
+#[test]
 fn working_reads_status_once_and_diff_head_reads_one_file_without_writing() {
     let run = Arc::new(FakeRunner::new(&["git"]));
     run.answer("status --porcelain=v2", PORCELAIN);

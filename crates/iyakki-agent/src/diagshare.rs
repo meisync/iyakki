@@ -399,6 +399,8 @@ pub struct Inputs {
     pub switches: Vec<String>,
     /// The newest CHECK-UP report (verdicts and device names; empty when no check-up ran).
     pub checkup: Vec<String>,
+    /// The compat report (versions of the core and every interface, peers, deprecated names seen): `iyakki_core_api::compat::Report::lines`.
+    pub compat: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -420,6 +422,7 @@ fn section(title: &str, text: &str) -> Section {
 pub fn build(inp: &Inputs) -> Bundle {
     let mut s = vec![
         section("Version", &inp.version.join("\n")),
+        section("Compatibility", &inp.compat.join("\n")),
         section("Services", &inp.services.join("\n")),
         section("Doctor", &inp.doctor.join("\n")),
         section("Check-up", &inp.checkup.join("\n")),
@@ -489,7 +492,7 @@ pub fn save(b: &Bundle, dir: &Path, name: &str) -> Result<PathBuf, String> {
         return Err("that is not a file name".into());
     }
     let p = dir.join(name);
-    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&p).map_err(|e| if e.kind() == std::io::ErrorKind::AlreadyExists { "a file with that name is already there".to_string() } else { format!("cannot write {}: {e}", p.display()) })?;
+    let mut f = { use std::os::unix::fs::OpenOptionsExt; std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&p) }.map_err(|e| if e.kind() == std::io::ErrorKind::AlreadyExists { "a file with that name is already there".to_string() } else { format!("cannot write {}: {e}", p.display()) })?;
     use std::io::Write;
     f.write_all(preview(b).as_bytes()).map_err(|e| e.to_string())?;
     f.sync_all().map_err(|e| e.to_string())?;

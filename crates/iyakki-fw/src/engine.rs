@@ -548,6 +548,19 @@ impl Engine {
         self.backend.counters().ok()
     }
 
+    /// What each counted rule (a rule of the page, a preset) has let in since the rules were last applied, newest settings first
+    /// as they stand in the chain. Empty when the firewall is not in force or the kernel cannot say.
+    pub fn rule_counts(&mut self) -> Vec<ruleset::RuleCount> {
+        if !self.installed {
+            return Vec::new();
+        }
+        let Ok(b) = self.build() else { return Vec::new() };
+        match self.backend.rule_counters() {
+            Ok(c) => ruleset::rule_counts(&b.ruleset, &c),
+            Err(_) => Vec::new(),
+        }
+    }
+
     /// Would a new connection from `src` to `port` (tcp) get in? True when the firewall is not in force.
     pub fn would_allow_tcp(&self, src: IpAddr, port: u16) -> bool {
         if !self.installed {

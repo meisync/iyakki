@@ -162,6 +162,8 @@ fn accept_loop(listener: TcpListener, sh: Arc<Shared>) {
 }
 
 fn connection(stream: TcpStream, peer: SocketAddr, sh: &Shared) {
+    // a socket accepted from a non-blocking listener is non-blocking too on macOS and the BSDs (not on Linux): the TLS code below expects to block
+    let _ = stream.set_nonblocking(false);
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(FIRST_BYTES));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));

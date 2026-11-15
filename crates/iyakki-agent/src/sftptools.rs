@@ -161,7 +161,10 @@ impl SftpTools {
         let c = &st.config;
         let mut s = if st.running { format!("SFTP server: ON, port {}, {}, started by {}.", st.port, when(st.until), st.by) } else { format!("SFTP server: off (port {} when on, {} per start).", c.port, expiry_label(c.expiry_secs)) };
         s.push_str(&format!("\nLogin: {}. Local network only.", if c.password_login { "keys or account password" } else { "keys only" }));
-        s.push_str(&format!("\nHost key: {}", st.host_fingerprint));
+        s.push_str(&format!("\nHost key: {} (Ed25519)", st.host_fingerprint));
+        if !st.host_fingerprint_ec.is_empty() {
+            s.push_str(&format!("\nHost key: {} (ECDSA P-256)", st.host_fingerprint_ec));
+        }
         if c.users.is_empty() {
             s.push_str("\nAllowed accounts: none.");
         }
@@ -230,6 +233,12 @@ impl SftpTools {
 }
 
 impl Tools for SftpTools {
+
+    fn inner_tools(&self) -> Option<&dyn Tools> {
+
+        Some(&*self.inner)
+
+    }
     fn defs(&self) -> Vec<ToolDef> {
         let mut v = self.inner.defs();
         v.retain(|d| !is_sftp_tool(&d.spec.name));

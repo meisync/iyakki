@@ -170,7 +170,7 @@ impl iyakki_tile_api::usage::UsageSource for NoUse {
 }
 
 fn cx_of(f: &Fake) -> TileCx<'_> {
-    TileCx { user: "amy", manage_settings: false, usage: &NoUse, calendar: &iyakki_tile_api::calendar::NoCalendar, audit: &iyakki_tile_api::NoAudit, remote: f, cameras: &iyakki_tile_api::cameras::NoCameras }
+    TileCx { user: "amy", manage_settings: false, usage: &NoUse, calendar: &iyakki_tile_api::calendar::NoCalendar, audit: &iyakki_tile_api::NoAudit, remote: f, cameras: &iyakki_tile_api::cameras::NoCameras, radio: &iyakki_tile_api::radio::NoRadio }
 }
 
 fn key(a: &mut RemoteFilesApp, cx: &TileCx, c: char) {

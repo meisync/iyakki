@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Lean boot layout (docs/BOOT-SPEED.md): split a finished image's initial RAM disk into a tiny first stage and the real root.
 #
-#   lean-image.sh IMAGES_DIR OUT_DIR [--root sfs|seed|tree|both|export] [--no-full-initrd] [--level N] [--fat-mb N] [--stage1 BIN] [--busybox-from DIR]
+#   lean-image.sh IMAGES_DIR OUT_DIR [--root sfs|seed|tree|both|export] [--no-full-initrd] [--level N] [--fat-mb N] [--stage1 BIN] [--busybox-from DIR] [--layers] [--layer-rules FILE]
 #
 #   IMAGES_DIR  a finished build's images/ (needs rootfs.cpio.zst, bzImage, install-root/ and iyakki-install-x86_64.img)
 #   OUT_DIR     everything is written here and nowhere else (the IMAGES_DIR is only read; no drive is ever written)
@@ -9,6 +9,10 @@
 # Makes:
 #   initrd-lean          the first-stage RAM disk: iyakki-stage1 as /init + BusyBox (emergency shell) + empty folders (about 1.5 MB)
 #   root.sfs             the whole system as a zstd squashfs (--root sfs|both). NEEDS a kernel with CONFIG_SQUASHFS + CONFIG_SQUASHFS_ZSTD
+#   layers/              with --layers (needs --root sfs): the same root split into base/core/ui squashfs layers by dist/buildroot/layers.txt
+#                        (layers.py), plus layers/layers.json, the layer manifest. root.sfs is STILL made (the single-root path is unchanged); the
+#                        image then carries the layers (boot/layers/, boot/layers.json) instead of boot/root.sfs (both would not fit the boot volume).
+#                        docs/development/LAYERED-ROOT-DESIGN.md. IYAKKI_ROOT_EXTRA_DIR=DIR copies DIR over the root first (tests: change one file).
 #   data-tree.ext4       an ext4 volume labelled IYAKKI-DATA holding the extracted tree (iyakki/root/<id>/tree, pointer `current`)
 #                        (--root tree|both). Works with the kernels built so far (ext4 is built in); the test route of this script
 #   iyakki-lean-x86_64.img   the install template with the lean layout: a bigger FAT boot volume holding the lean initrd and (for
@@ -22,13 +26,15 @@ set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$(cd "$HERE/../.." && pwd)"
 IMG="${1:-}"; OUT="${2:-}"; shift 2 2>/dev/null || true
 [ -d "$IMG" ] && [ -n "$OUT" ] || { sed -n '2,10p' "$0" >&2; exit 2; }
-MODE=sfs; NOFULL=0; LEVEL=3; FATMB=0; S1="$ROOT/target/x86_64-unknown-linux-musl/release/iyakki-stage1"
+MODE=sfs; LAYERS=0; LRULES=""; NOFULL=0; LEVEL=3; FATMB=0; S1="$ROOT/target/x86_64-unknown-linux-musl/release/iyakki-stage1"
 while [ $# -gt 0 ]; do
-  case "$1" in --root) MODE="$2"; shift 2 ;; --level) LEVEL="$2"; shift 2 ;; --fat-mb) FATMB="$2"; shift 2 ;; --stage1) S1="$2"; shift 2 ;; --no-full-initrd) NOFULL=1; shift ;;
+  case "$1" in --root) MODE="$2"; shift 2 ;; --level) LEVEL="$2"; shift 2 ;; --fat-mb) FATMB="$2"; shift 2 ;; --stage1) S1="$2"; shift 2 ;; --no-full-initrd) NOFULL=1; shift ;; --layers) LAYERS=1; shift ;; --layer-rules) LRULES="$2"; shift 2 ;;
     *) echo "lean-image: unknown option $1" >&2; exit 2 ;; esac
 done
 die() { echo "lean-image: $*" >&2; exit 1; }
 for t in fakeroot cpio zstd python3; do command -v "$t" >/dev/null || die "missing $t"; done
+[ "$LAYERS" = 0 ] || [ "$MODE" = sfs ] || die "--layers needs --root sfs"
+[ "$LAYERS" = 0 ] || command -v mksquashfs >/dev/null || die "missing mksquashfs"
 case "$MODE" in sfs|seed|tree|both|export|stick) ;; *) die "--root must be sfs, seed, tree, both, export or stick" ;; esac
 MCOPY="$(command -v mcopy || ls "$ROOT"/target/buildroot-*/host/bin/mcopy 2>/dev/null | head -n1 || true)"; [ "$MODE" = export ] || [ -n "$MCOPY" ] || die "no mcopy (mtools)"
 MMD="$(dirname "${MCOPY:-/nonexistent/x}")/mmd"; [ -x "$MMD" ] || MMD="$(command -v mmd || true)"
@@ -45,7 +51,7 @@ KERNEL="$IMG/bzImage"; [ ! -s "$IMG/install-root/boot/bzImage" ] || KERNEL="$IMG
 [ -d "$IMG/install-root/EFI" ] || die "no $IMG/install-root"
 IMG="$(cd "$IMG" && pwd)"; mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"; W="$(mktemp -d "${TMPDIR:-/tmp}/lean-XXXXXX")"; trap 'rm -rf "$W"' EXIT
 ID="${IYAKKI_ROOT_ID:-$(date -u +%Y%m%d%H%M%S)}"
-export W IMG OUT MODE LEVEL S1 ID MKE2FS HERE
+export W IMG OUT MODE LEVEL S1 ID MKE2FS HERE LAYERS LRULES
 
 cat > "$W/session.sh" <<'EOS'
 set -eu
@@ -58,6 +64,8 @@ rm -f boot/bzImage
 # the keys that may sign in over SSH on the diagnostics entries are baked into the image at /etc/iyakki/authorized_keys; IYAKKI_AUTH_KEYS=FILE
 # replaces that file in the lean tree (public keys only), so the machine that will connect to the stick can be named at build time
 [ -z "${IYAKKI_AUTH_KEYS:-}" ] || { cp "$IYAKKI_AUTH_KEYS" etc/iyakki/authorized_keys; chmod 0644 etc/iyakki/authorized_keys; }
+# a folder of files copied over the root (tests: change one file of one layer; the owner stays root)
+[ -z "${IYAKKI_ROOT_EXTRA_DIR:-}" ] || { cp -R --no-preserve=all "$IYAKKI_ROOT_EXTRA_DIR"/. "$W/root"/; }
 BUSY="bin/busybox"; MUSL="lib/libc.so"
 # first stage
 mkdir "$W/s1"; cd "$W/s1"
@@ -80,6 +88,10 @@ done
 [ -d lib/firmware/i915 ] && echo "lean-image: early Intel GPU firmware in the RAM disk: $(ls lib/firmware/i915 | wc -l) files, $(du -sk lib/firmware/i915 | cut -f1) KB"
 find . | LC_ALL=C sort | cpio --quiet -o -H newc | zstd -19 -T0 -q -f -o "$OUT/initrd-lean"
 cd "$W/root"
+if [ "$LAYERS" = 1 ]; then
+  rm -rf "$OUT/layers"
+  python3 -I "$HERE/layers.py" split "$W/root" "$OUT/layers" --level "$LEVEL" --release "$ID" --volume boot ${LRULES:+--rules "$LRULES"}
+fi
 if [ "$MODE" = sfs ] || [ "$MODE" = seed ] || [ "$MODE" = both ]; then
   mksquashfs "$W/root" "$OUT/root.sfs" -comp zstd -Xcompression-level "$LEVEL" -b 256K -noappend -quiet -no-progress -all-time 0 >/dev/null
 fi
@@ -104,6 +116,7 @@ fakeroot -- bash "$W/session.sh"
 [ -s "$OUT/initrd-lean" ] || die "no lean initrd was made"
 SZ() { echo "$(( $(stat -c %s "$1") / 1048576 )) MB"; }
 echo "lean-image: initrd-lean $(SZ "$OUT/initrd-lean") (was $(SZ "$IMG/rootfs.cpio.zst"))"
+[ "$LAYERS" = 0 ] || [ -s "$OUT/layers/layers.json" ] || die "no layers were made"
 [ ! -f "$OUT/root.sfs" ] || echo "lean-image: root.sfs $(SZ "$OUT/root.sfs") (zstd -$LEVEL)"
 [ ! -f "$OUT/data-tree.ext4" ] || echo "lean-image: data-tree.ext4 $(SZ "$OUT/data-tree.ext4")"
 
@@ -113,7 +126,9 @@ sed -n '/^# BEGIN lean-boot/,/^# END lean-boot/p' "$HERE/board/iyakki/grub.cfg" 
 [ "$MODE" != export ] || { echo "lean-image: exported tree, manifest, grub block and initrd-lean to $OUT"; exit 0; }
 
 # ---- the install template: bigger FAT volume with the lean files ----
-BOOTFILES=$(( $(stat -c %s "$OUT/initrd-lean") + $(stat -c %s "$KERNEL") + $( [ -f "$OUT/root.sfs" ] && stat -c %s "$OUT/root.sfs" || echo 0 ) ))
+ROOTBYTES=$( [ -f "$OUT/root.sfs" ] && stat -c %s "$OUT/root.sfs" || echo 0 )
+[ "$LAYERS" = 0 ] || ROOTBYTES=$(du -cb "$OUT"/layers/*.sfs | tail -n1 | cut -f1)
+BOOTFILES=$(( $(stat -c %s "$OUT/initrd-lean") + $(stat -c %s "$KERNEL") + ROOTBYTES ))
 [ "$MODE" != seed ] || [ "$NOFULL" = 1 ] || BOOTFILES=$(( BOOTFILES + $(stat -c %s "$IMG/rootfs.cpio.zst") ))   # the full initrd stays as the fallback
 SLACK=96; [ "$NOFULL" = 1 ] && SLACK=48
 [ "$FATMB" -gt 0 ] || FATMB=$(( BOOTFILES / 1048576 + SLACK ))
@@ -145,7 +160,13 @@ else
 "$MCOPY" -i "$FAT" -s "$IMG/install-root/boot/grub" ::boot/ >/dev/null
 "$MCOPY" -i "$FAT" "$KERNEL" ::boot/bzImage
 "$MCOPY" -i "$FAT" "$OUT/initrd-lean" ::boot/initrd
-[ ! -f "$OUT/root.sfs" ] || "$MCOPY" -i "$FAT" "$OUT/root.sfs" ::boot/root.sfs
+if [ "$LAYERS" = 1 ]; then
+  # the layered seed: boot/layers/NAME-HASH.sfs and boot/layers.json (the first stage prefers it to boot/root.sfs; no single root.sfs here, the volume is too small for both)
+  "$MMD" -i "$FAT" ::boot/layers >/dev/null
+  for f in "$OUT"/layers/*.sfs; do "$MCOPY" -i "$FAT" "$f" "::boot/layers/$(basename "$f")"; done
+  "$MCOPY" -i "$FAT" "$OUT/layers/layers.json" ::boot/layers.json
+elif [ -f "$OUT/root.sfs" ]; then "$MCOPY" -i "$FAT" "$OUT/root.sfs" ::boot/root.sfs
+fi
 fi
 # IYAKKI_STICK_PACKAGES="FILE ...": the person's own add-on packages (for example the FFmpeg libraries of the browser's audio and video add-on, which the project
 # never ships) go to iyakki-packages/ on the boot volume. The installer clones the whole boot volume, so every disk installed from this stick has them,

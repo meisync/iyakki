@@ -21,6 +21,8 @@ pub struct Beacon {
     pub mac: String,
     pub id: String,
     pub port: u16,
+    /// The sender's IPv6 link-local address (`fe80::/10`), so two computers on a link with no IPv4 can find each other (F-NET-14).
+    pub ip6: Option<std::net::Ipv6Addr>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -65,7 +67,7 @@ fn id_ok(s: &str) -> bool {
 impl Beacon {
     pub fn encode(&self) -> Vec<u8> {
         format!(
-            "{MAGIC}\nhost={}\nver={}\nrole={}\ndev={}\npairing={}\nmac={}\nid={}\nport={}\n",
+            "{MAGIC}\nhost={}\nver={}\nrole={}\ndev={}\npairing={}\nmac={}\nid={}\nport={}\n{}",
             self.host,
             self.version,
             self.role,
@@ -73,7 +75,8 @@ impl Beacon {
             u8::from(self.pairing_open),
             self.mac,
             self.id,
-            self.port
+            self.port,
+            self.ip6.map(|a| format!("ip6={a}\n")).unwrap_or_default()
         )
         .into_bytes()
     }
@@ -91,6 +94,7 @@ impl Beacon {
             return Err(BeaconError::Magic);
         }
         let (mut host, mut ver, mut role, mut dev, mut pairing, mut mac, mut id, mut port) = (None, None, None, None, None, None, None, None);
+        let mut ip6: Option<std::net::Ipv6Addr> = None;
         for (n, l) in lines.enumerate() {
             if n >= MAX_LINES {
                 return Err(BeaconError::TooManyLines);
@@ -108,6 +112,7 @@ impl Beacon {
                 "mac" => mac = Some(v.to_ascii_lowercase()).filter(|s| mac_ok(s)).ok_or(BeaconError::Field("mac")).map(Some)?,
                 "id" => id = Some(v.to_ascii_lowercase()).filter(|s| id_ok(s)).ok_or(BeaconError::Field("id")).map(Some)?,
                 "port" => port = Some(v.parse::<u16>().ok().filter(|p| *p >= 1024).ok_or(BeaconError::Field("port"))?),
+                "ip6" => ip6 = Some(v.parse::<std::net::Ipv6Addr>().ok().filter(|a| super::linklocal::is_link_local6(*a)).ok_or(BeaconError::Field("ip6"))?),
                 _ => {}
             }
         }
@@ -120,6 +125,7 @@ impl Beacon {
             mac: mac.ok_or(BeaconError::Missing("mac"))?,
             id: id.ok_or(BeaconError::Missing("id"))?,
             port: port.unwrap_or(super::DEV_PORT),
+            ip6,
         })
     }
 }

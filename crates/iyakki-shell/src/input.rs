@@ -62,6 +62,25 @@ pub fn parse_events(buf: &[u8]) -> Vec<Raw> {
 }
 
 /// US-layout translation of an evdev key code.
+static ALT_PASSTHROUGH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A tile that shows another computer's program (the Linux window) asks to get Alt+key as [`Key::Alt`]; every other tile ignores Alt as before.
+pub fn set_alt_passthrough(on: bool) {
+    ALT_PASSTHROUGH.store(on, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn alt_passthrough() -> bool {
+    ALT_PASSTHROUGH.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// A typed character with Alt held (and neither Ctrl nor Super) becomes `Key::Alt` when asked for; anything else stays as it is.
+pub fn alt_key(k: Key, ctrl: bool, alt: bool, meta: bool, wanted: bool) -> Key {
+    match k {
+        Key::Char(c) if wanted && alt && !ctrl && !meta && c.is_ascii_graphic() => Key::Alt(c),
+        other => other,
+    }
+}
+
 pub fn translate(code: u16, shift: bool, caps: bool) -> Option<Key> {
     const ROW_NUM: &str = "1234567890-=";
     const ROW_NUM_S: &str = "!@#$%^&*()_+";
@@ -142,6 +161,10 @@ pub struct InputState {
     /// The wheel movement of the frame being read (legacy clicks, and the hi-res units a newer wheel sends with them).
     wheel_legacy: i32,
     wheel_hires: i32,
+    /// The part of a pointer step (hundredths of a pixel) that [`scale_rel`] has not paid out yet, per axis.
+    rel_rem: (i32, i32),
+    /// Tests only: a mouse speed of this state alone, whatever the process has.
+    mouse_pct: Option<u32>,
     /// A clock for tests (milliseconds); the real one when `None`.
     fake_ms: Option<u64>,
     /// The earliest time of the next scroll step.
@@ -150,7 +173,7 @@ pub struct InputState {
 
 impl InputState {
     pub fn new(w: u32, h: u32) -> InputState {
-        InputState { shift: false, ctrl: false, alt: false, meta: false, ctrl_click: false, scroll_from_pad: false, caps: false, x: w as i32 / 2, y: h as i32 / 2, w: w as i32, h: h as i32, abs: (0, 0), slot: 0, pending_touch: false, pad: crate::touchpad::Touchpad::new(), touches: Default::default(), started: std::time::Instant::now(), sticky: Default::default(), slow: Default::default(), opts: None, scroll: crate::scrolleng::ScrollEngine::new(), wheel_legacy: 0, wheel_hires: 0, fake_ms: None, scroll_due: None }
+        InputState { shift: false, ctrl: false, alt: false, meta: false, ctrl_click: false, scroll_from_pad: false, caps: false, x: w as i32 / 2, y: h as i32 / 2, w: w as i32, h: h as i32, abs: (0, 0), slot: 0, pending_touch: false, pad: crate::touchpad::Touchpad::new(), touches: Default::default(), started: std::time::Instant::now(), sticky: Default::default(), slow: Default::default(), opts: None, scroll: crate::scrolleng::ScrollEngine::new(), wheel_legacy: 0, wheel_hires: 0, rel_rem: (0, 0), mouse_pct: None, fake_ms: None, scroll_due: None }
     }
 
     fn now_ms(&self) -> u64 {
@@ -277,15 +300,14 @@ impl InputState {
 
     /// `abs_max` is the device's (max_x, max_y) when it is an absolute pointer (tablet, QEMU usb-tablet).
     /// The input profile's view of a key press. True when it took the key (the events, if any, are in `out`).
-    /// Is the key printed Command held, in the Mac profile only? (The driver's swap of Command and Option is undone here, as in
-    /// `profile_key`.)
-    fn command_held(&self) -> bool {
-        use iyakki_agent::inputprofile as ip;
-        if crate::inputprofile::resolved() != ip::Resolved::Mac {
-            return false;
-        }
-        if crate::inputprofile::swap_in_effect() {
-            self.alt
+
+    /// Is the modifier of the lock and sign-out chords (Control+Command+L locks, Control+Command+Q signs out) held? In the Mac profile either Alt or Meta counts: whether the Apple
+    /// driver's Option/Command swap really reaches this keyboard cannot be known for sure (the saved setting says yes, a Bluetooth or T2
+    /// keyboard may not obey it), and Control+Option+Q or L means nothing else. In the PC profile Control+Windows+Q locks too, so a Mac
+    /// keyboard that was not recognised as Apple's (Automatic picks the PC profile) still has the chord it was told about.
+    fn lock_chord_mod(&self) -> bool {
+        if crate::inputprofile::resolved() == iyakki_agent::inputprofile::Resolved::Mac {
+            self.meta || self.alt
         } else {
             self.meta
         }
@@ -410,17 +432,35 @@ impl InputState {
                         out.push(Event::Fn(k, false));
                     }
                 }
+                // Desktop views: Ctrl+Alt+Super+1..9 jumps to view N (before the Ctrl+Alt digits, which apply a pane layout)
+                c if self.ctrl && self.alt && self.meta && r.value == 1 && (2..=10).contains(&c) => {
+                    out.push(Event::Layout(crate::panes::LayoutKey::View((c - 1) as u8)));
+                }
+                // Desktop views, Mac-style: Control+Command+Left / Right (Command is Super; Alt held makes it a pane snap instead)
+                105 | 106 if self.ctrl && self.meta && !self.alt && !self.shift && r.value == 1 => {
+                    out.push(Event::Layout(crate::panes::LayoutKey::ViewStep { back: r.code == 105, mac: true }));
+                }
                 // Ctrl+Alt chords for panes and displays (arrows, 0-9, Tab, M): the shell takes them, no app sees a key
                 c if self.ctrl && self.alt && (r.value == 1 || r.value == 2) && crate::panes::chord_from_evdev(c, self.shift).is_some() => {
                     if let Some(k) = crate::panes::chord_from_evdev(c, self.shift) {
                         out.push(Event::Layout(k));
                     }
                 }
-                // Control+Command+Q (as on a Mac) or Control+Command+L (the owner's habit, next to Super+L) locks the screen in the Mac profile:
-                // a Mac keyboard has no lock key, and Command+L alone stays the browser's address bar
-                16 | 38 if self.ctrl && r.value == 1 && self.command_held() => {
+                // Control+Command+Q (as on a Mac) asks to sign out, Control+Command+L (the owner's habit, next to Super+L) locks the screen,
+                // in the Mac profile; Control+Option does the same (the Option/Command swap may or may not reach the keyboard). In the PC
+                // profile Control+Windows+Q signs out and Control+Windows+L locks (Super+L below). Command+L alone stays the browser's
+                16 if self.ctrl && r.value == 1 && self.lock_chord_mod() => {
+                    out.push(Event::Fn(crate::fnkeys::FnKey::SignOut, true));
+                    out.push(Event::Fn(crate::fnkeys::FnKey::SignOut, false));
+                }
+                38 if self.ctrl && r.value == 1 && self.lock_chord_mod() => {
                     out.push(Event::Fn(crate::fnkeys::FnKey::Lock, true));
                     out.push(Event::Fn(crate::fnkeys::FnKey::Lock, false));
+                }
+                // Control+Command+S (Mac profile) or Control+Windows+S starts the screen saver now
+                31 if self.ctrl && r.value == 1 && self.lock_chord_mod() => {
+                    out.push(Event::Fn(crate::fnkeys::FnKey::Saver, true));
+                    out.push(Event::Fn(crate::fnkeys::FnKey::Saver, false));
                 }
                 // Super+L locks the screen (a PC keyboard; the Mac profile keeps Command+L for the browser's address bar)
                 38 if self.meta && r.value == 1 && crate::inputprofile::resolved() != iyakki_agent::inputprofile::Resolved::Mac => {
@@ -453,7 +493,7 @@ impl InputState {
                         // Ctrl+letter becomes a shortcut; Shift makes the letter uppercase (Ctrl+Shift+V)
                         out.push(Event::Key(match k {
                             Key::Char(ch) if self.ctrl && ch.is_ascii_alphabetic() => Key::Ctrl(if self.shift { ch.to_ascii_uppercase() } else { ch.to_ascii_lowercase() }),
-                            other => other,
+                            other => alt_key(other, self.ctrl, self.alt, self.meta, alt_passthrough()),
                         }));
                     }
                 }
@@ -461,12 +501,14 @@ impl InputState {
             },
             EV_REL => match r.code {
                 REL_X => {
-                    self.x += r.value;
+                    let pct = self.mouse_pct.unwrap_or_else(mouse_speed_pct);
+                    self.x = self.x.saturating_add(scale_rel(r.value, pct, &mut self.rel_rem.0));
                     self.clamp();
                     out.push(Event::MouseMove(self.x, self.y));
                 }
                 REL_Y => {
-                    self.y += r.value;
+                    let pct = self.mouse_pct.unwrap_or_else(mouse_speed_pct);
+                    self.y = self.y.saturating_add(scale_rel(r.value, pct, &mut self.rel_rem.1));
                     self.clamp();
                     out.push(Event::MouseMove(self.x, self.y));
                 }
@@ -477,6 +519,15 @@ impl InputState {
             },
             EV_SYN if r.code == SYN_REPORT => {
                 let (legacy, hires) = (std::mem::take(&mut self.wheel_legacy), std::mem::take(&mut self.wheel_hires));
+                // Control and the wheel zoom (as in other browsers): the app gets Control with + or -, up is bigger; the page does not scroll
+                if self.ctrl && !self.alt && !self.meta && (hires != 0 || legacy != 0) {
+                    let units = if hires != 0 { hires } else { legacy * 120 };
+                    let steps = ((units.unsigned_abs() + 119) / 120).clamp(1, 3);
+                    for _ in 0..steps {
+                        out.push(Event::Key(Key::Ctrl(if units > 0 { '+' } else { '-' })));
+                    }
+                    return out;
+                }
                 match (hires, legacy) {
                     (0, 0) => {}
                     (0, clicks) => {
@@ -527,6 +578,12 @@ impl InputState {
 // ------------------------------------------------------------------ touchpad settings (Settings -> Keyboard)
 
 static PAD_TAP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static PAD_3F: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Three-finger drag for every touchpad (takes effect with the next event).
+pub fn request_three_finger_drag(on: bool) {
+    PAD_3F.store(on, std::sync::atomic::Ordering::SeqCst);
+}
 
 /// Tap to click for every touchpad (takes effect with the next event). Scrolling choices: [`crate::scrolleng::request_config`].
 pub fn request_touchpad(tap_to_click: bool) {
@@ -536,7 +593,34 @@ pub fn request_touchpad(tap_to_click: bool) {
 
 pub fn pad_config() -> crate::touchpad::PadConfig {
     use std::sync::atomic::Ordering::SeqCst;
-    crate::touchpad::PadConfig { tap_to_click: PAD_TAP.load(SeqCst) }
+    crate::touchpad::PadConfig { tap_to_click: PAD_TAP.load(SeqCst), speed_pct: PAD_SPEED.load(SeqCst), three_finger_drag: PAD_3F.load(SeqCst) }
+}
+
+// ------------------------------------------------------------------ pointer speed (Settings -> Keyboard)
+
+static MOUSE_SPEED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(100);
+static PAD_SPEED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(100);
+
+/// The pointer speeds in percent for a mouse (relative device) and for a touchpad (takes effect with the next event).
+pub fn request_pointer_speed(mouse_pct: u32, pad_pct: u32) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let (lo, hi) = iyakki_agent::keyboard::POINTER_SPEED_RANGE;
+    MOUSE_SPEED.store(mouse_pct.clamp_safe(lo, hi), SeqCst);
+    PAD_SPEED.store(pad_pct.clamp_safe(lo, hi), SeqCst);
+}
+
+/// The speed a mouse moves at now, in percent.
+pub fn mouse_speed_pct() -> u32 {
+    MOUSE_SPEED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// One axis of relative motion scaled by `pct` percent. `rem` carries the part of a step that did not make a whole pixel (in
+/// hundredths of a pixel), so slow motion at 50 % or 30 % is delayed and not lost. Truncation is towards zero, so a movement and its
+/// opposite are symmetric; the arithmetic is 64-bit and the result is clamped to `i32`, so nothing overflows.
+pub fn scale_rel(delta: i32, pct: u32, rem: &mut i32) -> i32 {
+    let total = delta as i64 * pct as i64 + *rem as i64;
+    *rem = (total % 100) as i32;
+    (total / 100).clamp_safe(i32::MIN as i64, i32::MAX as i64) as i32
 }
 
 // ------------------------------------------------------------------ device access
@@ -1075,6 +1159,80 @@ pub fn poll_devices(devs: &mut Vec<Device>, timeout_ms: i32) -> Vec<Polled> {
 mod tests {
     use super::*;
 
+    // ---- pointer speed
+
+    fn scaled(deltas: &[i32], pct: u32) -> (i32, i32) {
+        let mut rem = 0;
+        let sum = deltas.iter().map(|d| scale_rel(*d, pct, &mut rem)).sum();
+        (sum, rem)
+    }
+
+    #[test]
+    fn scale_rel_halves_doubles_and_leaves_100_alone() {
+        assert_eq!(scaled(&[10], 50), (5, 0));
+        assert_eq!(scaled(&[10], 200), (20, 0));
+        assert_eq!(scaled(&[7, -3, 120, -250], 100), (-126, 0));
+        assert_eq!(scaled(&[0, 0], 25), (0, 0));
+    }
+
+    #[test]
+    fn scale_rel_carries_odd_steps_so_slow_motion_is_not_lost() {
+        // one count at 50 % pays out every second step
+        let mut rem = 0;
+        let out: Vec<i32> = (0..6).map(|_| scale_rel(1, 50, &mut rem)).collect();
+        assert_eq!(out, vec![0, 1, 0, 1, 0, 1]);
+        // 25 %: one pixel for four counts; 1000 counts give exactly 250
+        assert_eq!(scaled(&vec![1; 1000], 25), (250, 0));
+        // 75 % of 1000 single counts
+        assert_eq!(scaled(&vec![1; 1000], 75), (750, 0));
+        // 33 % of 100 counts: 33 pixels, the rest is still owed
+        let (sum, rem) = scaled(&vec![1; 100], 33);
+        assert_eq!((sum, rem), (33, 0));
+        // 125 % of 3 counts is 3.75: three now, 0.75 carried
+        assert_eq!(scaled(&[3], 125), (3, 75));
+    }
+
+    #[test]
+    fn scale_rel_is_symmetric_for_negative_deltas_and_never_overflows() {
+        for pct in [25u32, 33, 50, 75, 100, 125, 200, 300] {
+            for d in [1i32, 2, 3, 7, 10, 99, 1000] {
+                let (mut a, mut b) = (0, 0);
+                assert_eq!(scale_rel(d, pct, &mut a), -scale_rel(-d, pct, &mut b), "pct {pct} delta {d}");
+                assert_eq!(a, -b, "the carried part is mirrored too");
+            }
+        }
+        let mut rem = 0;
+        assert_eq!(scale_rel(i32::MAX, 300, &mut rem), i32::MAX);
+        let mut rem = 0;
+        assert_eq!(scale_rel(i32::MIN, 300, &mut rem), i32::MIN);
+        let mut rem = 0;
+        assert_eq!(scale_rel(i32::MAX, 25, &mut rem), i32::MAX / 4);
+    }
+
+    #[test]
+    fn a_mouse_moves_by_the_chosen_speed_and_the_pointer_stays_on_the_screen() {
+        let rel = |st: &mut InputState, code: u16, v: i32| st.feed(Raw { typ: EV_REL, code, value: v }, None);
+        let mut st = InputState::new(1920, 1080);
+        st.mouse_pct = Some(200);
+        let (x0, y0) = (st.x, st.y);
+        assert_eq!(rel(&mut st, REL_X, 10), vec![Event::MouseMove(x0 + 20, y0)]);
+        assert_eq!(rel(&mut st, REL_Y, -4), vec![Event::MouseMove(x0 + 20, y0 - 8)]);
+        st.mouse_pct = Some(50);
+        let (x1, _) = (st.x, st.y);
+        rel(&mut st, REL_X, 1);
+        assert_eq!(st.x, x1, "half a pixel is carried, not moved");
+        rel(&mut st, REL_X, 1);
+        assert_eq!(st.x, x1 + 1, "and paid out with the next count");
+        st.mouse_pct = Some(300);
+        rel(&mut st, REL_X, i32::MAX);
+        assert_eq!(st.x, 1919, "far past the edge stays on the screen");
+        // the process-wide choice is clamped and read back
+        request_pointer_speed(5000, 1);
+        assert_eq!((mouse_speed_pct(), pad_config().speed_pct), (300, 25));
+        request_pointer_speed(100, 100);
+        assert_eq!((mouse_speed_pct(), pad_config().speed_pct), (100, 100));
+    }
+
     fn touch_dev() -> crate::touchmap::TouchDev {
         crate::touchmap::TouchDev { key: "27c0:0859@usb-1/input0".into(), id: "27c0:0859".into(), name: "TouchScreen".into(), usb: true, mt: true, x: (0, 4095), y: (0, 4095) }
     }
@@ -1278,6 +1436,42 @@ mod tests {
     }
 
     #[test]
+    fn desktop_view_chords_become_layout_events_and_the_pane_and_lock_chords_are_unchanged() {
+        use crate::panes::LayoutKey;
+        let mut st = InputState::new(800, 600);
+        let down = |st: &mut InputState, code: u16| st.feed(Raw { typ: EV_KEY, code, value: 1 }, None);
+        let up = |st: &mut InputState, code: u16| st.feed(Raw { typ: EV_KEY, code, value: 0 }, None);
+        // Ctrl+Alt+PageUp / PageDown: browser-style previous and next
+        down(&mut st, 29);
+        down(&mut st, 56);
+        assert_eq!(down(&mut st, 104), vec![Event::Layout(LayoutKey::ViewStep { back: true, mac: false })]);
+        assert_eq!(down(&mut st, 109), vec![Event::Layout(LayoutKey::ViewStep { back: false, mac: false })]);
+        // Ctrl+Alt+Super+1..9 jumps; Ctrl+Alt+digit alone is still a pane layout
+        assert_eq!(down(&mut st, 3), vec![Event::Layout(LayoutKey::Apply(2))]);
+        down(&mut st, 125);
+        assert_eq!(down(&mut st, 2), vec![Event::Layout(LayoutKey::View(1))]);
+        assert_eq!(down(&mut st, 10), vec![Event::Layout(LayoutKey::View(9))]);
+        assert_eq!(down(&mut st, 11), vec![Event::Layout(LayoutKey::Picker)], "Ctrl+Alt+Super+0 is no jump key");
+        up(&mut st, 125);
+        up(&mut st, 56);
+        // Control+Command+Left / Right: Mac-style; Alt held makes it a pane snap, Shift is left alone
+        down(&mut st, 125);
+        assert_eq!(down(&mut st, 105), vec![Event::Layout(LayoutKey::ViewStep { back: true, mac: true })]);
+        assert_eq!(down(&mut st, 106), vec![Event::Layout(LayoutKey::ViewStep { back: false, mac: true })]);
+        // the sign-out chord (Q) and the lock chord (L) are not view keys
+        assert_eq!(down(&mut st, 16), vec![Event::Fn(crate::fnkeys::FnKey::SignOut, true), Event::Fn(crate::fnkeys::FnKey::SignOut, false)]);
+        assert_eq!(down(&mut st, 38), vec![Event::Fn(crate::fnkeys::FnKey::Lock, true), Event::Fn(crate::fnkeys::FnKey::Lock, false)]);
+        up(&mut st, 125);
+        up(&mut st, 29);
+        // Super+Left alone and Ctrl+Left alone are not view keys
+        down(&mut st, 125);
+        assert!(!down(&mut st, 105).iter().any(|e| matches!(e, Event::Layout(_))));
+        up(&mut st, 125);
+        down(&mut st, 29);
+        assert!(!down(&mut st, 105).iter().any(|e| matches!(e, Event::Layout(_))));
+    }
+
+    #[test]
     fn relative_pointer_clamps_and_clicks() {
         let mut st = InputState::new(100, 50);
         assert_eq!((st.x, st.y), (50, 25));
@@ -1413,6 +1607,26 @@ mod tests {
     }
     fn syn(st: &mut InputState) {
         st.feed(Raw { typ: EV_SYN, code: SYN_REPORT, value: 0 }, None);
+    }
+
+    #[test]
+    fn control_and_the_wheel_zoom_instead_of_scrolling() {
+        crate::scrolleng::request_config(crate::scrolleng::ScrollConfig::default());
+        let mut st = InputState::new(800, 600);
+        st.fake_ms = Some(0);
+        st.ctrl = true;
+        rel(&mut st, REL_WHEEL, 1);
+        let ev = st.feed(Raw { typ: EV_SYN, code: SYN_REPORT, value: 0 }, None);
+        assert_eq!(ev, vec![Event::Key(Key::Ctrl('+'))], "away from the person is bigger");
+        rel(&mut st, REL_WHEEL, -2);
+        let ev = st.feed(Raw { typ: EV_SYN, code: SYN_REPORT, value: 0 }, None);
+        assert_eq!(ev, vec![Event::Key(Key::Ctrl('-')), Event::Key(Key::Ctrl('-'))]);
+        assert!(st.scroll_tick().is_empty(), "nothing scrolled");
+        // without Control the same wheel scrolls
+        st.ctrl = false;
+        rel(&mut st, REL_WHEEL, 1);
+        syn(&mut st);
+        assert!(!st.scroll_tick().is_empty());
     }
 
     #[test]
@@ -1637,35 +1851,103 @@ mod profile_tests {
     }
 
     #[test]
-    fn control_command_q_locks_the_screen_in_the_mac_profile_only() {
+    fn control_windows_s_and_control_command_s_start_the_screen_saver_and_plain_s_does_not() {
+        let saver = vec![Event::Fn(crate::fnkeys::FnKey::Saver, true), Event::Fn(crate::fnkeys::FnKey::Saver, false)];
+        for (prof, modkey) in [("pc", 125u16), ("mac", 125)] {
+            let mut st = InputState::new(100, 100);
+            profile(prof, None, prof == "mac");
+            assert_ne!(press(&mut st, 31), saver, "{prof}: S alone is a letter");
+            hold(&mut st, modkey, true);
+            assert_ne!(press(&mut st, 31), saver, "{prof}: Super/Command+S alone is not the chord");
+            hold(&mut st, 29, true);
+            assert_eq!(press(&mut st, 31), saver, "{prof}: Control + Super/Command + S");
+            hold(&mut st, 29, false);
+            hold(&mut st, modkey, false);
+        }
+        profile("pc", None, false);
+    }
+
+    #[test]
+    fn control_command_q_signs_out_and_control_command_l_locks_in_the_mac_profile() {
         let lock = vec![Event::Fn(crate::fnkeys::FnKey::Lock, true), Event::Fn(crate::fnkeys::FnKey::Lock, false)];
+        let out = vec![Event::Fn(crate::fnkeys::FnKey::SignOut, true), Event::Fn(crate::fnkeys::FnKey::SignOut, false)];
         let mut st = InputState::new(100, 100);
         profile("mac", None, true);
         hold(&mut st, 125, true); // Command alone: Q does nothing, as before
         assert_eq!(press(&mut st, 16), vec![], "Command+Q does nothing");
-        hold(&mut st, 29, true); // and Control with it locks
-        assert_eq!(press(&mut st, 16), lock, "Control+Command+Q");
-        assert_eq!(press(&mut st, 38), lock, "Control+Command+L too");
+        hold(&mut st, 29, true); // and Control with it asks to sign out
+        assert_eq!(press(&mut st, 16), out, "Control+Command+Q signs out");
+        assert_eq!(press(&mut st, 38), lock, "Control+Command+L locks");
         hold(&mut st, 29, false);
         assert_ne!(press(&mut st, 38), lock, "Command+L alone is still the browser's address bar");
         hold(&mut st, 125, false);
         hold(&mut st, 29, true);
         assert_eq!(press(&mut st, 16), vec![Event::Key(Key::Ctrl('q'))], "Control+Q alone is still Control+Q");
         hold(&mut st, 29, false);
-        // the PC profile has Super+L; Control+Windows+Q is nothing there
+        // the PC profile has Super+L; Control+Windows+Q signs out there (a Mac keyboard that was not recognised as Apple's is a PC
+        // keyboard to Automatic), but Control+Alt+Q does not
         profile("pc", None, false);
         hold(&mut st, 125, true);
         hold(&mut st, 29, true);
-        assert_ne!(press(&mut st, 16), lock);
-        hold(&mut st, 29, false);
+        assert_eq!(press(&mut st, 16), out);
         hold(&mut st, 125, false);
+        hold(&mut st, 56, true);
+        assert_ne!(press(&mut st, 16), out);
+        hold(&mut st, 56, false);
+        hold(&mut st, 29, false);
         // with the driver's swap of Command and Option, the key printed Command arrives as Alt
         profile("mac", Some(true), true);
         hold(&mut st, 56, true);
         hold(&mut st, 29, true);
-        assert_eq!(press(&mut st, 16), lock, "the swapped Command key");
+        assert_eq!(press(&mut st, 16), out, "the swapped Command key");
+        assert_eq!(press(&mut st, 38), lock, "the swapped Command key locks");
         hold(&mut st, 29, false);
         hold(&mut st, 56, false);
+        profile("pc", None, false);
+    }
+
+    /// The raw stream a Mac keyboard really sends: scan-code (EV_MSC) and sync events around every key, Command and Control on either
+    /// side, the saved swap setting agreeing or not with what the driver does, and an unrecognised keyboard under Automatic.
+    #[test]
+    fn control_command_q_signs_out_and_l_locks_for_every_way_a_keyboard_reaches_the_shell() {
+        let lock = vec![Event::Fn(crate::fnkeys::FnKey::Lock, true), Event::Fn(crate::fnkeys::FnKey::Lock, false)];
+        let out = vec![Event::Fn(crate::fnkeys::FnKey::SignOut, true), Event::Fn(crate::fnkeys::FnKey::SignOut, false)];
+        const EV_MSC: u16 = 4;
+        let send = |st: &mut InputState, code: u16, value: i32| -> Vec<Event> {
+            let mut out = st.feed(Raw { typ: EV_MSC, code: 4, value: 0x70000 + code as i32 }, None);
+            out.extend(st.feed(Raw { typ: EV_KEY, code, value }, None));
+            out.extend(st.feed(Raw { typ: EV_SYN, code: 0, value: 0 }, None));
+            out
+        };
+        // (choice, saved swap, Apple keyboard listed)
+        for (choice, swap, apple) in [("mac", None, true), ("mac", Some(true), true), ("mac", Some(false), true), ("", None, true), ("", None, false), ("pc", None, false)] {
+            for cmd in [125u16, 126, 56, 100] {
+                // the Mac profile takes Command or Option for the chords; the PC profile only the Windows key (Alt there is Alt)
+                let mac = choice == "mac" || (choice.is_empty() && apple);
+                let expect = mac || cmd == 125 || cmd == 126;
+                for ctl in [29u16, 97] {
+                    for (code, want) in [(16u16, &out), (38, &lock)] {
+                        let mut st = InputState::new(100, 100);
+                        profile(choice, swap, apple);
+                        send(&mut st, ctl, 1);
+                        send(&mut st, cmd, 1);
+                        let first = send(&mut st, code, 1);
+                        let repeat = send(&mut st, code, 2);
+                        send(&mut st, code, 0);
+                        send(&mut st, cmd, 0);
+                        send(&mut st, ctl, 0);
+                        let what = format!("choice {choice:?} swap {swap:?} apple {apple} cmd {cmd} ctrl {ctl} key {code}");
+                        assert_eq!(&first == want, expect, "{what}: {first:?}");
+                        if code == 16 {
+                            assert!(!first.contains(&Event::Fn(crate::fnkeys::FnKey::Lock, true)), "{what}: Q never locks");
+                        } else {
+                            assert!(!first.contains(&Event::Fn(crate::fnkeys::FnKey::SignOut, true)), "{what}: L never signs out");
+                        }
+                        assert!(!repeat.iter().any(|e| matches!(e, Event::Fn(crate::fnkeys::FnKey::Lock | crate::fnkeys::FnKey::SignOut, true))), "{what}: a held key does not act again");
+                    }
+                }
+            }
+        }
         profile("pc", None, false);
     }
 

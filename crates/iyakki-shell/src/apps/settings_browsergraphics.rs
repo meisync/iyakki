@@ -5,6 +5,7 @@
 //! time the engine starts. Only administrators change it (it is a device setting); everybody sees it.
 
 use super::*;
+use crate::safeclamp::SafeClamp;
 use iyakki_agent::webgraphics;
 
 impl SettingsApp {
@@ -55,6 +56,23 @@ impl SettingsApp {
         }
         y += 58.0 * s;
         y + 6.0 * s - y0
+    }
+
+    /// The arrow, Page, Home and End keys scroll the Browser page (it is taller than a small window). True when the key was one of these.
+    pub(super) fn browser_scroll_key(&mut self, k: &Key) -> bool {
+        let s = self.nav_s.max(0.5);
+        let page = (self.bh.page_h.max(120.0)) * 0.85;
+        let to = match k {
+            Key::Up => self.bh.scroll - 40.0 * s,
+            Key::Down => self.bh.scroll + 40.0 * s,
+            Key::PageUp => self.bh.scroll - page,
+            Key::PageDown => self.bh.scroll + page,
+            Key::Home => 0.0,
+            Key::End => self.bh.max,
+            _ => return false,
+        };
+        self.bh.scroll = to.clamp_safe(0.0, self.bh.max);
+        true
     }
 
     /// `g` changes the choice (Automatic, Software, Hardware), `t` tries the card again. True when the key was one of these.

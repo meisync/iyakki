@@ -83,6 +83,9 @@ impl Supplicant {
         if self.last_replay.is_some_and(|l| replay <= l) {
             return None; // replay protection: only ever go up
         }
+        if info & 0x08 == 0 {
+            return self.on_group(b, info, replay, dlen);
+        }
         if !has_mic {
             // message 1
             self.anonce.copy_from_slice(&b[17..49]);
@@ -120,5 +123,33 @@ impl Supplicant {
         self.last_replay = Some(replay);
         self.installed = Some((ptk.tk, g.try_into().ok()?, gid));
         Some(self.frame(0x030a, replay, &[0u8; 32], &[]))
+    }
+
+    /// Group message 1: verify the MIC, unwrap the group key, install it and answer with group message 2.
+    fn on_group(&mut self, b: &[u8], info: u16, replay: u64, dlen: usize) -> Option<Vec<u8>> {
+        let ptk = self.ptk.clone()?;
+        self.installed?; // the 4-way handshake must have finished
+        if info & 0x100 == 0 || mic_of(&ptk.kck, &b[..99 + dlen]) != b[81..97] {
+            return None;
+        }
+        let kd = keywrap::unwrap(&ptk.kek, &b[99..99 + dlen])?;
+        let mut i = 0;
+        let mut gtk = None;
+        while i + 2 <= kd.len() {
+            let (t, l) = (kd[i], kd[i + 1] as usize);
+            if t == 0xdd && l == 0 {
+                break;
+            }
+            let e = kd.get(i + 2..i + 2 + l)?;
+            if t == 0xdd && l == 22 && e[..4] == [0, 0x0f, 0xac, 1] {
+                gtk = Some((e[4] & 3, e[6..22].to_vec()));
+            }
+            i += 2 + l;
+        }
+        let (gid, g) = gtk?;
+        self.last_replay = Some(replay);
+        let (tk, _, _) = self.installed?;
+        self.installed = Some((tk, g.try_into().ok()?, gid));
+        Some(self.frame(0x0302, replay, &[0u8; 32], &[]))
     }
 }

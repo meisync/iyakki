@@ -53,6 +53,8 @@ pub struct AgentHost {
     pub(super) cam_runs: super::camera::CamRuns,
     /// Which flows may send outside messages, and the cool-down, see `channel_switch.rs`.
     pub chan: super::channel_switch::ChannelSwitch,
+    /// Quiet hours, held messages and escalation of the outside messages, see `channel_policy.rs`.
+    pub msg_policy: super::channel_policy::PolicyBook,
 }
 
 /// A zone for cron triggers, from the system's zone files.
@@ -115,6 +117,7 @@ impl AgentHost {
             browser_sessions: Default::default(),
             cam_runs: Default::default(),
             chan: super::channel_switch::ChannelSwitch::new(data),
+            msg_policy: super::channel_policy::PolicyBook::new(data),
         }
     }
 
@@ -314,8 +317,36 @@ impl Host for AgentHost {
                 self.local_exec(req)
             }
             iyakki_flow::RunnerKind::K3sJob => self.k3s_exec(req),
-            iyakki_flow::RunnerKind::Remote => Err(NodeError::config("no remote runner is configured (the remote runner is planned)")),
+            iyakki_flow::RunnerKind::Remote => Err(NodeError::config("a single command does not run on another machine; run the whole flow on another IYAKKI with the remote runner instead")),
         }
+    }
+
+    fn remote_flow(&self, req: &iyakki_flow::host::RemoteFlowRequest, cancel: &Cancel) -> Result<iyakki_flow::host::RemoteFlowResult, NodeError> {
+        use super::remote::{run_flow, RemoteTarget, RunOptions};
+        let m = super::machines::Machines::new(&self.data).get(&req.machine).ok_or_else(|| NodeError::config(format!("there is no saved machine named `{}` (remote_machines lists them)", req.machine)))?;
+        let host = host_of(&m.url);
+        if host.is_empty() || !self.policy.allows_host(&host) {
+            return Err(NodeError::config(format!("your account may not reach {host}")));
+        }
+        let token = self.secret(&m.token).map_err(NodeError::config)?;
+        let target = RemoteTarget::new(&m.url, zeroize::Zeroizing::new(token)).map_err(NodeError::config)?;
+        let up = (self.upstream)(&HttpOptions { timeout: Duration::from_secs(30), ..Default::default() }).map_err(NodeError::config)?;
+        let opts = RunOptions { wait: Duration::from_secs(req.wait_s.clamp(1, 3600)), poll: Duration::from_secs(2) };
+        let sleep = |d: Duration| {
+            let end = std::time::Instant::now() + d;
+            while std::time::Instant::now() < end && !cancel.is_cancelled() {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        };
+        let r = run_flow(up.as_ref(), &target, &req.flow, &req.inputs, &opts, &|| cancel.is_cancelled(), &sleep).map_err(|e| {
+            self.audit_to("flow.remote", &format!("{}/{} {} {} -> {}", req.run_id, req.node_id, req.machine, req.flow, clip(&e, 120)));
+            NodeError::new(e)
+        })?;
+        if cancel.is_cancelled() {
+            return Err(NodeError::cancelled());
+        }
+        self.audit_to("flow.remote", &format!("{}/{} {} {} -> {} {}", req.run_id, req.node_id, req.machine, req.flow, r.run, r.status));
+        Ok(iyakki_flow::host::RemoteFlowResult { run: r.run, status: r.status, ended: r.ended, waiting: r.waiting, error: r.error, steps: r.steps })
     }
 
     fn cli_info(&self, id: &str) -> Option<CliInfo> {
@@ -379,7 +410,9 @@ impl Host for AgentHost {
             self.svc.browser.end_run(&self.user, run);
             return Err(NodeError::cancelled());
         }
+        let guard = crate::pendingplus::WorkGuard::start(&crate::pending::Ledger::open(&self.svc.dir().join("pending"), &self.user), crate::pending::Source::Browser, &format!("{}/{}", req.run_id, req.node_id), &format!("browser steps of a flow ({} steps)", steps.len()), "");
         let rep = crate::browserrun::run_steps(&actor, "flow", &steps, &o);
+        guard.finish(rep.passed(), if rep.passed() { "the browser steps passed" } else { "the browser steps failed" });
         let snapshot = self.svc.browser.last_snapshot(&self.user);
         self.svc.browser.end_run(&self.user, run);
         self.audit_to("flow.browser", &format!("{}/{} {} steps on {}: {}", req.run_id, req.node_id, steps.len(), req.allow_domains.join(","), if rep.passed() { "passed" } else { "failed" }));
@@ -537,6 +570,20 @@ impl Host for AgentHost {
         self.send_through_channels(n, c)
     }
 
+    fn tick(&self) {
+        self.tick_channels();
+    }
+
+    fn issue_run_token(&self, run_id: &str) -> Option<String> {
+        super::CLOUD_RUN_TOKEN.get().and_then(|h| h(run_id))
+    }
+
+    fn end_run_token(&self, run_id: &str) {
+        if let Some(h) = super::CLOUD_RUN_END.get() {
+            h(run_id);
+        }
+    }
+
     fn secret_for_run(&self, run: &iyakki_flow::host::RunSecretCx, name: &str) -> Result<String, String> {
         if let Some(answer) = super::CLOUD_SECRET.get().and_then(|h| h(&self.user, run, name)) {
             return answer;
@@ -564,8 +611,13 @@ impl Host for AgentHost {
     fn propose_patch(&self, req: &HealRequest, cancel: &Cancel) -> Result<HealProposal, String> {
         let hist = vec![Message::system("You repair failed steps of automated workflows. You reply with one JSON object and nothing else."), Message::user(req.context.clone())];
         let tokens_in = crate::agent::estimate_tokens(&hist);
-        let text = self.ask_model(hist, 120_000, cancel, None).map_err(|e| e.message)?;
+        // the agent profile may name a model (`provider/model`) and a time limit for this try
+        let chosen = req.model.split_once('/').map(|(p, m)| crate::settings::ModelChoice { provider: p.trim().to_string(), model: m.trim().to_string() }).filter(|c| !c.provider.is_empty() && !c.model.is_empty());
+        let backend = chosen.clone().map(|c| self.svc.chat_backend_for(c));
+        let timeout_ms = if req.timeout_secs > 0 { req.timeout_secs.min(1800) * 1000 } else { 120_000 };
+        let text = self.ask_model(hist, timeout_ms, cancel, backend).map_err(|e| e.message)?;
         let (provider, model, price) = self.chat_info();
+        let (provider, model) = chosen.map_or((provider, model), |c| (c.provider, c.model));
         let out_tokens = text.len() as u64 / 4;
         self.svc.usage.record(&self.user, &provider, &model, tokens_in, out_tokens);
         let (diagnosis, patch) = iyakki_flow::heal::parse_proposal(&text)?;

@@ -20,10 +20,15 @@ pub struct Machine {
     pub cores: usize,
 }
 
-/// Read the machine (`/proc/meminfo`, the data volume's free space, the processor count).
+/// Read the machine through the core API: memory, the data volume's free space, the processor count.
+pub fn machine_os(os: &dyn iyakki_core_api::Os, data: &Path) -> Machine {
+    let m = crate::memgate::read_mem_os(os);
+    Machine { mem_total: m.total, mem_available: m.available, disk_free: os.disks().space(&data.to_string_lossy()).map(|s| s.0).unwrap_or(0), cores: os.sysinfo().cpu_count().map(|n| n as usize).unwrap_or(2) }
+}
+
+/// [`machine_os`] on this machine, for code that has no `AppCx` (the shell starting up).
 pub fn machine(data: &Path) -> Machine {
-    let m = crate::memgate::read_mem_now();
-    Machine { mem_total: m.total, mem_available: m.available, disk_free: iyakki_agent::sharedsite::statvfs_free(data).unwrap_or(0), cores: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2) }
+    machine_os(&iyakki_core_local::LocalOs::system(), data)
 }
 
 /// The cache sizes for this machine and choice.

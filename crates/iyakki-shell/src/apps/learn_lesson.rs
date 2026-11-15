@@ -373,6 +373,7 @@ impl LearnApp {
             Key::Char('d') if !generating => self.regenerate(cx, Some(1)),
             Key::Char('g') if has && !generating => self.ask_regen(),
             Key::Char('r') => self.read_aloud(cx),
+            Key::Char('p') if has && !generating => self.export_pdf(cx),
             other => {
                 self.list.key(other);
             }

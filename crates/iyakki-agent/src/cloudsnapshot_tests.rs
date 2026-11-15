@@ -531,3 +531,47 @@ fn the_command_makes_and_uses_key_files_and_refuses_what_it_cannot_do() {
     assert!(run(&["restore", &id, "--data", &d, "--key-file", &kfs, "--to", &to]).unwrap()[0].contains("restored 4 files"));
     assert!(run(&["rekey", &id, "--data", &d]).is_err() && run(&["key-rotate", "--data", &d]).is_err());
 }
+
+#[test]
+fn the_command_keeps_the_snapshot_keys_wrapped_by_a_kms_key_and_migrates_plain_keys_into_it() {
+    let (data, _files) = tenant_with_noise("enc-kms-cli");
+    let d = data.display().to_string();
+    let master = data.join("master.key");
+    std::fs::write(&master, "ab".repeat(32)).unwrap();
+    let ms = master.display().to_string();
+    let run_cli = |args: &[&str]| -> Result<Vec<String>, String> {
+        let mut a: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        a.extend(["--data", &d].map(String::from));
+        let mut out = Vec::new();
+        cli(&a, &mut |l| out.push(l.to_string())).map(|_| out)
+    };
+    // the source names kms but no master key: refused with the reason
+    assert!(run_cli(&["create", "--keys", "kms:tenant/acme"]).unwrap_err().contains("--kms-master-key"));
+    // a setting that is none of file, vault or kms
+    assert!(run_cli(&["create", "--keys", "tape"]).unwrap_err().contains("file, vault or kms"));
+    // file and vault sources need their own options
+    assert!(run_cli(&["create", "--keys", "file"]).unwrap_err().contains("--key-file"));
+    assert!(run_cli(&["create", "--keys", "vault"]).unwrap_err().contains("--vault-key"));
+    // no key yet: nothing is made
+    assert!(run_cli(&["create", "--keys", "kms:tenant/acme", "--kms-master-key", &ms]).unwrap_err().contains("key-rotate"));
+    assert!(run_cli(&["key-rotate", "--keys", "kms:tenant/acme", "--kms-master-key", &ms]).unwrap()[0].contains("wrapped by tenant/acme"));
+    let said = run_cli(&["create", "--keys", "kms:tenant/acme", "--kms-master-key", &ms]).unwrap();
+    assert!(said[0].contains("encrypted with key"), "{said:?}");
+    let ring = data.join("cloud/snapshot-keyring");
+    let stored: Vec<String> = std::fs::read_dir(&ring).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
+    assert!(stored.iter().any(|n| n.ends_with(".wrapped")) && stored.iter().any(|n| n == "snapshot-key.current"), "{stored:?}");
+    // the folder holds only wrapped keys: no file contains a key's hex form
+    for e in std::fs::read_dir(&ring).unwrap() {
+        let t = std::fs::read(e.unwrap().path()).unwrap();
+        assert!(!String::from_utf8_lossy(&t).contains(&"ab".repeat(8)));
+    }
+    let id = list(&data.join("cloud/snapshots"))[0].0.clone();
+    assert!(run_cli(&["verify", &id, "--keys", "kms:tenant/acme", "--kms-master-key", &ms]).unwrap()[0].contains("intact"));
+    // another key reference does not open it
+    assert!(run_cli(&["verify", &id, "--keys", "kms:tenant/other", "--kms-master-key", &ms]).is_err());
+    // a plain key file is copied in, each copy checked, and the source is left as it was
+    let kf = data.join("old.key");
+    run_cli(&["key-new", "--out", &kf.display().to_string()]).unwrap();
+    let said = run_cli(&["keys-migrate", "--keys", "kms:tenant/acme", "--kms-master-key", &ms, "--key-file", &kf.display().to_string()]).unwrap();
+    assert!(said[0].contains("copied 1 key(s)") && kf.exists(), "{said:?}");
+}

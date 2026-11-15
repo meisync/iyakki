@@ -388,3 +388,37 @@ fn detect_automatically_is_opt_in_applies_the_detected_zone_and_a_hand_picked_zo
     assert!(!zone_of(&cx2).zone_auto);
 }
 
+
+#[test]
+fn a_form_a_picker_and_a_question_over_settings_are_announced_by_their_own_words() {
+    let cx = admin("a11y-settings");
+    let mut a = SettingsApp::new(&cx);
+    assert_eq!(a.dialog_title(), None, "no dialog on the page itself");
+    a.modal = Some(Modal::Pick(PickKind::Zone, Picker::new("Time zone (type to search)", vec!["Europe/Berlin".into()])));
+    assert_eq!(a.dialog_title().as_deref(), Some("Time zone (type to search)"));
+    a.modal = Some(Modal::Confirm(ConfirmKind::WizardRun, "Run the setup checks now?".into()));
+    assert_eq!(a.dialog_title().as_deref(), Some("Run the setup checks now?"));
+    a.modal = Some(Modal::Form(FormKind::BundleWizard, Form::new("Install a bundle")));
+    assert_eq!(a.dialog_title().as_deref(), Some("Install a bundle"));
+    a.modal = None;
+    assert_eq!(a.dialog_title(), None);
+}
+
+#[test]
+fn applying_the_host_name_goes_through_the_core_which_asks_and_the_machine_is_the_fakes() {
+    use iyakki_core_fake::FakeOs;
+    let mut cx = admin("hn-core");
+    let os = Arc::new(FakeOs::new());
+    cx.os = os.clone();
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx, Tab::HostName);
+    press(&mut a, &cx, 'e');
+    clear_field(&mut a, &cx);
+    typ(&mut a, &cx, "kitchen-mac");
+    key(&mut a, &cx, Key::Enter);
+    assert!(os.hardware_fake().calls().is_empty(), "typing changes nothing");
+    press(&mut a, &cx, 'y');
+    assert_eq!(os.hardware_fake().calls(), vec!["set_hostname(kitchen-mac)".to_string()]);
+    // the fake machine has no system.conf to keep the name in ("Could not save"); the change itself reached the core first
+    assert!(!status(&a).contains("not applied now"), "{}", status(&a));
+}

@@ -154,3 +154,38 @@ fn the_page_draws_at_four_sizes() {
         assert!(g.hits.iter().all(|hh| hh.rect.x + hh.rect.w <= w as f32 + 1.0), "{w}x{h}");
     }
 }
+
+#[test]
+fn an_administrator_sets_and_clears_the_default_layout_for_new_accounts_and_a_plain_user_cannot() {
+    let cx = user("hl4");
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx);
+    key(&mut a, &cx, Key::Char('c'));
+    assert!(!a.has_modal() && status(&a).contains("No default"), "{}", status(&a));
+    key(&mut a, &cx, Key::Char('n'));
+    typ(&mut a, &cx, "Games");
+    key(&mut a, &cx, Key::Enter);
+    key(&mut a, &cx, Key::Char('d'));
+    assert!(a.has_modal());
+    key(&mut a, &cx, Key::Char('n'));
+    assert!(!Layout::has_default(cx.services.dir()), "any other key cancels");
+    key(&mut a, &cx, Key::Char('d'));
+    key(&mut a, &cx, Key::Char('y'));
+    assert!(Layout::has_default(cx.services.dir()) && status(&a).contains("default for new accounts"), "{}", status(&a));
+    // a new account starts from it; the administrator's own file is not changed by it
+    assert_eq!(Layout::load(cx.services.dir(), "brand-new").groups[0].label, "Games");
+    key(&mut a, &cx, Key::Char('c'));
+    key(&mut a, &cx, Key::Char('y'));
+    assert!(!Layout::has_default(cx.services.dir()));
+    assert!(Layout::load(cx.services.dir(), "brand-new").is_default());
+    // a plain user is refused
+    let mut cx = user("hl5");
+    cx.session.role = Role::User;
+    cx.session.policy = Role::User.template();
+    cx.session.user = "alice".into();
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx);
+    key(&mut a, &cx, Key::Char('d'));
+    assert!(!a.has_modal() && status(&a).contains("administrator"), "{}", status(&a));
+    assert!(!Layout::has_default(cx.services.dir()));
+}

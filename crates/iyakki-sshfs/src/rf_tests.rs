@@ -290,7 +290,7 @@ fn ssh_rig(tag: &str, client_key: Option<&crate::sshkey::KeyPair>) -> SshRig {
             let _ = s.set_read_timeout(Some(Duration::from_millis(100)));
             let (g, h, st) = (g2.clone(), h2.clone(), s2.clone());
             std::thread::spawn(move || {
-                let srv = Server { host_key: &h, gate: &*g, peer: "127.0.0.1".parse().unwrap() };
+                let srv = Server { host_key: &h, gate: &*g, ec_host: None, peer: "127.0.0.1".parse().unwrap() };
                 serve(s, &srv, st);
             });
         }
@@ -873,3 +873,113 @@ fn ftp_to_strict(rig: &FtpRig, pin: &str) -> Result<rf_ftp::FtpFs, rf_ftp::FtpEr
     rf_ftp::connect("localhost", rig.port, "amy", "hunter2", true, &|fp| fp == pin, stop())
 }
 
+
+// ====================================================================== against a real OpenSSH sshd
+
+/// A real `sshd` of the machine, started as the current person on a loopback port with a host key and an authorised key made for this
+/// test (key login only, the `internal-sftp` subsystem). `None` where there is no `sshd`/`ssh-keygen` or it cannot start as a plain
+/// user (the test then says so and passes: it is a check against the real program, not a fake).
+struct RealSshd {
+    child: std::process::Child,
+    port: u16,
+    host_fp: String,
+    user: String,
+    dir: PathBuf,
+}
+
+impl Drop for RealSshd {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn real_sshd(tag: &str, client: &crate::sshkey::KeyPair) -> Option<RealSshd> {
+    let sshd = ["/usr/sbin/sshd", "/usr/local/sbin/sshd", "/opt/homebrew/sbin/sshd"].iter().find(|p| std::path::Path::new(p).exists())?;
+    let dir = tmp(tag);
+    let keygen = std::process::Command::new("ssh-keygen").args(["-q", "-t", "ed25519", "-N", "", "-f"]).arg(dir.join("host")).status().ok()?;
+    if !keygen.success() {
+        return None;
+    }
+    let host_pub = std::fs::read_to_string(dir.join("host.pub")).ok()?;
+    let blob = crate::sshkey::unb64(host_pub.split_whitespace().nth(1)?)?;
+    std::fs::write(dir.join("authorized_keys"), format!("{}\n", client.public_line())).ok()?;
+    let port = TcpListener::bind("127.0.0.1:0").ok()?.local_addr().ok()?.port();
+    let cfg = format!(
+        "Port {port}\nListenAddress 127.0.0.1\nHostKey {d}/host\nAuthorizedKeysFile {d}/authorized_keys\nPidFile {d}/pid\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPubkeyAuthentication yes\nStrictModes no\nSubsystem sftp internal-sftp\nLogLevel ERROR\n",
+        d = dir.display()
+    );
+    std::fs::write(dir.join("sshd_config"), cfg).ok()?;
+    let child = std::process::Command::new(sshd).args(["-D", "-e", "-f"]).arg(dir.join("sshd_config")).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().ok()?;
+    let mut me = RealSshd { child, port, host_fp: crate::sshkey::fingerprint_of_blob(&blob), user: String::new(), dir };
+    let t0 = Instant::now();
+    while TcpStream::connect(("127.0.0.1", port)).is_err() {
+        if t0.elapsed() > Duration::from_secs(5) || me.child.try_wait().ok()?.is_some() {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    me.user = String::from_utf8_lossy(&std::process::Command::new("id").arg("-un").output().ok()?.stdout).trim().to_string();
+    Some(me)
+}
+
+#[test]
+fn the_sftp_client_works_against_a_real_openssh_sshd_lists_transfers_resumes_and_refuses_what_it_should() {
+    let k = crate::sshkey::KeyPair::from_seed([21; 32], "m7");
+    let Some(srv) = real_sshd("realsshd", &k) else {
+        eprintln!("skipped: no usable OpenSSH sshd/ssh-keygen on this machine (needs to start as a plain user)");
+        return;
+    };
+    let work = srv.dir.join("work");
+    std::fs::create_dir_all(work.join("sub")).unwrap();
+    std::fs::write(work.join("a.txt"), "alpha").unwrap();
+    let w = work.display().to_string();
+    let fp = srv.host_fp.clone();
+    let ok = move |kind: &str, f: &str| kind == "ssh-ed25519" && f == fp;
+    let connect = |key: Option<&crate::sshkey::KeyPair>, pw: Option<&str>| rf_ssh::connect(tcp_to(srv.port), &srv.user, pw, key, &ok, stop());
+    let mut fs = SftpFs::start(connect(Some(&k), None).unwrap_or_else(|e| panic!("key login to a real sshd: {e}"))).unwrap();
+    // list, make, rename, size, remove
+    let (_, mut entries) = fs.list(&w).unwrap();
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    assert_eq!(entries.iter().map(|e| (e.name.as_str(), e.is_dir)).collect::<Vec<_>>(), vec![("a.txt", false), ("sub", true)]);
+    assert_eq!(entries[0].size, 5);
+    assert!(entries[0].modified > 0 && entries[0].perms.len() == 9, "{:?}", entries[0]);
+    fs.mkdir(&format!("{w}/made")).unwrap();
+    assert!(work.join("made").is_dir());
+    assert!(fs.mkdir(&format!("{w}/made")).is_err(), "a second mkdir is refused by the real server");
+    fs.rename(&format!("{w}/a.txt"), &format!("{w}/b.txt")).unwrap();
+    assert!(work.join("b.txt").exists() && !work.join("a.txt").exists());
+    assert_eq!(fs.size(&format!("{w}/b.txt")).unwrap(), Some(5));
+    assert_eq!(fs.size(&format!("{w}/nothing")).unwrap(), None);
+    fs.remove_file(&format!("{w}/b.txt")).unwrap();
+    fs.remove_dir(&format!("{w}/made")).unwrap();
+    assert!(fs.list(&format!("{w}/nope")).is_err());
+    // a file larger than the window: upload in two parts (resume), download whole and from an offset, cancel
+    let big = pattern(5 * 1024 * 1024 + 123);
+    let first = &big[..1024 * 1024];
+    fs.upload(&format!("{w}/up.part"), 0, &mut &first[..], &mut |_| true).unwrap();
+    assert_eq!(fs.size(&format!("{w}/up.part")).unwrap(), Some(1024 * 1024));
+    let mut rest = &big[1024 * 1024..];
+    fs.upload(&format!("{w}/up.part"), 1024 * 1024, &mut rest, &mut |_| true).unwrap();
+    fs.rename(&format!("{w}/up.part"), &format!("{w}/up.bin")).unwrap();
+    assert_eq!(std::fs::read(work.join("up.bin")).unwrap(), big, "the real server holds exactly what was sent");
+    let mut got = Vec::new();
+    fs.download(&format!("{w}/up.bin"), 0, &mut got, &mut |_| true).unwrap();
+    assert_eq!(got, big);
+    let mut tail = Vec::new();
+    fs.download(&format!("{w}/up.bin"), 2_000_000, &mut tail, &mut |_| true).unwrap();
+    assert_eq!(tail, big[2_000_000..]);
+    let mut n = 0;
+    let e = fs.download(&format!("{w}/up.bin"), 0, &mut Vec::new(), &mut |_| {
+        n += 1;
+        n < 3
+    })
+    .unwrap_err();
+    assert_eq!(e, "cancelled");
+    // identity and login: an unpinned host key ends before any login, an unknown key is an authentication error
+    let e = rf_ssh::connect(tcp_to(srv.port), &srv.user, None, Some(&k), &|_, _| false, stop()).err().unwrap();
+    assert!(matches!(e, SshErr::HostKey { .. }), "{e}");
+    let other = crate::sshkey::KeyPair::from_seed([22; 32], "other");
+    let e = connect(Some(&other), None).err().unwrap();
+    assert!(matches!(e, SshErr::Auth(_)), "{e}");
+}

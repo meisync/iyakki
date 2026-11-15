@@ -28,6 +28,10 @@ pub trait Backend: Send {
     fn remove(&mut self) -> Result<(), BackendError>;
     /// Packets and bytes counted as blocked.
     fn counters(&mut self) -> Result<(u64, u64), BackendError>;
+    /// The counter of every rule of the chain in order (`None`: no counter in that rule). Empty when the backend cannot say.
+    fn rule_counters(&mut self) -> Result<Vec<Option<(u64, u64)>>, BackendError> {
+        Ok(Vec::new())
+    }
 }
 
 /// The kernel's nf_tables through our netlink writer. Loads the few modules it needs first.
@@ -85,6 +89,9 @@ impl Backend for KernelBackend {
     fn counters(&mut self) -> Result<(u64, u64), BackendError> {
         self.sock()?.counters().map_err(conv)
     }
+    fn rule_counters(&mut self) -> Result<Vec<Option<(u64, u64)>>, BackendError> {
+        self.sock()?.rule_counters().map_err(conv)
+    }
 }
 
 /// A stand-in for tests: remembers what was installed and can be told to fail.
@@ -95,6 +102,8 @@ pub struct FakeState {
     pub fail_replace: Option<BackendError>,
     pub fail_remove: Option<BackendError>,
     pub packets: u64,
+    /// What `rule_counters` answers (one entry per rule of the installed chain).
+    pub rule_counters: Vec<Option<(u64, u64)>>,
 }
 
 #[derive(Clone, Default)]
@@ -131,5 +140,8 @@ impl Backend for FakeBackend {
     fn counters(&mut self) -> Result<(u64, u64), BackendError> {
         let s = self.0.lock().unwrap();
         Ok((s.packets, s.packets * 60))
+    }
+    fn rule_counters(&mut self) -> Result<Vec<Option<(u64, u64)>>, BackendError> {
+        Ok(self.0.lock().unwrap().rule_counters.clone())
     }
 }

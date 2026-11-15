@@ -1,0 +1,12 @@
+[package]
+name = "iyakki-edit-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "iyakki-edit for the browser: a WebAssembly module with a small C-style interface (buffer with undo, search, highlighting, line diff). The page loads it; it needs no imports."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+iyakki-edit = { path = "../iyakki-edit" }

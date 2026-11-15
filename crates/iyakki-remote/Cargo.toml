@@ -11,6 +11,7 @@ iyakki-agent.workspace = true
 iyakki-fw.workspace = true
 iyakki-sec.workspace = true
 iyakki-link.workspace = true
+iyakki-client-engine.workspace = true
 iyakki-core-api.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
@@ -25,3 +26,5 @@ iyakki-core-fake.workspace = true
 iyakki-flow.workspace = true
 iyakki-web.workspace = true
 iyakki-sec.workspace = true
+# the window program's end-to-end test (tests/window_browser.rs) drives iyakki-connect against this server
+iyakki-connect = { path = "../iyakki-connect" }

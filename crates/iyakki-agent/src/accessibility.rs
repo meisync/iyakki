@@ -35,11 +35,13 @@ pub struct Access {
     pub sticky_keys: bool,
     /// A key counts only after it was held this long (0 = off, see [`SLOW_CHOICES`]).
     pub slow_keys_ms: u32,
+    /// Say each letter typed into a plain text field (never a field that hides its text); on by default while the reader is on.
+    pub typing_echo: bool,
 }
 
 impl Default for Access {
     fn default() -> Access {
-        Access { screen_reader: false, speak_notices: true, large_pointer: false, big_ring: false, reduce_motion: false, sticky_keys: false, slow_keys_ms: 0 }
+        Access { screen_reader: false, speak_notices: true, large_pointer: false, big_ring: false, reduce_motion: false, sticky_keys: false, slow_keys_ms: 0, typing_echo: true }
     }
 }
 
@@ -56,14 +58,15 @@ impl Access {
     pub fn describe(&self) -> String {
         let on = |b: bool| if b { "on" } else { "off" };
         format!(
-            "screen reader {}; speak notices {}; large pointer {}; big focus ring {}; reduce motion {}; sticky keys {}; slow keys {}",
+            "screen reader {}; speak notices {}; large pointer {}; big focus ring {}; reduce motion {}; sticky keys {}; slow keys {}; typing echo {}",
             on(self.screen_reader),
             on(self.speak_notices),
             on(self.large_pointer),
             on(self.big_ring),
             on(self.reduce_motion),
             on(self.sticky_keys),
-            if self.slow_keys_ms == 0 { "off".to_string() } else { format!("{} ms", self.slow_keys_ms) }
+            if self.slow_keys_ms == 0 { "off".to_string() } else { format!("{} ms", self.slow_keys_ms) },
+            on(self.typing_echo)
         )
     }
 }

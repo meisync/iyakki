@@ -84,7 +84,17 @@ fn main() {
     let (w, h) = std::env::args().nth(2).and_then(|d| d.split_once('x').map(|(a, b)| (a.parse().unwrap_or(1280), b.parse().unwrap_or(720)))).unwrap_or((1280, 720));
     std::fs::create_dir_all(&dir).unwrap();
     let only: Option<String> = std::env::var("ONLY").ok();
+    // the pictures are of the window (desktop mode, whatever this computer's /sys says); `WINDOW=0` takes the machine's own
+    iyakki_agent::cloudmode::set_window_mode(std::env::var("WINDOW").map_or(true, |v| v != "0"));
     let e = env();
+    // THEME=light|high-contrast|dark renders every screen in that theme. It is saved as the person's own choice
+    // rather than forced, because sign-in calls `theme::apply_for` and would otherwise override it.
+    if let Ok(t) = std::env::var("THEME") {
+        let id = iyakki_uikit::theme::ThemeId::from_key(&t);
+        for who in ["root", "amy", "bea", "test"] {
+            iyakki_uikit::theme::save(e.services.dir(), who, id);
+        }
+    }
     // the AI IDE shows this repository as its project, with a fake cluster that has a small shop in it
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     {

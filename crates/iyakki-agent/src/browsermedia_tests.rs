@@ -345,3 +345,23 @@ fn the_camera_the_desktop_uses_is_the_one_that_has_it_on_else_the_last_page_that
         unregister(u);
     }
 }
+
+#[test]
+fn a_test_thread_can_have_a_registry_of_its_own_that_no_other_thread_sees() {
+    let m = BrowserMedia::silent(Policy::allow_all());
+    std::thread::spawn(move || {
+        isolate_for_this_thread();
+        register("iso-test-user", m.clone());
+        assert!(for_user("iso-test-user").is_some(), "this thread sees its own");
+        assert!(!std::thread::spawn(|| for_user("iso-test-user").is_some()).join().unwrap(), "another thread never does");
+        unregister("iso-test-user");
+        assert!(for_user("iso-test-user").is_none());
+    })
+    .join()
+    .unwrap();
+    // a thread that did not isolate still reads (and writes) the process-wide registry as before
+    let n = BrowserMedia::silent(Policy::allow_all());
+    register("iso-test-global", n);
+    assert!(std::thread::spawn(|| for_user("iso-test-global").is_some()).join().unwrap());
+    unregister("iso-test-global");
+}

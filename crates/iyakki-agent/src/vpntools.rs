@@ -130,6 +130,12 @@ fn one_line(r: &crate::vpn_mgr::Row, now: u64) -> String {
 }
 
 impl Tools for VpnTools {
+
+    fn inner_tools(&self) -> Option<&dyn Tools> {
+
+        Some(&*self.inner)
+
+    }
     fn defs(&self) -> Vec<ToolDef> {
         let mut v = self.inner.defs();
         v.retain(|d| !is_vpn_tool(&d.spec.name));

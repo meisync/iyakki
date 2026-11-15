@@ -106,7 +106,7 @@ pub struct Services {
     dir: PathBuf,
     user_vaults: Mutex<HashMap<String, LocalVault>>,
     /// The person signed in at the screen: whose home and vault the vendor coding agents are looked at and started with.
-    agent_user: Mutex<String>,
+    agent_user: Arc<Mutex<String>>,
     /// For model downloads (their progress arrives over time).
     streamer: Mutex<Option<Arc<dyn iyakki_proxy::Streamer>>>,
     /// For model answers read as they are written (waits long for the first byte: a local model may need loading).
@@ -186,6 +186,14 @@ impl Services {
         } else {
             None
         };
+        // every request to Google passes the consent gate of the person signed in (`crate::gemini`): no code path can send without it
+        let agent_user_arc = Arc::new(Mutex::new(String::new()));
+        let who: Arc<dyn Fn() -> String + Send + Sync> = {
+            let a = agent_user_arc.clone();
+            Arc::new(move || a.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone())
+        };
+        let quick: Arc<dyn Upstream> = Arc::new(crate::gemini::GuardedUpstream::new(quick, dir, who.clone()));
+        let slow: Arc<dyn Upstream> = Arc::new(crate::gemini::GuardedUpstream::new(slow, dir, who.clone()));
         let secrets = Secrets::new(system, quick.clone());
         secrets.set_providers(settings.get().secret_providers.clone().into_iter().collect());
         // a cloud instance's common vault (cvault:NAME), when the operator mounted one
@@ -256,7 +264,7 @@ impl Services {
                 slow,
                 dir: dir.into(),
                 user_vaults: Mutex::new(HashMap::new()),
-                agent_user: Mutex::new(String::new()),
+                agent_user: agent_user_arc,
                 streamer: Mutex::new(None),
                 chat_streamer: Mutex::new(None),
                 last_warm_up_ms: std::sync::atomic::AtomicU64::new(0),
@@ -355,23 +363,23 @@ impl Services {
     /// search carries on meanwhile. Returns false when a run is already going or nothing is out of date.
     pub fn reindex_stale_in_background(self: &Arc<Self>) -> bool {
         use std::sync::atomic::Ordering;
-        if self.kb.lock().unwrap().stale_namespaces().is_empty() || self.reindexing.swap(true, Ordering::SeqCst) {
+        if self.kb.lock().unwrap_or_else(std::sync::PoisonError::into_inner).stale_namespaces().is_empty() || self.reindexing.swap(true, Ordering::SeqCst) {
             return false;
         }
         let me = self.clone();
         let spawned = std::thread::Builder::new().name("iyakki-reindex".into()).spawn(move || {
             let (mut done, mut first_err) = (0usize, None::<String>);
-            let stale = me.kb.lock().unwrap().stale_namespaces();
+            let stale = me.kb.lock().unwrap_or_else(std::sync::PoisonError::into_inner).stale_namespaces();
             for ns in stale {
-                match me.kb.lock().unwrap().reindex(&ns) {
+                match me.kb.lock().unwrap_or_else(std::sync::PoisonError::into_inner).reindex(&ns) {
                     Ok(()) => done += 1,
                     Err(e) => {
                         first_err.get_or_insert(format!("{ns}: {e:?}"));
                     }
                 }
             }
-            let id = me.kb.lock().unwrap().embedder_id();
-            *me.reindex_note.lock().unwrap() = Some(match first_err {
+            let id = me.kb.lock().unwrap_or_else(std::sync::PoisonError::into_inner).embedder_id();
+            *me.reindex_note.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(match first_err {
                 None => format!("Documents brought up to date with {id} ({done} collection{}).", if done == 1 { "" } else { "s" }),
                 Some(e) => format!("Some documents could not be brought up to date with {id}: {e}"),
             });
@@ -390,14 +398,14 @@ impl Services {
 
     /// How the last background run ended (for the Settings page).
     pub fn reindex_note(&self) -> Option<String> {
-        self.reindex_note.lock().unwrap().clone()
+        self.reindex_note.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 
     /// Make the Ollama server at `url` (the one started from the CLI tile, or one already running on this machine) available
     /// in Models as `ollama-local`, if it is not there already. The chat model is not changed.
     pub fn use_local_ollama(&self, url: &str) {
         let url = url.trim_end_matches('/');
-        let mut st = self.settings.lock().unwrap();
+        let mut st = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         use crate::providers::Kind;
         // an `ollama-local` that points at the cluster's Ollama is not pulled back to a host one that happens to answer
         let cluster_url = format!(":{}", crate::quickinstall::ollama_cluster::LOCAL_PORT);
@@ -418,7 +426,7 @@ impl Services {
     pub fn use_cluster_ollama(&self, url: &str) {
         use crate::providers::Kind;
         let url = url.trim_end_matches('/');
-        let mut st = self.settings.lock().unwrap();
+        let mut st = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut p = match st.get().provider("ollama-local") {
             Some(p) if p.kind == Kind::Ollama => p.clone(),
             Some(_) => return,
@@ -439,7 +447,7 @@ impl Services {
         let base = crate::lemonade::api_base(base);
         let found = crate::lemonade::Server::Lemonade { base: base.clone(), version: version.map(str::to_string) }.found();
         let same = |u: &str| crate::lemonade::api_base(u) == base || crate::lemonade::origin(u) == crate::lemonade::origin(&base) && crate::lemonade::api_base(u).ends_with("/v1");
-        let mut st = self.settings.lock().unwrap();
+        let mut st = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(p) = st.get().providers.iter().find(|p| p.base_url.as_deref().is_some_and(same)) {
             return format!("{found}; it is already in Models as {}.", p.id);
         }
@@ -467,7 +475,7 @@ impl Services {
         let mut out = Vec::new();
         if let Some(v) = crate::ollama::probe(ollama_port) {
             let url = format!("http://127.0.0.1:{ollama_port}");
-            let had = self.settings.lock().unwrap().get().providers.iter().any(|p| p.kind == crate::providers::Kind::Ollama && p.base_url.as_deref().map(|u| u.trim_end_matches('/')) == Some(url.as_str()));
+            let had = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().providers.iter().any(|p| p.kind == crate::providers::Kind::Ollama && p.base_url.as_deref().map(|u| u.trim_end_matches('/')) == Some(url.as_str()));
             self.use_local_ollama(&url);
             out.push(format!("Ollama found at {url} (version {v}){}", if had { "; it is already in Models." } else { "; it is in Models as ollama-local." }));
         }
@@ -495,7 +503,7 @@ impl Services {
     }
 
     fn refresh_lemonade_at(&self, base: &str) -> Result<(), String> {
-        let id = self.settings.lock().unwrap().get().providers.iter().find(|p| p.kind == crate::providers::Kind::Lemonade && p.base_url.as_deref().is_some_and(|u| crate::lemonade::api_base(u) == crate::lemonade::api_base(base))).map(|p| p.id.clone());
+        let id = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().providers.iter().find(|p| p.kind == crate::providers::Kind::Lemonade && p.base_url.as_deref().is_some_and(|u| crate::lemonade::api_base(u) == crate::lemonade::api_base(base))).map(|p| p.id.clone());
         id.map_or(Ok(()), |id| self.refresh_lemonade(&id).map(|_| ()))
     }
 
@@ -507,7 +515,7 @@ impl Services {
     /// Read a Lemonade provider's typed model list and keep it: the chat models in `models`, the type of each in `model_kinds`.
     pub fn refresh_lemonade(&self, provider: &str) -> Result<Vec<crate::lemonade::Model>, String> {
         let list = self.client_for(provider, true)?.lemonade_catalog()?;
-        let mut st = self.settings.lock().unwrap();
+        let mut st = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(mut cfg) = st.get().provider(provider).cloned() {
             cfg.models = list.iter().filter(|m| m.downloaded && m.kind.chats()).map(|m| m.id.clone()).collect();
             cfg.model_kinds = crate::lemonade::kinds_map(&list);
@@ -518,7 +526,7 @@ impl Services {
 
     /// A Lemonade provider's typed list without waiting on the network: the one last read, else the saved types.
     pub fn lemonade_cached(&self, provider: &str) -> Vec<crate::lemonade::Model> {
-        let Some(cfg) = self.settings.lock().unwrap().get().provider(provider).cloned() else { return vec![] };
+        let Some(cfg) = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().provider(provider).cloned() else { return vec![] };
         if let Some(c) = cfg.base().ok().and_then(|b| crate::lemonade::cached(&crate::lemonade::api_base(&b))) {
             return c;
         }
@@ -530,7 +538,7 @@ impl Services {
 
     /// The downloaded models of one type on every enabled Lemonade provider, as (provider, model).
     pub fn lemonade_models(&self, t: crate::lemonade::ModelType) -> Vec<(String, String)> {
-        let ids: Vec<String> = self.settings.lock().unwrap().get().providers.iter().filter(|p| p.enabled && p.kind == crate::providers::Kind::Lemonade).map(|p| p.id.clone()).collect();
+        let ids: Vec<String> = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().providers.iter().filter(|p| p.enabled && p.kind == crate::providers::Kind::Lemonade).map(|p| p.id.clone()).collect();
         ids.into_iter().flat_map(|id| self.lemonade_cached(&id).into_iter().filter(|m| m.kind == t && m.downloaded).map(move |m| (id.clone(), m.id)).collect::<Vec<_>>()).collect()
     }
 
@@ -541,7 +549,7 @@ impl Services {
 
     /// The picture models of the Lemonade servers that are not downloaded yet (they have to be pulled in Settings -> Models).
     pub fn lemonade_images_missing(&self) -> Vec<crate::lemonade::Model> {
-        let ids: Vec<String> = self.settings.lock().unwrap().get().providers.iter().filter(|p| p.enabled && p.kind == crate::providers::Kind::Lemonade).map(|p| p.id.clone()).collect();
+        let ids: Vec<String> = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().providers.iter().filter(|p| p.enabled && p.kind == crate::providers::Kind::Lemonade).map(|p| p.id.clone()).collect();
         ids.into_iter().flat_map(|id| self.lemonade_cached(&id)).filter(|m| m.kind == crate::lemonade::ModelType::Image && !m.downloaded).collect()
     }
 
@@ -556,14 +564,14 @@ impl Services {
     }
 
     pub fn provider_is_lemonade(&self, provider: &str) -> bool {
-        self.settings.lock().unwrap().get().provider(provider).is_some_and(|p| p.kind == crate::providers::Kind::Lemonade)
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().provider(provider).is_some_and(|p| p.kind == crate::providers::Kind::Lemonade)
     }
 
     /// The picture models of `found` plus the picture models Lemonade servers have but have not downloaded, as choices that say
     /// where they are, whether they are installed, their size and their own size and steps.
     pub fn picture_choices(&self, found: &[(String, String)]) -> Vec<crate::storyillus::Cand> {
         let mut v = self.picture_candidates(found);
-        let ids: Vec<String> = self.settings.lock().unwrap().get().providers.iter().filter(|p| p.enabled && p.kind == crate::providers::Kind::Lemonade).map(|p| p.id.clone()).collect();
+        let ids: Vec<String> = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().providers.iter().filter(|p| p.enabled && p.kind == crate::providers::Kind::Lemonade).map(|p| p.id.clone()).collect();
         for id in ids {
             for m in self.lemonade_cached(&id).into_iter().filter(|m| m.kind == crate::lemonade::ModelType::Image && !m.downloaded) {
                 v.push(crate::storyillus::Cand { remote: self.provider_is_remote(&id), provider: id.clone(), model: m.id, downloaded: false, loaded: false, size_gb: m.size_gb, defaults: m.image_defaults });
@@ -581,26 +589,26 @@ impl Services {
 
     /// Read aloud with a Lemonade text-to-speech model (TALES, chat replies): the speech engine becomes its endpoint.
     pub fn use_lemonade_voice(&self, provider: &str, model: &str, voice: Option<&str>) -> Result<String, String> {
-        let cfg = self.settings.lock().unwrap().get().provider(provider).cloned().ok_or("unknown provider")?;
+        let cfg = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().provider(provider).cloned().ok_or("unknown provider")?;
         let base = cfg.base()?;
         if !self.speech_server_allowed(&base) {
             return Err(format!("{provider} is {}: what is read aloud would be sent there. Say yes to that first.", crate::speechtime::locality(&base).label()));
         }
         let engine = crate::lemonade::tts_engine(&base, model, voice, cfg.key_ref.clone());
         let label = engine.label();
-        self.settings.lock().unwrap().update(|s| s.voice.tts = Some(engine)).map_err(|e| e.to_string())?;
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| s.voice.tts = Some(engine)).map_err(|e| e.to_string())?;
         Ok(format!("Reading voice: {model} on {provider} ({label})."))
     }
 
     /// Listen with a Lemonade whisper model (Settings → Voice speech-to-text).
     pub fn use_lemonade_stt(&self, provider: &str, model: &str) -> Result<String, String> {
-        let cfg = self.settings.lock().unwrap().get().provider(provider).cloned().ok_or("unknown provider")?;
+        let cfg = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().provider(provider).cloned().ok_or("unknown provider")?;
         let base = cfg.base()?;
         if !self.speech_server_allowed(&base) {
             return Err(format!("{provider} is {}: what the microphone hears, and speech whose words are timed, would be sent there. Say yes to that first.", crate::speechtime::locality(&base).label()));
         }
         let engine = crate::lemonade::stt_engine(&base, model, cfg.key_ref.clone());
-        self.settings.lock().unwrap().update(|s| s.voice.stt = Some(engine)).map_err(|e| e.to_string())?;
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| s.voice.stt = Some(engine)).map_err(|e| e.to_string())?;
         Ok(format!("Speech-to-text: {model} on {provider}."))
     }
 
@@ -644,14 +652,14 @@ impl Services {
     /// Days the tool log is kept.
     /// The size cap for media downloads, in bytes.
     pub fn media_download_limit(&self) -> u64 {
-        match self.settings.lock().unwrap().get().media_download_max_mb {
+        match self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().media_download_max_mb {
             0 => crate::mediadl::DEFAULT_MAX_BYTES,
             mb => mb as u64 * (1 << 20),
         }
     }
 
     pub fn tool_log_days(&self) -> u32 {
-        crate::toollog::effective_days(self.settings.lock().unwrap().get().tool_log_days)
+        crate::toollog::effective_days(self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().tool_log_days)
     }
 
     /// A folder of its own for one chat: files the assistant creates for that conversation go here and stay apart
@@ -673,23 +681,23 @@ impl Services {
 
     /// The streaming transport, when one was set (downloads use it).
     pub fn streamer(&self) -> Option<Arc<dyn iyakki_proxy::Streamer>> {
-        self.streamer.lock().unwrap().clone()
+        self.streamer.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone().map(|s| self.guard_streamer(s))
     }
 
     /// The transport model answers are streamed over; without one answers arrive in one piece.
     pub fn set_chat_streamer(&self, s: Arc<dyn iyakki_proxy::Streamer>) {
-        *self.chat_streamer.lock().unwrap() = Some(s);
+        *self.chat_streamer.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(s);
     }
 
     pub fn chat_streamer(&self) -> Option<Arc<dyn iyakki_proxy::Streamer>> {
-        self.chat_streamer.lock().unwrap().clone()
+        self.chat_streamer.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone().map(|s| self.guard_streamer(s))
     }
 
     /// Load the chat model into memory in the background when it is a local Ollama model, so the first question is not slow.
     pub fn warm_up_chat(self: &Arc<Self>) {
         let svc = self.clone();
         let _ = std::thread::Builder::new().name("iyakki-warm".into()).spawn(move || {
-            let Some(c) = svc.settings.lock().unwrap().get().chat.clone() else { return };
+            let Some(c) = svc.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().chat.clone() else { return };
             let reg = crate::startup::global();
             reg.starting("models", &format!("loading the model {}", c.model));
             match svc.client_for(&c.provider, false).and_then(|client| client.warm_up(&c.model)) {
@@ -711,13 +719,13 @@ impl Services {
 
     pub fn set_streamer(&self, s: Arc<dyn iyakki_proxy::Streamer>) {
         self.clis.set_streamer(s.clone());
-        *self.streamer.lock().unwrap() = Some(s);
+        *self.streamer.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(s);
     }
 
     /// Every model of every enabled provider, as (provider, model); the server's own list when it answers, otherwise
     /// the one saved in Settings.
     pub fn all_models(&self) -> Vec<(String, String)> {
-        let providers: Vec<ProviderCfg> = self.settings.lock().unwrap().get().providers.iter().filter(|p| p.enabled).cloned().collect();
+        let providers: Vec<ProviderCfg> = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().providers.iter().filter(|p| p.enabled).cloned().collect();
         let mut out = Vec::new();
         for p in providers {
             let live = self.client_for(&p.id, true).and_then(|c| c.list_models());
@@ -747,7 +755,7 @@ impl Services {
             None => {
                 let found = self.image_models();
                 found.first().cloned().ok_or_else(|| {
-                    let checked: Vec<String> = self.settings.lock().unwrap().get().providers.iter().filter(|p| p.enabled).map(|p| p.id.clone()).collect();
+                    let checked: Vec<String> = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().providers.iter().filter(|p| p.enabled).map(|p| p.id.clone()).collect();
                     format!("No model that draws pictures was found{}. A picture model such as Qwen-Image, FLUX or Stable Diffusion has to be available on a connected server; I can download one into Ollama if you tell me its name.", if checked.is_empty() { " (no model provider is connected at all)".to_string() } else { format!(" (looked at: {})", checked.join(", ")) })
                 })
             }
@@ -777,12 +785,12 @@ impl Services {
 
     /// Is this provider a server on another computer (not this one)?
     pub fn provider_is_remote(&self, provider: &str) -> bool {
-        self.settings.lock().unwrap().get().provider(provider).and_then(|c| c.base().ok()).is_some_and(|b| crate::speechtime::locality(&b) != crate::speechtime::Locality::ThisComputer)
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().provider(provider).and_then(|c| c.base().ok()).is_some_and(|b| crate::speechtime::locality(&b) != crate::speechtime::Locality::ThisComputer)
     }
 
     /// The first enabled Lemonade provider that is not this computer (a GPU machine, as far as the settings can tell).
     pub fn gpu_lemonade(&self) -> Option<String> {
-        let ids: Vec<String> = self.settings.lock().unwrap().get().providers.iter().filter(|p| p.enabled && p.kind == crate::providers::Kind::Lemonade).map(|p| p.id.clone()).collect();
+        let ids: Vec<String> = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().providers.iter().filter(|p| p.enabled && p.kind == crate::providers::Kind::Lemonade).map(|p| p.id.clone()).collect();
         ids.into_iter().find(|id| self.provider_is_remote(id))
     }
 
@@ -798,29 +806,49 @@ impl Services {
     }
 
     pub fn pull_status(&self) -> Vec<PullStatus> {
-        let mut v: Vec<PullStatus> = self.pulls.lock().unwrap().values().cloned().collect();
+        let mut v: Vec<PullStatus> = self.pulls.lock().unwrap_or_else(std::sync::PoisonError::into_inner).values().cloned().collect();
         v.sort_by(|a, b| (&a.provider, &a.model).cmp(&(&b.provider, &b.model)));
         v
     }
 
     /// Starts downloading `model` into the Ollama server `provider` and returns at once; `pull_status` follows it.
     pub fn pull_model(self: &Arc<Self>, provider: &str, model: &str) -> Result<(), String> {
+        self.pull_model_for("", provider, model)
+    }
+
+    /// Like [`Services::pull_model`], and the download is one piece of waiting work in the person's pending ledger (`user` empty: not
+    /// recorded), so the assistant that waits for it is woken when it ends.
+    pub fn pull_model_for(self: &Arc<Self>, user: &str, provider: &str, model: &str) -> Result<(), String> {
         if !crate::models::valid_pull_name(model) {
             return Err("that is not a model name Ollama can download".into());
         }
         let client = self.client_for(provider, false)?;
         let (url, headers, body) = client.pull_request(model)?;
-        let streamer = self.streamer.lock().unwrap().clone().ok_or("no network connection is set up for downloads")?;
+        let streamer = self.streamer.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone().ok_or("no network connection is set up for downloads")?;
         let key = format!("{provider}/{model}");
         {
-            let mut p = self.pulls.lock().unwrap();
+            let mut p = self.pulls.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if p.get(&key).is_some_and(|s| !s.done && s.error.is_none()) {
                 return Err(format!("{model} is already downloading"));
             }
             p.insert(key.clone(), PullStatus { provider: provider.into(), model: model.into(), status: "starting".into(), completed: 0, total: 0, done: false, error: None });
         }
         let (me, provider, model) = (self.clone(), provider.to_string(), model.to_string());
-        std::thread::Builder::new().name("iyakki-pull".into()).spawn(move || me.run_pull(&key, &provider, &model, &*streamer, &url, &headers, &body)).map_err(|e| e.to_string())?;
+        let guard = (!user.is_empty()).then(|| crate::pendingplus::WorkGuard::start(&crate::pending::Ledger::open(&self.dir().join("pending"), user), crate::pending::Source::Pull, &key, &format!("download of {model}"), ""));
+        std::thread::Builder::new()
+            .name("iyakki-pull".into())
+            .spawn(move || {
+                me.run_pull(&key, &provider, &model, &*streamer, &url, &headers, &body);
+                if let Some(g) = guard {
+                    let st = me.pulls.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key).cloned();
+                    match st {
+                        Some(s) if s.done && s.error.is_none() => g.finish(true, "downloaded"),
+                        Some(s) => g.finish(false, &s.error.unwrap_or_else(|| "the download did not finish".into())),
+                        None => g.finish(false, "the download did not finish"),
+                    }
+                }
+            })
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -828,11 +856,11 @@ impl Services {
     fn run_pull(&self, key: &str, provider: &str, model: &str, streamer: &dyn iyakki_proxy::Streamer, url: &str, headers: &[(String, String)], body: &[u8]) {
         use std::io::BufRead;
         let set = |f: &dyn Fn(&mut PullStatus)| {
-            if let Some(s) = self.pulls.lock().unwrap().get_mut(key) {
+            if let Some(s) = self.pulls.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get_mut(key) {
                 f(s);
             }
         };
-        let lemonade = self.settings.lock().unwrap().get().provider(provider).is_some_and(|p| p.kind == crate::providers::Kind::Lemonade);
+        let lemonade = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().provider(provider).is_some_and(|p| p.kind == crate::providers::Kind::Lemonade);
         let fail = |e: String| set(&|s: &mut PullStatus| s.error = Some(if lemonade { format!("the download of `{model}` into Lemonade failed: {e}") } else { crate::models::explain_pull_error(model, &e) }));
         let head = match streamer.post(url, headers, body) {
             Ok(h) => h,
@@ -872,11 +900,11 @@ impl Services {
             return fail(if status >= 400 { format!("HTTP {status}") } else { "the server stopped answering before the download finished".into() });
         }
         // the new model goes into the provider's list so it can be chosen and found
-        let lemonade = self.settings.lock().unwrap().get().provider(provider).is_some_and(|p| p.kind == crate::providers::Kind::Lemonade);
+        let lemonade = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().provider(provider).is_some_and(|p| p.kind == crate::providers::Kind::Lemonade);
         if lemonade {
             let _ = self.refresh_lemonade(provider);
         } else if let Ok(names) = self.client_for(provider, true).and_then(|c| c.list_models()) {
-            let mut st = self.settings.lock().unwrap();
+            let mut st = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(mut cfg) = st.get().provider(provider).cloned() {
                 cfg.models = names;
                 let _ = st.upsert_provider(cfg);
@@ -910,6 +938,12 @@ impl Services {
     }
 
     /// The upstream for long requests (speech, transcription).
+    /// A streaming transport behind the Google consent gate (`crate::gemini`).
+    fn guard_streamer(&self, s: Arc<dyn iyakki_proxy::Streamer>) -> Arc<dyn iyakki_proxy::Streamer> {
+        let a = self.agent_user.clone();
+        Arc::new(crate::gemini::GuardedStreamer::new(s, &self.dir, Arc::new(move || a.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone())))
+    }
+
     pub fn slow_upstream(&self) -> Arc<dyn Upstream> {
         self.slow.clone()
     }
@@ -945,7 +979,7 @@ impl Services {
         let user_state = if LocalVault::exists(&up) {
             match LocalVault::open(&up).and_then(|mut v| v.unlock(&slot, password).map(|_| v)) {
                 Ok(v) => {
-                    self.user_vaults.lock().unwrap().insert(user.into(), v);
+                    self.user_vaults.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(user.into(), v);
                     VaultState::Unlocked
                 }
                 Err(e) => VaultState::Locked(e.to_string()),
@@ -953,7 +987,7 @@ impl Services {
         } else {
             match LocalVault::create(&up, &slot, password) {
                 Ok(v) => {
-                    self.user_vaults.lock().unwrap().insert(user.into(), v);
+                    self.user_vaults.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(user.into(), v);
                     VaultState::Created
                 }
                 Err(e) => VaultState::Locked(e.to_string()),
@@ -984,7 +1018,7 @@ impl Services {
         let slot = format!("user:{user}");
         match LocalVault::open(&up).and_then(|mut v| v.unlock(&slot, password).map(|_| v)) {
             Ok(v) => {
-                self.user_vaults.lock().unwrap().insert(user.into(), v);
+                self.user_vaults.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(user.into(), v);
                 Ok(())
             }
             Err(_) => Err("that password does not open your vault".into()),
@@ -992,7 +1026,7 @@ impl Services {
     }
 
     fn admin_login_system(&self, slot: &str, password: &str) -> VaultState {
-        let mut g = self.secrets.system.lock().unwrap();
+        let mut g = self.secrets.system.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if g.is_none() {
             let p = self.system_path();
             *g = if LocalVault::exists(&p) { LocalVault::open(&p).ok() } else { LocalVault::create(&p, slot, password).ok() };
@@ -1022,7 +1056,7 @@ impl Services {
     pub fn on_logout(&self, user: &str, is_admin: bool) {
         // the encrypted home folder closes with the sign-in (F-STORE-05)
         let _ = crate::enchome::EncHome::on_logout_if_any(&self.dir, user);
-        self.user_vaults.lock().unwrap().remove(user);
+        self.user_vaults.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(user);
         {
             let mut au = self.agent_user.lock().unwrap_or_else(|e| e.into_inner());
             if *au == user {
@@ -1032,11 +1066,12 @@ impl Services {
         self.ext_status.invalidate();
         // key passphrases typed this session and the keys an assistant was allowed to use are forgotten with the sign-in
         crate::gitkeys::shared_session().forget();
-        self.page_snapshot.lock().unwrap().remove(user);
+        self.page_snapshot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(user);
+        crate::devtools_headers::forget_engine_headers(user);
         crate::datatools::forget(user);
         self.browser.on_logout(user);
-        if is_admin && self.settings.lock().unwrap().get().vault.lock_on_admin_logout {
-            if let Some(v) = self.secrets.system.lock().unwrap().as_mut() {
+        if is_admin && self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().vault.lock_on_admin_logout {
+            if let Some(v) = self.secrets.system.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_mut() {
                 v.lock();
             }
         }
@@ -1049,9 +1084,9 @@ impl Services {
         let slot = format!("user:{user}");
         if let Ok(mut v) = LocalVault::open(&self.user_path(user)) {
             let _ = v.change_password(&slot, old, new);
-            self.user_vaults.lock().unwrap().remove(user);
+            self.user_vaults.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(user);
         }
-        if let Some(v) = self.secrets.system.lock().unwrap().as_mut() {
+        if let Some(v) = self.secrets.system.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_mut() {
             if v.has_slot(&slot) {
                 let _ = v.change_password(&slot, old, new);
             }
@@ -1063,7 +1098,7 @@ impl Services {
     pub fn reset_user_vault(&self, user: &str) -> Result<(), String> {
         // an encrypted home keeps its own key: it stays sealed until the recovery key or an administrator slot is used (F-STORE-05)
         crate::enchome::EncHome::note_admin_reset_if_any(&self.dir, user);
-        self.user_vaults.lock().unwrap().remove(user);
+        self.user_vaults.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(user);
         match std::fs::remove_file(self.user_path(user)) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -1072,9 +1107,9 @@ impl Services {
     }
 
     pub fn unlock_with_keyfile(&self) -> bool {
-        let Some(path) = self.settings.lock().unwrap().get().vault.keyfile.clone() else { return false };
+        let Some(path) = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().vault.keyfile.clone() else { return false };
         let Ok(key) = std::fs::read_to_string(&path) else { return false };
-        let mut g = self.secrets.system.lock().unwrap();
+        let mut g = self.secrets.system.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         match g.as_mut() {
             Some(v) if v.has_slot("keyfile") => v.unlock("keyfile", key.trim()).is_ok(),
             _ => false,
@@ -1088,7 +1123,7 @@ impl Services {
         let mut raw = [0u8; 32];
         iyakki_sec::random_fill(&mut raw).map_err(|e| io_err(e.to_string()))?;
         let key: String = raw.iter().map(|b| format!("{b:02x}")).collect();
-        let mut g = self.secrets.system.lock().unwrap();
+        let mut g = self.secrets.system.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let v = g.as_mut().ok_or("the system vault does not exist yet")?;
         if !v.is_unlocked() {
             return Err(VaultError::Locked.to_string());
@@ -1100,45 +1135,45 @@ impl Services {
             e.to_string()
         })?;
         drop(g);
-        self.settings.lock().unwrap().update(|s| s.vault.keyfile = Some(path.into())).map_err(io_err)
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| s.vault.keyfile = Some(path.into())).map_err(io_err)
     }
 
     fn system_state(&self) -> (bool, bool) {
-        let g = self.secrets.system.lock().unwrap();
+        let g = self.secrets.system.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         (g.is_some(), g.as_ref().is_some_and(|v| v.is_unlocked()))
     }
 
     pub fn system_slots(&self) -> Vec<String> {
-        self.secrets.system.lock().unwrap().as_ref().map(|v| v.slot_ids()).unwrap_or_default()
+        self.secrets.system.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().map(|v| v.slot_ids()).unwrap_or_default()
     }
 
     pub fn lock_system(&self) {
-        if let Some(v) = self.secrets.system.lock().unwrap().as_mut() {
+        if let Some(v) = self.secrets.system.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_mut() {
             v.lock();
         }
     }
 
     // secret CRUD — callers enforce who may use which (system: manage_settings; user: own only)
     pub fn system_names(&self) -> Result<Vec<String>, VaultError> {
-        self.secrets.system.lock().unwrap().as_ref().ok_or(VaultError::Locked)?.names()
+        self.secrets.system.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().ok_or(VaultError::Locked)?.names()
     }
     pub fn system_set(&self, name: &str, value: &str) -> Result<(), VaultError> {
-        self.secrets.system.lock().unwrap().as_mut().ok_or(VaultError::Locked)?.set(name, value)
+        self.secrets.system.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_mut().ok_or(VaultError::Locked)?.set(name, value)
     }
     pub fn system_delete(&self, name: &str) -> Result<(), VaultError> {
-        self.secrets.system.lock().unwrap().as_mut().ok_or(VaultError::Locked)?.delete(name)
+        self.secrets.system.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_mut().ok_or(VaultError::Locked)?.delete(name)
     }
     pub fn user_names(&self, user: &str) -> Result<Vec<String>, VaultError> {
-        self.user_vaults.lock().unwrap().get(user).ok_or(VaultError::Locked)?.names()
+        self.user_vaults.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(user).ok_or(VaultError::Locked)?.names()
     }
     pub fn user_set(&self, user: &str, name: &str, value: &str) -> Result<(), VaultError> {
-        self.user_vaults.lock().unwrap().get_mut(user).ok_or(VaultError::Locked)?.set(name, value)
+        self.user_vaults.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get_mut(user).ok_or(VaultError::Locked)?.set(name, value)
     }
     pub fn user_get(&self, user: &str, name: &str) -> Result<zeroize::Zeroizing<String>, VaultError> {
-        self.user_vaults.lock().unwrap().get(user).ok_or(VaultError::Locked)?.get(name)
+        self.user_vaults.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(user).ok_or(VaultError::Locked)?.get(name)
     }
     pub fn user_delete(&self, user: &str, name: &str) -> Result<(), VaultError> {
-        self.user_vaults.lock().unwrap().get_mut(user).ok_or(VaultError::Locked)?.delete(name)
+        self.user_vaults.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get_mut(user).ok_or(VaultError::Locked)?.delete(name)
     }
     /// The person's answer to a secret request: the value goes into their vault under `name`, and the waiting tool is told
     /// only the name. Returns the name stored.
@@ -1178,24 +1213,24 @@ impl Services {
     }
 
     pub fn user_vault_unlocked(&self, user: &str) -> bool {
-        self.user_vaults.lock().unwrap().contains_key(user)
+        self.user_vaults.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains_key(user)
     }
 
     /// Close the person's own vault again without signing out (the decrypted secrets are forgotten); `unlock_user_vault` opens it.
     pub fn lock_user_vault(&self, user: &str) {
-        self.user_vaults.lock().unwrap().remove(user);
+        self.user_vaults.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(user);
     }
 
     // ------------------------------------------------------------ models
 
     /// Push secret-provider settings into the resolver (call after editing them).
     pub fn refresh_secret_providers(&self) {
-        let p = self.settings.lock().unwrap().get().secret_providers.clone();
+        let p = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().secret_providers.clone();
         self.secrets.set_providers(p.into_iter().collect());
     }
 
     pub fn client_for(&self, provider_id: &str, quick: bool) -> Result<ProviderClient, String> {
-        let cfg: ProviderCfg = self.settings.lock().unwrap().get().provider(provider_id).cloned().ok_or_else(|| format!("unknown provider `{provider_id}`"))?;
+        let cfg: ProviderCfg = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().provider(provider_id).cloned().ok_or_else(|| format!("unknown provider `{provider_id}`"))?;
         Ok(ProviderClient::new(cfg, self.secrets.clone(), if quick { self.quick.clone() } else { self.slow.clone() }).with_options_dir(&self.dir))
     }
 
@@ -1260,12 +1295,12 @@ impl Services {
     // ------------------------------------------------------------ voice
 
     pub fn voice_settings(&self) -> VoiceSettings {
-        self.settings.lock().unwrap().get().voice.clone()
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().voice.clone()
     }
 
     /// The person's microphone (Voice tile and Browser): saved in the voice settings and handed to the web engine. Empty is automatic.
     pub fn set_voice_mic(&self, id: &str) -> Result<(), String> {
-        self.settings.lock().unwrap().update(|s| s.voice.mic = id.to_string()).map_err(|e| e.to_string())?;
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| s.voice.mic = id.to_string()).map_err(|e| e.to_string())?;
         self.share_voice_mic();
         Ok(())
     }
@@ -1279,21 +1314,29 @@ impl Services {
 
     /// Settings -> Cloud mode: the administrator's choice (Automatic, On, Off).
     pub fn cloud_setting(&self) -> crate::cloudmode::Setting {
-        self.settings.lock().unwrap().get().cloud
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().cloud
     }
 
     /// Change the Cloud mode setting (callers check that the person may).
     pub fn set_cloud_setting(&self, v: crate::cloudmode::Setting) -> Result<(), String> {
-        self.settings.lock().unwrap().update(|s| s.cloud = v).map_err(|e| e.to_string())
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| s.cloud = v).map_err(|e| e.to_string())
     }
 
     /// Settings -> Network: the person's choice about announcing the device's name (None: the default).
+    pub fn startup_reboot_into_iyakki(&self) -> bool {
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().startup_reboot_into_iyakki
+    }
+
+    pub fn set_startup_reboot_into_iyakki(&self, v: bool) -> Result<(), String> {
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| s.startup_reboot_into_iyakki = v).map_err(|e| e.to_string())
+    }
+
     pub fn announce_name_setting(&self) -> Option<bool> {
-        self.settings.lock().unwrap().get().announce_name
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().announce_name
     }
 
     pub fn set_announce_name(&self, v: Option<bool>) -> Result<(), String> {
-        self.settings.lock().unwrap().update(|s| s.announce_name = v).map_err(|e| e.to_string())
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| s.announce_name = v).map_err(|e| e.to_string())
     }
 
     /// Is the device announcing its name now: the choice, or the default (on, but off in cloud mode).
@@ -1303,34 +1346,34 @@ impl Services {
 
     /// Settings -> Remote access (web): is the desktop to be served to browsers, and on which port (always HTTPS).
     pub fn web_access_on(&self) -> bool {
-        self.settings.lock().unwrap().get().web_access
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().web_access
     }
 
     pub fn web_access_port(&self) -> u16 {
-        crate::webaccess::effective_port(self.settings.lock().unwrap().get().web_port)
+        crate::webaccess::effective_port(self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().web_port)
     }
 
     pub fn set_web_access(&self, on: bool) -> Result<(), String> {
-        self.settings.lock().unwrap().update(|s| s.web_access = on).map_err(|e| e.to_string())
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| s.web_access = on).map_err(|e| e.to_string())
     }
 
     /// The port the person chose (0: the default, 8443).
     pub fn set_web_access_port(&self, port: u16) -> Result<(), String> {
         let port = crate::webaccess::check_port(port)?;
-        self.settings.lock().unwrap().update(|s| s.web_port = port).map_err(|e| e.to_string())
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| s.web_port = port).map_err(|e| e.to_string())
     }
 
     /// Settings: "Show all AI tools" (default off): the AI tools the hardware profile hides are shown as "not recommended".
     pub fn show_all_ai(&self) -> bool {
-        self.settings.lock().unwrap().get().show_all_ai
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().show_all_ai
     }
 
     pub fn set_show_all_ai(&self, v: bool) -> Result<(), String> {
-        self.settings.lock().unwrap().update(|s| s.show_all_ai = v).map_err(|e| e.to_string())
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| s.show_all_ai = v).map_err(|e| e.to_string())
     }
 
     pub fn sound_settings(&self) -> crate::audioout::SoundSettings {
-        self.settings.lock().unwrap().get().sound.clone()
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().sound.clone()
     }
 
     /// Change Settings -> Sound (callers check that the person may). Takes effect for the next sound, and at once for the
@@ -1527,7 +1570,7 @@ impl Services {
     /// Search the local knowledge base and every enabled external backend, merging the ranked
     /// lists with Reciprocal Rank Fusion. Backend failures become warnings, not errors.
     pub fn search(&self, namespaces: &[&str], query: &str, k: usize) -> (Vec<Hit>, Vec<String>) {
-        let mut lists = vec![self.kb.lock().unwrap().search(namespaces, query, k * 2)];
+        let mut lists = vec![self.kb.lock().unwrap_or_else(std::sync::PoisonError::into_inner).search(namespaces, query, k * 2)];
         let (ext, warnings) = self.search_external(query, k);
         lists.extend(ext);
         (fuse(lists, k), warnings)
@@ -1539,7 +1582,7 @@ impl Services {
         let mut lists = Vec::new();
         let mut warnings = Vec::new();
         let (exts, use_ext) = {
-            let s = self.settings.lock().unwrap();
+            let s = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             (s.get().external_rag.iter().filter(|e| e.enabled).map(|e| e.backend.clone()).collect::<Vec<_>>(), s.get().rag.use_external)
         };
         if use_ext {
@@ -1619,23 +1662,23 @@ impl ChatBackend for FixedChat {
 
 impl ChatBackend for DynamicChat {
     fn provider_name(&self) -> String {
-        self.svc.settings.lock().unwrap().get().chat.as_ref().map(|c| c.provider.clone()).unwrap_or_default()
+        self.svc.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().chat.as_ref().map(|c| c.provider.clone()).unwrap_or_default()
     }
 
     fn complete(&self, history: &[Message]) -> Result<String, String> {
-        let choice: Option<ModelChoice> = self.svc.settings.lock().unwrap().get().chat.clone();
+        let choice: Option<ModelChoice> = self.svc.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().chat.clone();
         let c = choice.ok_or("No chat model selected. Open Settings → Models, add a provider and pick a model.")?;
         self.svc.client_for(&c.provider, false)?.chat(&c.model, history)
     }
 
     fn complete_tools(&self, history: &[Message], tools: &[ToolSpec]) -> Result<ModelTurn, String> {
-        let choice: Option<ModelChoice> = self.svc.settings.lock().unwrap().get().chat.clone();
+        let choice: Option<ModelChoice> = self.svc.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().chat.clone();
         let c = choice.ok_or("No chat model selected. Open Settings → Models, add a provider and pick a model.")?;
         self.svc.client_for(&c.provider, false)?.chat_turn(&c.model, history, tools)
     }
 
     fn complete_tools_stream(&self, history: &[Message], tools: &[ToolSpec], on_text: &mut dyn FnMut(&str) -> bool) -> Result<ModelTurn, String> {
-        let choice: Option<ModelChoice> = self.svc.settings.lock().unwrap().get().chat.clone();
+        let choice: Option<ModelChoice> = self.svc.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().chat.clone();
         let c = choice.ok_or("No chat model selected. Open Settings → Models, add a provider and pick a model.")?;
         let client = self.svc.client_for(&c.provider, false)?;
         match self.svc.chat_streamer() {
@@ -1652,7 +1695,7 @@ pub struct DynamicEmbed {
 
 impl DynamicEmbed {
     fn embed_with(svc: &Services, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
-        let choice = svc.settings.lock().unwrap().get().embedding.clone();
+        let choice = svc.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().embedding.clone();
         match choice {
             None => HashEmbed::default().embed(texts),
             Some(c) => {
@@ -1670,7 +1713,7 @@ impl DynamicEmbed {
 impl TextEmbedder for DynamicEmbed {
     fn id(&self) -> String {
         match self.svc.upgrade() {
-            Some(s) => match s.settings.lock().unwrap().get().embedding.clone() {
+            Some(s) => match s.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().embedding.clone() {
                 Some(c) => format!("remote:{}:{}", c.provider, c.model),
                 None => HashEmbed::default().id(),
             },
@@ -2028,6 +2071,29 @@ mod tests {
         assert_eq!(p.base_url.as_deref(), Some(format!("http://127.0.0.1:{port}").as_str()));
     }
 
+    /// Run by hand on a machine that really has Ollama running (`cargo test -p iyakki-agent --lib -- --ignored a_real_ollama`): the
+    /// real server on the usual port is found and added to Models as `ollama-local`. Skips quietly when nothing answers there.
+    #[test]
+    #[ignore = "needs an Ollama running on 127.0.0.1:11434"]
+    fn a_real_ollama_on_the_usual_port_is_found_and_added_to_models() {
+        let up = std::net::TcpStream::connect_timeout(&"127.0.0.1:11434".parse().unwrap(), std::time::Duration::from_millis(500)).is_ok();
+        if !up {
+            eprintln!("no Ollama on 127.0.0.1:11434: skipped");
+            return;
+        }
+        let (s, _, _) = svc("detectrealollama", none);
+        s.detect_local_ollama_at(11434);
+        for _ in 0..200 {
+            if s.settings.lock().unwrap().get().providers.iter().any(|p| p.id == "ollama-local") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        let st = s.settings.lock().unwrap();
+        let p = st.get().providers.iter().find(|p| p.id == "ollama-local").expect("the real Ollama was added to Models");
+        assert_eq!(p.base_url.as_deref(), Some("http://127.0.0.1:11434"));
+    }
+
     #[test]
     fn the_device_watch_reads_the_neighbour_table_in_the_background_and_reports_strangers_once() {
         let (s, _, _) = svc("devwatch", none);
@@ -2050,7 +2116,13 @@ mod tests {
         assert!(s.devwatch.take_fresh().is_empty());
         std::fs::write(&arp, format!("{head}{}{}", row("10.0.0.1", "aa:aa:aa:aa:aa:01"), row("10.0.0.9", "bb:bb:bb:bb:bb:09"))).unwrap();
         wait(&|| s.devwatch.untrusted_count() == 1);
-        let fresh = s.devwatch.take_fresh();
+        // the report of a new device and the untrusted count are set by the same poll, but take_fresh is a separate call: collect (wall clock) until it has the stranger
+        let mut fresh = s.devwatch.take_fresh();
+        let t0 = std::time::Instant::now();
+        while fresh.is_empty() && t0.elapsed() < std::time::Duration::from_secs(10) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            fresh = s.devwatch.take_fresh();
+        }
         assert_eq!(fresh.len(), 1);
         assert_eq!(fresh[0].mac, "bb:bb:bb:bb:bb:09");
         std::thread::sleep(std::time::Duration::from_millis(150));

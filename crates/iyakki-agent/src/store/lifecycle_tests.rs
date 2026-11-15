@@ -839,3 +839,164 @@ fn a_copy_the_private_store_yanked_is_marked_withdrawn_and_listed_so_and_can_be_
     w.f.store.remove_item(&w.f.svc, &policy, "root", &lives, &l, &opts, &|_, _| {}).unwrap();
     assert!(w.f.store.records().get(&record_key("skill", &Scope::Shared, "meeting-notes")).is_none());
 }
+
+// ---------------------------------------------------------------------------------------- core capabilities (docs/development/CORE-ACCESS-MODEL.md)
+
+#[test]
+fn app_json_takes_a_core_capability_list_refuses_unknown_names_and_keeps_the_old_object_form() {
+    use super::tile::TileManifest;
+    let ok = TileManifest::parse(r#"{"id":"cam-app","name":"Cam","capabilities":[{"name":"camera.view","why":"show the live view"},{"name":"notify.receive","why":"show new mail","param":"source=mail"}]}"#).unwrap();
+    assert_eq!(ok.core_caps.len(), 2);
+    assert!(!ok.caps.storage);
+    let round = TileManifest::parse(&ok.to_json().to_string()).unwrap();
+    assert_eq!(round.core_caps, ok.core_caps);
+    let e = TileManifest::parse(r#"{"id":"cam-app","name":"Cam","capabilities":[{"name":"camera.peek","why":"x"}]}"#).unwrap_err();
+    assert!(e.contains("unknown capability") && e.contains("camera.view"), "{e}");
+    assert!(TileManifest::parse(r#"{"id":"cam-app","name":"Cam","capabilities":[{"name":"notify"}]}"#).is_err(), "a reason is required");
+    assert!(TileManifest::parse(r#"{"id":"cam-app","name":"Cam","capabilities":[{"name":"notify","why":"x","extra":1}]}"#).is_ok(), "an unknown field of an entry is kept (finding F-1), only unknown names are refused");
+    let old = TileManifest::parse(r#"{"id":"cam-app","name":"Cam","capabilities":{"storage":true}}"#).unwrap();
+    assert!(old.caps.storage && old.core_caps.is_empty());
+}
+
+#[test]
+fn the_install_card_lists_core_capabilities_asks_first_and_records_who_approved_what_for_which_version() {
+    use iyakki_core_api::appcaps::ApprovalBook;
+    let mut w = world("life-core-caps");
+    let m1 = m(&[]);
+    let v1 = tile_package(&w, "1.0.0", r#"[{"name":"camera.view","why":"show the live view"},{"name":"camera.record","why":"save clips"}]"#, &m1);
+    w.publish("tile", "calc", "1.0.0", &v1, &m1);
+    let l = w.loaded();
+    let a = admin();
+    let items = w.f.store.items(&w.f.svc, &a, &l);
+    let item = items.iter().find(|i| i.entry.name == "calc").unwrap();
+    let r = w.f.store.review_item(&w.f.svc, &a, item, &l, &NoFetch, Scope::Shared, &[]).unwrap();
+    assert_eq!(r.core_lines.len(), 2);
+    assert!(r.core_lines.iter().all(|c| c.is_new));
+    assert!(r.core_lines.iter().any(|c| c.name == "camera.record" && c.hard_ask));
+    assert!(r.is_sensitive(), "a hard ask makes the card sensitive");
+    assert!(r.summary().contains("device and system access") && r.summary().contains("live view") && r.summary().contains("every use asks"), "{}", r.summary());
+    // no answer, no install, no record
+    let none = Confirm { permissions: false, warnings: true };
+    assert!(matches!(w.f.store.install(&w.f.svc, &a, &r, none), Err(super::install::InstallError::NeedsConfirmation(_))));
+    assert!(w.f.store.approval("tile/shared/calc").is_none());
+    // the answer is stored with who, when, version and hash
+    let rec = w.f.store.install(&w.f.svc, &a, &r, Confirm::all()).unwrap();
+    let ap = w.f.store.approval(&rec.key()).unwrap();
+    assert_eq!((ap.who.as_str(), ap.app.as_str(), ap.app_version.as_str(), ap.app_sha256.as_str()), (a.user.as_str(), "calc", "1.0.0", rec.sha256.as_str()));
+    assert_eq!(ap.at, w.f.store.now());
+    assert!(ap.holds("camera.view", None) && ap.holds("camera.record", None) && !ap.holds("microphone.listen", None));
+    assert!(ap.audit_detail().contains("calc 1.0.0") && ap.audit_detail().contains("camera.record"));
+    // an update that asks for the same or less does not ask again
+    let v2 = tile_package(&w, "1.1.0", r#"[{"name":"camera.view","why":"show the live view"}]"#, &m1);
+    w.publish("tile", "calc", "1.1.0", &v2, &m1);
+    let p = w.plan("tile:calc").unwrap();
+    assert!(!p.added.iter().any(|x| x.canonical.starts_with("core:")), "{}", p.summary());
+    let mut audited = Vec::new();
+    let audit = |e: &str, d: &str| audited.push((e.to_string(), d.to_string()));
+    let cell = std::cell::RefCell::new(audit);
+    w.f.store.apply_update(&w.f.svc, &a, &p, Confirm { permissions: false, warnings: true }, &|e, d| (cell.borrow_mut())(e, d)).unwrap();
+    drop(cell);
+    assert!(audited.iter().any(|(e, d)| e == "store.approve" && d.contains("calc 1.1.0")), "{audited:?}");
+    assert_eq!(w.f.store.approval(&rec.key()).unwrap().app_version, "1.1.0");
+    // an update that asks for more is gated and its new line is marked
+    let v3 = tile_package(&w, "1.2.0", r#"[{"name":"camera.view","why":"show the live view"},{"name":"microphone.listen","why":"hear the room"}]"#, &m1);
+    w.publish("tile", "calc", "1.2.0", &v3, &m1);
+    let p = w.plan("tile:calc").unwrap();
+    assert!(p.needs_confirm() && p.added.iter().any(|x| x.canonical == "core:microphone.listen" && x.sensitive), "{}", p.summary());
+    assert!(matches!(w.f.store.apply_update(&w.f.svc, &a, &p, Confirm { permissions: false, warnings: true }, &|_, _| {}), Err(LifeError::NeedsConfirm(_))));
+    w.update("tile:calc", Confirm::all()).unwrap();
+    assert!(w.f.store.approval(&rec.key()).unwrap().holds("microphone.listen", None));
+    // removing the app drops its approval
+    let lives = w.lives();
+    let life = Store::find_life(&lives, "tile:calc").unwrap();
+    w.f.store.remove_item(&w.f.svc, &Role::Admin.template(), "root", &lives, life, &RemoveOpts::default(), &|_, _| {}).unwrap();
+    assert!(w.f.store.approval(&rec.key()).is_none());
+    // the fake book and the file book agree
+    let mut book = iyakki_core_api::appcaps::MemoryBook::default();
+    book.put("k", ap);
+    assert!(book.get("k").is_some());
+}
+
+#[test]
+fn an_update_copies_the_apps_data_first_keeps_three_snapshots_and_never_blocks_on_a_big_folder() {
+    let mut w = world("life-snap");
+    let v1 = w.skill("alpha", "1.0.0", &m(&[]));
+    w.publish("skill", "alpha", "1.0.0", &v1, &m(&[]));
+    w.install("alpha");
+    let data = w.f.dir.join("store/appdata/skill/shared/alpha");
+    std::fs::create_dir_all(data.join("sub")).unwrap();
+    std::fs::write(data.join("notes.txt"), "version one data").unwrap();
+    std::fs::write(data.join("sub/more.txt"), "more").unwrap();
+    let key = "skill/shared/alpha";
+    let mut said = String::new();
+    for (i, v) in ["1.1.0", "1.2.0", "1.3.0", "1.4.0"].iter().enumerate() {
+        let pkg = w.skill("alpha", v, &m(&[]));
+        w.publish("skill", "alpha", v, &pkg, &m(&[]));
+        std::fs::write(data.join("notes.txt"), format!("data before {v}")).unwrap();
+        said = w.update("skill:alpha", Confirm::default()).unwrap();
+        assert!(said.contains("Its data was copied first (snapshot pre-update-"), "{i}: {said}");
+    }
+    // three kept, the oldest moved aside (never deleted)
+    let root = w.f.store.snapshot_root(key);
+    let kept = crate::bundlesnap::list(&root);
+    assert_eq!(kept.len(), crate::store::Store::SNAPSHOTS_KEPT, "{kept:?}");
+    assert!(root.join(".old").is_dir() && std::fs::read_dir(root.join(".old")).unwrap().count() == 1);
+    // the newest snapshot holds the data as it was just before the last update, and it restores
+    let newest = kept.last().unwrap();
+    assert!(newest.id.contains("1.3.0"), "{}", newest.id);
+    std::fs::write(data.join("notes.txt"), "damaged by the migration").unwrap();
+    let kept_dir = crate::bundlesnap::restore(&root, &newest.id, &data).unwrap();
+    assert_eq!(std::fs::read_to_string(data.join("notes.txt")).unwrap(), "data before 1.4.0");
+    assert_eq!(std::fs::read_to_string(data.join("sub/more.txt")).unwrap(), "more");
+    assert_eq!(std::fs::read_to_string(kept_dir.join("notes.txt")).unwrap(), "damaged by the migration", "what was there is kept");
+    assert!(w.f.store.life_state().history.get(key).is_some() && said.contains("1.4.0"));
+    // an app without data folder takes no snapshot and the answer does not mention one
+    let mut w2 = world("life-snap-none");
+    let a = w2.skill("beta", "1.0.0", &m(&[]));
+    w2.publish("skill", "beta", "1.0.0", &a, &m(&[]));
+    w2.install("beta");
+    let b = w2.skill("beta", "1.1.0", &m(&[]));
+    w2.publish("skill", "beta", "1.1.0", &b, &m(&[]));
+    let said = w2.update("skill:beta", Confirm::default()).unwrap();
+    assert!(!said.contains("copied first") && !w2.f.store.snapshot_root("skill/shared/beta").exists(), "{said}");
+}
+
+#[test]
+fn the_assistant_lists_the_data_snapshots_and_puts_one_back_only_through_a_card_that_always_asks() {
+    use super::tools;
+    use serde_json::json;
+    let mut w = world("life-snap-tools");
+    let p = Role::Admin.template();
+    let s1 = w.skill("alpha", "1.0.0", &m(&[]));
+    w.publish("skill", "alpha", "1.0.0", &s1, &m(&[]));
+    w.install("alpha");
+    let data = w.f.dir.join("store/appdata/skill/shared/alpha");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("notes.txt"), "before the update").unwrap();
+    let defs = tools::defs(&p);
+    let risk = |n: &str| defs.iter().find(|d| d.spec.name == n).map(|d| d.risk).unwrap_or_else(|| panic!("{n}"));
+    assert_eq!(risk("store_data_snapshots"), crate::agent::Risk::Safe);
+    assert_eq!(risk("store_data_restore"), crate::agent::Risk::Ask);
+    assert!(tools::is_store_tool("store_data_restore") && crate::agent::hard_ask("store_data_restore", &json!({})).is_some());
+    assert!(crate::agent::hard_ask("store_data_snapshots", &json!({})).is_none());
+    let none = tools::call("store_data_snapshots", &json!({"id": "skill:alpha"}), &w.f.svc, &p, "root").unwrap();
+    assert!(none.contains("has no data snapshots"), "{none}");
+    let s2 = w.skill("alpha", "1.1.0", &m(&[]));
+    w.publish("skill", "alpha", "1.1.0", &s2, &m(&[]));
+    assert!(tools::call("store_update", &json!({"id": "skill:alpha"}), &w.f.svc, &p, "root").unwrap().contains("Its data was copied first"));
+    let list = tools::call("store_data_snapshots", &json!({"id": "skill:alpha"}), &w.f.svc, &p, "root").unwrap();
+    let name = list.split(' ').next().unwrap().to_string();
+    assert!(name.starts_with("pre-update-1.0.0-") && list.contains("1 files"), "{list}");
+    // the card says what will happen
+    let card = tools::describe(&w.f.svc, &p, "root", "store_data_restore", &json!({"id": "skill:alpha", "snapshot": name})).unwrap();
+    assert!(card.contains("PUT BACK") && card.contains("nothing is deleted"), "{card}");
+    std::fs::write(data.join("notes.txt"), "damaged").unwrap();
+    let said = tools::call("store_data_restore", &json!({"id": "skill:alpha", "snapshot": name}), &w.f.svc, &p, "root").unwrap();
+    assert!(said.contains("is back as it was") && said.contains("rolled-back"), "{said}");
+    assert_eq!(std::fs::read_to_string(data.join("notes.txt")).unwrap(), "before the update");
+    // a name that is not a snapshot, and a missing name, are refused in words and change nothing
+    let e = tools::call("store_data_restore", &json!({"id": "skill:alpha", "snapshot": "nope"}), &w.f.svc, &p, "root").unwrap_err();
+    assert!(e.contains("no snapshot called nope"), "{e}");
+    assert!(tools::call("store_data_restore", &json!({"id": "skill:alpha"}), &w.f.svc, &p, "root").is_err());
+    assert_eq!(std::fs::read_to_string(data.join("notes.txt")).unwrap(), "before the update");
+}

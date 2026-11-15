@@ -15,16 +15,19 @@ use crate::agent::{Risk, ToolDef, Tools};
 use crate::chat::ToolSpec;
 use crate::store::updatecheck::{CheckSettings, Kind, Mode, Report};
 
-pub const PROMPT_RULE: &str = "\nUPDATES: updates_status shows the installed IYAKKI version, how often and when the device last looked for updates, what is waiting and whether the connection is metered. updates_check_now asks the person first, then contacts the update sources and only reports; it never downloads or installs. updates_settings_status shows how often the device looks (daily by default, but only at stores and an update list address the person added); updates_settings_set (daily, on_request, off) asks. To apply an app update use store_update (it asks); a system update is the person's click on Settings -> System update. Do not promise an update will be installed.";
+pub const PROMPT_RULE: &str = "\nUPDATES: updates_status shows the installed IYAKKI version, how often and when the device last looked for updates, what is waiting and whether the connection is metered. updates_check_now asks the person first, then contacts the update sources and only reports; it never downloads or installs. updates_settings_status shows how often the device looks (daily by default, but only at stores and an update list address the person added); updates_settings_set (daily, on_request, off) asks. To apply an app update use store_update (it asks); a system update is the person's click on Settings -> System update. updates_bundle_open asks the person first, then opens a signed system update file (a .tgz with its .sig next to it) from a stick or a folder: the signature is checked before anything is unpacked and the update is only listed in Settings -> System update. Do not promise an update will be installed.";
 
 pub const READ_TOOL: &str = "updates_status";
 pub const WRITE_TOOL: &str = "updates_check_now";
 /// How often the device looks (the same choice as Settings -> System update and Store -> Settings, devmode key `store.daily_check`).
 pub const SETTINGS_READ_TOOL: &str = "updates_settings_status";
 pub const SETTINGS_WRITE_TOOL: &str = "updates_settings_set";
+/// Open a signed system update file (a .tgz with its .sig next to it) from a stick or a folder: the signature is checked first, the update
+/// is unpacked where Settings -> System update lists it, and nothing is installed (F-UPD-01).
+pub const BUNDLE_TOOL: &str = "updates_bundle_open";
 
 pub fn is_updates_tool(n: &str) -> bool {
-    n == READ_TOOL || n == WRITE_TOOL || n == SETTINGS_READ_TOOL || n == SETTINGS_WRITE_TOOL
+    n == READ_TOOL || n == WRITE_TOOL || n == SETTINGS_READ_TOOL || n == SETTINGS_WRITE_TOOL || n == BUNDLE_TOOL
 }
 
 fn parse_mode(args: &Value) -> Result<Mode, String> {
@@ -52,6 +55,16 @@ pub trait Backend: Send + Sync {
     fn now(&self) -> i64;
     /// Keep how often the device looks (administrators; the real one also writes the audit line).
     fn save_mode(&self, mode: Mode) -> Result<(), String>;
+    /// The compat report in plain lines (F-CORE-19): which versions of the core and its interfaces meet here, the peers (names for
+    /// administrators only) and the deprecated names. A backend without one says nothing.
+    fn compat_lines(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// Open the signed system update file at `path` for the update centre (administrators; see `sysupdate::open_for_centre`). A backend
+    /// that cannot says so.
+    fn open_bundle(&self, _path: &str) -> Result<String, String> {
+        Err("opening a system update file is not available here".into())
+    }
 }
 
 pub struct UpdatesTools {
@@ -76,6 +89,7 @@ fn report_lines(r: &Report) -> Vec<String> {
             Kind::System => format!("System: {} {} -> {} (install it from Settings -> System update; the assistant cannot)", u.title, u.from, u.to),
             Kind::App => format!("App {}: {} {} -> {} from {}", u.id, u.title, u.from, u.to, u.source),
         };
+        let what = if let Some(v) = u.needs_newer_iyakki() { format!("{what}. NEEDS A NEWER IYAKKI ({v} or newer): update IYAKKI first") } else { what };
         out.push(if u.needs_review() { format!("{what}. ASKS FOR NEW PERMISSIONS: {}", u.new_permissions.join(", ")) } else { what });
     }
     for (src, e) in &r.errors {
@@ -106,6 +120,11 @@ impl UpdatesTools {
                 out.push(format!("Last checked {}: {}.", ago(b.now() - r.checked_at), match r.count() { 0 => "everything is up to date".to_string(), n => format!("{n} update(s) waiting; nothing was downloaded or installed") }));
                 out.extend(report_lines(&r));
             }
+        }
+        let compat = b.compat_lines();
+        if !compat.is_empty() {
+            out.push("Compatibility:".into());
+            out.extend(compat.into_iter().map(|l| format!("  {l}")));
         }
         out.join("\n")
     }
@@ -138,6 +157,20 @@ impl UpdatesTools {
         }))
     }
 
+    fn bundle_card(&self, args: &Value) -> Result<String, String> {
+        if !self.backend.may_check() {
+            return Err("only an administrator can open a system update file".into());
+        }
+        let path = args.get("path").and_then(Value::as_str).unwrap_or("").trim();
+        if path.is_empty() || path.len() > 400 || path.contains('\0') {
+            return Err("give the path of the update file (a .tgz with its .sig file next to it)".into());
+        }
+        if !path.ends_with(".tgz") && !path.ends_with(".tar.gz") {
+            return Err("a system update file is a .tgz".into());
+        }
+        Ok(format!("Open the system update file {path}: its signature file ({path}.sig) is checked against the IYAKKI release key before anything is unpacked, then the update is listed in Settings -> System update. Nothing is installed or restarted."))
+    }
+
     fn card(&self) -> Result<String, String> {
         if !self.backend.may_check() {
             return Err("only an administrator can ask for an update check".into());
@@ -154,13 +187,20 @@ impl UpdatesTools {
 }
 
 impl Tools for UpdatesTools {
+
+    fn inner_tools(&self) -> Option<&dyn Tools> {
+
+        Some(&*self.inner)
+
+    }
     fn defs(&self) -> Vec<ToolDef> {
         let mut v = self.inner.defs();
         v.retain(|d| !is_updates_tool(&d.spec.name));
-        v.push(ToolDef { spec: ToolSpec { name: READ_TOOL.into(), description: "Show the installed IYAKKI version, how often and when updates were last looked for, what is waiting (apps and the system) and whether the connection is metered. Reads the last answer; contacts nothing.".into(), schema: json!({"type": "object", "properties": {}}) }, risk: Risk::Safe, untrusted: false });
+        v.push(ToolDef { spec: ToolSpec { name: READ_TOOL.into(), description: "Show the installed IYAKKI version, how often and when updates were last looked for, what is waiting (apps and the system), whether the connection is metered, and the compatibility report (versions of the core and its interfaces, paired computers for administrators, deprecated names). Reads the last answer; contacts nothing.".into(), schema: json!({"type": "object", "properties": {}}) }, risk: Risk::Safe, untrusted: false });
         v.push(ToolDef { spec: ToolSpec { name: WRITE_TOOL.into(), description: "Look for updates now: contacts the store sources and the system update list the administrator set, and reports what is newer. Never downloads or installs. The person approves a card first.".into(), schema: json!({"type": "object", "properties": {}}) }, risk: Risk::Ask, untrusted: false });
         v.push(ToolDef { spec: ToolSpec { name: SETTINGS_READ_TOOL.into(), description: "Show how often the device looks for updates (daily, only on request, off) and what it asks. Reads settings; contacts nothing.".into(), schema: json!({"type": "object", "properties": {}}) }, risk: Risk::Safe, untrusted: false });
         v.push(ToolDef { spec: ToolSpec { name: SETTINGS_WRITE_TOOL.into(), description: "Change how often the device looks for updates: daily, on_request or off. Daily contacts only the stores and update list address the person added. The person approves a card first.".into(), schema: json!({"type": "object", "properties": {"how_often": {"type": "string", "enum": ["daily", "on_request", "off"]}}, "required": ["how_often"]}) }, risk: Risk::Ask, untrusted: false });
+        v.push(ToolDef { spec: ToolSpec { name: BUNDLE_TOOL.into(), description: "Open a signed system update file (a .tgz with its .sig file next to it, for example from a USB stick) for Settings -> System update: the signature is checked with the IYAKKI release key before anything is unpacked; an update for another edition, too old a base or not newer is refused with the reason. Never installs or restarts. The person approves a card first.".into(), schema: json!({"type": "object", "properties": {"path": {"type": "string", "description": "The path of the .tgz; its signature is the file with .sig added."}}, "required": ["path"]}) }, risk: Risk::Ask, untrusted: false });
         v
     }
 
@@ -173,6 +213,10 @@ impl Tools for UpdatesTools {
                 let mode = parse_mode(args)?;
                 self.backend.save_mode(mode)?;
                 Ok(format!("Checking for updates is now: {}.", mode.label()))
+            }
+            BUNDLE_TOOL => {
+                self.bundle_card(args)?;
+                self.backend.open_bundle(args.get("path").and_then(Value::as_str).unwrap_or("").trim())
             }
             WRITE_TOOL => {
                 self.card()?;
@@ -196,6 +240,7 @@ impl Tools for UpdatesTools {
             READ_TOOL => "Show the update status".into(),
             SETTINGS_READ_TOOL => "Show how often updates are looked for".into(),
             SETTINGS_WRITE_TOOL => "Change how often updates are looked for".into(),
+            BUNDLE_TOOL => format!("Open the system update file {}", args.get("path").and_then(Value::as_str).unwrap_or("")),
             _ => self.inner.describe(name, args),
         }
     }
@@ -204,6 +249,7 @@ impl Tools for UpdatesTools {
         match name {
             WRITE_TOOL => self.card().ok(),
             SETTINGS_WRITE_TOOL => self.settings_card(args).ok(),
+            BUNDLE_TOOL => self.bundle_card(args).ok(),
             READ_TOOL | SETTINGS_READ_TOOL => None,
             _ => self.inner.preview(name, args),
         }
@@ -213,6 +259,7 @@ impl Tools for UpdatesTools {
         match name {
             WRITE_TOOL => self.card().err(),
             SETTINGS_WRITE_TOOL => self.settings_card(args).err(),
+            BUNDLE_TOOL => self.bundle_card(args).err(),
             READ_TOOL | SETTINGS_READ_TOOL => None,
             _ => self.inner.refusal(name, args),
         }
@@ -223,11 +270,11 @@ impl Tools for UpdatesTools {
     }
 
     fn approved_always(&self, name: &str) -> bool {
-        name != WRITE_TOOL && name != SETTINGS_WRITE_TOOL && self.inner.approved_always(name)
+        name != WRITE_TOOL && name != SETTINGS_WRITE_TOOL && name != BUNDLE_TOOL && self.inner.approved_always(name)
     }
 
     fn grant_blocker(&self, name: &str, args: &Value) -> Option<String> {
-        if name == WRITE_TOOL || name == SETTINGS_WRITE_TOOL { Some("looking for updates contacts other computers and the schedule is a privacy choice, so it asks every time".into()) } else { self.inner.grant_blocker(name, args) }
+        if name == WRITE_TOOL || name == SETTINGS_WRITE_TOOL { Some("looking for updates contacts other computers and the schedule is a privacy choice, so it asks every time".into()) } else if name == BUNDLE_TOOL { Some("opening a system update file unpacks software that is meant to be installed on this computer, so it asks every time".into()) } else { self.inner.grant_blocker(name, args) }
     }
     fn grant_scope(&self, name: &str, args: &Value) -> String {
         self.inner.grant_scope(name, args)
@@ -283,6 +330,23 @@ impl Backend for RealBackend {
     }
     fn now(&self) -> i64 {
         crate::clock::now_unix()
+    }
+    fn compat_lines(&self) -> Vec<String> {
+        let admin = self.policy.manage_settings;
+        let dm = crate::devmode::DevMode::open(self.svc.dir());
+        let mut l = crate::compatreport::report(if admin { crate::compatreport::peers(self.svc.dir(), &dm.keys(), dm.now()) } else { vec![] }).lines(admin);
+        l.extend(crate::twophase::status_lines(self.svc.dir()));
+        l
+    }
+    fn open_bundle(&self, path: &str) -> Result<String, String> {
+        if !self.policy.manage_settings {
+            return Err("only an administrator can open a system update file".into());
+        }
+        let (running, variant) = self.running();
+        let centre = crate::devmode::centre::Centre::real(self.svc.dir());
+        let s = crate::sysupdate::open_for_centre(self.svc.dir(), std::path::Path::new(path), centre.key(), &running, &variant)?;
+        (self.audit)("system.update.bundle", &format!("opened {} (assistant)", s.release.version));
+        Ok(format!("The signature is good. IYAKKI {} ({}) is unpacked and listed in Settings -> System update; nothing was installed.", s.release.version, s.release.variant))
     }
     fn save_mode(&self, mode: Mode) -> Result<(), String> {
         (self.audit)("settings.update_check", &format!("mode={mode:?} (assistant)"));

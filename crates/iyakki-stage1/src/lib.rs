@@ -1,6 +1,8 @@
 //! Pure decisions of the first-stage init (docs/BOOT-SPEED.md). The system calls are in `main.rs`; everything that can be wrong
 //! without a kernel (reading a label, parsing the pointer file, ordering the places the root may come from) is here and tested.
 
+pub mod layers;
+
 /// Label of the boot volume and of the data volume (same names as `iyakki-storage` and the installer).
 pub const BOOT_LABEL: &str = "IYAKKI-BOOT";
 pub const DATA_LABEL: &str = "IYAKKI-DATA";

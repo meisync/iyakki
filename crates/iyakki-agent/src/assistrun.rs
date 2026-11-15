@@ -176,7 +176,7 @@ fn wait_tool(p: Pending, timeout: Duration, name: &str, cancel: &AtomicBool) -> 
 /// replace it, and a retried refusal should never flash on the screen.
 fn looks_like_refusal_start(t: &str) -> bool {
     let l = t.trim_start().to_lowercase().replace('\u{2019}', "'");
-    ["i cannot", "i can't", "i can not", "i'm unable", "i am unable", "sorry", "i'm sorry", "i apologize", "unfortunately", "i don't have", "i do not have", "as an ai", "i'm not able", "i am not able", "my capabilities", "would you like me", "shall i", "do you want me"].iter().any(|p| l.starts_with(p) || p.starts_with(l.as_str()))
+    ["i cannot", "i can't", "i can not", "i'm unable", "i am unable", "sorry", "i'm sorry", "i apologize", "unfortunately", "i don't have", "i do not have", "as an ai", "i'm not able", "i am not able", "my capabilities", "would you like me", "shall i", "do you want me"].iter().any(|p| l.starts_with(p) || p.starts_with(l.as_str())) || crate::phrases::starts_like_refusal(&l)
 }
 
 // ------------------------------------------------------------------------------------------------ the loop
@@ -540,6 +540,11 @@ pub(crate) fn run_loop(backend: Arc<dyn ChatBackend>, tools: Arc<dyn Tools>, mut
         // prose that repeats the question ask_user asks is dropped: the question appears once, with its buttons
         if let Some(a) = turn.calls.iter().find(|c| c.name == "ask_user").and_then(|c| guard::ask_from_args(&c.args)) {
             turn.text = guard::strip_repeated_question(&turn.text, &a);
+        }
+        if turn.calls.is_empty() && assist.guard {
+            if let Some(fix) = tools.correct_claims(&turn.text) {
+                turn.text = format!("{}\n\n{fix}", turn.text.trim_end());
+            }
         }
         emit(RunEvent::Model { text: turn.text.clone(), calls: turn.calls.iter().map(|c| CallInfo { id: c.id.clone(), name: c.name.clone(), args: c.args.clone() }).collect() });
         if turn.calls.is_empty() {

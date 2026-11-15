@@ -34,7 +34,7 @@ the GUI workspace, either lock file, the changelog or the release notes disagree
 It builds and tests the workspace (locked), builds the window binary, runs `cargo deny` for both workspaces, regenerates
 `THIRD_PARTY_LICENSES.txt`, writes `SBOM.json`, runs the QEMU smoke tests that exist when images exist (it never builds images), checks docs
 links, the FEATURES.md totals, version consistency and that no secrets are in the tree, and prints a PASS / FAIL / WARN / SKIP table. Exit code is non-zero
-on any FAIL. Logs go to `target/alpha-check/`. It also runs a **macOS cross-check** (WARN-level, never fails the gate): `./run.sh check-macos` does a `cargo check` of the agent, shell,
+on any FAIL. Logs go to `target/alpha-check/`. It also runs a **macOS cross-check** (a missing Rust target only warns, a compile error FAILS the gate): `./run.sh check-macos` does a `cargo check` of the agent, shell,
 core and the window (`crates/iyakki-gui`) for each installed `*-apple-darwin` Rust target, so Linux-only code without a `cfg` fence is caught
 on a Linux machine. It proves the code compiles, not that it runs (nothing is linked or started); without the target
 (`rustup target add aarch64-apple-darwin`) it prints a skip and the gate row is a WARN. Fix the FAILs; read the WARNs. Then fill in `ALPHA-GATE.md` (what the script cannot do: the Mac

@@ -154,6 +154,27 @@ impl Waits {
         Resolution::Applied
     }
 
+    /// The desktop path (the INBOX or the core contract answering a flow question) for a run: when this tenant has the node waiting as an
+    /// approval request, the answer goes through [`Waits::resolve_once`] like the API's, so the two can never both decide it. `None`:
+    /// no such request here (a desktop run, or one already resolved and gone), the caller decides on its own. `Some(Err)`: refused, because
+    /// `by` is not among the request's approvers (nobody approves their own request). `Some(Ok(AlreadyResolved))`: someone was first.
+    /// A request that is decided here leaves the approvers' lists.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resolve_from_desktop(&self, env: &Env, roles: &Roles, run: &str, node: &str, approved: bool, by: &str, note: &str, resolver: &dyn Resolver, now: u64) -> Option<Result<Resolution, String>> {
+        let w = self.load().into_iter().find(|w| w.run == run && w.node == node && w.state != "resolved")?;
+        if w.state != "waiting" {
+            return Some(Ok(Resolution::AlreadyResolved));
+        }
+        if !approvals::approvers_of(env, roles, &w.approval_id).iter().any(|a| a == by) {
+            return Some(Err("you are not one of the approvers of this step".into()));
+        }
+        let r = self.resolve_once(&w.user, run, node, approved, by, note, resolver, now);
+        if r == Resolution::Applied {
+            approvals::close(env, &w.approval_id, by, now);
+        }
+        Some(Ok(r))
+    }
+
     fn mark(&self, run: &str, node: &str, state: &str, outcome: &str, now: u64) {
         let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut all = self.load();
@@ -171,6 +192,11 @@ impl Waits {
         if r.is_ok() || r.as_ref().err().is_some_and(|e| e.contains("not waiting") || e.contains("no such")) {
             self.mark_state(run, node, "resolved", now);
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mark_state_for_test(&self, run: &str, node: &str, state: &str, now: u64) {
+        self.mark_state(run, node, state, now)
     }
 
     fn mark_state(&self, run: &str, node: &str, state: &str, now: u64) {

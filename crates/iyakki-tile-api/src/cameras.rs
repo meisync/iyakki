@@ -24,6 +24,8 @@ pub enum Status {
     Busy(String),
     /// The vault that holds the camera's password is locked, or the password is missing.
     NeedsPassword(String),
+    /// Pictures arrive but are black: the camera may be covered or its privacy shutter closed. The text is a plain question.
+    Dark(String),
 }
 
 impl Status {
@@ -35,11 +37,12 @@ impl Status {
             Status::NeedsAddon(_) => "Needs video add-on",
             Status::Busy(_) => "In use",
             Status::NeedsPassword(_) => "Needs password",
+            Status::Dark(_) => "Black picture",
         }
     }
     pub fn detail(&self) -> &str {
         match self {
-            Status::Lost(m) | Status::NeedsAddon(m) | Status::Busy(m) | Status::NeedsPassword(m) => m,
+            Status::Lost(m) | Status::NeedsAddon(m) | Status::Busy(m) | Status::NeedsPassword(m) | Status::Dark(m) => m,
             _ => "",
         }
     }
@@ -205,6 +208,19 @@ pub struct MotionInfo {
     pub keep_days: u32,
 }
 
+/// The limits that hold for the recordings of every camera together (F-CAM-03).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecLimits {
+    /// All recordings together, in MiB (0: no limit).
+    pub total_mb: u64,
+    /// Recording stops when the disk has less than this free, in MiB.
+    pub min_free_mb: u64,
+    /// The least the free-space floor may be set to, in MiB.
+    pub min_floor_mb: u64,
+    /// The person is an administrator and may change them.
+    pub can_change: bool,
+}
+
 /// What a motion change asks for; `None` keeps the current value.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MotionChange {
@@ -239,6 +255,11 @@ pub trait CameraSource {
     /// The newest picture of a camera; asking also keeps the stream going (it stops a few seconds after the last ask). `big` asks for
     /// the larger size used when one camera fills the window.
     fn view(&self, id: &str, big: bool) -> Option<Frame>;
+    /// The person left the tile: close this computer's own cameras at once (their light goes off) instead of waiting for the idle time.
+    fn release_local(&self) {}
+    /// The window shows only the cameras in `shown` now (another page, a layout with fewer cells, a form instead of the grid): close
+    /// this computer's own cameras that are not in the list at once. Called after every drawn frame.
+    fn release_local_except(&self, _shown: &[String]) {}
     /// Save the newest picture in the person's Pictures folder; the path (shown to the person) on success.
     fn snapshot(&self, id: &str) -> Result<String, String>;
     /// Save a network camera. `password`: `None` keeps the stored one, `Some("")` removes it, `Some(text)` stores it in the vault.
@@ -257,6 +278,14 @@ pub trait CameraSource {
         None
     }
     fn rec_set(&self, _id: &str, _change: &RecChange) -> Result<(), String> {
+        Err("Recording is not available here.".into())
+    }
+    /// The limits for all cameras together (everybody may read them).
+    fn rec_limits(&self) -> Option<RecLimits> {
+        None
+    }
+    /// Change them (administrators); `None` keeps a value.
+    fn rec_limits_set(&self, _total_mb: Option<u64>, _min_free_mb: Option<u64>) -> Result<(), String> {
         Err("Recording is not available here.".into())
     }
     /// Days with recordings, newest first (owner only).

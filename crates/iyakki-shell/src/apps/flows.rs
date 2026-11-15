@@ -54,6 +54,7 @@ pub mod id {
     pub const IMPORT: usize = 126;
     pub const HISTORY: usize = 127;
     pub const HOOKS: usize = 193;
+    pub const DEFAULTS: usize = 194;
     pub const FLOWS: usize = 128;
     pub const ZOOM_IN: usize = 129;
     pub const ZOOM_OUT: usize = 130;
@@ -67,6 +68,7 @@ pub mod id {
     pub const APPLY_RUNNING: usize = 141;
     pub const LEAVE_UPDATE: usize = 142;
     pub const OFFER: usize = 138;
+    pub const OFFER_FLOW: usize = 137;
     pub const FAIL_LOG: usize = 139;
     pub const CLOSE: usize = 145;
     pub const R_BACK: usize = 146;
@@ -76,6 +78,7 @@ pub mod id {
     pub const SUG_OPEN: usize = 185;
     pub const ASSIST_ROLLBACK: usize = 186;
     pub const ASSIST_PAUSE: usize = 187;
+    pub const ASSIST_KILL: usize = 188;
     // run view
     pub const R_CANCEL: usize = 150;
     pub const R_RETRY: usize = 151;
@@ -168,6 +171,8 @@ pub(super) enum Modal {
     Webhook(super::flows_hook::HookPanel),
     /// The suggested changes of the agent (Assist): list, stored diff, Approve, Reject.
     Suggestions(super::flows_assist::SugView),
+    /// The Assist and messages page: account defaults, the agent profile, outside-message policy, Activity (F-FLOW-32/33/34, F-MSG-04).
+    Defaults(Box<super::flows_defaults::DefView>),
     Import(Form),
     Result(String, ScrollLog),
     EditPatch(String, super::dash_query::QueryBox),
@@ -210,6 +215,8 @@ pub(super) struct HistView {
 /// What the screen waits for from a worker thread.
 pub(super) enum Msg {
     NodeTest(String, Result<NodeTest, String>),
+    /// A whole-flow trial finished (the flow, what it did).
+    Trial(String, Result<iyakki_flow::assist_run::WholeTrial, String>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -340,6 +347,9 @@ pub struct FlowsApp {
     pub(super) jump: Option<(String, String)>,
     /// What Assist shows for the open flow: waiting suggestions, the watched version, the pause.
     pub(super) assist: super::flows_assist::AssistUi,
+    /// Flows with a suggestion waiting for the person (read while the list shows), and the account-wide assist kill switch.
+    pub(super) sug_flows: Vec<String>,
+    pub(super) assist_off: bool,
 }
 
 pub(super) fn stamp_of(env: &FlowEnv, id: &str) -> (u64, u128) {
@@ -425,6 +435,8 @@ impl FlowsApp {
             tip_rect: None,
             tip: crate::tooltip::Tooltip::new().with_pointer_delay(super::flows_tip::NODE_TIP_DELAY),
             assist: Default::default(),
+            sug_flows: Vec::new(),
+            assist_off: false,
         };
         a.reload_flows();
         a.refresh_runs();
@@ -462,6 +474,7 @@ impl FlowsApp {
         self.flows = self.env.summaries();
         self.flow_names = self.contract_flow_names();
         self.list_sel = self.list_sel.min(self.flows.len().saturating_sub(1));
+        self.update_assist_list();
     }
 
     /// The flows' ids and names through the core contract (`flows.list`); empty when the call is refused.
@@ -614,6 +627,7 @@ impl FlowsApp {
         }
         self.update_fail_card();
         self.update_assist();
+        self.update_assist_list();
     }
 
     pub(super) fn select_run(&mut self, id: &str, go: bool) {
@@ -635,6 +649,7 @@ impl FlowsApp {
     pub(super) fn poll(&mut self) {
         while let Ok(m) = self.rx.try_recv() {
             match m {
+                Msg::Trial(flow, r) => self.def_trial_done(&flow, r),
                 Msg::NodeTest(node, r) => {
                     self.testing = None;
                     let mut log = ScrollLog::default();
@@ -734,6 +749,9 @@ impl FlowsApp {
         }
         match self.env.engine.start_run(req) {
             Ok(o) => {
+                if !o.existing {
+                    self.env.report_run(&o.run_id, &id);
+                }
                 self.refresh_runs();
                 self.select_run(&o.run_id, true);
                 self.say(format!("Started run {}{}.", o.run_id, if draft { " of the draft" } else { "" }), true);

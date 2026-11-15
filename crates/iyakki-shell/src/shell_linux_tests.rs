@@ -100,6 +100,15 @@ fn switches_folders_terminal_and_delete_change_the_record_and_are_audited() {
     assert!(sh.brand.linux.facts.as_ref().unwrap().boxes[0].network, "the page shows the new state");
     sh.linux_action(LinuxAction::SetNetwork { name: "dev".into(), on: false });
     assert!(!sandbox_of(&sh, "root", "dev").network);
+    // the three-way switch: outbound only keeps the computer out of reach, and the page shows the mode
+    use iyakki_agent::linuxapps_net::Mode;
+    sh.linux_action(LinuxAction::SetNetMode { name: "dev".into(), mode: Mode::OutboundOnly });
+    assert!(sandbox_of(&sh, "root", "dev").network);
+    assert_eq!(sh.brand.linux.facts.as_ref().unwrap().boxes[0].mode, Mode::OutboundOnly);
+    sh.linux_action(LinuxAction::SetNetMode { name: "dev".into(), mode: Mode::HostShared });
+    assert_eq!(sh.brand.linux.facts.as_ref().unwrap().boxes[0].mode, Mode::HostShared);
+    sh.linux_action(LinuxAction::SetNetMode { name: "dev".into(), mode: Mode::Off });
+    assert!(!sandbox_of(&sh, "root", "dev").network);
     // folders: only what the person's scope and the data-folder rule allow
     let proj = std::env::temp_dir().join(format!("iyakki-linux-shell-proj-{}", std::process::id()));
     std::fs::create_dir_all(&proj).unwrap();
@@ -164,4 +173,26 @@ fn image_apps_need_the_cluster_and_a_pinned_digest() {
     sh.linux_action(LinuxAction::RunImage { id: "nothing".into() });
     assert!(sh.brand.note.as_ref().unwrap().0.contains("no image app"));
     assert!(!audit(&sh).contains("imageapp.run"));
+}
+
+#[test]
+fn the_archive_button_goes_through_the_same_checks_as_the_chat_tool_and_makes_nothing_without_the_dev_cluster() {
+    let (mut sh, _) = shell_with_users("linux-archive");
+    login(&mut sh, "root", "rootpass12");
+    open_linux(&mut sh);
+    let ask = |archive: &str, confirmed: bool| LinuxAction::ImageFromRoot { archive: archive.into(), name: "My Notes".into(), port: 8080, licence: "MIT".into(), command: vec!["/usr/bin/notes".into()], confirmed };
+    // no dev cluster runs here: the same refusal as the chat tool gives, and no card appears
+    sh.linux_action(ask("root.tar.gz", false));
+    let n = sh.brand.note.clone().unwrap();
+    assert!(!n.1 && n.0.contains("dev cluster is not running"), "{n:?}");
+    assert!(sh.brand.linux.card.is_none());
+    // the confirmed form does not skip the checks either, and nothing is written
+    sh.linux_action(ask("root.tar.gz", true));
+    assert!(sh.brand.note.clone().unwrap().0.contains("dev cluster is not running"));
+    assert!(!sh.env.services.dir().join("image-apps").join("my-notes.json").exists());
+    // an ordinary user is refused first
+    let (mut sh2, _) = shell_with_users("linux-archive-user");
+    login(&mut sh2, "gus", "guestpass1");
+    sh2.linux_action(ask("root.tar.gz", false));
+    assert!(sh2.brand.note.as_ref().is_some_and(|n| !n.1 && n.0.contains("full command-line permission")), "{:?}", sh2.brand.note);
 }

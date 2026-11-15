@@ -165,7 +165,7 @@ fn an_app_that_panics_in_draw_input_or_tick_is_closed_alone_with_a_note_in_the_a
         sh.handle(&Event::Tick);
         sh.render(&mut g);
         assert_eq!(sh.screen_name(), "launcher", "{when}: only the app is closed, the desktop stays");
-        assert!(sh.toast_text().is_some_and(|t| t.contains("Bomb stopped because of an internal error") && t.contains("Open it again")), "{when}: {:?}", sh.toast_text());
+        assert!(sh.crash_card_text().is_some_and(|t| t.contains("Bomb stopped because of an internal error") && t.contains("Open it again")), "{when}: {:?}", sh.crash_card_text());
         let log = std::fs::read_to_string(sh.env.audit.path()).unwrap();
         assert!(log.matches("app.crash").count() > before, "{when}: the crash is in the audit log");
         // everything else still works: another app opens and draws
@@ -173,4 +173,63 @@ fn an_app_that_panics_in_draw_input_or_tick_is_closed_alone_with_a_note_in_the_a
         sh.render(&mut g);
         assert_eq!(sh.screen_name(), "app:settings");
     }
+}
+
+#[test]
+fn the_restart_card_reopens_the_app_that_stopped_and_can_be_dismissed_or_expire() {
+    let mut sh = signed("ovl-crashcard");
+    let mut g = Gfx::new(1280, 720);
+    sh.show_app_for_test(Box::new(Bomb("key")), PApp::Chat);
+    sh.render(&mut g);
+    sh.handle(&Event::Key(Key::Char('x')));
+    sh.render(&mut g);
+    assert_eq!(sh.screen_name(), "launcher");
+    assert!(sh.crash_card_text().is_some_and(|t| t.contains("Bomb stopped")), "the card is up");
+    assert!(sh.hits().iter().any(|h| h.ev == Event::Tab(crate::crashcard::OPEN)) && sh.hits().iter().any(|h| h.ev == Event::Tab(crate::crashcard::DISMISS)), "with both buttons");
+    // the button opens the tile that stopped, afresh, and the card goes
+    sh.handle(&Event::Tab(crate::crashcard::OPEN));
+    sh.render(&mut g);
+    assert_eq!(sh.screen_name(), "app:chat", "the app is open again");
+    assert!(sh.crash_card_text().is_none());
+    let log = std::fs::read_to_string(sh.env.audit.path()).unwrap();
+    assert!(log.contains("app.reopen"), "the reopen is in the audit log");
+    // dismissing only removes the card
+    sh.show_app_for_test(Box::new(Bomb("key")), PApp::Chat);
+    sh.handle(&Event::Key(Key::Char('x')));
+    sh.render(&mut g);
+    assert!(sh.crash_card_text().is_some());
+    sh.handle(&Event::Tab(crate::crashcard::DISMISS));
+    sh.render(&mut g);
+    assert!(sh.crash_card_text().is_none() && sh.screen_name() == "launcher");
+    // left alone, it goes away by itself after half a minute of heartbeats
+    sh.show_app_for_test(Box::new(Bomb("key")), PApp::Chat);
+    sh.handle(&Event::Key(Key::Char('x')));
+    assert!(sh.crash_card_text().is_some());
+    for _ in 0..crate::crashcard::KEEP_TICKS + 5 {
+        sh.handle(&Event::Tick);
+    }
+    assert!(sh.crash_card_text().is_none(), "expired");
+}
+
+#[test]
+fn a_crash_card_does_not_outlive_the_person_who_saw_it() {
+    let mut sh = signed("ovl-crashcard-out");
+    sh.show_app_for_test(Box::new(Bomb("key")), PApp::Chat);
+    sh.handle(&Event::Key(Key::Char('x')));
+    assert!(sh.crash_card_text().is_some());
+    sh.sign_out();
+    assert!(sh.crash_card_text().is_none());
+}
+
+#[test]
+fn an_approved_ssh_login_from_the_assistant_brings_the_cli_tile_up() {
+    let mut sh = signed("ovl-sshask");
+    assert_eq!(sh.screen_name(), "launcher");
+    iyakki_agent::sshsessiontools::request_login(sh.env.services.dir(), "root", "box");
+    for _ in 0..12 {
+        sh.handle(&Event::Tick);
+    }
+    assert_eq!(sh.screen_name(), "app:cli", "the CLI tile is open");
+    // the tile took the request (there is no connection called box, so it only says so)
+    assert!(!iyakki_agent::sshsessiontools::pending(sh.env.services.dir(), "root"));
 }

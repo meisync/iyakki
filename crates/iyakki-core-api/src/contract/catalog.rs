@@ -72,11 +72,14 @@ pub fn call(domain_name: &str, call_name: &str) -> Option<&'static CallSpec> {
     domain(domain_name)?.calls.iter().find(|c| c.name == call_name)
 }
 
+/// The oldest minor of the current major this build still serves (the overlap window of the charter, section 6).
+pub const OLDEST_MINOR: u16 = 1;
+
 /// The `hello` for this build.
 pub fn hello_for(machine: &str, build: &str, capabilities: Capabilities) -> Hello {
     Hello {
         contract: CONTRACT_VERSION,
-        oldest_minor: 1,
+        oldest_minor: OLDEST_MINOR,
         machine: machine.to_string(),
         build: build.to_string(),
         domains: DOMAINS
@@ -85,6 +88,7 @@ pub fn hello_for(machine: &str, build: &str, capabilities: Capabilities) -> Hell
             .collect(),
         capabilities,
         rate_limit: RateLimit { calls: 120, per_ms: 60_000 },
+        deprecations: crate::compat::deprecations(),
     }
 }
 

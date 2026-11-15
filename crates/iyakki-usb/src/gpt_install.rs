@@ -202,6 +202,16 @@ pub struct GrubBits {
 const BOOT_START_OFFSET: usize = 0x5C; // GRUB_BOOT_MACHINE_KERNEL_SECTOR: where boot.img looks for the core image (8 bytes)
 const BLOCKLIST_OFFSET: usize = 512 - 12; // the core image's first sector ends with {start: u64, len: u16, segment: u16}
 
+/// GRUB for a shared disk: the boot code with the core image's address set to `core_lba`, and only the used sectors of the core image
+/// (the first sector plus the block list's length), not the whole padded gap.
+pub fn grub_bits_used(source: &SourceInfo, core_lba: u64) -> Result<GrubBits, String> {
+    let (_, gap) = source.bios.unwrap_or((512, source.p1_start.saturating_sub(1) * 512));
+    let mut g = grub_bits(source, core_lba, gap)?;
+    let list_len = u16::from_le_bytes(g.core[BLOCKLIST_OFFSET + 8..BLOCKLIST_OFFSET + 10].try_into().unwrap()) as usize;
+    g.core.truncate((1 + list_len) * 512);
+    Ok(g)
+}
+
 pub fn grub_bits(source: &SourceInfo, core_lba: u64, part_bytes: u64) -> Result<GrubBits, String> {
     // the core image's place in the source: the gap after sector 0 (template) or the BIOS boot partition (GPT stick)
     let (gap_off, gap) = source.bios.unwrap_or((512, source.p1_start.saturating_sub(1) * 512));

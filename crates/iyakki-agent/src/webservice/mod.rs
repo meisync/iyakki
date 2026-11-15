@@ -23,6 +23,7 @@ pub mod hooks;
 mod schedules;
 pub mod openapi;
 pub mod real;
+pub mod metrics;
 pub mod routes;
 pub mod runs;
 pub mod server;
@@ -49,15 +50,27 @@ pub enum Profile {
     AgentApi,
     /// The limited cloud deployment: `agent-api` plus flows (read) and the data tools directly. No local hardware of any kind.
     Cloud,
+    /// Sign-in and the flows of the person (list, read, start, follow runs) and nothing else: no chat, no models, no tiles, no data tools.
+    /// A step of a flow that needs a person waits for that person at the machine's own FLOWS tile (no approval route here yet).
+    FlowsRunner,
+    /// Sign-in and the read-only data tools (`data_open`, `data_describe`, `data_query`) inside the person's own data jail, through `POST /api/v1/data/call`; no chat, no flows.
+    DataApi,
+    /// Sign-in and the WASM tiles (`GET /api/v1/tiles`, `POST /api/v1/tiles/{id}/events`) and nothing else: no chat runs, flows, data call,
+    /// approvals or settings routes. A tile's calls work only as far as the person's account allows, and a change a tile asks for waits
+    /// for an approval that this profile has no route to answer (the desktop or an `agent-api` service answers it).
+    TileHost,
 }
 
 impl Profile {
-    pub const ALL: [Profile; 2] = [Profile::AgentApi, Profile::Cloud];
+    pub const ALL: [Profile; 5] = [Profile::AgentApi, Profile::Cloud, Profile::FlowsRunner, Profile::DataApi, Profile::TileHost];
 
     pub fn name(self) -> &'static str {
         match self {
             Profile::AgentApi => "agent-api",
             Profile::Cloud => "cloud",
+            Profile::FlowsRunner => "flows-runner",
+            Profile::DataApi => "data-api",
+            Profile::TileHost => "tile-host",
         }
     }
 
@@ -73,7 +86,9 @@ impl Profile {
     pub fn tools(self) -> &'static [&'static str] {
         match self {
             Profile::AgentApi => &["now", "web_search", "web_fetch", "web_research", "web_feed", "web_links", "weather", "stock_quote", "search_documents", "data_open", "data_describe", "data_query"],
-            Profile::Cloud => &["now", "web_search", "web_fetch", "web_research", "web_feed", "web_links", "weather", "stock_quote", "search_documents", "data_open", "data_describe", "data_query", "flow_list", "flow_get", "flow_runs", "flow_run_status"],
+            Profile::FlowsRunner | Profile::TileHost => &[],
+            Profile::DataApi => &["data_open", "data_describe", "data_query"],
+            Profile::Cloud => &["deploy_team_host", "tiles_list", "now", "web_search", "web_fetch", "web_research", "web_feed", "web_links", "weather", "stock_quote", "search_documents", "data_open", "data_describe", "data_query", "flow_list", "flow_get", "flow_runs", "flow_run_status"],
         }
     }
 
@@ -94,6 +109,9 @@ impl Profile {
         match self {
             Profile::AgentApi => &[App::Chat],
             Profile::Cloud => &[App::Chat, App::Flows, App::Data],
+            Profile::FlowsRunner => &[App::Flows],
+            Profile::DataApi => &[App::Data],
+            Profile::TileHost => &[App::Chat],
         }
     }
 }

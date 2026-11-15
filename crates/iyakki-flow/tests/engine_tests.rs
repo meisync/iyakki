@@ -178,6 +178,43 @@ fn for_each_runs_a_sub_flow_per_item_and_is_capped() {
 }
 
 #[test]
+fn for_each_can_loop_over_rows_an_earlier_node_produced_and_a_missing_list_loops_over_nothing() {
+    let e = env("each-output");
+    e.host.on_http(|req| {
+        if req.url.contains("list") {
+            ok_json(r#"{"rows": [{"id": 7}, {"id": 8}]}"#)
+        } else {
+            ok_json(&format!(r#"{{"seen": "{}"}}"#, req.url))
+        }
+    });
+    let mut child = Flow::new("per-row", "Per row");
+    child.nodes.push(Node::new("s", "start", json!({})));
+    child.nodes.push(http_node("h", "https://x.example/row/{{ inputs._item.id }}"));
+    child.nodes.push(Node::new("e", "end", json!({"outputs": {"url": "{{ nodes.h.output.body.seen }}"}})));
+    child.edges = vec![Edge::new("s", "h"), Edge::new("h", "e")];
+    e.publish(child);
+    let mut f = Flow::new("loop-output", "Loop over output");
+    f.nodes.push(Node::new("s", "start", json!({})));
+    f.nodes.push(http_node("get", "https://x.example/list"));
+    f.nodes.push(Node::new("each", "foreach", json!({"items": "{{ nodes.get.output.body.rows }}", "flow": "per-row", "max_items": 5})));
+    f.nodes.push(Node::new("e", "end", json!({"outputs": {"urls": "{{ nodes.each.output.items }}", "count": "{{ nodes.each.output.count }}"}})));
+    f.edges = vec![Edge::new("s", "get"), Edge::new("get", "each"), Edge::new("each", "e")];
+    e.publish(f);
+    let r = e.run("loop-output");
+    assert_eq!(r.status, RunStatus::Succeeded, "{}", r.error);
+    assert_eq!(r.outputs["count"], 2);
+    assert_eq!(r.outputs["urls"][0]["url"], "https://x.example/row/7");
+    assert_eq!(r.outputs["urls"][1]["url"], "https://x.example/row/8");
+    // the earlier node gives no list: nothing is looped over and no item is fetched
+    e.host.on_http(|_| ok_json(r#"{"nothing": true}"#));
+    let before = e.host.http_calls.lock().unwrap().len();
+    let r2 = e.run("loop-output");
+    assert_eq!(r2.status, RunStatus::Succeeded, "{}", r2.error);
+    assert_eq!(r2.outputs["count"], 0);
+    assert_eq!(e.host.http_calls.lock().unwrap().len(), before + 1, "only the listing call was made");
+}
+
+#[test]
 fn sub_flows_cannot_call_themselves_or_nest_too_deep() {
     let e = env("sub");
     e.host.on_http(|_| ok_json("{}"));

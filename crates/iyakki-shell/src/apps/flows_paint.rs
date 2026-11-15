@@ -190,10 +190,21 @@ pub fn draw_graph(g: &mut Gfx, p: &Paint) {
     });
 }
 
+/// How much larger card text is drawn on a window that is larger than the reference one: half of the window scale above 1, at most 15 percent
+/// (the card itself keeps its size, so the text must stay inside it).
+pub fn text_boost(s: f32) -> f32 {
+    (1.0 + (s - 1.0).max(0.0) * 0.5).min(1.15)
+}
+
+/// The size of the name on a card at window scale `s` and zoom `z`.
+pub fn card_text_size(s: f32, z: f32) -> f32 {
+    (11.5 * z * text_boost(s)).max(10.0 * text_boost(s))
+}
+
 /// The name shown on a node's card at scale `s` and zoom `z`: the whole name, cut with an ellipsis only when it does not fit the one line.
-pub fn card_title(g: &mut Gfx, n: &Node, _s: f32, z: f32) -> String {
+pub fn card_title(g: &mut Gfx, n: &Node, s: f32, z: f32) -> String {
     let (pad, ic) = (9.0 * z, 15.0 * z);
-    let ts = (11.5 * z).max(10.0);
+    let ts = card_text_size(s, z);
     let room = NODE_W * z - pad - ic - 5.0 * z - 6.0 * z;
     g.fit(ts, n.title(), Face::Bold, room)
 }
@@ -234,14 +245,14 @@ fn draw_node(g: &mut Gfx, p: &Paint, n: &Node) {
         super::flows_icons::draw_kind(g, &n.kind, sx + pad + ic / 2.0, sy + 8.0 * z + ic / 2.0, ic, icon_c);
         // one line: the step's name, cut with an ellipsis only when it really does not fit; the kind and the settings are in the
         // tooltip and the step's panel, not on the card
-        let ts = (11.5 * z).max(10.0);
+        let ts = card_text_size(s, z);
         let tx = sx + pad + ic + 5.0 * z;
         let title = card_title(g, n, s, z);
         g.text(tx, sy + 8.0 * z + (ic - ts * 1.2) / 2.0, ts, if dim { MUTED } else { TEXT }, &title, Face::Bold);
         // badges on the bottom edge: retry, sandbox, the agent's change, problems
         let mut bx = sx + pad;
         let by = sy + h - 19.0 * z;
-        let bs = (9.5 * z).max(10.0);
+        let bs = (9.5 * z * text_boost(s)).max(10.0 * text_boost(s));
         let badge = |g: &mut Gfx, text: &str, c: [u8; 4], x: &mut f32| {
             let tw = g.text_width(bs, text, Face::Bold);
             g.rrect(*x, by, tw + 8.0 * z, 14.0 * z, 5.0 * z, with_alpha(c, 50));

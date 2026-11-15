@@ -13,4 +13,7 @@ docs/project/RELEASE-READINESS.md
 docs/development/PUBLIC-READINESS-AUDIT-*.md
 docs/development/WAVE*-*.md
 docs/development/PARTIALS-PLAN-*.md
+docs/development/PARTIALS-TRIAGE-*.md
 docs/development/WORK-QUEUE.md
+docs/project/ALPHA-4-PLAN.md
+docs/development/SECURITY-REVIEW-*.md

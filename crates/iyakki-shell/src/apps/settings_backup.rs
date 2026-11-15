@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use iyakki_agent::backup::{self as bk, AreaInfo, Contents, Created, Layout, RestoreReport};
+use iyakki_agent::backup_schedule::Schedule;
 
 use super::*;
 
@@ -29,6 +30,8 @@ pub(super) enum BackupForm {
     Make,
     Open,
     Restore,
+    /// The scheduled backup: every N days, the hour, the folder, how many to keep, the passphrase file.
+    Schedule,
 }
 
 #[derive(Default)]
@@ -43,6 +46,8 @@ pub(super) struct BackupPanel {
     first: usize,
     /// Folders to use instead of the real ones (tests).
     layout: Option<Layout>,
+    /// How far the backup that is being made has come, and the way to stop it (Settings shows a bar and the S key).
+    pub(super) progress: Option<std::sync::Arc<bk::Progress>>,
 }
 
 const WARN: [u8; 4] = [255, 196, 94, 255];
@@ -89,7 +94,11 @@ impl SettingsApp {
         if self.backup.loaded.is_some() {
             vec![("Restore chosen…", ACCENT, 'r'), ("Choose / skip", TEXT, ' '), ("Close backup", TEXT, 'c'), ("Open another…", TEXT, 'o')]
         } else {
-            vec![("Back up…", ACCENT, 'b'), ("Open backup…", TEXT, 'o'), ("Include / leave out", TEXT, ' '), ("Look again", TEXT, 'k')]
+            let mut v = vec![("Back up…", ACCENT, 'b'), ("Open backup…", TEXT, 'o'), ("Include / leave out", TEXT, ' '), ("Look again", TEXT, 'k'), ("Schedule…", TEXT, 'h'), ("Schedule off", TEXT, 'u')];
+            if self.backup.progress.is_some() && self.is_busy() {
+                v.insert(0, ("Stop the backup", ERR, 's'));
+            }
+            v
         }
     }
 
@@ -107,6 +116,37 @@ impl SettingsApp {
                 }
             }
             Key::Char('k') => self.backup.preview = None,
+            Key::Char('s') => match (&self.backup.progress, self.is_busy()) {
+                (Some(p), true) => {
+                    p.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                    self.ok("Stopping the backup: the half file is removed.");
+                }
+                _ => self.fail("No backup is running."),
+            },
+            Key::Char('h') if self.backup.loaded.is_none() => {
+                let s = Schedule::load(cx.services.dir(), &cx.session.user);
+                let f = Form::new("Back up on a schedule")
+                    .text("Every how many days (1 to 31)", &s.every_days.to_string(), "1 is every day")
+                    .text("From which hour (0 to 23)", &s.hour.to_string(), "a computer that was off runs it when you next sign in")
+                    .path("Folder to write to", if s.dest.is_empty() { &self.backup.last_dir } else { &s.dest }, "a folder that exists, for example on your USB stick", crate::filepicker::PathKind::Folder, &[])
+                    .text("Keep how many files (1 to 50)", &s.keep.to_string(), "older ones of yours in that folder are removed after a good run")
+                    .path("Passphrase file (empty: NOT encrypted)", &s.passphrase_file, "a file you made; its first line is the passphrase (8 or more characters). Nothing is typed here", crate::filepicker::PathKind::File, &[]);
+                self.open_form(FormKind::Backup(BackupForm::Schedule), f);
+            }
+            Key::Char('u') if self.backup.loaded.is_none() => {
+                let mut s = Schedule::load(cx.services.dir(), &cx.session.user);
+                if !s.enabled {
+                    return self.ok("There is no scheduled backup.");
+                }
+                s.enabled = false;
+                match s.save(cx.services.dir(), &cx.session.user) {
+                    Ok(()) => {
+                        cx.audit.record(&cx.session.user, "backup.schedule", "off");
+                        self.ok("The scheduled backup is off (its settings are kept).");
+                    }
+                    Err(e) => self.fail(e),
+                }
+            }
             Key::Char('c') if self.backup.loaded.is_some() => {
                 self.backup.loaded = None;
                 self.backup.pick.clear();
@@ -165,8 +205,27 @@ impl SettingsApp {
                 self.backup.last_dir = dest.clone();
                 let opts = bk::CreateOptions { areas: self.backup_on(), passphrase: pass.clone(), now, release: env!("CARGO_PKG_VERSION").to_string() };
                 cx.audit.record(&user, "backup.create", &format!("{} area(s) to {}, {}", opts.areas.len(), dest, if pass.is_some() { "encrypted" } else { "not encrypted" }));
-                self.start("Backing up", move || JobOut::Backup(BackupOut::Made(bk::create(&layout, std::path::Path::new(&dest), &opts).map_err(|e| e.to_string()))));
+                let pr = std::sync::Arc::new(bk::Progress::default());
+                self.backup.progress = Some(pr.clone());
+                self.start("Backing up", move || JobOut::Backup(BackupOut::Made(bk::create_with_progress(&layout, std::path::Path::new(&dest), &opts, &pr).map_err(|e| e.to_string()))));
                 Ok("Backing up…".into())
+            }
+            BackupForm::Schedule => {
+                let num = |i: usize, what: &str, lo: u32, hi: u32| -> Result<u32, String> { form.value(i).trim().parse::<u32>().ok().filter(|n| (lo..=hi).contains(n)).ok_or_else(|| format!("{what}: a whole number from {lo} to {hi}.")) };
+                let mut s = Schedule::load(cx.services.dir(), &user);
+                s.every_days = num(0, "Days", 1, 31)?;
+                s.hour = num(1, "Hour", 0, 23)? as u8;
+                s.dest = form.value(2).trim().to_string();
+                s.keep = num(3, "Keep", 1, 50)?;
+                s.passphrase_file = form.value(4).trim().to_string();
+                s.enabled = true;
+                s.validate()?;
+                if !std::path::Path::new(&s.dest).is_dir() {
+                    return Err("The folder is not there yet: make it, or plug in the stick, then try again.".into());
+                }
+                s.save(cx.services.dir(), &user)?;
+                cx.audit.record(&user, "backup.schedule", &format!("on, every {} day(s), {}", s.every_days, if s.passphrase_file.is_empty() { "not encrypted" } else { "encrypted" }));
+                Ok(s.describe(&iyakki_agent::clock::Zone::system_with(None), now))
             }
             BackupForm::Open => {
                 let file = PathBuf::from(form.value(0).trim());
@@ -197,6 +256,7 @@ impl SettingsApp {
     }
 
     pub(super) fn backup_job_done(&mut self, out: BackupOut) {
+        self.backup.progress = None;
         match out {
             BackupOut::Made(Ok(c)) => {
                 self.backup.preview = None;
@@ -221,6 +281,23 @@ impl SettingsApp {
     pub(super) fn render_backup(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
         let rows = self.backup_rows(cx);
         let mut y = a.y;
+        if let (Some(p), true) = (&self.backup.progress, self.is_busy()) {
+            let (done, total) = (p.done.load(std::sync::atomic::Ordering::Relaxed), p.total.load(std::sync::atomic::Ordering::Relaxed));
+            let frac = if total == 0 { 0.0 } else { (done as f32 / total as f32).min(1.0) };
+            g.rrect(a.x, y, a.w, 10.0 * s, 5.0 * s, rgb(30, 38, 68));
+            g.rrect(a.x, y, (a.w * frac).max(if total == 0 { 0.0 } else { 6.0 * s }), 10.0 * s, 5.0 * s, ACCENT);
+            let t = if total == 0 { "Counting the files… (S stops)".to_string() } else { format!("{}% (S stops, the half file is removed)", (frac * 100.0) as u32) };
+            let t = g.fit(13.0 * s, &t, Face::Sans, a.w);
+            g.text(a.x, y + 14.0 * s, 13.0 * s, TEXT, &t, Face::Sans);
+            y += 36.0 * s;
+        } else if self.backup.loaded.is_none() {
+            let line = Schedule::load(cx.services.dir(), &cx.session.user).describe(&iyakki_agent::clock::Zone::system_with(None), iyakki_agent::clock::now_unix());
+            for w in g.wrap(13.0 * s, &line, Face::Sans, a.w).into_iter().take(2) {
+                g.text(a.x, y, 13.0 * s, DIM, &w, Face::Sans);
+                y += 18.0 * s;
+            }
+            y += 4.0 * s;
+        }
         let intro: Vec<(String, [u8; 4])> = match &self.backup.loaded {
             None => vec![
                 ("Makes one file with your own data, to keep on a stick or another disk. It holds the things listed below, and only yours.".into(), MUTED),

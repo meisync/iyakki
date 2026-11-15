@@ -25,6 +25,7 @@ const AREA_REVIEW: usize = 2;
 const F_QUERY: usize = 10;
 const F_REPLACE: usize = 11;
 const F_GOTO: usize = 12;
+const F_INPUT: usize = 13;
 const TAB: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -195,6 +196,11 @@ pub struct EditApp {
     active: usize,
     /// A run of the open file in progress, its result, and the panel that shows it.
     running: Option<(String, std::sync::mpsc::Receiver<(bool, String)>)>,
+    /// Raised by Stop: the run really ends (a WebAssembly call is interrupted, a container job is deleted).
+    run_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// The Input bar (F7) while it is open, and the text the next run reads on its standard input (`\n` in the box means a new line).
+    input: Option<TextField>,
+    run_stdin: String,
     output: Option<RunOutput>,
     /// A completion being written by the assistant.
     completing: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
@@ -322,6 +328,9 @@ impl EditApp {
             docs: vec![None],
             active: 0,
             running: None,
+            run_cancel: None,
+            input: None,
+            run_stdin: String::new(),
             completing: None,
             complete_at: None,
             md: Default::default(),
@@ -466,15 +475,39 @@ impl EditApp {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let code = self.buf.text();
         let (tx, rx) = std::sync::mpsc::channel();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stdin = self.stdin_text();
         match ext.as_str() {
             "wasm" | "wat" => {
-                cx.audit.record(&cx.session.user, "edit.run", &format!("wasm {name}"));
+                cx.audit.record(&cx.session.user, "edit.run", &format!("wasm {name}{}", if stdin.is_empty() { String::new() } else { format!(" with {} bytes of input", stdin.len()) }));
                 let (host, user, policy) = (cx.host.clone(), cx.session.user.clone(), cx.session.policy.clone());
                 let bytes = code.into_bytes();
+                let io = iyakki_agent::WasmIo { stdin: stdin.into_bytes(), cancel: cancel.clone() };
                 let _ = std::thread::Builder::new().name("iyakki-edit-run".into()).spawn(move || {
-                    let r = host.run_wasm(&user, &policy, &bytes, "_start");
+                    let r = host.run_wasm_io(&user, &policy, &bytes, "_start", &io);
                     let _ = tx.send(match r {
                         Ok(out) => (true, out),
+                        Err(e) => (false, e),
+                    });
+                });
+            }
+            // tests: `cargo test` for a Rust file in a Cargo project, `pytest` for a test_*.py file (on this computer, no network rule here)
+            "rs" | "py" if ext == "rs" || iyakki_agent::edittest::plan(&path).is_ok() => {
+                if cx.session.policy.cli != iyakki_sec::policy::CliLevel::Full {
+                    return self.fail("Running tests needs the full command-line permission for your account.");
+                }
+                let plan = match iyakki_agent::edittest::plan(&path) {
+                    Ok(p) => p,
+                    Err(e) => return self.fail(e),
+                };
+                cx.audit.record(&cx.session.user, "edit.run", &format!("tests {} {name}", plan.label));
+                let flag = cancel.clone();
+                let who = cx.session.user.clone();
+                let _ = std::thread::Builder::new().name("iyakki-edit-run".into()).spawn(move || {
+                    // the test program is the person's own in SYSTEM, "My processes" while it runs
+                    let r = iyakki_agent::procowner::as_user(&who, || iyakki_agent::edittest::run(&plan, 300, &flag));
+                    let _ = tx.send(match r {
+                        Ok(t) => (t.ok, t.text(&plan.label)),
                         Err(e) => (false, e),
                     });
                 });
@@ -491,21 +524,71 @@ impl EditApp {
                 if cx.services.cluster.state() != iyakki_agent::cluster::ClusterState::Running {
                     return self.fail("Start the container cluster first (CLI → CLIs → k3s) to run scripts here; WebAssembly files run without it.");
                 }
-                cx.audit.record(&cx.session.user, "edit.run", &format!("{lang} {name}"));
+                cx.audit.record(&cx.session.user, "edit.run", &format!("{lang} {name}{}", if stdin.is_empty() { String::new() } else { format!(" with {} bytes of input", stdin.len()) }));
                 let svc = cx.services.clone();
+                let flag = cancel.clone();
                 let _ = std::thread::Builder::new().name("iyakki-edit-run".into()).spawn(move || {
-                    let r = svc.cluster.sandbox_run(lang, &code, 60, false);
+                    let r = svc.cluster.sandbox_run_io(lang, &code, &stdin, 60, false, &flag);
                     let _ = tx.send(match r {
                         Ok(res) => (res.ok, res.output),
                         Err(e) => (false, e),
                     });
                 });
             }
-            _ => return self.fail("Only .py, .js, .sh and WebAssembly (.wasm, .wat) files can be run from here."),
+            _ => return self.fail("Only .py, .js, .sh and WebAssembly (.wasm, .wat) files can be run from here; tests run from a .rs file in a Cargo project or a test_*.py file."),
         }
         self.output = None;
         self.running = Some((name.clone(), rx));
+        self.run_cancel = Some(cancel);
         self.ok(format!("Running {name}…"));
+    }
+
+    /// The text the next run reads on its standard input: the Input box with `\n` read as a new line, ending in one.
+    fn stdin_text(&self) -> String {
+        let t = self.run_stdin.replace("\\n", "\n");
+        if t.is_empty() || t.ends_with('\n') { t } else { format!("{t}\n") }
+    }
+
+    /// F8 or the Stop button: really stop the run. The flag interrupts a WebAssembly call within a fraction of a second and makes the
+    /// cluster delete a script's job; the editor stops waiting at once and the Run button is free again.
+    fn stop_run(&mut self, cx: &AppCx) {
+        let Some((name, _rx)) = self.running.take() else { return self.fail("Nothing is running.") };
+        if let Some(c) = self.run_cancel.take() {
+            c.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        cx.audit.record(&cx.session.user, "edit.run.stop", &name);
+        self.output = Some(RunOutput { title: name.clone(), lines: vec![format!("Stopped {name}. The run was told to stop; its answer is not shown.")], ok: false });
+        self.fail(format!("Stopped {name}."));
+    }
+
+    /// F7: the Input box for the next run (Enter keeps it, Esc leaves it as it was).
+    fn open_input(&mut self) {
+        let mut f = TextField::new("Input for the program (\\n = new line)", false);
+        f.max = 4000;
+        f.set(&self.run_stdin);
+        self.find = None;
+        self.goto = None;
+        self.input = Some(f);
+    }
+
+    fn input_key(&mut self, k: &Key) {
+        let Some(f) = self.input.as_mut() else { return };
+        match k {
+            Key::Esc => self.input = None,
+            Key::Enter => {
+                self.run_stdin = f.value.clone();
+                self.input = None;
+                let n = self.stdin_text().len();
+                if n == 0 {
+                    self.ok("No input for the next run.");
+                } else {
+                    self.ok(format!("The next run reads {n} byte{} from its input.", if n == 1 { "" } else { "s" }));
+                }
+            }
+            other => {
+                f.handle(other);
+            }
+        }
     }
 
     fn poll_run(&mut self) {
@@ -1544,8 +1627,12 @@ impl EditApp {
         btn(g, "Undo", TEXT, Key::Ctrl('z'), !in_review && self.buf.can_undo());
         btn(g, "Redo", TEXT, Key::Ctrl('y'), !in_review && self.buf.can_redo());
         btn(g, "Find", TEXT, Key::Ctrl('f'), !in_review);
-        if !embedded && self.path.as_ref().and_then(|p| p.extension()).is_some_and(|e| matches!(e.to_string_lossy().to_lowercase().as_str(), "py" | "js" | "mjs" | "sh" | "wasm" | "wat")) {
+        if !embedded && self.path.as_ref().and_then(|p| p.extension()).is_some_and(|e| matches!(e.to_string_lossy().to_lowercase().as_str(), "py" | "js" | "mjs" | "sh" | "wasm" | "wat" | "rs")) {
             btn(g, "Run", OK, Key::F(5), !in_review && self.running.is_none());
+            if self.running.is_some() {
+                btn(g, "Stop", ERR, Key::F(8), true);
+            }
+            btn(g, if self.run_stdin.is_empty() { "Input" } else { "Input ●" }, TEXT, Key::F(7), !in_review);
         }
         if !embedded {
             btn(g, "Complete", ACCENT, Key::F(6), !in_review && self.writable && self.completing.is_none());
@@ -1572,7 +1659,7 @@ impl EditApp {
             g.text(x + w - lw - 10.0 * s - lbw, ty + 6.0 * s, 15.0 * s, if self.buf.is_dirty() { rgb(255, 196, 94) } else { TEXT }, &label, Face::Bold);
         }
         // text area
-        let find_h = if self.find.as_ref().is_some_and(|f| f.show_replace) { 84.0 * s } else if self.find.is_some() || self.goto.is_some() { 46.0 * s } else { 0.0 };
+        let find_h = if self.find.as_ref().is_some_and(|f| f.show_replace) { 84.0 * s } else if self.find.is_some() || self.goto.is_some() || self.input.is_some() { 46.0 * s } else { 0.0 };
         let top_off = if ide { tool_h + 6.0 * s } else { 44.0 * s };
         let top = area.y + tabs_h + top_off;
         // the result of running the file takes some of the room under the text
@@ -1625,6 +1712,12 @@ impl EditApp {
                 rx += g.button(rx, fy + 43.0 * s, 13.0 * s, "Replace", ACCENT, self.bev(Key::Enter)) + 6.0 * s;
                 g.button(rx, fy + 43.0 * s, 13.0 * s, "Replace all", ACCENT, self.bev(Key::Ctrl('r')));
             }
+        } else if let Some(inp) = &self.input {
+            g.text(x, fy + 10.0 * s, 14.0 * s, MUTED, "Input", Face::Sans);
+            inp.render(g, R::new(x + 64.0 * s, fy, (w * 0.5).max(200.0 * s), 36.0 * s), true, s, blink(tick), Face::Sans, F_INPUT);
+            let bx = x + 64.0 * s + (w * 0.5).max(200.0 * s) + 8.0 * s;
+            let bw = g.button(bx, fy + 3.0 * s, 13.0 * s, "Keep", ACCENT, self.bev(Key::Enter));
+            g.button(bx + bw + 6.0 * s, fy + 3.0 * s, 13.0 * s, "Close", MUTED, self.bev(Key::Esc));
         } else if let Some(gt) = &self.goto {
             g.text(x, fy + 10.0 * s, 14.0 * s, MUTED, "Go to line", Face::Sans);
             gt.render(g, R::new(x + 100.0 * s, fy, 140.0 * s, 36.0 * s), true, s, blink(tick), Face::Sans, F_GOTO);
@@ -1822,6 +1915,27 @@ impl EditApp {
 }
 
 impl App for EditApp {
+    #[cfg(test)]
+    fn probe(&self) -> String {
+        format!("{} | {:?}", self.open_paths().iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>().join("\n"), self.status)
+    }
+
+    fn dialog_title(&self) -> Option<String> {
+        Some(match self.modal.as_ref()? {
+            Modal::Open { picker, .. } => picker.title.clone(),
+            Modal::PathForm(f, _) => f.title.clone(),
+            Modal::Confirm(_, q) => q.clone(),
+            Modal::Overwrite(_) => "A file with that name exists. Replace it?".into(),
+        })
+    }
+
+    /// A path from another tile (the browser's Downloads list): open the file in a tab.
+    fn open_item(&mut self, item: &str, cx: &AppCx) {
+        if let Err(e) = self.open_path(cx, item) {
+            self.status = Some((e, false));
+        }
+    }
+
     fn take_host_save(&mut self) -> Option<(String, Vec<u8>)> {
         self.host_save.take()
     }
@@ -1837,7 +1951,7 @@ impl App for EditApp {
     fn context_items(&mut self, _x: i32, _y: i32) -> Vec<crate::ctxmenu::Item> {
         use crate::ctxmenu::{Item, COPY, CUT, PASTE, SELECT_ALL};
         let sel = self.buf.selection().is_some();
-        let mut v = vec![Item::new(CUT, "Cut", "Ctrl+X").enabled(sel), Item::new(COPY, "Copy", "Ctrl+C").enabled(sel), Item::new(PASTE, "Paste", "Ctrl+V").needs_clip(), Item::new(SELECT_ALL, "Select all", "Ctrl+A")];
+        let mut v = vec![Item::new(CUT, "Cut", "Ctrl+X").enabled(sel), Item::new(COPY, "Copy", "Ctrl+C").enabled(sel), Item::new(PASTE, "Paste", iyakki_uikit::platform::paste_key()).needs_clip(), Item::new(SELECT_ALL, "Select all", "Ctrl+A")];
         if self.hl.lang().line_comment().is_some() {
             v.push(Item::separator());
             v.push(Item::new("comment", "Comment line", "Ctrl+L"));
@@ -1882,12 +1996,21 @@ impl App for EditApp {
         if self.review.is_some() {
             "y accept · n reject · a accept all · Enter apply · Esc discard".into()
         } else {
-            "Ctrl+S save · Ctrl+O open · Ctrl+N new tab · Ctrl+W close tab · Ctrl+F find · Ctrl+L comment · F5 run · Ctrl+Z undo · Esc back".into()
+            "Ctrl+S save · Ctrl+O open · Ctrl+N new tab · Ctrl+W close tab · Ctrl+F find · Ctrl+L comment · F5 run · F7 input · Ctrl+Z undo · Esc back".into()
         }
     }
 
     fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
         if matches!(ev, Event::Tick) {
+            if self.running.is_some() && iyakki_agent::settingstools_backup::take_run_stop(cx.services.dir(), &cx.session.user) {
+                self.stop_run(cx);
+            }
+            if let Some(t) = iyakki_agent::settingstools_backup::take_run_input(cx.services.dir(), &cx.session.user) {
+                self.run_stdin = t.trim_end_matches('\n').replace('\n', "\\n");
+                self.input = None;
+                cx.audit.record(&cx.session.user, "edit.run.input", &format!("{} bytes", self.run_stdin.len()));
+                self.ok("The assistant set the input for the next run.");
+            }
             self.poll_run();
             self.poll_complete();
             return Flow::Stay;
@@ -1957,6 +2080,28 @@ impl App for EditApp {
                 _ => {}
             }
         }
+        if self.input.is_some() {
+            match ev {
+                Event::Key(Key::F(5)) | Event::Key(Key::F(8)) => {}
+                Event::Key(k) => {
+                    self.input_key(k);
+                    return Flow::Stay;
+                }
+                Event::Paste(t) => {
+                    if let Some(f) = self.input.as_mut() {
+                        f.paste(&t.replace('\n', "\\n"));
+                    }
+                    return Flow::Stay;
+                }
+                Event::FocusAt(F_INPUT, x) => {
+                    if let Some(f) = self.input.as_mut() {
+                        f.click(*x);
+                    }
+                    return Flow::Stay;
+                }
+                _ => {}
+            }
+        }
         if self.goto.is_some() {
             match ev {
                 Event::Key(k) => {
@@ -2018,6 +2163,8 @@ impl App for EditApp {
             Event::Tab(n) if !self.embedded && *n >= 300 && *n < 400 => self.request_close_doc(*n - 300, cx),
             Event::Tab(n) if !self.embedded && *n >= 200 && *n < 300 => self.switch_doc(*n - 200),
             Event::Key(Key::F(5)) if !self.embedded => self.run_file(cx),
+            Event::Key(Key::F(8)) if !self.embedded => self.stop_run(cx),
+            Event::Key(Key::F(7)) if !self.embedded => self.open_input(),
             Event::Key(Key::F(6)) if !self.embedded => self.request(Pending::Complete, cx),
             Event::Key(Key::Ctrl('l')) => match self.hl.lang().line_comment() {
                 Some(prefix) => {
@@ -2837,6 +2984,99 @@ mod tests {
         assert!(a.scroll > before && a.buffer().selection().is_some());
     }
 
+    /// A host that records the input of each run and, for a module that says `spin`, runs until the stop flag is raised.
+    struct Recorder {
+        seen: std::sync::Mutex<Vec<String>>,
+        ended_by_flag: std::sync::atomic::AtomicBool,
+    }
+    impl iyakki_agent::HostApi for Recorder {
+        fn detect_env(&self) -> String {
+            "test".into()
+        }
+        fn net_status(&self) -> String {
+            String::new()
+        }
+        fn run_wasm(&self, _: &str, _: &iyakki_sec::policy::Policy, _: &[u8], _: &str) -> Result<String, String> {
+            Ok("plain".into())
+        }
+        fn run_wasm_io(&self, _: &str, _: &iyakki_sec::policy::Policy, wasm: &[u8], _: &str, io: &iyakki_agent::WasmIo) -> Result<String, String> {
+            self.seen.lock().unwrap().push(String::from_utf8_lossy(&io.stdin).into_owned());
+            if String::from_utf8_lossy(wasm).contains("spin") {
+                while !io.cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                self.ended_by_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                return Err("stopped".into());
+            }
+            Ok(format!("read {} bytes", io.stdin.len()))
+        }
+        fn power_off(&self) {}
+        fn reboot(&self) {}
+    }
+
+    #[test]
+    fn the_input_box_feeds_the_run_and_stop_really_raises_the_flag() {
+        let (mut cx, home) = world("estdin");
+        let rec = std::sync::Arc::new(Recorder { seen: Default::default(), ended_by_flag: Default::default() });
+        cx.host = rec.clone();
+        let mut a = app_with(&cx, &home, "t.wat", "(module (func (export \"_start\")))");
+        // F7 opens the box, typing fills it, Enter keeps it and says how much the next run reads
+        assert!(!render(&mut a, &cx).hits.iter().any(|h| h.label == "Keep"));
+        key(&mut a, &cx, Key::F(7));
+        typ(&mut a, &cx, "12\\n34");
+        let g = render(&mut a, &cx);
+        assert!(g.hits.iter().any(|h| h.label == "Keep") && g.hits.iter().any(|h| h.label == "Input"), "the bar and the toolbar button are drawn");
+        key(&mut a, &cx, Key::Enter);
+        assert!(a.status().unwrap().0.contains("reads 6 bytes"), "{:?}", a.status());
+        assert!(a.input.is_none() && render(&mut a, &cx).hits.iter().any(|h| h.label == "Input ●"), "the button shows that an input is set");
+        key(&mut a, &cx, Key::F(5));
+        for _ in 0..400 {
+            a.handle(&Event::Tick, &cx);
+            if a.running.is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(rec.seen.lock().unwrap().last().map(String::as_str), Some("12\n34\n"), "a typed \\n is a new line and the input ends in one");
+        assert_eq!(a.output.as_ref().unwrap().lines, vec!["read 6 bytes".to_string()]);
+        assert!(cx.audit.recent(10).iter().any(|l| l.contains("edit.run") && l.contains("with 6 bytes of input")));
+        key(&mut a, &cx, Key::Esc);
+        // Esc leaves the box as it was
+        key(&mut a, &cx, Key::F(7));
+        typ(&mut a, &cx, "zzz");
+        key(&mut a, &cx, Key::Esc);
+        assert_eq!(a.run_stdin, "12\\n34");
+        // the assistant's edit_run_input is taken on the next beat, once, and replaces the box
+        iyakki_agent::settingstools_backup::request_run_input(cx.services.dir(), &cx.session.user, "7\n8\n");
+        a.handle(&Event::Tick, &cx);
+        assert_eq!(a.stdin_text(), "7\n8\n");
+        assert!(cx.audit.recent(10).iter().any(|l| l.contains("edit.run.input")));
+        a.handle(&Event::Tick, &cx);
+        assert_eq!(a.stdin_text(), "7\n8\n", "taken once");
+        // empty input: the run is given nothing
+        key(&mut a, &cx, Key::F(7));
+        for _ in 0..10 {
+            key(&mut a, &cx, Key::Backspace);
+        }
+        key(&mut a, &cx, Key::Enter);
+        assert_eq!(a.stdin_text(), "");
+        // Stop on a run that does not end by itself: the flag is raised and the run really ends
+        let mut b = app_with(&cx, &home, "spin.wat", "(module ;; spin\n (func (export \"_start\")))");
+        key(&mut b, &cx, Key::F(5));
+        assert!(b.running.is_some());
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!rec.ended_by_flag.load(std::sync::atomic::Ordering::SeqCst), "still running");
+        key(&mut b, &cx, Key::F(8));
+        for _ in 0..400 {
+            if rec.ended_by_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(rec.ended_by_flag.load(std::sync::atomic::Ordering::SeqCst), "Stop raised the flag the host watches");
+        assert!(b.running.is_none() && b.run_cancel.is_none());
+    }
+
     #[test]
     fn f5_runs_webassembly_files_in_the_sandbox_and_says_why_other_files_cannot_run() {
         let (cx, home) = world("erun");
@@ -2858,6 +3098,23 @@ mod tests {
         assert!(g.hits.iter().any(|h| h.label == "Run"), "a Run button for runnable files");
         key(&mut a, &cx, Key::Esc);
         assert!(a.output.is_none(), "Esc closes the result first");
+        // F8 stops a run that is going: the Run button is free again and the stop is audited
+        key(&mut a, &cx, Key::F(5));
+        assert!(a.running.is_some());
+        let g = render(&mut a, &cx);
+        assert!(g.hits.iter().any(|h| h.label == "Stop"), "a Stop button while it runs");
+        key(&mut a, &cx, Key::F(8));
+        assert!(a.running.is_none() && a.output.as_ref().is_some_and(|o| o.lines[0].starts_with("Stopped t.wat")), "{:?}", a.output.as_ref().map(|o| o.lines.clone()));
+        assert!(cx.audit.recent(10).iter().any(|l| l.contains("edit.run.stop")));
+        key(&mut a, &cx, Key::F(8));
+        assert!(a.status().unwrap().0.contains("Nothing is running"));
+        // the assistant's edit_run_stop is a request the editor takes on its next beat
+        key(&mut a, &cx, Key::F(5));
+        assert!(a.running.is_some());
+        iyakki_agent::settingstools_backup::request_run_stop(cx.services.dir(), &cx.session.user);
+        a.handle(&Event::Tick, &cx);
+        assert!(a.running.is_none() && cx.audit.recent(10).iter().any(|l| l.contains("edit.run.stop")));
+        key(&mut a, &cx, Key::Esc);
         // a Python file needs the container cluster
         let mut p = app_with(&cx, &home, "t.py", "print(1)\n");
         key(&mut p, &cx, Key::F(5));

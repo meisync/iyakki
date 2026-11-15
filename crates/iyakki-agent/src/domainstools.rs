@@ -242,6 +242,12 @@ impl DomainTools {
 }
 
 impl Tools for DomainTools {
+
+    fn inner_tools(&self) -> Option<&dyn Tools> {
+
+        Some(&*self.inner)
+
+    }
     fn defs(&self) -> Vec<ToolDef> {
         let mut v = self.inner.defs();
         v.retain(|d| !is_domain_tool(&d.spec.name));
@@ -259,7 +265,7 @@ impl Tools for DomainTools {
                 "scheme": {"type": "string", "enum": ["http", "https", "passthrough"], "description": "http (default), https (needs certificate) or passthrough (TLS passed through to the target)."},
                 "certificate": {"type": "string", "description": "https only: a certificate NAME from the vault, or `trial` for a self-signed one. Never certificate text."},
                 "websocket": {"type": "boolean", "description": "Let WebSocket upgrades through (default true)."},
-                "access": {"type": "string", "enum": ["members", "public"], "description": "members (default; not enforced by the listener) or public."}
+                "access": {"type": "string", "enum": ["members", "public"], "description": "members (default; people signed in to this device) or public."}
             }, "required": ["host"]}),
         ));
         v.push(ask("domain_route_remove", "Remove a domain route. The person approves a card.", json!({"type": "object", "properties": {"host": {"type": "string"}, "path": {"type": "string", "description": "/ by default."}}, "required": ["host"]})));

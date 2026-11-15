@@ -708,6 +708,7 @@ pub fn fetch_resume(st: &dyn iyakki_proxy::Streamer, url: &str, want: u64, dest:
                 }
                 last_err = format!("got {got} of {want} bytes");
             }
+            Err(Retry::Again(e)) if iyakki_proxy::guard::is_no_network(&e) => return Err(e),
             Err(Retry::Again(e)) => last_err = e,
             Err(Retry::Stop(e)) => return Err(e),
         }

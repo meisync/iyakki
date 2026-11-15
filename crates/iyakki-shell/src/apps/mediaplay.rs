@@ -242,12 +242,12 @@ fn blit(g: &mut Gfx, f: &Frame, into: R) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
     /// A fake ffmpeg and a fake speaker in a temporary folder: no media and no device is touched.
-    fn fakes(tag: &str) -> (std::path::PathBuf, Config) {
+    pub(crate) fn fakes(tag: &str) -> (std::path::PathBuf, Config) {
         let d = std::env::temp_dir().join(format!("iyakki-mediaplay-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
@@ -259,7 +259,8 @@ mod tests {
         };
         let ff = w(
             "ffmpeg",
-            r#"echo "$@" >> "$0.log"
+            r#"LC_ALL=C; export LC_ALL
+echo "$@" >> "$0.log"
 case "$*" in
   *rawvideo*)
     for a in "$@"; do case "$a" in *scale=*) wh=${a#*scale=};; esac; done
@@ -276,7 +277,7 @@ esac
 "#,
         );
         let sp = w("aplay", "cat > /dev/null\n");
-        (d.clone(), Config { ffmpeg: ff, audio_cmd: vec![sp], max_fps: 30.0, audio_lag: 0.9 })
+        (d.clone(), Config { ffmpeg: ff, audio_cmd: vec![sp], max_fps: 30.0, audio_lag: 0.9, mixer: None })
     }
 
     fn pump(v: &mut NativeView, what: &str, f: impl Fn(&NativeView) -> bool) {

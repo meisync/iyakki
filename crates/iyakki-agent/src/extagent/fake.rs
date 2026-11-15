@@ -174,6 +174,56 @@ out({"type": "result", "subtype": "success", "is_error": False, "result": text, 
     )
 }
 
+/// A `copilot` that speaks MCP to the bridge like the real one (the stdio server of `--additional-mcp-config=@FILE`): per run (counted in
+/// `count`) it does what `plan.json` says for that run (`calls`: IYAKKI tools through the socket, each printed in the verified Copilot
+/// event shapes) and ends with its text and a `result` line. It has no tool prompts of its own: writes and commands go through IYAKKI's
+/// tools. Needs `python3` (the tests skip without it).
+pub fn copilot_mcp(dir: &Path) -> PathBuf {
+    script(
+        dir,
+        "copilot",
+        r#"#!/usr/bin/env python3
+import sys, os, json, socket
+D = "__DIR__"
+a = sys.argv[1:]
+if a[:1] == ["--version"]:
+    print("GitHub Copilot CLI 1.0.98"); sys.exit(0)
+n = (int(open(D + "/count").read()) if os.path.exists(D + "/count") else 0) + 1
+open(D + "/count", "w").write(str(n))
+open(D + "/args%d.txt" % n, "w").write("\n".join(a))
+plans = json.load(open(D + "/plan.json"))
+plan = plans[min(n, len(plans)) - 1]
+cfgpath = [x for x in a if x.startswith("--additional-mcp-config=@")][0].split("@", 1)[1]
+cfg = json.load(open(cfgpath))["mcpServers"]["iyakki"]
+s = socket.socket(socket.AF_UNIX); s.connect(cfg["args"][1])
+f = s.makefile("rw"); f.write(cfg["env"]["IYAKKI_MCP_TOKEN"] + "\n"); f.flush()
+rid = [0]
+def rpc(method, params):
+    rid[0] += 1
+    f.write(json.dumps({"jsonrpc": "2.0", "id": rid[0], "method": method, "params": params}) + "\n"); f.flush()
+    return json.loads(f.readline())
+def out(o):
+    print(json.dumps(o)); sys.stdout.flush()
+rpc("initialize", {"protocolVersion": "2025-03-26"})
+out({"type": "session.mcp_server_status_changed", "data": {"serverName": "iyakki", "status": "connected"}, "ephemeral": True})
+out({"type": "assistant.turn_start", "data": {"turnId": "0"}})
+for i, c in enumerate(plan.get("calls", [])):
+    tid = "call_%d_%d" % (n, i)
+    name = "iyakki-" + c["name"]
+    out({"type": "assistant.message", "data": {"messageId": "m%d_%d" % (n, i), "content": "", "toolRequests": [{"toolCallId": tid, "name": name, "arguments": c.get("args", {}), "type": "function", "mcpServerName": "iyakki"}]}})
+    out({"type": "tool.execution_start", "data": {"toolCallId": tid, "toolName": name, "arguments": c.get("args", {}), "mcpServerName": "iyakki", "mcpToolName": c["name"]}})
+    r = rpc("tools/call", {"name": c["name"], "arguments": c.get("args", {})})
+    res = r["result"]
+    text = res["content"][0]["text"]
+    out({"type": "tool.execution_complete", "data": {"toolCallId": tid, "success": not res.get("isError"), "result": {"content": text, "contents": [{"type": "text", "text": text}]}}})
+text = plan.get("text", "ok")
+out({"type": "assistant.message", "data": {"messageId": "mfinal%d" % n, "content": text, "toolRequests": []}})
+out({"type": "assistant.idle", "data": {}, "ephemeral": True})
+out({"type": "result", "sessionId": "cop-ap", "exitCode": 0, "usage": {"premiumRequests": 1}})
+"#,
+    )
+}
+
 /// A custom agent that can list its models: `--version`, and `--models` printing one per line with an optional note.
 pub fn modelist(dir: &Path) -> PathBuf {
     script(

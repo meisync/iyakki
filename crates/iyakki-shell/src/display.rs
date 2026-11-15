@@ -10,6 +10,47 @@ use std::path::Path;
 pub mod kms;
 pub mod outputs;
 
+static DRIVEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The shell opened its screen at this size (width, height): what Settings shows as "Screen in use".
+pub fn set_driven(w: u32, h: u32) {
+    DRIVEN.store((u64::from(w) << 32) | u64::from(h), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The size of the screen the shell is drawing on, once it has opened one.
+pub fn driven() -> Option<(u32, u32)> {
+    let v = DRIVEN.load(std::sync::atomic::Ordering::Relaxed);
+    (v != 0).then_some(((v >> 32) as u32, v as u32))
+}
+
+thread_local! {
+    static DRM_DIR: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Where the kernel's connectors are: `/sys/class/drm`, or a fake folder a test of this thread named.
+pub fn drm_dir() -> std::path::PathBuf {
+    DRM_DIR.with(|d| d.borrow().clone()).unwrap_or_else(|| "/sys/class/drm".into())
+}
+
+#[cfg(test)]
+pub fn set_drm_dir_for_tests(p: Option<std::path::PathBuf>) {
+    DRM_DIR.with(|d| *d.borrow_mut() = p);
+}
+
+/// How each connected display looks to the kernel and whether its list of sizes matches what it can do, as text. `sys_drm` is
+/// `/sys/class/drm` (a fake folder in tests). The app asks here instead of reading the kernel itself.
+pub fn status_text(sys_drm: &Path) -> String {
+    iyakki_devctl::drmmodes::status_text(sys_drm)
+}
+
+/// "Look again": ask the kernel to read the connected displays again, in the background, and paint everything again when a display's
+/// list of modes became right (the framebuffer and the KMS paths both notice the new modes by themselves). Returns how the displays
+/// look now, in one line. `sys_drm` is `/sys/class/drm` (a fake folder in tests).
+pub fn look_again(sys_drm: &Path) -> String {
+    iyakki_devctl::drmmodes::set_logger(|l| log::info!("{l}"));
+    iyakki_devctl::drmmodes::look_again(sys_drm, crate::splash::request_repaint)
+}
+
 /// One display connector as sysfs describes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Connector {

@@ -24,6 +24,7 @@ pub const USAGE_BASE: &str = "usage: iyakki dev <command>
   screenshot [-o FILE.png]            a picture of the device's screen
   whoami                              the device, the account this computer acts as, and the scopes it holds
   info | ps | dmesg [--follow] [--grep X] | logs --system | status      look at the device (scope debug)
+  doctor [--detail]                                                   the DOCTOR report of the device, with its dev cluster, vault and VPN (scope debug, administrator)
   files ls|stat|push|pull|rm|mkdir PATH       copy files to and from the device (scope files)
   input tap X Y | key NAME | text 'abc' | swipe X1 Y1 X2 Y2 | click \"LABEL\"    drive the screen (scope input)
 {DIAG}
@@ -36,7 +37,7 @@ pub const USAGE_BASE: &str = "usage: iyakki dev <command>
   patch build DIR -o PACK [--delta-from OLD] | show PACK | apply PACK [--live|--next-boot] [--shell] | list | remove ID     hot-patch files of the running system (scope update)
   reboot | poweroff                   restart or switch off the device (approval on its screen)
   update PAYLOAD|IMAGE.img [--force] [--reboot] | update --status | update --discard    replace the boot files with a newer IYAKKI (scope update)
-  update-pack IMAGE.img -o DIR [--version V] [--variant NAME] [--sign KEYFILE]   make the payload from an install image (nothing is written to the image); --sign adds update.json.sig for Settings -> System update
+  update-pack IMAGE.img -o DIR [--version V] [--variant NAME] [--against PREV] [--sign KEYFILE]   make the payload from an install image (nothing is written to the image); --against PREV (a layers folder or an earlier v2 pack) makes a layered pack that carries only the changed layers; --sign adds update.json.sig for Settings -> System update
   screenshot [--display N] [--record SECONDS [--fps N]] [-o FILE|DIR]
 options for every command: --device NAME (default: the first paired), --home DIR (default: ~/.config/iyakki/dev or $IYAKKI_DEV_HOME)";
 
@@ -52,7 +53,7 @@ pub(super) struct Args {
     pub(super) after: Vec<String>,
 }
 
-const WITH_VALUE: [&str; 33] = ["--code", "--name", "--as", "--fingerprint", "--device", "--home", "-o", "--default", "--forget", "--grep", "-n", "--source", "--display", "--record", "--fps", "--minutes", "--reason", "--lines", "--image", "--set", "--kind", "--url", "--key-file", "--key-env", "--ports", "--proto", "--comment", "--file", "--value", "--version", "--variant", "--sign", "--delta-from"];
+const WITH_VALUE: [&str; 34] = ["--code", "--name", "--as", "--fingerprint", "--device", "--home", "-o", "--default", "--forget", "--grep", "-n", "--source", "--display", "--record", "--fps", "--minutes", "--reason", "--lines", "--image", "--set", "--kind", "--url", "--key-file", "--key-env", "--ports", "--proto", "--comment", "--file", "--value", "--version", "--variant", "--sign", "--delta-from", "--against"];
 
 impl Args {
     pub(super) fn parse(a: &[String]) -> Result<Args, String> {
@@ -206,13 +207,8 @@ pub fn run(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
             out(&format!("Paired: this computer is “{name}” on {} and acts as the account {}. Saved as device “{}” in {}.", host, d.account, d.name, home.dir().display()));
         }
         "scan" => {
-            let found = iyakki_netscan::mdns::net::scan(&iyakki_netscan::mdns::net::Ask::new(Duration::from_secs(2)));
-            if found.is_empty() {
-                out("No IYAKKI device answered. It must be on this network with \"Announce this device on the local network\" on (Settings, Network); some Wi-Fi access points block this kind of message between devices.");
-            }
-            for f in found {
-                let svc: Vec<String> = f.services.iter().map(|(k, p)| format!("{k}:{p}")).collect();
-                out(&format!("{:<24} {:<32} {}", f.host, f.addrs.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(","), svc.join(" ")));
+            for l in scan_report(&iyakki_netscan::mdns::net::scan(&iyakki_netscan::mdns::net::Ask::new(SCAN_WAIT))) {
+                out(&l);
             }
         }
         "devices" => {
@@ -318,4 +314,52 @@ pub fn run(a: &[String], out: &mut dyn FnMut(&str)) -> Result<(), String> {
         other => return Err(format!("unknown command {other:?}\n{}", usage())),
     }
     Ok(())
+}
+
+/// How long `iyakki dev scan` waits for answers (the name lookup of a paired device waits `client::RESOLVE_WAIT`, the same time).
+pub const SCAN_WAIT: Duration = Duration::from_secs(2);
+
+/// The lines `iyakki dev scan` prints: one per device with its name, its addresses and its services, or the help line when none answered.
+pub fn scan_report(found: &[iyakki_netscan::mdns::net::Found]) -> Vec<String> {
+    if found.is_empty() {
+        return vec!["No IYAKKI device answered. It must be on this network with \"Announce this device on the local network\" on (Settings, Network); some Wi-Fi access points block this kind of message between devices.".to_string()];
+    }
+    found
+        .iter()
+        .map(|f| {
+            let svc: Vec<String> = f.services.iter().map(|(k, p)| format!("{k}:{p}")).collect();
+            format!("{:<24} {:<32} {}", f.host, f.addrs.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(","), svc.join(" "))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod scan_tests {
+    use super::*;
+    use iyakki_netscan::mdns::net::Found;
+
+    #[test]
+    fn the_scan_lists_name_addresses_and_services_and_says_what_to_check_when_nobody_answers() {
+        let found = vec![
+            Found { host: "iyakki-0a1b2c.local".into(), addrs: vec!["192.168.68.66".parse().unwrap(), "fd00::1".parse().unwrap()], services: vec![("_iyakki-dev._tcp".into(), 7979), ("_iyakki-web._tcp".into(), 8443)] },
+            Found { host: "iyakki-ffeedd.local".into(), addrs: vec![], services: vec![("_iyakki-dev._tcp".into(), 7979)] },
+        ];
+        let lines = scan_report(&found);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("iyakki-0a1b2c.local") && lines[0].contains("192.168.68.66,fd00::1") && lines[0].ends_with("_iyakki-dev._tcp:7979 _iyakki-web._tcp:8443"), "{lines:?}");
+        assert!(lines[1].contains("iyakki-ffeedd.local") && lines[1].ends_with("_iyakki-dev._tcp:7979"));
+        let none = scan_report(&[]);
+        assert_eq!(none.len(), 1);
+        assert!(none[0].contains("Announce this device on the local network") && none[0].contains("block"));
+    }
+
+    #[test]
+    fn the_scan_and_the_name_lookup_both_give_up_after_two_seconds() {
+        assert_eq!(SCAN_WAIT, Duration::from_secs(2));
+        assert_eq!(super::super::client::RESOLVE_WAIT, Duration::from_secs(2));
+        // and a scan against a responder that is not there returns with nothing instead of waiting for ever
+        let dead = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+        let ask = iyakki_netscan::mdns::net::Ask { timeout: Duration::from_millis(300), dests: vec![dead], allow_loopback: true };
+        assert!(iyakki_netscan::mdns::net::scan(&ask).is_empty());
+    }
 }

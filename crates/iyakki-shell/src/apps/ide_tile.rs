@@ -189,6 +189,21 @@ impl IdeApp {
             return true;
         }
         cx.audit.record(&cx.session.user, "ide.tile.run", &dir.display().to_string());
+        // beside the editor when there is room (F-IDE-25); full screen in a compact window or a narrow one
+        if self.can_dock() {
+            match iyakki_agent::store::tilehub::preview_entry(&cx.session.user, &dir) {
+                Ok(e) => {
+                    let app = super::tile::open_entry(e, cx);
+                    self.preview_dir = Some(dir);
+                    self.dock_preview(app);
+                    return true;
+                }
+                Err(m) => {
+                    self.notice = Some((format!("Could not run the app: {m}"), false));
+                    return true;
+                }
+            }
+        }
         self.request = Some((format!("tile-preview:{}", dir.display()), String::new()));
         true
     }

@@ -7,7 +7,7 @@
 use crate::safeclamp::SafeClamp;
 use std::sync::Arc;
 
-use iyakki_devctl::{Control, LinkKind, Roots};
+use iyakki_core_api::hardware::{self as hw, Control, Hardware, LinkKind, Roots};
 
 use crate::gfx::rgb;
 use crate::ui::{Key, DIM, OK};
@@ -32,7 +32,7 @@ impl DeviceEnv {
             iyakki_agent::macfw::register_bluetooth_loader();
             // sound from a phone over Bluetooth plays through the mixer (the play command is only the fallback when it is off)
             iyakki_agent::btaudiotools::install(|| iyakki_agent::voice::DEFAULT_PLAY_CMD.to_string());
-            DeviceEnv { roots: Roots::real(), ctl: Arc::new(iyakki_devctl::System) }
+            DeviceEnv { roots: Roots::real(), ctl: iyakki_core_local::system_control() }
         }
     }
 }
@@ -47,13 +47,13 @@ impl Control for NoControl {
     fn ipv4(&self) -> Vec<(String, String)> {
         vec![]
     }
-    fn volume(&self, _: u32) -> Option<iyakki_devctl::Volume> {
+    fn volume(&self, _: u32) -> Option<hw::Volume> {
         None
     }
-    fn change_volume(&self, _: u32, _: Option<i32>) -> Result<iyakki_devctl::Volume, String> {
+    fn change_volume(&self, _: u32, _: Option<i32>) -> Result<hw::Volume, String> {
         Err("not available here".into())
     }
-    fn set_volume(&self, _: u32, _: u32) -> Result<iyakki_devctl::Volume, String> {
+    fn set_volume(&self, _: u32, _: u32) -> Result<hw::Volume, String> {
         Err("not available here".into())
     }
     fn dhcp(&self, _: &str) -> Result<(), String> {
@@ -103,6 +103,8 @@ pub enum Target {
     SoundMic(String),
     /// Settings -> Sound, Microphone: listen for three seconds and say how loud it was.
     SoundMicTest,
+    /// Settings -> Display: ask the kernel to read the connected displays again (their modes), then draw at the best one.
+    LookAgain,
     /// The Mac's built-in (T2) microphone: allow or forbid it (a risk card first).
     SoundT2Mic,
     /// Advanced: the highlight timing offset of read-aloud words, ms (-500..500).
@@ -113,7 +115,7 @@ impl Target {
     /// A row that is a choice (an input, an output) or a harmless switch: a click or a touch does what Enter does, so the page is not
     /// keyboard-only. Rows that change the machine's connections stay select-then-press, as before.
     pub fn activates_on_click(&self) -> bool {
-        matches!(self, Target::SoundChoice | Target::SoundOut(..) | Target::SoundMic(_) | Target::SoundMicTest | Target::SoundT2Mic | Target::SoundAdvanced)
+        matches!(self, Target::SoundChoice | Target::SoundOut(..) | Target::SoundMic(_) | Target::SoundMicTest | Target::SoundT2Mic | Target::SoundAdvanced | Target::LookAgain)
     }
 }
 
@@ -166,11 +168,13 @@ pub struct Done {
 const REFRESH_TICKS: u64 = 60;
 
 struct Snapshot {
-    links: Vec<iyakki_devctl::Link>,
+    links: Vec<hw::Link>,
     ips: Vec<(String, String)>,
-    rfkill: Vec<iyakki_devctl::Rfkill>,
-    screen: iyakki_devctl::Screen,
-    cards: Vec<(iyakki_devctl::Card, Option<iyakki_devctl::Volume>)>,
+    rfkill: Vec<hw::Rfkill>,
+    /// A Broadcom 4360-family Wi-Fi card is in the machine (no driver for it here).
+    bcm_nodriver: Option<&'static str>,
+    screen: hw::Screen,
+    cards: Vec<(hw::Card, Option<hw::Volume>)>,
     outputs: Vec<iyakki_agent::audioout::Output>,
     /// The card whose software volume (IYAKKI's ALSA softvol) carries the IYAKKI volume.
     soft_card: Option<u32>,
@@ -182,9 +186,9 @@ struct Snapshot {
     hw_ignored: Option<u32>,
     /// The sound card is held by another program: the sentence to show.
     busy: Option<String>,
-    mac: Vec<iyakki_devctl::mac::MacInfo>,
+    mac: Vec<hw::mac::MacInfo>,
     /// The Bluetooth hardware (the page itself is `bluetooth_page.rs`; this keeps what the Overview needs).
-    bt: iyakki_devctl::btstate::BtState,
+    bt: hw::btstate::BtState,
     /// A MacBookPro13,x/14,x or iMac whose CS8409 codec has no driver (`iyakki_drivers::cs8409`): the line to show.
     cs8409: Option<String>,
     /// The microphones (capture devices) and whether a T2 sound card's microphones are hidden on purpose.
@@ -194,10 +198,12 @@ struct Snapshot {
 
 pub struct DevicesPane {
     env: DeviceEnv,
+    /// What the pages read and switch on the machine (`LocalHardware` over `env`, or a fake).
+    api: std::sync::Arc<dyn Hardware>,
     snap: Option<Snapshot>,
     at: u64,
     /// What the private MAC address setting reads and changes.
-    mac: iyakki_devctl::mac::MacEnv,
+    mac: hw::mac::MacEnv,
     /// Settings -> Sound (output choice, IYAKKI's volume), given by the Settings app.
     sound: iyakki_agent::audioout::SoundSettings,
     /// The microphone the person chose (`VoiceSettings::mic`; empty: Automatic).
@@ -211,10 +217,17 @@ pub struct DevicesPane {
 impl DevicesPane {
     pub fn new(env: DeviceEnv) -> DevicesPane {
         #[cfg(test)]
-        let mac = iyakki_devctl::mac::MacEnv { roots: env.roots.clone(), ..iyakki_devctl::mac::MacEnv::nowhere(env.ctl.clone()) };
+        let mac = hw::mac::MacEnv { roots: env.roots.clone(), ..hw::mac::MacEnv::nowhere(env.ctl.clone()) };
         #[cfg(not(test))]
-        let mac = iyakki_devctl::mac::MacEnv { ctl: env.ctl.clone(), roots: env.roots.clone(), ..iyakki_devctl::mac::MacEnv::real() };
-        DevicesPane { env, snap: None, at: 0, mac, sound: Default::default(), mic_choice: String::new(), advanced: false, request: None }
+        let mac = hw::mac::MacEnv { ctl: env.ctl.clone(), roots: env.roots.clone(), ..hw::mac::MacEnv::real() };
+        let api: std::sync::Arc<dyn Hardware> = std::sync::Arc::new(iyakki_core_local::LocalHardware::new(env.roots.clone(), env.ctl.clone()));
+        DevicesPane { env, api, snap: None, at: 0, mac, sound: Default::default(), mic_choice: String::new(), advanced: false, request: None }
+    }
+
+    /// Read and switch the hardware through this handle (`cx.os.hardware()` or a fake) instead of the one made from the environment.
+    pub fn set_hardware(&mut self, api: std::sync::Arc<dyn Hardware>) {
+        self.api = api;
+        self.invalidate();
     }
 
     /// The microphone the person chose, so the Sound page can show it (the page tells the pane before drawing).
@@ -244,12 +257,12 @@ impl DevicesPane {
     }
 
     /// The private MAC address settings and actions (a copy).
-    pub fn mac(&self) -> &iyakki_devctl::mac::MacEnv {
+    pub fn mac(&self) -> &hw::mac::MacEnv {
         &self.mac
     }
 
     /// Replace what the private MAC address setting acts on (tests).
-    pub fn set_mac(&mut self, mac: iyakki_devctl::mac::MacEnv) {
+    pub fn set_mac(&mut self, mac: hw::mac::MacEnv) {
         self.mac = mac;
         self.invalidate();
     }
@@ -269,11 +282,8 @@ impl DevicesPane {
 
     fn refresh(&mut self, tick: u64) {
         let r = &self.env.roots;
-        let cards = iyakki_devctl::cards(r).into_iter().map(|c| {
-            let v = self.env.ctl.volume(c.index);
-            (c, v)
-        });
-        let mac = iyakki_devctl::mac::infos(&*self.env.ctl, r, &self.mac.config());
+        let cards = self.api.cards();
+        let mac = self.api.mac_infos(&self.mac.config());
         let outputs = iyakki_agent::audioout::outputs_at(&r.proc_);
         let soft_card = if self.real_sound() { iyakki_agent::audioout::global().softvol_card() } else { None };
         let (mix_channels, starting, hw_ignored, busy) = if self.real_sound() {
@@ -287,9 +297,9 @@ impl DevicesPane {
         } else {
             (None, iyakki_agent::audioout::card_starting(&r.proc_, &r.sys).map(|_| iyakki_agent::audioout::STARTING_LINE.to_string()), None, None)
         };
-        let bt = iyakki_devctl::btstate::read(&*self.env.ctl, r);
-        let cs8409 = iyakki_drivers::cs8409::missing_line(&iyakki_drivers::cs8409::Roots { proc_: r.proc_.clone(), sys: r.sys.clone(), lib_modules: "/lib/modules".into() });
-        self.snap = Some(Snapshot { links: iyakki_devctl::links(r), ips: self.env.ctl.ipv4(), rfkill: iyakki_devctl::rfkill_list(r), screen: iyakki_devctl::screen(r), cards: cards.collect(), outputs, soft_card, mix_channels, starting, hw_ignored, busy, mac, bt, cs8409, mics: iyakki_agent::voicedesk::list_mics(&r.proc_), mic_t2: iyakki_agent::voicedesk::t2_mic(&r.proc_) });
+        let bt = self.api.bluetooth();
+        let cs8409 = self.api.cs8409_line();
+        self.snap = Some(Snapshot { links: self.api.links(), ips: self.api.ipv4(), rfkill: self.api.rfkill(), bcm_nodriver: self.api.broadcom_wifi_without_driver().then_some(hw::BROADCOM_NO_DRIVER_TEXT), screen: self.api.screen(), cards, outputs, soft_card, mix_channels, starting, hw_ignored, busy, mac, bt, cs8409, mics: iyakki_agent::voicedesk::list_mics(&r.proc_), mic_t2: iyakki_agent::voicedesk::t2_mic(&r.proc_) });
         self.at = tick;
     }
 
@@ -314,7 +324,7 @@ impl DevicesPane {
         let s = self.snap(tick);
         match tab {
             DevTab::Network => network_rows(s, host),
-            DevTab::Display => display_rows(s),
+            DevTab::Display => display_rows(s, &screen_in_use_now(s.screen.framebuffer.as_deref())),
             DevTab::Sound => sound_rows(s, &sound, advanced, &mic_choice),
         }
     }
@@ -328,13 +338,14 @@ impl DevicesPane {
         let down = matches!(key, Key::Char('-'));
         let done = match (&row.target, tab) {
             (Target::Nothing, _) => Some(Done { result: Err(format!("{}: nothing to switch here.", row.title)), audit: String::new() }).filter(|_| toggle || up || down),
+            (Target::LookAgain, _) if toggle => Some(self.look_again()),
             (Target::Ethernet(name), _) if toggle => Some(self.toggle_link(name, &row)),
             (Target::Wifi(name, ids), _) if toggle => Some(self.toggle_wifi(name, ids, &row)),
             (Target::Radio(ids), _) if toggle => Some(self.toggle_radio(ids, &row)),
             (Target::Backlight(name), _) if up || down => {
                 let cur = self.snap.as_ref().and_then(|s| s.screen.backlights.iter().find(|b| &b.name == name).map(|b| b.percent())).unwrap_or(50);
                 let want = if up { (cur + 10).min(100) } else { cur.saturating_sub(10).max(5) };
-                Some(match iyakki_devctl::set_brightness(&self.env.roots, name, want) {
+                Some(match self.api.set_brightness(name, want) {
                     Ok(()) => Done { result: Ok(format!("Brightness {want}%.")), audit: format!("brightness {name} {want}") },
                     Err(e) => Done { result: Err(e), audit: String::new() },
                 })
@@ -361,7 +372,7 @@ impl DevicesPane {
         let slider = row.slider?;
         let v = value.clamp_safe(slider.min, slider.max);
         let done = match &row.target {
-            Target::Backlight(name) => match iyakki_devctl::set_brightness(&self.env.roots, name, v as u32) {
+            Target::Backlight(name) => match self.api.set_brightness(name, v as u32) {
                 Ok(()) => Done { result: Ok(format!("Brightness {v}%.")), audit: format!("brightness {name} {v}") },
                 Err(e) => Done { result: Err(e), audit: String::new() },
             },
@@ -392,9 +403,9 @@ impl DevicesPane {
         let res = (|| -> Result<(), String> {
             if on {
                 self.env.ctl.set_link(name, false)?;
-                ids.iter().try_for_each(|id| iyakki_devctl::rfkill_set(&self.env.roots, id, true))
+                ids.iter().try_for_each(|id| self.api.set_rfkill(id, true))
             } else {
-                ids.iter().try_for_each(|id| iyakki_devctl::rfkill_set(&self.env.roots, id, false))?;
+                ids.iter().try_for_each(|id| self.api.set_rfkill(id, false))?;
                 note = self.private_address_note(name);
                 self.env.ctl.set_link(name, true)?;
                 self.env.ctl.dhcp(name)
@@ -413,7 +424,7 @@ impl DevicesPane {
             return String::new();
         }
         let cfg = self.mac.config();
-        let kind = iyakki_devctl::links(&self.env.roots).into_iter().find(|l| l.name == name).map(|l| l.kind);
+        let kind = self.api.links().into_iter().find(|l| l.name == name).map(|l| l.kind);
         let Some(kind) = kind else { return String::new() };
         let ssid = if kind == LinkKind::Wifi { self.mac.preferred_ssid() } else { None };
         if !cfg.mode_for(kind, name, ssid.as_deref()).is_private() {
@@ -445,9 +456,17 @@ impl DevicesPane {
         self.request.take()
     }
 
+    /// "Look again": the kernel reads every connected display again (`detect`), a few times in the background; when its mode list becomes
+    /// right the screen is drawn again at the best mode (`crate::display::look_again`).
+    fn look_again(&mut self) -> Done {
+        let line = crate::display::look_again(&self.env.roots.sys.join("class/drm"));
+        self.snap = None; // the next look reads the modes again
+        Done { result: Ok(format!("Looking at the displays again: {line}. A display that now offers a bigger size is used within a few seconds.")), audit: "display look again".into() }
+    }
+
     fn toggle_radio(&mut self, ids: &[String], row: &DevRow) -> Done {
         let on = row.chips.iter().any(|c| c.0 == "ON");
-        match ids.iter().try_for_each(|id| iyakki_devctl::rfkill_set(&self.env.roots, id, on)) {
+        match ids.iter().try_for_each(|id| self.api.set_rfkill(id, on)) {
             Ok(()) => Done { result: Ok(format!("{} turned {}.", row.title, if on { "off" } else { "on" })), audit: format!("radio {} {}", ids.join(","), if on { "off" } else { "on" }) },
             Err(e) => Done { result: Err(e), audit: String::new() },
         }
@@ -461,16 +480,16 @@ fn onoff(on: bool) -> (&'static str, [u8; 4]) {
 }
 
 /// The private MAC address row of one adapter: what is chosen, the hardware address, the one in use now.
-fn mac_row(i: &iyakki_devctl::mac::MacInfo, host: bool) -> DevRow {
+fn mac_row(i: &hw::mac::MacInfo, host: bool) -> DevRow {
     let now = format!("now {}{}", i.current, if i.locally_administered { " · locally administered" } else { "" });
     if host {
         return DevRow::new(format!("Private MAC · {}", i.iface), format!("{now} · managed by the host operating system"), Target::Nothing).chip("host", DIM);
     }
     let sub = format!("{} · hardware {} · {now}", i.mode.key(), i.permanent.as_deref().unwrap_or("unknown"));
     let (label, col) = match i.mode {
-        iyakki_devctl::mac::MacMode::Off => ("MAC OFF", DIM),
-        iyakki_devctl::mac::MacMode::PerNetwork => ("PER NETWORK", OK),
-        iyakki_devctl::mac::MacMode::Random => ("RANDOM", OK),
+        hw::mac::MacMode::Off => ("MAC OFF", DIM),
+        hw::mac::MacMode::PerNetwork => ("PER NETWORK", OK),
+        hw::mac::MacMode::Random => ("RANDOM", OK),
     };
     DevRow::new(format!("Private MAC · {}", i.iface), sub, Target::Mac(i.iface.clone(), i.kind)).chip(label, col).chip(if i.private { "private" } else { "hardware" }, if i.private { OK } else { DIM })
 }
@@ -489,7 +508,7 @@ fn network_rows(s: &Snapshot, host: bool) -> Vec<DevRow> {
         rows.push(DevRow::new("Ethernet", "no adapter detected", Target::Nothing).chip("not found", DIM));
     }
     let wlan_ids: Vec<String> = s.rfkill.iter().filter(|k| k.kind == "wlan").map(|k| k.id.clone()).collect();
-    let wlan_on = iyakki_devctl::radio_on(&s.rfkill.iter().filter(|k| k.kind == "wlan").cloned().collect::<Vec<_>>());
+    let wlan_on = hw::radio_on(&s.rfkill.iter().filter(|k| k.kind == "wlan").cloned().collect::<Vec<_>>());
     let hard = s.rfkill.iter().any(|k| k.kind == "wlan" && k.hard);
     let wifi: Vec<_> = s.links.iter().filter(|l| l.kind == LinkKind::Wifi).collect();
     for l in &wifi {
@@ -503,17 +522,39 @@ fn network_rows(s: &Snapshot, host: bool) -> Vec<DevRow> {
         rows.push(row);
     }
     if wifi.is_empty() {
-        let sub = if s.rfkill.iter().any(|k| k.kind == "wlan") { "a radio is present but has no driver loaded (it may need firmware)" } else { "no adapter detected, so WiFi stays disabled" };
-        rows.push(DevRow::new("WiFi", sub, Target::Nothing).chip("not found", DIM));
+        let sub = if let Some(t) = s.bcm_nodriver { t } else if s.rfkill.iter().any(|k| k.kind == "wlan") { "a radio is present but has no driver loaded (it may need firmware)" } else { "no adapter detected, so WiFi stays disabled" };
+        rows.push(DevRow::new("WiFi", sub, Target::Nothing).chip(if s.bcm_nodriver.is_some() { "no driver" } else { "not found" }, DIM));
     }
     // the private MAC address of each adapter, after the adapters themselves
     rows.extend(s.mac.iter().map(|i| mac_row(i, host)));
     rows
 }
-fn display_rows(s: &Snapshot) -> Vec<DevRow> {
+/// What the "Screen in use" row says: the size the shell is driving now, not the framebuffer size sysfs reported at the last refresh
+/// (which stayed at 1920x1080 on a Mac mini while the shell drew 3840x2160). `kms` are the displays the shell drives itself (name and
+/// size); `driven` the size of the framebuffer it draws on; `fb` the framebuffer's own line ("3840x2160 · 32 bit · i915drmfb").
+pub(crate) fn screen_in_use(fb: Option<&str>, driven: Option<(u32, u32)>, kms: &[(String, (u32, u32))]) -> String {
+    if !kms.is_empty() {
+        return format!("{} (the shell draws on each display itself)", kms.iter().map(|(n, (w, h))| format!("{n} {w}x{h}")).collect::<Vec<_>>().join(", "));
+    }
+    match (driven, fb) {
+        (Some((w, h)), Some(fb)) if fb.starts_with(&format!("{w}x{h} ")) || fb == format!("{w}x{h}") => fb.to_string(),
+        (Some((w, h)), Some(fb)) => format!("{w}x{h} drawn by the shell · framebuffer {fb}"),
+        (Some((w, h)), None) => format!("{w}x{h} drawn by the shell"),
+        (None, Some(fb)) => fb.to_string(),
+        (None, None) => "no framebuffer found".into(),
+    }
+}
+
+fn screen_in_use_now(fb: Option<&str>) -> String {
+    let st = crate::display::outputs::hub().status();
+    let kms: Vec<(String, (u32, u32))> = if st.kms { st.outputs.iter().filter(|o| o.connected).filter_map(|o| o.current.map(|c| (o.name.clone(), c))).collect() } else { Vec::new() };
+    screen_in_use(fb, crate::display::driven(), &kms)
+}
+
+fn display_rows(s: &Snapshot, in_use: &str) -> Vec<DevRow> {
     let mut rows = Vec::new();
     let scr = &s.screen;
-    rows.push(DevRow::new("Screen in use", scr.framebuffer.clone().unwrap_or_else(|| "no framebuffer found".into()), Target::Nothing));
+    rows.push(DevRow::new("Screen in use", in_use, Target::Nothing));
     let mut idle = 0;
     for o in &scr.outputs {
         if !o.connected {
@@ -532,6 +573,9 @@ fn display_rows(s: &Snapshot) -> Vec<DevRow> {
             Some((best, rest)) => format!("best {best} · also {}", rest.iter().take(4).map(|m| m.as_str()).collect::<Vec<_>>().join(", ")),
         };
         rows.push(DevRow::new(format!("Output · {}", o.name), sub, Target::Nothing).chip("connected", OK));
+    }
+    if scr.outputs.iter().any(|o| o.connected) {
+        rows.push(DevRow::new("Look again", "Press Enter: the computer reads the connected displays again and uses the best size they offer (use it when a display shows a smaller size than it can do). It also happens by itself when a display is plugged in.", Target::LookAgain));
     }
     if idle > 0 {
         rows.push(DevRow::new("Other outputs", format!("{idle} not connected"), Target::Nothing).chip("free", DIM));
@@ -710,7 +754,7 @@ fn advanced_sound_rows(s: &Snapshot, prefs: &iyakki_agent::audioout::SoundSettin
 
 /// One card's mixer row. The card that carries IYAKKI's software volume (its only control is IYAKKI's softvol) moves the
 /// IYAKKI volume, so the two never disagree and mute keeps the level to come back to.
-fn card_row(c: &iyakki_devctl::Card, v: Option<&iyakki_devctl::Volume>, soft_card: Option<u32>, ignored: Option<u32>, prefs: &iyakki_agent::audioout::SoundSettings) -> DevRow {
+fn card_row(c: &hw::Card, v: Option<&hw::Volume>, soft_card: Option<u32>, ignored: Option<u32>, prefs: &iyakki_agent::audioout::SoundSettings) -> DevRow {
     let title = if c.long_name.is_empty() { c.name.clone() } else { c.long_name.clone() };
     let soft = soft_card == Some(c.index) && (ignored == Some(c.index) || v.is_none_or(|v| v.control == iyakki_agent::softvol::CONTROL));
     if soft {
@@ -884,6 +928,17 @@ mod tests {
     }
 
     #[test]
+    fn a_broadcom_4360_card_without_a_driver_is_named_on_the_wifi_row() {
+        let (mut p, roots, _) = pane("bcm", false, Arc::new(Fake::default()));
+        put(&roots.sys, "bus/pci/devices/0000:03:00.0/vendor", "0x14e4\n");
+        put(&roots.sys, "bus/pci/devices/0000:03:00.0/device", "0x43a0\n");
+        let net = p.rows(DevTab::Network, 0);
+        let w = net.iter().find(|r| r.title == "WiFi").unwrap();
+        assert!(w.sub.contains("Broadcom BCM43xx") && w.sub.contains("USB Wi-Fi adapter") && w.sub.contains("tether"), "{}", w.sub);
+        assert!(w.chips.iter().any(|c| c.0 == "no driver"));
+    }
+
+    #[test]
     fn ethernet_and_wifi_rows_show_their_state() {
         let (mut p, _, _) = pane("net", true, Arc::new(Fake::default()));
         let rows = p.rows(DevTab::Network, 0);
@@ -980,6 +1035,27 @@ mod tests {
         }
         assert_eq!(iyakki_devctl::screen(&roots).backlights[0].value, 5, "the floor is 5 %");
         assert!(p.act(DevTab::Display, 0, &Key::Char('+'), 20).unwrap().result.is_err(), "the screen row has no brightness");
+    }
+
+    #[test]
+    fn screen_in_use_shows_the_size_the_shell_drives_and_look_again_is_a_row() {
+        // sysfs said 1920x1080 at the last refresh, the shell draws 3840x2160
+        let fb = "1920x1080 · 32 bit · i915drmfb";
+        assert_eq!(screen_in_use(Some(fb), Some((3840, 2160)), &[]), "3840x2160 drawn by the shell · framebuffer 1920x1080 · 32 bit · i915drmfb");
+        assert_eq!(screen_in_use(Some(fb), Some((1920, 1080)), &[]), fb, "same size: the framebuffer line as before");
+        assert_eq!(screen_in_use(Some(fb), None, &[]), fb);
+        assert_eq!(screen_in_use(None, Some((3840, 2160)), &[]), "3840x2160 drawn by the shell");
+        assert_eq!(screen_in_use(None, None, &[]), "no framebuffer found");
+        assert_eq!(screen_in_use(Some(fb), Some((1920, 1080)), &[("DP-1".into(), (3840, 2160)), ("DP-3".into(), (1920, 1080))]), "DP-1 3840x2160, DP-3 1920x1080 (the shell draws on each display itself)");
+        // the row, and Enter on it reads the displays again through the pane's own sysfs
+        let (mut p, roots, _) = pane("look", true, Arc::new(Fake::default()));
+        let rows = p.rows(DevTab::Display, 0);
+        let at = rows.iter().position(|r| r.target == Target::LookAgain).expect("a Look again row");
+        assert!(Target::LookAgain.activates_on_click());
+        let done = p.act(DevTab::Display, at, &Key::Enter, 1).unwrap();
+        assert!(done.result.unwrap().contains("Looking at the displays again"));
+        assert_eq!(done.audit, "display look again");
+        assert!(roots.sys.join("class/drm").exists());
     }
 
     #[test]
@@ -1091,5 +1167,35 @@ mod tests {
         assert!(rows.iter().any(|r| matches!(r.target, Target::SoundPattern(false))) || rows.iter().all(|r| !matches!(r.target, Target::SoundPattern(_))), "{rows:?}");
         assert!(!rows.iter().any(|r| matches!(r.target, Target::SoundPattern(true))), "no four-channel chain here");
         assert!(rows.iter().any(|r| matches!(r.target, Target::SoundAdvanced) && r.chips[0].0 == "shown"));
+    }
+
+    #[test]
+    fn the_display_and_radio_rows_follow_a_fake_machine_and_the_switches_reach_it() {
+        use iyakki_core_api::hardware::{Backlight, Rfkill, Screen};
+        use iyakki_core_fake::FakeOs;
+        use iyakki_core_api::Os;
+        let os = FakeOs::new();
+        let fake = os.hardware_fake();
+        fake.set(|s| {
+            s.screen = Screen { framebuffer: Some("1920x1080 · 32 bit · fake".into()), outputs: vec![], backlights: vec![Backlight { name: "panel".into(), value: 50, max: 100 }] };
+            s.rfkill = vec![Rfkill { id: "rfkill1".into(), name: "hci0".into(), kind: "wlan".into(), soft: false, hard: false }];
+            s.links = vec![hw::Link { name: "wlan0".into(), kind: LinkKind::Wifi, up: true, carrier: true, mac: "02:00:00:00:00:01".into(), speed: None, driver: "fake".into() }];
+        });
+        let (mut p, _, _) = pane("fakeos", false, Arc::new(Fake::default()));
+        p.set_hardware(os.hardware());
+        let rows = p.rows(DevTab::Display, 0);
+        let bl = rows.iter().position(|r| matches!(r.target, Target::Backlight(_))).expect("the fake's backlight is a row");
+        assert_eq!(p.act(DevTab::Display, bl, &Key::Char('+'), 0).unwrap().result.unwrap(), "Brightness 60%.");
+        assert_eq!(fake.screen().backlights[0].value, 60, "the change reached the fake machine");
+        for t in 1..12 {
+            p.act(DevTab::Display, bl, &Key::Char('-'), t);
+        }
+        assert_eq!(fake.screen().backlights[0].value, 5, "the floor is 5 %");
+        assert!(fake.calls().iter().any(|c| c == "set_brightness(panel,60)"), "{:?}", fake.calls());
+        // switching WiFi off blocks its radio on the fake machine
+        let rows = p.rows(DevTab::Network, 20);
+        let r = rows.iter().position(|r| matches!(r.target, Target::Wifi(..))).expect("the fake's WiFi interface is a row");
+        p.act(DevTab::Network, r, &Key::Enter, 21).unwrap().result.unwrap();
+        assert!(fake.rfkill()[0].soft, "the radio was blocked on the fake machine");
     }
 }

@@ -1143,6 +1143,53 @@ fn ask_user_ends_the_turn_with_the_question_and_its_numbered_options_and_the_mod
     assert!(!ev.iter().any(|e| matches!(e, RunEvent::Approval { .. })));
 }
 
+// ------------------------------------------------------------------------------------------------ the target of a workspace (a scripted model, not a real one)
+
+#[test]
+fn in_a_tile_app_workspace_a_scripted_model_that_plans_cluster_work_is_refused_on_the_board_and_a_tile_plan_is_taken() {
+    let (root, tools, _inner, _audit) = board_world("target-tile", false);
+    crate::target::write(&root, "calc", crate::target::Target::IyakkiTile).unwrap();
+    let add = |id: &str, t: &str| calls(vec![call(id, "board_add", json!({"prefix": "TILE", "title": t}))]);
+    let b = Scripted::new(vec![
+        add("r1", "Deploy the calculator to k3s"),
+        add("r2", "Push the image to the registry"),
+        add("r3", "Write the tile's index.html"),
+        say("The plan is a tile: the cluster rows do not belong here."),
+    ]);
+    let h = start_with(b.clone(), tools, vec![Message::system("SYS"), Message::user("create a iyakki calculator app")], RunLimits::default(), std_assist());
+    let ev = drive(&h, |_| Some(Verdict::Approve));
+    let r = results(&ev);
+    let adds: Vec<&(String, bool, String)> = r.iter().filter(|x| x.0 == "board_add").collect();
+    assert_eq!(adds.len(), 3, "{r:?}");
+    assert!(!adds[0].1 && adds[0].2.contains("does not belong on this board"), "{:?}", adds[0]);
+    assert!(!adds[1].1 && adds[1].2.contains("does not belong on this board"), "{:?}", adds[1]);
+    assert!(adds[2].1, "a tile row is taken: {:?}", adds[2]);
+    let board = std::fs::read_to_string(root.join("FEATURES.md")).unwrap();
+    assert!(board.contains("index.html") && !board.contains("k3s") && !board.contains("registry"), "{board}");
+    assert!(final_text(&ev).contains("tile"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_workspace_without_a_target_tells_the_model_to_ask_one_question_and_the_scripted_answer_ends_the_turn_with_the_four_options() {
+    let (root, _tools, _inner, _audit) = board_world("target-none", false);
+    let state = crate::target::state_line(&root);
+    assert!(state.contains("Target: not chosen") && state.contains("ask_user") || state.to_lowercase().contains("ask one"), "{state}");
+    let reg = Arc::new(Reg {
+        defs: vec![def("ask_user", json!({"question": {"type": "string"}, "options": {"type": "array", "items": {"type": "string"}}}), &["question"], Risk::Safe)],
+        delay: Duration::ZERO,
+        ran: Mutex::new(vec![]),
+        out: Box::new(|_, _| Ok("shown".into())),
+    });
+    let b = Scripted::new(vec![calls(vec![call("q1", "ask_user", json!({"question": "What should I build?", "options": ["IYAKKI tile app", "Service for k3s", "MCP server", "Skill"]}))]), say("never")]);
+    let h = start_with(b.clone(), reg, vec![Message::system(format!("SYS\n{state}")), Message::user("make me a todo thing")], RunLimits::default(), std_assist());
+    let ev = drive(&h, |_| Some(Verdict::Approve));
+    assert_eq!(final_text(&ev), "What should I build?\n\n1. IYAKKI tile app\n2. Service for k3s\n3. MCP server\n4. Skill");
+    assert_eq!(b.requests().len(), 1, "the model is not called again until the person answers");
+    assert!(b.requests()[0].0[0].content.contains("Target: not chosen"), "the request carried the target rule");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 // ------------------------------------------------------------------------------------------------ the board tracker
 
 const NODE_TOOLS: &[&str] = &["read_file", "write_file", "deploy_build", "deploy_load", "k8s_apply", "deploy_status", "run_command"];
@@ -1494,6 +1541,46 @@ mod autopilot_tests {
     }
 
     #[test]
+    fn stop_on_the_board_ends_an_autopilot_of_the_chat_like_the_chats_stop_and_a_task_cannot_be_stopped_that_way() {
+        let (root, t, audit) = world("boardstop", false);
+        let b = Scripted::streaming(vec![say("slow")], 400, vec![]);
+        let h = autopilot::start(b, t, vec![Message::system("SYS"), Message::user("goal")], RunLimits::default(), std_assist(), ctx(&root, &audit));
+        // it shows as an agent of the workspace; the board asks it to stop
+        let mut asked = false;
+        for _ in 0..100 {
+            if crate::assign::load(&root).get("autopilot:run").is_some() {
+                asked = crate::assign::update(&root, |d| d.request_stop("autopilot:run")).is_ok();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(asked, "the Autopilot registered itself as an agent");
+        let ev = drive(&h, |_| Some(Verdict::Approve));
+        assert!(matches!(ev.last(), Some(RunEvent::Stopped { reason }) if reason.contains("stopped by the person")), "{:?}", ev.last());
+        // the agent's state is written when the run's thread ends, just after the last event: wait for it, bounded
+        for _ in 0..200 {
+            if crate::assign::load(&root).get("autopilot:run").is_some_and(|a| !a.state.active()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let d = crate::assign::load(&root);
+        let a = d.get("autopilot:run").unwrap();
+        assert!(!a.stop_requested, "the request was taken");
+        assert_eq!(a.state, crate::assign::AState::Failed);
+        assert!(a.last.contains("stopped by the person"), "{}", a.last);
+        // only a running Autopilot is asked; a task or a finished agent is refused
+        let mut doc = crate::assign::Doc::default();
+        doc.register("t1", "task", "built-in", &[], "t1", 1);
+        assert!(doc.request_stop("t1").unwrap_err().contains("Autopilot"));
+        assert!(doc.request_stop("nobody").is_err());
+        doc.register("autopilot:x", "autopilot", "assistant", &[], "x", 1);
+        doc.set_state("autopilot:x", crate::assign::AState::Done, "finished", 2);
+        assert!(doc.request_stop("autopilot:x").unwrap_err().contains("not running"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn a_read_only_workspace_refuses_and_the_state_machine_enforces_time_and_tokens() {
         let (root, t, audit) = world("ro", false);
         let mut c = ctx(&root, &audit);
@@ -1603,7 +1690,32 @@ fn rows_marked_done_without_proof_are_claimed_not_counted_and_the_summary_says_s
     let h = crate::autopilot::start(b, t2, vec![Message::system("SYS"), Message::user("go")], RunLimits::default(), std_assist(), c);
     let ev = drive(&h, |_| Some(Verdict::Approve));
     let text = final_text(&ev);
-    assert!(text.contains("1 of 2 rows done (verified)") && text.contains("1 marked done without a check (claimed, not counted)"), "{text}");
+    assert!(text.contains("1 of 2 rows done (verified)") && text.contains("1 marked done without a check (claimed, not counted"), "{text}");
+    assert!(text.contains("set by you or by hand: 1") && !text.contains("refused it"), "a done set in the file is a hand edit: {text}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_done_the_harness_refused_is_told_apart_from_one_set_by_hand() {
+    let (root, t) = proof_world("refusedvshand");
+    board_call(&t, "board_add", json!({"prefix": "APP", "title": "Polish the welcome text"})).unwrap();
+    board_call(&t, "board_add", json!({"prefix": "APP", "title": "Tidy the footer"})).unwrap();
+    let ids: Vec<String> = crate::boardtrack::Tracker::new(&root, &root.join("FEATURES.md")).owned_ids().into_iter().collect();
+    assert_eq!(ids.len(), 2);
+    // the model asks for done on the first row: refused, and the refusal is remembered
+    let r = board_call(&t, "board_update", json!({"id": ids[0], "status": "done"}));
+    assert!(r.is_ok_and(|m| m.contains("parked")), "no check applies: the claim is parked, not accepted");
+    let tr = crate::boardtrack::Tracker::new(&root, &root.join("FEATURES.md"));
+    assert_eq!(tr.refused_ids().into_iter().collect::<Vec<_>>(), vec![ids[0].clone()]);
+    // later both rows are done in the file without a check: one was forced after the refusal, the other set by hand
+    let f = root.join("FEATURES.md");
+    let text = std::fs::read_to_string(&f).unwrap().replace("| planned |", "| done |").replace("| review |", "| done |");
+    std::fs::write(&f, text).unwrap();
+    let rows = crate::autopilot::Rows::read(&root, &f);
+    assert_eq!((rows.done, rows.claimed, rows.forced), (0, 2, 1));
+    // a verified mark keeps the refusal list
+    tr.mark_verified(&[ids[1].clone()]);
+    assert_eq!(tr.refused_ids().len(), 1);
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1653,8 +1765,42 @@ fn claiming_done_runs_the_check_itself_and_a_pass_marks_the_row_done() {
 }
 
 #[test]
+fn a_reply_that_says_a_row_is_done_while_the_board_says_otherwise_gets_one_correction_line_and_the_board_is_not_touched() {
+    // found by the live-model run of F-ASSIST-20: the model said "already marked as done" without calling board_update
+    let (root, t, _a) = vworld("claim-prose", false);
+    board_call(&t, "board_add", json!({"prefix": "APP", "title": "Check that the app responds"})).unwrap();
+    let run_with = |text: &str| {
+        let b = Scripted::new(vec![say(text)]);
+        let h = start_with(b, t.clone(), vec![Message::system("SYS"), Message::user("mark F-APP-01 done")], RunLimits::default(), std_assist());
+        final_text(&drive(&h, |_| Some(Verdict::Approve)))
+    };
+    let f = run_with("The update for F-APP-01 is already complete. The status is marked as **done**.");
+    assert!(f.starts_with("The update for F-APP-01 is already complete.") && f.matches("Correction:").count() == 1, "{f}");
+    assert!(f.contains("F-APP-01 is `planned`") && f.contains("not changed"), "{f}");
+    assert_eq!(row_status(&root, "F-APP-01").0, "planned", "the board is never edited by the guard");
+    // an honest answer, a denial, a question and another row's id are left alone
+    for ok in ["F-APP-01 is not done: the check failed.", "I could not mark F-APP-01 as done.", "Should I mark F-APP-01 done once the deployment is ready?", "F-APP-02 is done.", "F-APP-01 can be completed after the build.", "Nothing was changed."] {
+        assert_eq!(run_with(ok), ok);
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_failed_check_in_an_ordinary_chat_tells_the_model_what_to_do_now_and_does_not_end_the_run() {
+    // found by the live-model run of F-ASSIST-20: without Autopilot there is no next step, so the run must not end on "the diagnosis comes with the next step"
+    let (root, t, _a) = vworld("claim-fail-plain", false);
+    board_call(&t, "board_add", json!({"prefix": "APP", "title": "Check that the app responds"})).unwrap();
+    let e = board_call(&t, "board_update", json!({"id": "F-APP-01", "status": "done", "comment": "it works"})).unwrap_err();
+    assert!(e.contains("the check failed") && e.contains("check again") && !e.contains("next step"), "{e}");
+    assert_eq!(row_status(&root, "F-APP-01").0, "planned", "the row is unchanged");
+    assert!(Tools::should_end_run(&*t).is_none(), "an ordinary chat keeps going so the model can act on the failure");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn a_claim_with_a_failing_check_ends_the_step_with_a_diagnosis_for_the_next_one_and_only_real_fix_attempts_count() {
     let (root, t, _a) = vworld("claim-fail", false);
+    Tools::begin_step(&*t); // an Autopilot step: a failed check ends it
     board_call(&t, "board_add", json!({"prefix": "APP", "title": "Check that the app responds"})).unwrap();
     let e1 = board_call(&t, "board_update", json!({"id": "F-APP-01", "status": "done", "comment": "it works"})).unwrap_err();
     assert!(e1.contains("the check failed") && e1.chars().count() < 300 && e1.lines().count() == 1, "short, one line, no dump: {e1}");
@@ -2102,6 +2248,98 @@ mod autopilot_context_tests {
         drive(&h, |_| Some(Verdict::Approve))
     }
 
+    /// A backend that says, like a provider, how many tokens a call took.
+    struct Reporting(Arc<Scripted>, serde_json::Value);
+    impl ChatBackend for Reporting {
+        fn complete(&self, h: &[Message]) -> Result<String, String> {
+            self.0.complete(h)
+        }
+        fn complete_tools(&self, h: &[Message], t: &[ToolSpec]) -> Result<ModelTurn, String> {
+            crate::providers::note_usage(&self.1);
+            self.0.complete_tools(h, t)
+        }
+        fn complete_tools_stream(&self, h: &[Message], t: &[ToolSpec], on: &mut dyn FnMut(&str) -> bool) -> Result<ModelTurn, String> {
+            crate::providers::note_usage(&self.1);
+            self.0.complete_tools_stream(h, t, on)
+        }
+    }
+
+    #[test]
+    fn the_token_counts_a_provider_reports_replace_the_estimate() {
+        let tokens = |ev: &[RunEvent]| ev.iter().filter_map(|e| if let RunEvent::Usage { tokens, .. } = e { Some(*tokens) } else { None }).last();
+        let (_root, t) = world("reported", Box::new(plain));
+        let said = Reporting(Scripted::new(vec![say("All fine.")]), json!({"usage": {"prompt_tokens": 5000, "completion_tokens": 700}}));
+        let h = start_with(Arc::new(said), t.clone(), vec![Message::system("SYS"), Message::user("look at the logs")], RunLimits::default(), std_assist());
+        assert_eq!(tokens(&drive(&h, |_| Some(Verdict::Approve))), Some(5700), "what the provider said, not a guess");
+        // a provider that says nothing is estimated from the text (some hundred tokens here, far from the 5,700 reported above)
+        let ev = run_plain(Scripted::new(vec![say("All fine.")]), Reg::new(&["read_file"]));
+        assert!(tokens(&ev).is_some_and(|n| n > 0 && n < 1000), "{:?}", tokens(&ev));
+    }
+
+    #[test]
+    fn the_vendor_cost_of_an_autopilot_run_is_saved_and_survives_a_pause_and_resume() {
+        use crate::autopilot::{Context, State};
+        let (root, t) = world("costresume", Box::new(plain));
+        let ex: crate::autopilot::Executor = Arc::new(|_call| {
+            let (etx, erx) = std::sync::mpsc::channel();
+            let (dtx, _drx) = std::sync::mpsc::channel();
+            let _ = etx.send(RunEvent::Usage { tokens: 100, cost_cents: 2.0, files: 0, seconds: 1 });
+            let _ = etx.send(RunEvent::Final { text: "Looked at it. Nothing to change.".into() });
+            RunHandle::from_parts(erx, dtx)
+        });
+        let mk = |resume: bool| {
+            let mut c = Context::new(&root, &root.join("FEATURES.md"), "look around");
+            c.executor = Some(ex.clone());
+            c.resume = resume;
+            c
+        };
+        let cents = |ev: &[RunEvent]| ev.iter().filter_map(|e| if let RunEvent::Usage { cost_cents, .. } = e { Some(*cost_cents) } else { None }).fold(0.0f64, f64::max);
+        let h = crate::autopilot::start(Scripted::new(vec![say("unused")]), t.clone(), vec![Message::system("SYS"), Message::user("go")], RunLimits::default(), std_assist(), mk(false));
+        let first = drive(&h, |_| Some(Verdict::Approve));
+        let saved = State::load(&root.join(".iyakki/autopilot.json")).expect("the place is saved");
+        assert!(saved.cost_milli >= 2000, "the cost is part of the saved place: {}", saved.cost_milli);
+        let before = saved.cost_total_cents();
+        assert!(cents(&first) >= 2.0);
+        // a paused run is resumed: the total shown goes on from the saved cost, and the budget starts afresh
+        let mut paused = saved.clone();
+        paused.status = "paused".into();
+        paused.save(&root.join(".iyakki/autopilot.json"));
+        let h = crate::autopilot::start(Scripted::new(vec![say("unused")]), t.clone(), vec![Message::system("SYS"), Message::user("go")], RunLimits::default(), std_assist(), mk(true));
+        let second = drive(&h, |_| Some(Verdict::Approve));
+        assert!(cents(&second) >= before + 2.0 - 0.01, "the total goes on from {before}: {}", cents(&second));
+        let after = State::load(&root.join(".iyakki/autopilot.json")).unwrap();
+        assert!(after.cost_total_cents() >= before + 2.0 - 0.01 && after.cost_base_milli == saved.cost_milli, "{after:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn history_forget_asks_every_time_and_forgets_only_what_was_asked() {
+        use crate::agent::hard_ask;
+        let store = kb();
+        let (root, _t) = world("histforget", Box::new(plain));
+        let mk = |sess: &str| History::new(store.clone(), "alice", "Web", Some(sess));
+        let (one, two) = (mk("s_one"), mk("s_two"));
+        one.record("turn", "", "the registry address is 10.0.0.5");
+        two.record("turn", "", "the cluster name is blue");
+        let tools = crate::boardtools::ProjectTools::new(Reg::new(&["read_file"]), &root, "Web", &root.join("FEATURES.md")).with_history(one.clone());
+        assert!(Tools::defs(&tools).iter().any(|d| d.spec.name == "history_forget" && d.risk == Risk::Ask));
+        assert!(hard_ask("history_forget", &json!({"scope": "session"})).is_some(), "Auto never runs it, a grant never covers it");
+        assert!(Tools::call(&tools, "history_forget", &json!({})).unwrap_err().contains("scope"));
+        assert_eq!(one.len(), 2, "a refused call forgets nothing");
+        assert!(Tools::describe(&tools, "history_forget", &json!({"scope": "workspace"})).contains("whole"));
+        // the session scope removes this chat's entries only
+        let r = Tools::call(&tools, "history_forget", &json!({"scope": "session"})).unwrap();
+        assert!(r.contains("Forgot 1 "), "{r}");
+        assert!(two.search("cluster", crate::history::Scope::parse("workspace"), None, 4).len() == 1, "the other chat keeps its memory");
+        assert!(one.search("registry", crate::history::Scope::parse("workspace"), None, 4).is_empty());
+        // the workspace scope removes everything
+        let r = Tools::call(&tools, "history_forget", &json!({"scope": "workspace"})).unwrap();
+        assert!(r.contains("Forgot 1 ") && r.contains("(0 left)"), "{r}");
+        assert!(two.is_empty());
+        // without a history the tool is not offered
+        assert!(!Tools::defs(&crate::boardtools::ProjectTools::new(Reg::new(&["read_file"]), &root, "Web", &root.join("FEATURES.md"))).iter().any(|d| d.spec.name == "history_forget"));
+    }
+
     #[test]
     fn what_a_step_learned_is_recalled_later_and_by_a_new_session_and_history_search_reads_it() {
         let store = kb();
@@ -2526,6 +2764,33 @@ fn asking_the_person_to_edit_or_run_is_sent_back_once_in_ask_and_auto_mode_and_t
     let b = Scripted::new(vec![say(DELEGATING_REPLY), say(DELEGATING_REPLY), say(DELEGATING_REPLY), say("never")]);
     run_auto(b.clone(), Reg::new(&["write_file", "deploy_build", "now"]), false);
     assert_eq!(b.requests().len(), 3);
+}
+
+#[test]
+fn a_chat_without_file_or_command_tools_is_not_told_to_do_it_itself_scripted_model() {
+    // the same reply that is sent back when tools exist stands as the answer when the chat has none to use
+    let b = Scripted::new(vec![say(DELEGATING_REPLY), say("never")]);
+    let ev = run_auto(b.clone(), Reg::new(&["now", "weather"]), false);
+    assert_eq!(final_text(&ev), DELEGATING_REPLY);
+    assert_eq!(b.requests().len(), 1, "no nudge: there is nothing the assistant could do itself");
+}
+
+#[test]
+fn a_scripted_model_that_claims_done_on_a_row_nothing_can_check_parks_it_for_the_person_and_it_is_not_done() {
+    let (root, t) = proof_world("persons-row");
+    std::fs::write(root.join("FEATURES.md"), format!("{}| H-01 | Write the docs by hand | planned | — |  |  | mine |\n", crate::featureboard::EMPTY_BOARD)).unwrap();
+    let b = Scripted::new(vec![
+        calls(vec![call("u1", "board_update", json!({"id": "H-01", "status": "done"}))]),
+        say("The row stays as it is: it is yours and nothing verified it."),
+    ]);
+    let h = start_with(b.clone(), t.clone(), vec![Message::system("SYS"), Message::user("finish the docs row")], RunLimits::default(), std_assist());
+    let ev = drive(&h, |_| Some(Verdict::Approve));
+    let r = results(&ev);
+    assert!(r.iter().any(|x| x.0 == "board_update" && x.2.contains("parked as review") && x.2.contains("needs your OK")), "{r:?}");
+    assert_eq!(row_status(&root, "H-01").0, "review", "waits for the person, not done");
+    assert!(!crate::boardtrack::Tracker::new(&root, &root.join("FEATURES.md")).is_verified("H-01"));
+    assert_eq!(crate::autopilot::Rows::read(&root, &root.join("FEATURES.md")).done, 0);
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]

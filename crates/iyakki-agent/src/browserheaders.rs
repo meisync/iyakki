@@ -1,19 +1,27 @@
 //! Custom request headers for the Browser (Settings -> Browser -> Custom headers). A rule is a header name, a value, a domain filter
 //! and an optional URL prefix, and can be enabled, disabled and deleted. Matching uses the same hybrid filter as the VPN and the SSH
-//! tunnels (`iyakki_vpn::filter::FilterSet`).
+//! tunnels (`iyakki_filter::FilterSet`).
 //!
 //! A header value is secret-like (a token, a cookie): it lives only in the person's vault (through [`Values`]), never in the rule
 //! file, never in an audit line or a log, and the lists show it masked. The header is sent only to requests that match, over https
 //! (plain http only to this computer or a private address), and the in-house engine asks again for every redirect hop, so a header
 //! never follows a redirect to a site it was not meant for. Names the browser owns are refused.
 //!
-//! Where it is applied: the in-house engine (`iyakki_web::headerfetch`, `iyakki_proxy::https::BrowserFetch`). The full web engine
-//! (WPE) is NOT wired: it needs a web process extension hooking `send-request`, which the helper does not have yet.
+//! Where it is applied:
+//! * the in-house engine (`iyakki_web::headerfetch`, `iyakki_proxy::https::BrowserFetch`): every rule, matched here;
+//! * the full web engine (WPE): header rules are the first built-in browser extension (`crate::browserext`). The enabled rules, with
+//!   their values read from the vault, travel as a `request.headers` hook in the extension snapshot over the helper socket
+//!   (`ToHelper::Extensions`, never to a file, never logged) to a small web process extension (`dist/webview/wpe-helper/webext.c`)
+//!   that adds them on the `send-request` signal, once per request and again for every redirect hop. The matcher there is the C twin
+//!   of [`Compiled::matches`] over the same filter entries ([`Compiled::to_wire`]); it is narrower on purpose: a rule with a path
+//!   pattern (regex) or an address-range/IP filter entry is not sent to the full engine, plain http goes only to `localhost` names,
+//!   and an ambiguous path (an escape, a backslash, a dot segment) matches only host-only entries. A header the page already set
+//!   is kept. NOT yet run in a real WPE (no WPE headers on the build host); see KNOWN-ISSUES.md.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use iyakki_vpn::filter::{FilterSet, Route};
+use iyakki_filter::filter::{FilterSet, Route};
 use serde::{Deserialize, Serialize};
 
 pub const MAX_RULES: usize = 50;
@@ -325,6 +333,40 @@ pub fn active_names(rules: &[Compiled], url: &iyakki_web::Url) -> Vec<String> {
     rules.iter().filter(|r| r.matches(url)).map(|r| r.name.clone()).collect()
 }
 
+impl Compiled {
+    /// This rule for the full engine's web process, or `None` when it cannot be expressed there (a path regex, an address entry, an
+    /// exclusion, a scheme other than http/https). The value is copied into the wire rule; it is secret like the rule's own.
+    pub fn to_wire(&self) -> Option<iyakki_webview::ext::HeaderRule> {
+        use iyakki_webview::ext::Pat;
+        if self.path.is_some() {
+            return None;
+        }
+        let pats = |f: &Option<FilterSet>| -> Option<Vec<Pat>> {
+            let Some(f) = f else { return Some(Vec::new()) };
+            f.name_patterns()?
+                .into_iter()
+                .map(|p| {
+                    let scheme = match p.scheme.as_deref() {
+                        None => 0,
+                        Some("http") => 1,
+                        Some("https") => 2,
+                        Some(_) => return None,
+                    };
+                    Some(Pat { scheme, suffix: p.suffix, host: p.host, port: p.port.unwrap_or(0), segs: p.path })
+                })
+                .collect()
+        };
+        Some(iyakki_webview::ext::HeaderRule { header: self.header.clone(), value: self.value.clone(), replace: false, domains: pats(&self.domains)?, prefix: pats(&self.prefix)? })
+    }
+}
+
+/// The active rules for the full engine, and how many enabled rules cannot be sent there.
+pub fn wire_rules() -> (Vec<iyakki_webview::ext::HeaderRule>, usize) {
+    let a = ACTIVE.read().map(|a| a.iter().map(Compiled::to_wire).collect::<Vec<_>>()).unwrap_or_default();
+    let skipped = a.iter().filter(|r| r.is_none()).count();
+    (a.into_iter().flatten().collect(), skipped)
+}
+
 // ---- the set the browser's transport reads -------------------------------------------------------------------------------------
 
 static ACTIVE: RwLock<Vec<Compiled>> = RwLock::new(Vec::new());
@@ -334,6 +376,7 @@ pub fn activate(rules: Vec<Compiled>) {
     if let Ok(mut a) = ACTIVE.write() {
         *a = rules;
     }
+    crate::browserext::host().changed();
 }
 
 /// Active names for an address, for the page-info line.

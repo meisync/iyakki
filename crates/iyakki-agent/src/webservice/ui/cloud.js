@@ -46,6 +46,18 @@
     return done ? " Keys rotated: " + done + "." : "";
   }
 
+  // "2026-11-12 09:30 UTC  tenant: olga made ann Admin": the trail's lines (the service sends them newest first) as plain text, at most `max`
+  function trailText(lines, max) {
+    const two = (n) => String(n).padStart(2, "0");
+    const out = [];
+    for (const l of Array.isArray(lines) ? lines : []) {
+      if (!l || typeof l.change !== "string" || !Number.isFinite(l.time)) continue;
+      const d = new Date(l.time * 1000);
+      out.push(d.getUTCFullYear() + "-" + two(d.getUTCMonth() + 1) + "-" + two(d.getUTCDate()) + " " + two(d.getUTCHours()) + ":" + two(d.getUTCMinutes()) + " UTC  " + l.change);
+    }
+    return out.slice(0, max || 20);
+  }
+
   function page() {
     return {
       id: "cloud",
@@ -75,7 +87,12 @@
         const m = await api.get("/api/v1/namespaces/" + encodeURIComponent(ns.name) + "/members");
         members[ns.name] = m.ok ? m.data.members : [];
       }
-      return commit({ view: t.data, members }, force);
+      let trail = [], more = false;
+      if (isTenantAdmin(t.data)) {
+        const a = await api.get("/api/v1/tenant/audit?limit=" + TRAIL_PAGE + "&offset=0");
+        if (a.ok) { trail = a.data.lines || []; more = a.data.more === true; }
+      }
+      return commit({ view: t.data, members, trail, more }, force);
     }
 
     function commit(next, force) {
@@ -97,7 +114,7 @@
       await load(true);
     }
 
-    const roleSelect = (id, choices, value) => el("select", { id, "aria-label": "Role" }, choices.map((c) => el("option", { value: c, selected: c === value, text: c })));
+    const roleSelect = (id, choices, value) => el("select", { id: id || false, "aria-label": "Role" }, choices.map((c) => el("option", { value: c, selected: c === value, text: c })));
 
     function confirmRow(text, yes) {
       return el("div", { class: "inline", role: "alertdialog", "aria-label": text }, [
@@ -205,14 +222,29 @@
         ]));
       }
       body.appendChild(nsCard);
+
+      if (isTenantAdmin(v)) {
+        const trail = trailText(data.trail, 1000);
+        const card = el("section", { class: "card", "aria-labelledby": "h-trail" }, [ el("h2", { id: "h-trail", text: "Audit trail" }) ]);
+        if (!trail.length) card.appendChild(el("p", { class: "muted", text: "No role changes recorded yet." }));
+        for (const line of trail) card.appendChild(el("p", { class: "mono", text: line }));
+        if (data.more) card.appendChild(el("button", { type: "button", text: "Older entries", onclick: async () => {
+          const a = await api.get("/api/v1/tenant/audit?limit=" + TRAIL_PAGE + "&offset=" + data.trail.length);
+          if (!a.ok) { say(a.message, "err"); return; }
+          data = Object.assign({}, data, { trail: data.trail.concat(a.data.lines || []), more: a.data.more === true });
+          draw();
+        } }));
+        body.appendChild(card);
+      }
     }
 
     await load(true);
-    // TODO(web-ui): polling stands in for the events WebSocket the API does not have yet (see app.js, poll).
-    ctx.poll(() => load(false), 5000);
+    // refreshed by the event stream when it is up, by the timer otherwise (app.js, poll)
+    ctx.poll(() => load(false), 5000, { push: true });
   }
 
-  const exported = { page, isTenantAdmin, tenantRoleChoices, canManageNamespaces, canManageNsMembers, canJoin, validName, rotationText };
+  const TRAIL_PAGE = 20;
+  const exported = { page, isTenantAdmin, tenantRoleChoices, canManageNamespaces, canManageNsMembers, canJoin, validName, rotationText, trailText };
   if (typeof module !== "undefined" && module.exports) module.exports = exported;
   else (root.IyakkiPages = root.IyakkiPages || []).push(page());
 })(typeof window !== "undefined" ? window : globalThis);

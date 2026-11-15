@@ -227,7 +227,7 @@ fn hello(cx: &CoreCx, req: &Value) -> CallResult<Value> {
     cx.dm.log(&cx.key.name, &cx.key.account, "dev.core.hello", &format!("client {}.{}", client.contract.major, client.contract.minor), n.version.is_some());
     to(json!({
         "hello": h,
-        "negotiated": { "version": n.version, "usable": n.usable, "missing": n.missing },
+        "negotiated": { "version": n.version, "usable": n.usable, "missing": n.missing, "update": n.update.map(|u| u.word()), "say": n.say(&h, &client) },
         // what THIS computer may do with it: the scopes an administrator granted on the device
         "scopes": cx.dm.core_scopes(&cx.key.name),
     }))
@@ -240,8 +240,11 @@ fn call(cx: &CoreCx, ctx: &CallContext, req: &Value) -> CallResult<Value> {
     // a client that says which contract it speaks is refused across a major, or when older than the machine still serves
     if let Some(v) = opt::<ContractVersion>(req, "contract")? {
         let h = hello_for(cx.hostname, "", Capabilities::none());
-        if negotiate(&h, &ClientHello { contract: v, wants: vec![] }).version.is_none() {
-            return Err(CallError::new(ErrorCode::VersionMismatch, "core.version_mismatch", &format!("This machine speaks contract {}.{} (oldest served minor {}).", h.contract.major, h.contract.minor, h.oldest_minor)).hint("Update the client or the machine."));
+        let client = ClientHello { contract: v, wants: vec![] };
+        let n = negotiate(&h, &client);
+        if n.version.is_none() {
+            let side = n.update.map_or("the client or the machine", |u| if u == iyakki_core_api::compat::UpdateSide::Client { "the client" } else { "this machine" });
+            return Err(CallError::new(ErrorCode::VersionMismatch, "core.version_mismatch", &format!("This machine speaks contract {}.{} (oldest served minor {}).", h.contract.major, h.contract.minor, h.oldest_minor)).hint(&format!("Update {side}.")));
         }
     }
     let spec = catalog::call(&domain, &name).ok_or_else(|| CallError::new(ErrorCode::Unsupported, "core.unsupported", &format!("This machine has no call {domain}.{name}.")).hint("Ask hello what it supports."))?;
@@ -312,7 +315,13 @@ fn dispatch(cx: &CoreCx, ctx: &CallContext, domain: &str, name: &str, a: &Value)
 fn stream_read(cx: &CoreCx, ctx: &CallContext, req: &Value) -> CallResult<Value> {
     let id = StreamId(arg(req, "id")?);
     let c = cx.core.streams.read(ctx, &id, opt(req, "offset")?.unwrap_or(0), opt(req, "max_len")?.unwrap_or(16 * 1024))?;
-    to(c)
+    // contract 0.2: a client that asks for `base64` gets the bytes as one text instead of a JSON list of numbers (about a quarter of the size on the
+    // wire and in the parser). Without the field the answer is the 0.1 shape, which stays served (deprecations.txt).
+    match opt::<String>(req, "encoding")?.as_deref() {
+        None | Some("numbers") => to(c),
+        Some("base64") => Ok(json!({"stream": c.stream, "offset": c.offset, "encoding": "base64", "data": crate::dash::connector::b64(&c.data), "last": c.last})),
+        Some(other) => Err(bad(&format!("encoding is \"base64\" or \"numbers\", not {other:?}"))),
+    }
 }
 
 fn stream_close(cx: &CoreCx, ctx: &CallContext, req: &Value) -> CallResult<Value> {

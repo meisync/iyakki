@@ -56,7 +56,7 @@ fn menu_ids(sh: &Shell) -> Vec<String> {
 }
 
 fn entry(name: &str, title: &str, group: &str) -> TileEntry {
-    TileEntry { key: format!("tile/shared/{name}"), name: name.into(), title: title.into(), icon: String::new(), icon_picture: None, group: group.into(), version: "1.0.0".into(), publisher: String::new(), trust: "Community".into(), dev: false, dir: None, scope: Scope::Shared, caps: Default::default() }
+    TileEntry { key: format!("tile/shared/{name}"), name: name.into(), title: title.into(), icon: String::new(), icon_picture: None, group: group.into(), version: "1.0.0".into(), publisher: String::new(), trust: "Community".into(), dev: false, dir: None, scope: Scope::Shared, caps: Default::default(), wasm: false }
 }
 
 /// Give the launcher these custom apps without the store (they are not refreshed away for a while).

@@ -18,7 +18,6 @@ use iyakki_proxy::certinfo;
 use iyakki_proxy::{StreamHead, Streamer, TlsMode, TlsPlan};
 
 use crate::audiofmt::{self, AacDecoder, AacFactory, Codec, Pcm};
-use serde::{Deserialize, Serialize};
 
 pub const MAX_STATIONS: usize = 200;
 /// The largest issuer certificate fetched from a certificate's own "CA Issuers" address.
@@ -26,17 +25,9 @@ const MAX_ISSUER_CERT: usize = 16 * 1024;
 /// How many issuer certificates are followed upwards.
 const MAX_ISSUER_HOPS: usize = 3;
 
-/// Stations to start from, by language: `(name, stream address)`: MP3, or AAC / HLS ones that need the audio add-on
-/// (`radio_stations::needs_addon`). Each answered when this list was made (24 October 2026); stations move and disappear, so a failing one says why and the person can add their own.
-pub struct Language {
-    pub name: &'static str,
-    pub stations: &'static [(&'static str, &'static str)],
-}
-
+// `Language` and `BANDS` come from the tile facade; the preset stations (`LANGUAGES`: MP3, or AAC / HLS ones that need the audio add-on, each answered when the
+// list was made on 24 October 2026) stay here, in `radio_stations`.
 pub use crate::radio_stations::LANGUAGES;
-
-/// How many bars the level display has.
-pub const BANDS: usize = 28;
 
 /// Loudness in `BANDS` bands from low to high pitch (0.0 – 1.0, on a decibel scale), for the animated display. One
 /// Goertzel filter per band over a mono mix of the frame: cheap, and enough to move a spectrum.
@@ -71,65 +62,11 @@ pub fn band_levels(pcm: &[i16], channels: usize, rate: u32) -> [f32; BANDS] {
     out
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Station {
-    pub name: String,
-    pub url: String,
-    /// The certificate the person approved for this station's server (see [`CertPin`]). Old files have none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cert_pin: Option<CertPin>,
-}
-
-impl Station {
-    pub fn new(name: &str, url: &str) -> Station {
-        Station { name: name.to_string(), url: url.to_string(), cert_pin: None }
-    }
-}
-
-/// A server certificate a person chose to trust for one station: the exact leaf certificate (SHA-256) of one host and port.
-/// It is never a general "do not verify": the connection to that host must show exactly this certificate, for that name, within
-/// its dates; a renewed certificate asks again.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CertPin {
-    pub host: String,
-    pub port: u16,
-    /// Upper-case hex pairs with colons.
-    pub sha256: String,
-}
+pub use iyakki_tile_api::radio::{CertPin, CertProblem, Holder, Language, RadioState, SoundGate, Station, BANDS};
 
 /// `(host, port)` of an https address (port 443 when none); `None` for anything else.
 pub fn https_endpoint(url: &str) -> Option<(String, u16)> {
     url.starts_with("https://").then(|| iyakki_proxy::pintls::split_https(url).ok()).flatten().map(|(h, p, _)| (h, p))
-}
-
-/// Why a station's secure connection was stopped, with what the person needs to decide about trusting the certificate.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CertProblem {
-    pub station: String,
-    pub url: String,
-    pub host: String,
-    pub port: u16,
-    /// True when the station was trusted before and now shows a different certificate.
-    pub changed: bool,
-    pub sha256: String,
-    pub subject: String,
-    pub issuer: String,
-    /// Unix time.
-    pub not_after: i64,
-    /// Trusting only helps when the certificate is for this host name and still valid.
-    pub trustable: bool,
-    /// The plain-language sentence for the person (also the radio's failure text).
-    pub message: String,
-}
-
-impl CertProblem {
-    pub fn pin(&self) -> CertPin {
-        CertPin { host: self.host.clone(), port: self.port, sha256: self.sha256.clone() }
-    }
-
-    pub fn expiry(&self) -> String {
-        certinfo::date_text(self.not_after)
-    }
 }
 
 pub const UNKNOWN_ISSUER_TEXT: &str = "This station's server did not send its full certificate chain (the issuer is missing). Browsers hide this; IYAKKI checks strictly.";
@@ -152,11 +89,7 @@ pub fn valid_url(u: &str) -> Result<String, String> {
     Ok(u.to_string())
 }
 
-pub fn host_of(u: &str) -> String {
-    let rest = u.split_once("://").map_or(u, |x| x.1);
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    authority.rsplit_once(':').filter(|(_, p)| p.chars().all(|c| c.is_ascii_digit())).map_or(authority, |x| x.0).trim_matches(['[', ']']).to_ascii_lowercase()
-}
+pub use iyakki_tile_api::radio::host_of;
 
 pub fn valid_name(n: &str) -> Result<String, String> {
     let n: String = n.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -304,7 +237,7 @@ impl<R: Read> Read for IcyReader<R> {
                 self.inner.read_exact(&mut meta)?;
                 let text = String::from_utf8_lossy(&meta);
                 if let Some(t) = text.split("StreamTitle='").nth(1).and_then(|r| r.split("';").next()) {
-                    *self.title.lock().unwrap() = t.trim().chars().take(120).collect();
+                    *self.title.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = t.trim().chars().take(120).collect();
                 }
             }
             self.left = self.interval;
@@ -316,13 +249,6 @@ impl<R: Read> Read for IcyReader<R> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RadioState {
-    Idle,
-    Connecting(String),
-    Playing { station: String, title: String, kbps: u32 },
-    Failed { station: String, why: String },
-}
 
 struct Inner {
     state: Mutex<RadioState>,
@@ -374,12 +300,12 @@ fn resolve(base: &str, loc: &str) -> Option<String> {
 
 impl RadioPlayer {
     pub fn set_streamer(&self, s: Arc<dyn Streamer>) {
-        *self.inner.streamer.lock().unwrap() = Some(s);
+        *self.inner.streamer.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(s);
     }
 
     /// Where AAC decoders come from instead of the installed add-on (tests).
     pub fn set_aac_factory(&self, f: AacFactory) {
-        *self.inner.aac.lock().unwrap() = Some(f);
+        *self.inner.aac.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(f);
     }
 
     /// Shortens the HLS follower's waits by this factor (tests).
@@ -388,7 +314,7 @@ impl RadioPlayer {
     }
 
     fn aac_decoder(&self) -> Result<Box<dyn AacDecoder>, String> {
-        let f = self.inner.aac.lock().unwrap().clone();
+        let f = self.inner.aac.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
         match f {
             Some(f) => f(),
             None => crate::aacpipe::aac_decoder(),
@@ -397,16 +323,16 @@ impl RadioPlayer {
 
     /// How long to wait before reconnecting a stream that dropped.
     pub fn set_retry_wait(&self, d: Duration) {
-        *self.inner.retry_wait.lock().unwrap() = d;
+        *self.inner.retry_wait.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = d;
     }
 
     pub fn state(&self) -> RadioState {
-        self.inner.state.lock().unwrap().clone()
+        self.inner.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 
     /// The levels of what is playing now, `BANDS` of them (all zero when nothing plays).
     pub fn levels(&self) -> [f32; BANDS] {
-        *self.inner.levels.lock().unwrap()
+        *self.inner.levels.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Make the radio's volume the master volume: `f(None)` reads it (percent), `f(Some(v))` sets it (and unmutes).
@@ -457,7 +383,7 @@ impl RadioPlayer {
         let playing = matches!(self.state(), RadioState::Playing { .. });
         if playing {
             self.inner.paused.store(true, Ordering::SeqCst);
-            *self.inner.levels.lock().unwrap() = [0.0; BANDS];
+            *self.inner.levels.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = [0.0; BANDS];
         }
         playing
     }
@@ -473,23 +399,23 @@ impl RadioPlayer {
 
     /// The certificate decision the last failed start is waiting for, if that is why it failed.
     pub fn cert_problem(&self) -> Option<CertProblem> {
-        self.inner.problem.lock().unwrap().clone()
+        self.inner.problem.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 
     pub fn stop(&self) {
-        *self.inner.problem.lock().unwrap() = None;
+        *self.inner.problem.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         self.inner.paused.store(false, Ordering::SeqCst);
         self.inner.generation.fetch_add(1, Ordering::SeqCst);
-        *self.inner.state.lock().unwrap() = RadioState::Idle;
-        *self.inner.levels.lock().unwrap() = [0.0; BANDS];
+        *self.inner.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = RadioState::Idle;
+        *self.inner.levels.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = [0.0; BANDS];
     }
 
     /// Start (or switch to) a station. `allow` is the account's host policy; `play_cmd` takes WAV on its stdin.
     pub fn play(&self, station: &Station, allow: Allow, play_cmd: &str) {
         self.inner.paused.store(false, Ordering::SeqCst);
         let gen = self.inner.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        *self.inner.state.lock().unwrap() = RadioState::Connecting(station.name.clone());
-        *self.inner.problem.lock().unwrap() = None;
+        *self.inner.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = RadioState::Connecting(station.name.clone());
+        *self.inner.problem.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         let me = self.clone();
         let (station, play_cmd) = (station.clone(), play_cmd.to_string());
         std::thread::Builder::new().name("iyakki-radio".into()).spawn(move || me.run(gen, &station, allow, &play_cmd)).ok();
@@ -501,7 +427,7 @@ impl RadioPlayer {
 
     fn set_state(&self, gen: u64, s: RadioState) {
         if self.current(gen) {
-            *self.inner.state.lock().unwrap() = s;
+            *self.inner.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = s;
         }
     }
 
@@ -516,7 +442,7 @@ impl RadioPlayer {
                 Ok(()) => {
                     // a file that has played to its end
                     self.set_state(gen, RadioState::Idle);
-                    *self.inner.levels.lock().unwrap() = [0.0; BANDS];
+                    *self.inner.levels.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = [0.0; BANDS];
                     return;
                 }
                 Err(StreamEnd::Stopped) => return,
@@ -527,7 +453,7 @@ impl RadioPlayer {
                         return;
                     }
                     self.set_state(gen, RadioState::Connecting(station.name.clone()));
-                    let wait = *self.inner.retry_wait.lock().unwrap();
+                    let wait = *self.inner.retry_wait.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     let t0 = std::time::Instant::now();
                     while t0.elapsed() < wait {
                         if !self.current(gen) {
@@ -560,7 +486,7 @@ impl RadioPlayer {
         if let Some(path) = url.strip_prefix("file://") {
             return Self::open_file(path).map(|h| (h, Codec::Mp3));
         }
-        let streamer = self.inner.streamer.lock().unwrap().clone().ok_or_else(|| StreamEnd::Failed("no network connection is set up for the radio".into()))?;
+        let streamer = self.inner.streamer.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone().ok_or_else(|| StreamEnd::Failed("no network connection is set up for the radio".into()))?;
         let mut url = url.to_string();
         for _ in 0..6 {
             if !self.current(gen) {
@@ -671,7 +597,7 @@ impl RadioPlayer {
             format!("{UNKNOWN_ISSUER_TEXT} {who}")
         };
         if self.current(gen) {
-            *self.inner.problem.lock().unwrap() = Some(CertProblem { station: station.name.clone(), url: url.to_string(), host, port, changed, sha256: info.sha256.clone(), subject: info.subject.clone(), issuer: info.issuer.clone(), not_after: info.not_after, trustable, message: message.clone() });
+            *self.inner.problem.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(CertProblem { station: station.name.clone(), url: url.to_string(), host, port, changed, sha256: info.sha256.clone(), subject: info.subject.clone(), issuer: info.issuer.clone(), not_after: info.not_after, trustable, message: message.clone() });
         }
         Err(StreamEnd::Failed(message))
     }
@@ -733,7 +659,7 @@ impl RadioPlayer {
                 match reader.read(&mut chunk) {
                     Ok(0) => break,
                     Err(e) => {
-                        *said2.lock().unwrap() = e.to_string();
+                        *said2.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = e.to_string();
                         break;
                     }
                     Ok(n) => {
@@ -780,7 +706,7 @@ impl RadioPlayer {
         let own = if self.link().is_some() { 100 } else { self.volume() };
         {
             let fresh = band_levels(pcm, ch as usize, rate);
-            let mut l = self.inner.levels.lock().unwrap();
+            let mut l = self.inner.levels.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             for (o, f) in l.iter_mut().zip(fresh) {
                 // rises at once, falls away smoothly
                 *o = f.max(*o * 0.86);
@@ -791,7 +717,7 @@ impl RadioPlayer {
         if let Err(said) = out.write(pcm) {
             return Err(StreamEnd::Failed(player_stopped_message(&said)));
         }
-        let t = c.title.lock().unwrap().clone();
+        let t = c.title.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
         let kbps = if bitrate > 0 { bitrate } else { c.kbps_hint };
         *played = true;
         self.set_state(c.gen, RadioState::Playing { station: c.station.name.clone(), title: t, kbps });
@@ -799,7 +725,7 @@ impl RadioPlayer {
     }
 
     fn stopped_sending(c: &Ctx) -> String {
-        let said = c.said.lock().unwrap().clone();
+        let said = c.said.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
         if said.is_empty() { "the station stopped sending".into() } else { format!("the station stopped sending ({said})") }
     }
 
@@ -1038,6 +964,15 @@ mod tests {
         Station::new("Test FM", url)
     }
 
+    /// Waits (at most 20 s) until the play command (`tee`) has written more than `min` bytes to `file`. Stopping the player ends the
+    /// command at once, so a test that stops it first can find an empty file when the command has not had a CPU yet.
+    fn wait_for_bytes(file: &Path, min: u64) {
+        let t0 = std::time::Instant::now();
+        while std::fs::metadata(file).map_or(0, |m| m.len()) <= min && t0.elapsed() < Duration::from_secs(20) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     fn tmp(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("iyakki-radio-{}-{}", std::process::id(), tag));
         let _ = std::fs::remove_dir_all(&d);
@@ -1106,6 +1041,10 @@ mod tests {
 
     #[test]
     fn pausing_holds_the_sound_resuming_carries_on_and_stopping_while_paused_works() {
+        // the sound goes to the play command of this test: the process-wide mixer switch (flipped by other tests) must not take it
+        let _route = crate::mixer::pin_command_route();
+        // the sound must go to the play command named here: another test that turns the mixer on would take it otherwise
+        let _route = crate::mixer::pin_command_route();
         let d = tmp("pause");
         let out = d.join("out.wav");
         let p = RadioPlayer::default();
@@ -1118,15 +1057,29 @@ mod tests {
         std::thread::sleep(Duration::from_millis(150));
         assert!(p.pause());
         assert!(p.is_paused());
-        std::thread::sleep(Duration::from_millis(100)); // what was already on its way finishes
-        let held = size();
+        // what was already on its way finishes: wait until the file has not grown for 300 ms (on a loaded machine the play command
+        // can take longer than a fixed 100 ms to write what it was handed before the pause), at most 10 s
+        let t0 = std::time::Instant::now();
+        let mut held = size();
+        let mut still = std::time::Instant::now();
+        while still.elapsed() < Duration::from_millis(300) && t0.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(20));
+            let now = size();
+            if now != held {
+                held = now;
+                still = std::time::Instant::now();
+            }
+        }
         std::thread::sleep(Duration::from_millis(400));
         assert_eq!(size(), held, "no sound is sent while paused");
         assert_eq!(p.levels(), [0.0; BANDS]);
         assert!(matches!(p.state(), RadioState::Playing { .. }), "still the same station");
         assert!(p.resume());
         assert!(!p.is_paused());
-        std::thread::sleep(Duration::from_millis(400));
+        let t0 = std::time::Instant::now();
+        while size() <= held && t0.elapsed() < Duration::from_secs(15) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
         assert!(size() > held, "sound flows again after resuming");
         // stopping while paused ends it and clears the pause for the next song
         assert!(p.pause());
@@ -1176,6 +1129,10 @@ mod tests {
 
     #[test]
     fn a_stream_plays_through_the_play_command_and_stops() {
+        // the sound goes to the play command of this test: the process-wide mixer switch (flipped by other tests) must not take it
+        let _route = crate::mixer::pin_command_route();
+        // the sound must go to the play command named here: another test that turns the mixer on would take it otherwise
+        let _route = crate::mixer::pin_command_route();
         let d = tmp("play");
         let out = d.join("out.wav");
         let f = fake(vec![("https://r.example.org/live.mp3", ok_mp3(60))]);
@@ -1185,6 +1142,7 @@ mod tests {
         assert!(matches!(&s, RadioState::Playing { station, kbps: 128, .. } if station == "Test FM"), "{s:?}");
         // it ends (the fake stream is finite) and reconnects; stop while it does
         std::thread::sleep(Duration::from_millis(150));
+        wait_for_bytes(&out, 44 + 4608);
         p.stop();
         assert_eq!(p.state(), RadioState::Idle);
         let wav = std::fs::read(&out).unwrap();
@@ -1197,6 +1155,10 @@ mod tests {
 
     #[test]
     fn a_dropped_stream_is_reconnected_and_a_station_that_never_starts_is_not() {
+        // the sound goes to the play command of this test: the process-wide mixer switch (flipped by other tests) must not take it
+        let _route = crate::mixer::pin_command_route();
+        // the sound must go to the play command named here: another test that turns the mixer on would take it otherwise
+        let _route = crate::mixer::pin_command_route();
         let d = tmp("retry");
         let out = d.join("o.wav");
         let f = fake(vec![("https://r.example.org/live.mp3", ok_mp3(30)), ("https://dead.example.org/x", Box::new(|_| Ok((404, vec![], vec![]))))]);
@@ -1294,6 +1256,10 @@ mod tests {
 
     #[test]
     fn an_aac_stream_goes_to_the_decoder_whatever_its_content_type_says_and_its_sound_is_played() {
+        // the sound goes to the play command of this test: the process-wide mixer switch (flipped by other tests) must not take it
+        let _route = crate::mixer::pin_command_route();
+        // the sound must go to the play command named here: another test that turns the mixer on would take it otherwise
+        let _route = crate::mixer::pin_command_route();
         let d = tmp("aac");
         let out = d.join("out.wav");
         let body = adts_stream(30);
@@ -1324,10 +1290,16 @@ mod tests {
         while fed.lock().unwrap().len() < body.len() && std::time::Instant::now() < until {
             std::thread::sleep(Duration::from_millis(10));
         }
-        std::thread::sleep(Duration::from_millis(150));
+        // `tee` writes the file on its own schedule, and stopping the player ends it at once: wait (at most 20 s) until the file holds
+        // the header and some sound BEFORE stopping, instead of stopping a `tee` that has not had a CPU yet on a loaded machine
+        let t0 = std::time::Instant::now();
+        while std::fs::metadata(&out).map_or(0, |m| m.len()) <= 44 + 2048 && t0.elapsed() < Duration::from_secs(20) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
         p.stop();
         assert_eq!(&fed.lock().unwrap()[..body.len()], &body[..], "the decoder got the stream untouched, from its first byte");
         let wav = std::fs::read(&out).unwrap();
+        assert!(wav.len() >= 44, "the play command wrote only {} bytes", wav.len());
         assert_eq!(u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]), 22_050);
         assert_eq!(u16::from_le_bytes([wav[22], wav[23]]), 1);
         assert!(wav.len() > 44 + 2048 && wav[44..].chunks_exact(2).any(|c| i16::from_le_bytes([c[0], c[1]]) != 0), "sound followed the header");
@@ -1352,6 +1324,10 @@ mod tests {
 
     #[test]
     fn an_hls_station_with_mp3_segments_plays_without_the_add_on_and_follows_the_live_edge() {
+        // the sound goes to the play command of this test: the process-wide mixer switch (flipped by other tests) must not take it
+        let _route = crate::mixer::pin_command_route();
+        // the sound must go to the play command named here: another test that turns the mixer on would take it otherwise
+        let _route = crate::mixer::pin_command_route();
         let d = tmp("hls-mp3");
         let out = d.join("out.wav");
         let net = hls_world(0x03, |_| silence(4));
@@ -1363,6 +1339,7 @@ mod tests {
         wait_for(&p, |s| matches!(s, RadioState::Playing { .. }));
         wait_for(&p, |_| net.asked.lock().unwrap().iter().any(|u| u.ends_with("seg4.ts")));
         std::thread::sleep(Duration::from_millis(100));
+        wait_for_bytes(&out, 44 + 4608);
         p.stop();
         let asked = net.asked.lock().unwrap().clone();
         let ts: Vec<&str> = asked.iter().filter(|u| u.ends_with(".ts")).map(|u| u.rsplit('/').next().unwrap()).collect();
@@ -1371,6 +1348,86 @@ mod tests {
         let wav = std::fs::read(&out).unwrap();
         assert_eq!(u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]), 44_100);
         assert!(wav.len() > 44 + 4608);
+    }
+
+    /// A TLS-aware stand-in for an HLS server whose certificate chain is incomplete: every ordinary request to its host fails with the
+    /// unknown-issuer error, and only a request that carries the intermediate certificate (the road the radio completes) gets the
+    /// playlists and segments of the wrapped fake network.
+    struct IncompleteChainHls {
+        inner: Arc<crate::hls::testkit::FakeNet>,
+        leaf: Vec<u8>,
+        aia: String,
+        inter: Vec<u8>,
+        log: Mutex<Vec<String>>,
+    }
+
+    impl IncompleteChainHls {
+        fn new(inner: Arc<crate::hls::testkit::FakeNet>) -> Arc<IncompleteChainHls> {
+            let aia = "http://ca.example.org/int.der".to_string();
+            let leaf = iyakki_proxy::testcerts::issued_der("cdn.example.org", "Test Authority", Some(&aia));
+            let inter = iyakki_proxy::testcerts::leaf_der(&["Test Authority"], None, None);
+            Arc::new(IncompleteChainHls { inner, leaf, aia, inter, log: Mutex::new(vec![]) })
+        }
+        fn chained(&self) -> Vec<String> {
+            self.log.lock().unwrap().iter().filter_map(|l| l.strip_prefix("chain ").map(str::to_string)).collect()
+        }
+        fn plain_to_the_host(&self) -> usize {
+            self.log.lock().unwrap().iter().filter(|l| l.starts_with("plain https://cdn.example.org/")).count()
+        }
+    }
+
+    impl Streamer for IncompleteChainHls {
+        fn open(&self, url: &str, h: &[(String, String)]) -> Result<StreamHead, String> {
+            if url == self.aia {
+                self.log.lock().unwrap().push(format!("fetch {url}"));
+                return Ok(StreamHead { status: 200, headers: vec![], body: Box::new(Cursor::new(self.inter.clone())) });
+            }
+            if url.starts_with("https://cdn.example.org/") {
+                self.log.lock().unwrap().push(format!("plain {url}"));
+                return Err("io: invalid peer certificate: UnknownIssuer".into());
+            }
+            self.inner.open(url, h)
+        }
+        fn open_tls(&self, url: &str, h: &[(String, String)], mode: &TlsMode) -> Result<StreamHead, String> {
+            match mode {
+                TlsMode::ExtraChain(c) if c == &vec![self.inter.clone()] => {
+                    self.log.lock().unwrap().push(format!("chain {url}"));
+                    self.inner.open(url, h)
+                }
+                _ => Err("io: invalid peer certificate: UnknownIssuer".into()),
+            }
+        }
+        fn peer_chain(&self, host: &str, port: u16) -> Result<Vec<Vec<u8>>, String> {
+            assert_eq!((host, port), ("cdn.example.org", 443));
+            Ok(vec![self.leaf.clone()])
+        }
+    }
+
+    #[test]
+    fn an_hls_station_with_a_missing_intermediate_is_completed_once_and_the_follower_fetches_every_playlist_and_segment_on_that_road() {
+        let _route = crate::mixer::pin_command_route();
+        let net = hls_world(0x03, |_| silence(4));
+        let f = IncompleteChainHls::new(net.clone());
+        let p = RadioPlayer::default();
+        p.set_streamer(f.clone());
+        p.set_hls_time_scale(2000);
+        p.set_aac_factory(Arc::new(|| Err(audiofmt::NEEDS_AUDIO_ADDON.to_string())));
+        p.play(&st("https://cdn.example.org/air/master.m3u8"), allow_all(), "tee /dev/null");
+        wait_for(&p, |s| matches!(s, RadioState::Playing { .. }));
+        wait_for(&p, |_| net.asked.lock().unwrap().iter().filter(|u| u.ends_with(".ts")).count() >= 3);
+        p.stop();
+        assert!(p.cert_problem().is_none(), "no question for the person: the chain was completed from the certificate's own address");
+        let log = f.log.lock().unwrap().clone();
+        assert_eq!(log.iter().filter(|l| l.starts_with("fetch ")).count(), 1, "the intermediate is fetched once: {log:?}");
+        let chained = f.chained();
+        assert!(chained.iter().any(|u| u.ends_with("master.m3u8")), "{chained:?}");
+        assert!(chained.iter().any(|u| u.ends_with("chunks.m3u8")), "the media playlist goes the same way: {chained:?}");
+        assert!(chained.iter().filter(|u| u.ends_with(".ts")).count() >= 3, "and so do the segments: {chained:?}");
+        // after the first plain try the follower never asked the ordinary way again (that road is closed to this host)
+        assert_eq!(f.plain_to_the_host(), 1, "{log:?}");
+        // everything the wrapped network served came through the chained road
+        let served: Vec<String> = net.asked.lock().unwrap().iter().filter(|u| u.starts_with("https://cdn.example.org/")).cloned().collect();
+        assert!(!served.is_empty() && served.iter().all(|u| chained.contains(u)), "{served:?} vs {chained:?}");
     }
 
     #[test]
@@ -1414,8 +1471,13 @@ mod tests {
 
     #[test]
     fn switching_stations_and_a_missing_player_are_reported() {
-        let f = fake(vec![("https://r.example.org/a", ok_mp3(40)), ("https://r.example.org/b", ok_mp3(40))]);
-        let p = player(f);
+        // the sound must go to the play command named here: another test that turns the mixer on would take it otherwise
+        let _route = crate::mixer::pin_command_route();
+        // An endless stream (like a real station): a finite one of 40 frames is decoded in a few milliseconds, the state then goes
+        // Playing -> Failed("the station stopped sending") -> Playing again, and a loaded machine could look at the wrong moment.
+        let p = RadioPlayer::default();
+        p.set_streamer(Arc::new(SlowStreamer));
+        p.set_retry_wait(Duration::from_millis(30));
         p.play(&st("https://r.example.org/a"), allow_all(), "tee /dev/null");
         wait_for(&p, |s| matches!(s, RadioState::Playing { .. }));
         p.play(&Station::new("Other", "https://r.example.org/b"), allow_all(), "tee /dev/null");
@@ -1432,6 +1494,8 @@ mod tests {
     #[test]
     #[ignore]
     fn live_stream() {
+        // the sound must go to the play command named here: another test that turns the mixer on would take it otherwise
+        let _route = crate::mixer::pin_command_route();
         let Ok(url) = std::env::var("IYAKKI_RADIO_URL") else { return };
         let d = tmp("live");
         let out = d.join("live.wav");
@@ -1640,6 +1704,119 @@ mod tests {
         p.play(&st(URL), Arc::new(|h: &str| h != "ca.example.org"), "tee /dev/null");
         wait_for(&p, |s| matches!(s, RadioState::Failed { .. }));
         assert!(!f.saw("fetch") && p.cert_problem().is_some());
+    }
+
+    /// A server whose certificates form a chain of addresses: the leaf names `u1`, the certificate at `u1` names `u2`, and so on. The
+    /// handshake works once at least `needed` certificates are handed over. `bodies` may be replaced to serve other bytes.
+    struct ChainFake {
+        leaf: Vec<u8>,
+        bodies: Vec<(String, Vec<u8>)>,
+        needed: usize,
+        log: Mutex<Vec<String>>,
+    }
+
+    impl ChainFake {
+        fn new(levels: usize, needed: usize) -> ChainFake {
+            let url = |n: usize| format!("http://ca.example.org/int{n}.der");
+            let leaf = iyakki_proxy::testcerts::issued_der(HOST, "Test Authority 1", Some(&url(1)));
+            let bodies = (1..=levels)
+                .map(|n| {
+                    let next = (n < levels).then(|| url(n + 1));
+                    // each certificate is issued by an authority that is not itself, except the last one up
+                    let der = if next.is_some() { iyakki_proxy::testcerts::issued_der(&format!("Test Intermediate {n}"), &format!("Test Authority {}", n + 1), next.as_deref()) } else { iyakki_proxy::testcerts::leaf_der(&["Test Root"], None, None) };
+                    (url(n), der)
+                })
+                .collect();
+            ChainFake { leaf, bodies, needed, log: Mutex::new(vec![]) }
+        }
+        fn fetched(&self) -> Vec<String> {
+            self.log.lock().unwrap().iter().filter_map(|l| l.strip_prefix("fetch ").map(str::to_string)).collect()
+        }
+    }
+
+    impl Streamer for ChainFake {
+        fn open(&self, url: &str, _h: &[(String, String)]) -> Result<StreamHead, String> {
+            if let Some((_, der)) = self.bodies.iter().find(|(u, _)| u == url) {
+                self.log.lock().unwrap().push(format!("fetch {url}"));
+                return Ok(StreamHead { status: 200, headers: vec![], body: Box::new(Cursor::new(der.clone())) });
+            }
+            if url == URL {
+                return Err("io: invalid peer certificate: UnknownIssuer".into());
+            }
+            Err("connection refused".into())
+        }
+        fn open_tls(&self, url: &str, _h: &[(String, String)], mode: &TlsMode) -> Result<StreamHead, String> {
+            match mode {
+                TlsMode::ExtraChain(c) if c.len() >= self.needed => {
+                    self.log.lock().unwrap().push(format!("chain {} {url}", c.len()));
+                    Ok(StreamHead { status: 200, headers: vec![("content-type".into(), "audio/mpeg".into())], body: Box::new(Cursor::new(silence(40))) })
+                }
+                _ => Err("io: invalid peer certificate: UnknownIssuer".into()),
+            }
+        }
+        fn peer_chain(&self, _host: &str, _port: u16) -> Result<Vec<Vec<u8>>, String> {
+            Ok(vec![self.leaf.clone()])
+        }
+    }
+
+    fn chain_player(f: Arc<ChainFake>) -> RadioPlayer {
+        let p = RadioPlayer::default();
+        p.set_streamer(f);
+        p.set_retry_wait(Duration::from_millis(30));
+        p
+    }
+
+    #[test]
+    fn the_issuer_fetch_climbs_at_most_three_levels() {
+        // three missing certificates are found one by one and the stream plays
+        let f = Arc::new(ChainFake::new(3, 3));
+        let p = chain_player(f.clone());
+        p.play(&st(URL), allow_all(), "tee /dev/null");
+        wait_for(&p, |s| matches!(s, RadioState::Playing { .. }));
+        assert_eq!(f.fetched().len(), 3);
+        assert!(f.log.lock().unwrap().iter().any(|l| l.starts_with("chain 3 ")));
+        p.stop();
+        // a fourth level is never asked for: four certificates are missing, so the station fails and the person decides
+        let f = Arc::new(ChainFake::new(5, 4));
+        let p = chain_player(f.clone());
+        p.play(&st(URL), allow_all(), "tee /dev/null");
+        wait_for(&p, |s| matches!(s, RadioState::Failed { .. }));
+        assert_eq!(f.fetched(), (1..=3).map(|n| format!("http://ca.example.org/int{n}.der")).collect::<Vec<_>>());
+        assert!(!f.fetched().iter().any(|u| u.ends_with("int4.der")), "{:?}", f.fetched());
+        assert!(p.cert_problem().is_some());
+    }
+
+    #[test]
+    fn an_issuer_answer_over_sixteen_kilobytes_or_not_in_der_form_is_not_used() {
+        let big = {
+            let mut v = vec![0x30, 0x82, 0x4f, 0x00];
+            v.resize(16 * 1024 + 1, 0x41);
+            v
+        };
+        let exactly = {
+            let mut v = iyakki_proxy::testcerts::leaf_der(&["Test Intermediate"], None, None);
+            assert!(v.len() < 16 * 1024);
+            v.shrink_to_fit();
+            v
+        };
+        let pem = b"-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n".to_vec();
+        for (what, body, used) in [("over 16 KB", big, false), ("PEM text", pem, false), ("a normal DER certificate", exactly, true)] {
+            let mut f = ChainFake::new(1, 1);
+            f.bodies[0].1 = body;
+            let f = Arc::new(f);
+            let p = chain_player(f.clone());
+            p.play(&st(URL), allow_all(), "tee /dev/null");
+            if used {
+                wait_for(&p, |s| matches!(s, RadioState::Playing { .. }));
+                assert!(f.log.lock().unwrap().iter().any(|l| l.starts_with("chain ")), "{what}");
+            } else {
+                wait_for(&p, |s| matches!(s, RadioState::Failed { .. }));
+                assert_eq!(f.fetched().len(), 1, "{what}: it was asked once");
+                assert!(!f.log.lock().unwrap().iter().any(|l| l.starts_with("chain ")), "{what}: not used");
+                assert!(p.cert_problem().is_some(), "{what}");
+            }
+            p.stop();
+        }
     }
 
     #[test]

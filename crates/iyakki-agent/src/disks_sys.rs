@@ -88,26 +88,26 @@ impl DiskEnv for RealEnv {
         let (s, t, f, d) = (cstr(dev)?, cstr(target)?, cstr(fstype)?, cstr(data)?);
         let mut fl: libc::c_ulong = 0;
         if flags.rdonly {
-            fl |= libc::MS_RDONLY;
+            fl |= crate::oscompat::MS_RDONLY;
         }
         if flags.nosuid {
-            fl |= libc::MS_NOSUID;
+            fl |= crate::oscompat::MS_NOSUID;
         }
         if flags.nodev {
-            fl |= libc::MS_NODEV;
+            fl |= crate::oscompat::MS_NODEV;
         }
         if flags.noexec {
-            fl |= libc::MS_NOEXEC;
+            fl |= crate::oscompat::MS_NOEXEC;
         }
         // SAFETY: all pointers are valid NUL-terminated strings for the duration of the call.
-        let rc = unsafe { libc::mount(s.as_ptr(), t.as_ptr(), f.as_ptr(), fl, d.as_ptr().cast()) };
+        let rc = unsafe { crate::oscompat::mount(s.as_ptr(), t.as_ptr(), f.as_ptr(), fl, d.as_ptr().cast()) };
         if rc == 0 { Ok(()) } else { Err(std::io::Error::last_os_error().to_string()) }
     }
 
     fn umount(&self, target: &str) -> Result<(), String> {
         let t = cstr(target)?;
         // SAFETY: a valid NUL-terminated path; flags 0 = a plain unmount (no MNT_FORCE, no MNT_DETACH).
-        let rc = unsafe { libc::umount2(t.as_ptr(), 0) };
+        let rc = unsafe { crate::oscompat::umount2(t.as_ptr(), 0) };
         if rc == 0 { return Ok(()) };
         let e = std::io::Error::last_os_error();
         if e.raw_os_error() == Some(libc::EBUSY) { Err("device is busy".into()) } else { Err(e.to_string()) }

@@ -102,6 +102,15 @@ impl PendingTools {
             }
             let label = if label_arg.is_empty() { format!("wait for {}", probe.describe()) } else { label_arg };
             self.ledger.register(Ticket { source: Source::Probe, label, workspace: ws, deadline_ms: Self::deadline(args), on_done, probe: Some(probe), ..Ticket::default() })
+        } else if let Some(url) = args.get("url").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+            crate::pendingplus::parse_local_http(url)?;
+            let expect = u16::try_from(args.get("status").and_then(Value::as_u64).unwrap_or(0)).map_err(|_| "`status` must be an HTTP status such as 200".to_string())?;
+            let probe = Probe::Http { url: url.to_string(), expect };
+            if probe.holds() {
+                return Ok(format!("{} already: nothing to wait for.", probe.describe()));
+            }
+            let label = if label_arg.is_empty() { format!("wait for {}", probe.describe()) } else { label_arg };
+            self.ledger.register(Ticket { source: Source::Probe, label, workspace: ws, deadline_ms: Self::deadline(args), on_done, probe: Some(probe), ..Ticket::default() })
         } else if let Some(port) = args.get("port").and_then(Value::as_u64) {
             let host = args.get("host").and_then(Value::as_str).unwrap_or("127.0.0.1").trim().to_string();
             if !matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1") {
@@ -118,7 +127,7 @@ impl PendingTools {
             let label = if label_arg.is_empty() { format!("wait for {}", probe.describe()) } else { label_arg };
             self.ledger.register(Ticket { source: Source::Probe, label, workspace: ws, deadline_ms: Self::deadline(args), on_done, probe: Some(probe), ..Ticket::default() })
         } else {
-            return Err("give one of `job_id` (a running job), `file` (a path that must appear) or `port` (a local port that must accept connections)".into());
+            return Err("give one of `job_id` (a running job), `file` (a path that must appear) `port` (a local port that must accept connections) or `url` (a local http address that must answer)".into());
         };
         self.note("pending.register", &format!("{} {}", t.id, t.source.label()));
         let block = args.get("block_seconds").and_then(Value::as_u64).unwrap_or(0).min(MAX_BLOCK_SECS);
@@ -152,14 +161,20 @@ impl PendingTools {
 }
 
 impl Tools for PendingTools {
+
+    fn inner_tools(&self) -> Option<&dyn Tools> {
+
+        Some(&*self.inner)
+
+    }
     fn defs(&self) -> Vec<ToolDef> {
         let mut v = self.inner.defs();
         v.retain(|d| !is_pending_tool(&d.spec.name));
         let obj = |props: Value, req: &[&str]| json!({"type": "object", "properties": props, "required": req});
         v.push(spec(
             "wait_for",
-            "Register something to wait for and get woken when it ends: a running job (`job_id`), a file that must appear (`file`), or a port on this machine that must accept connections (`port`). Returns at once; end your turn saying \"Waiting for: ...\" and IYAKKI starts a new turn for you with the result. Never write \"I'll report back\" without a ticket. `on_done`: one line, what you will do when it lands. `timeout_seconds` (default 3600, at most 21600). `block_seconds` (at most 60) blocks and returns the first pending work that ended: only for agents that cannot be woken.",
-            obj(json!({"job_id": {"type": "string"}, "file": {"type": "string"}, "port": {"type": "integer"}, "host": {"type": "string"}, "label": {"type": "string"}, "on_done": {"type": "string"}, "timeout_seconds": {"type": "integer"}, "block_seconds": {"type": "integer"}}), &[]),
+            "Register something to wait for and get woken when it ends: a running job (`job_id`), a file that must appear (`file`), a port on this machine that must accept connections (`port`), or an http address on this machine that must answer (`url`, optional `status`). Returns at once; end your turn saying \"Waiting for: ...\" and IYAKKI starts a new turn for you with the result. Never write \"I'll report back\" without a ticket. `on_done`: one line, what you will do when it lands. `timeout_seconds` (default 3600, at most 21600). `block_seconds` (at most 60) blocks and returns the first pending work that ended: only for agents that cannot be woken.",
+            obj(json!({"job_id": {"type": "string"}, "file": {"type": "string"}, "port": {"type": "integer"}, "url": {"type": "string"}, "status": {"type": "integer"}, "host": {"type": "string"}, "label": {"type": "string"}, "on_done": {"type": "string"}, "timeout_seconds": {"type": "integer"}, "block_seconds": {"type": "integer"}}), &[]),
             Risk::Safe,
             false,
         ));
@@ -176,8 +191,8 @@ impl Tools for PendingTools {
         }
         v.push(spec(
             "pending_settings",
-            "Change the waiting settings (`auto_continue` true/false, `max_wakes_per_day` 1-500, `max_wait_hours` 1-168). Without arguments it only shows them. Asks the person first.",
-            obj(json!({"auto_continue": {"type": "boolean"}, "max_wakes_per_day": {"type": "integer"}, "max_wait_hours": {"type": "integer"}}), &[]),
+            "Change the waiting settings (`auto_continue` true/false, `separate_thread` true/false, `max_wakes_per_day` 1-500, `max_wait_hours` 1-168). Without arguments it only shows them. Asks the person first.",
+            obj(json!({"auto_continue": {"type": "boolean"}, "separate_thread": {"type": "boolean"}, "max_wakes_per_day": {"type": "integer"}, "max_wait_hours": {"type": "integer"}}), &[]),
             Risk::Ask,
             false,
         ));
@@ -226,6 +241,9 @@ impl Tools for PendingTools {
                 if let Some(b) = args.get("auto_continue").and_then(Value::as_bool) {
                     s.auto_continue = b;
                 }
+                if let Some(b) = args.get("separate_thread").and_then(Value::as_bool) {
+                    s.separate_thread = b;
+                }
                 if let Some(n) = args.get("max_wakes_per_day").and_then(Value::as_u64) {
                     s.max_wakes_per_day = n.min(500) as u32;
                 }
@@ -243,7 +261,7 @@ impl Tools for PendingTools {
 
     fn describe(&self, name: &str, args: &Value) -> String {
         match name {
-            "wait_for" => format!("wait for {}", ["job_id", "file", "port"].iter().find_map(|k| args.get(*k).map(|v| v.to_string().trim_matches('"').to_string())).unwrap_or_default()),
+            "wait_for" => format!("wait for {}", ["job_id", "file", "port", "url"].iter().find_map(|k| args.get(*k).map(|v| v.to_string().trim_matches('"').to_string())).unwrap_or_default()),
             "pending_list" => "list pending work".into(),
             "pending_cancel" => format!("stop waiting for {}", args.get("id").and_then(Value::as_str).unwrap_or("?")),
             "pending_check" => format!("attach a check to {}: `{}`", args.get("id").and_then(Value::as_str).unwrap_or("?"), args.get("command").and_then(Value::as_str).unwrap_or("").chars().take(160).collect::<String>()),

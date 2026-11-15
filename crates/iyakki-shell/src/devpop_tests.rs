@@ -11,7 +11,7 @@ fn put(root: &Path, rel: &str, content: &str) {
     std::fs::write(p, content).unwrap();
 }
 
-fn tmp(tag: &str) -> PathBuf {
+pub(crate) fn tmp(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("iyakki-devpop-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
@@ -47,7 +47,7 @@ impl Control for Fake {
     }
 }
 
-fn probe_at(root: &Path) -> Probe {
+pub(crate) fn probe_at(root: &Path) -> Probe {
     let roots = Roots { sys: root.join("sys"), proc_: root.join("proc") };
     Probe {
         dev: DeviceEnv { roots: roots.clone(), ctl: Arc::new(Fake { muted: Default::default() }) },
@@ -771,4 +771,60 @@ fn every_list_in_the_header_popover_uses_the_tooltip_and_the_shell_feeds_it() {
     // the shell hands the popover every event, whoever takes the click, and redraws when the tooltip changes
     let shell = include_str!("shell.rs");
     assert!(shell.contains("self.devpop.tip_event(ev)") && shell.contains("self.devpop.tip_changed()"));
+}
+
+// ---- the refresh rate of a display (KI-210: a laptop panel showed "@ 0 Hz")
+
+/// A 128-byte EDID whose first detailed timing is `w` x `h` with the given totals and pixel clock (in 10 kHz units).
+fn edid_with(w: u32, hb: u32, h: u32, vb: u32, clock10k: u16) -> Vec<u8> {
+    let mut e = vec![0u8; 128];
+    e[..8].copy_from_slice(&[0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0]);
+    let d = &mut e[54..72];
+    d[0..2].copy_from_slice(&clock10k.to_le_bytes());
+    d[2] = (w & 0xff) as u8;
+    d[3] = (hb & 0xff) as u8;
+    d[4] = (((w >> 8) << 4) | (hb >> 8)) as u8;
+    d[5] = (h & 0xff) as u8;
+    d[6] = (vb & 0xff) as u8;
+    d[7] = (((h >> 8) << 4) | (vb >> 8)) as u8;
+    e
+}
+
+#[test]
+fn the_refresh_rate_comes_from_the_framebuffer_then_the_edid_and_is_never_zero() {
+    let edid120 = edid_with(2560, 80, 1600, 40, 51_955); // 519.55 MHz over 2640 x 1640 = 120 Hz
+    // amdgpu: the framebuffer line says -0; the panel's EDID knows
+    assert_eq!(refresh_hz("2560x1600", Some("U:2560x1600p-0"), Some(&edid120)), Some(120));
+    // a framebuffer number wins when it is real and for the same size
+    assert_eq!(refresh_hz("3840x2160", Some("U:3840x2160p-60"), None), Some(60));
+    // a framebuffer line for another size says nothing about this output
+    assert_eq!(refresh_hz("1920x1080", Some("U:3840x2160p-60"), None), None);
+    // nothing known: no rate, not 0
+    assert_eq!(refresh_hz("2560x1600", Some("U:2560x1600p-0"), None), None);
+    assert_eq!(refresh_hz("2560x1600", None, None), None);
+    assert_eq!(refresh_hz("resolution unknown", Some("U:2560x1600p-60"), None), None);
+    // an EDID whose preferred timing is another size is not used
+    assert_eq!(refresh_hz("1920x1080", Some("U:1920x1080p-0"), Some(&edid120)), None);
+    assert_eq!(refresh_text(Some(120)), " @ 120 Hz");
+    assert_eq!(refresh_text(Some(0)), "");
+    assert_eq!(refresh_text(None), "");
+}
+
+#[test]
+fn a_laptop_panel_with_a_zero_framebuffer_rate_shows_the_edid_rate_or_no_hertz() {
+    let r = tmp("amd-edp");
+    put(&r, "sys/class/drm/card1-eDP-1/status", "connected\n");
+    put(&r, "sys/class/drm/card1-eDP-1/modes", "2560x1600\n1920x1200\n");
+    put(&r, "sys/class/graphics/fb0/virtual_size", "2560,1600\n");
+    put(&r, "sys/class/graphics/fb0/modes", "U:2560x1600p-0\n");
+    let panel = |r: &Path| -> String { item(&gather(&probe_at(r)), "Display").detail.clone() };
+    let none = panel(&r);
+    assert!(none.contains("eDP-1") && none.contains("2560x1600"), "{none}");
+    assert!(!none.contains("Hz"), "an unknown rate prints no Hz at all: {none}");
+    let edid = edid_with(2560, 80, 1600, 40, 51_955);
+    let p = r.join("sys/class/drm/card1-eDP-1/edid");
+    std::fs::write(&p, &edid).unwrap();
+    let known = panel(&r);
+    assert!(known.contains("2560x1600 @ 120 Hz"), "{known}");
+    assert!(!known.contains(" 0 Hz"), "{known}");
 }

@@ -332,7 +332,7 @@ fn the_tab_never_overlaps_or_leaves_the_screen_from_1280x720_down_to_800x480_in_
             for page in [false] {
                 app.show_main(MainTab::Tasks);
                 cur_mut(&mut app).tasks.page = page;
-                for tab in [DTab::Overview, DTab::Files, DTab::Diff, DTab::Log] {
+                for tab in [DTab::Overview, DTab::Files, DTab::Diff, DTab::Log, DTab::Chat] {
                     cur_mut(&mut app).tasks.tab = tab;
                     ticks(&mut app, &w.cx, 2);
                     let g = render_at(&mut app, &w.cx, wd, ht);
@@ -589,6 +589,7 @@ fn running_tasks_are_agents_on_the_board_that_can_be_opened_paused_messaged_and_
     std::fs::write(d.join("FEATURES.md"), DEP_BOARD).unwrap();
     let mut app = IdeApp::new(&w.cx);
     open(&mut app, &w.cx, "Alpha", &d);
+    cur_mut(&mut app).board.ext.poll_every = Duration::ZERO; // the board looks at the registry on every frame (the 700 ms default made the second agent appear a moment after the record)
     new_task(&mut app, &w.cx, "Second row", "do it", "F-A-03");
     until(&mut app, &w.cx, "an agent with a file", |_| iyakki_agent::assign::load(&d).agents.iter().any(|x| x.files.iter().any(|f| f.path == "work.txt")));
     app.show_main(MainTab::Board);
@@ -811,4 +812,98 @@ fn the_tab_with_low_memory_shows_the_lowered_cap_and_a_waiting_task_at_the_four_
     assert_eq!((mgr.concurrency(), mgr.effective_concurrency()), (2, 1));
     hold.store(false, Ordering::SeqCst);
     assert!(bad.is_empty(), "{} problems:\n{}", bad.len(), bad.iter().take(40).cloned().collect::<Vec<_>>().join("\n"));
+}
+
+#[test]
+fn leaving_the_ide_with_a_working_task_asks_first_and_a_yes_leaves() {
+    let hold = Arc::new(AtomicBool::new(true));
+    let h2 = hold.clone();
+    let _r = fake(Arc::new(move |_, etx, cancel, _| {
+        while h2.load(Ordering::SeqCst) && !cancel.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let _ = etx.send(RunEvent::Stopped { reason: "window closed".into() });
+    }));
+    let w = world("tasks-leave");
+    let d = git_project(&w, "alpha");
+    let mut app = IdeApp::new(&w.cx);
+    open(&mut app, &w.cx, "Alpha", &d);
+    assert!(super::super::App::leave_guard(&mut app, &w.cx), "nothing is working: leave at once");
+    new_task(&mut app, &w.cx, "Long job", "long", "");
+    until(&mut app, &w.cx, "running", |a| statuses(a) == vec![Status::Running]);
+    assert!(!super::super::App::leave_guard(&mut app, &w.cx), "a task is working: ask first");
+    let Some(Modal::Confirm(Confirm::CloseIde(q))) = &app.modal else { panic!("the close question") };
+    assert!(q.contains("Long job") && q.contains("Close anyway?"), "{q}");
+    // no keeps the IDE open
+    assert!(matches!(super::super::App::handle(&mut app, &Event::Key(Key::Char('n')), &w.cx), crate::apps::Flow::Stay));
+    assert!(app.modal.is_none());
+    assert!(!super::super::App::leave_guard(&mut app, &w.cx));
+    // yes leaves
+    assert!(matches!(super::super::App::handle(&mut app, &Event::Key(Key::Char('y')), &w.cx), crate::apps::Flow::Back));
+    hold.store(false, Ordering::SeqCst);
+}
+
+#[test]
+fn a_stopped_task_can_be_given_the_uncommitted_files_of_the_workspace_with_one_button() {
+    let hold = Arc::new(AtomicBool::new(true));
+    let h2 = hold.clone();
+    let _r = fake(Arc::new(move |_, etx, cancel, _| {
+        while h2.load(Ordering::SeqCst) && !cancel.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let _ = etx.send(RunEvent::Stopped { reason: "window closed".into() });
+    }));
+    let w = world("tasks-bring");
+    let d = git_project(&w, "alpha");
+    {
+        let mut app = IdeApp::new(&w.cx);
+        open(&mut app, &w.cx, "Alpha", &d);
+        new_task(&mut app, &w.cx, "Long job", "long", "");
+        until(&mut app, &w.cx, "running", |a| statuses(a) == vec![Status::Running]);
+    }
+    let mut app = IdeApp::new(&w.cx);
+    let id = app.reg.ordered()[0].id.clone();
+    app.open_by_id(&id, &w.cx).unwrap();
+    assert_eq!(statuses(&app), vec![Status::Interrupted]);
+    app.show_main(MainTab::Tasks);
+    let g = render(&mut app, &w.cx, 1280, 720);
+    assert!(g.hits.iter().any(|h| h.label == "My changes"), "the button is offered: {:?}", g.hits.iter().map(|h| h.label.clone()).collect::<Vec<_>>());
+    // nothing uncommitted yet: said plainly, nothing copied
+    key(&mut app, &w.cx, Key::Char('u'));
+    assert!(cur(&app).tasks.status.as_ref().is_some_and(|(m, ok)| !ok && m.contains("no uncommitted")), "{:?}", cur(&app).tasks.status);
+    std::fs::write(d.join("scratch.txt"), "my unsaved idea").unwrap();
+    key(&mut app, &w.cx, Key::Char('u'));
+    let t = cur(&app).tasks.mgr.list()[0].clone();
+    assert_eq!(std::fs::read_to_string(t.tree.join("scratch.txt")).unwrap(), "my unsaved idea");
+    assert!(cur(&app).tasks.status.as_ref().is_some_and(|(m, ok)| *ok && m.contains("copied into the task")), "{:?}", cur(&app).tasks.status);
+    hold.store(false, Ordering::SeqCst);
+}
+
+#[test]
+fn an_autopilot_of_the_chat_on_the_board_is_stopped_from_its_panel_and_opens_its_run_while_pause_stays_in_the_chat() {
+    let w = world("board-autopilot");
+    let d = git_project(&w, "alpha");
+    std::fs::write(d.join("FEATURES.md"), DEP_BOARD).unwrap();
+    let mut app = IdeApp::new(&w.cx);
+    open(&mut app, &w.cx, "Alpha", &d);
+    // the chat's Autopilot registers itself like this (and writes its run log id)
+    iyakki_agent::assign::update(&d, |doc| {
+        doc.register("autopilot:s1", "autopilot", "assistant", &[], "s1", 5);
+        doc.set_run("autopilot:s1", "run-s1");
+    });
+    app.show_main(MainTab::Board);
+    let name = iyakki_agent::assign::load(&d).get("autopilot:s1").unwrap().name.clone();
+    board_click(&mut app, &w.cx, &format!("agent {name}"));
+    let g = render(&mut app, &w.cx, 1280, 720);
+    assert!(g.hits.iter().any(|h| h.label == "agent Stop") && g.hits.iter().any(|h| h.label == "agent Open run"));
+    // Pause is the chat's: said so, nothing changes
+    board_click(&mut app, &w.cx, "agent Pause");
+    assert!(!iyakki_agent::assign::load(&d).get("autopilot:s1").unwrap().stop_requested);
+    // Stop leaves the request the run reads at its next step
+    board_click(&mut app, &w.cx, "agent Stop");
+    assert!(iyakki_agent::assign::load(&d).get("autopilot:s1").unwrap().stop_requested);
+    assert!(cur(&app).status.as_ref().is_some_and(|s| s.0.contains("Stopping the Autopilot")), "{:?}", cur(&app).status);
+    // Open run hands its run log to RUNS
+    board_click(&mut app, &w.cx, "agent Open run");
+    assert_eq!(App::take_request(&mut app), Some(("runs".to_string(), "run:run-s1".to_string())));
 }

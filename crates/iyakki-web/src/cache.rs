@@ -452,7 +452,8 @@ impl<F: Fetch> Fetch for CachedFetch<F> {
 
     fn send(&self, req: &Request) -> Result<Response, String> {
         net::bump(&COUNTERS.requests, 1);
-        let cacheable = req.method.eq_ignore_ascii_case("GET") && req.if_none_match.is_empty() && req.if_modified_since.is_empty() && self.budget() != Budget::OFF;
+        // a ranged request (a piece of a download, a media probe) is neither answered from the cache nor kept in it
+        let cacheable = req.method.eq_ignore_ascii_case("GET") && req.range.is_empty() && req.if_none_match.is_empty() && req.if_modified_since.is_empty() && self.budget() != Budget::OFF;
         if !cacheable {
             net::bump(&COUNTERS.misses, 1);
             return self.inner.send(req);

@@ -34,6 +34,11 @@ fn state(i: &IfaceInfo) -> &'static str {
 }
 
 pub fn choices(ifs: &[IfaceInfo], wifi_ap: bool) -> Choices {
+    choices_with(ifs, wifi_ap, None)
+}
+
+/// [`choices`] with the reason the Wi-Fi hotspot is not offered (what the radios said, see `iyakki_hotspot::caps::hotspot_unavailable`).
+pub fn choices_with(ifs: &[IfaceInfo], wifi_ap: bool, wifi_why: Option<&str>) -> Choices {
     let mut c = Choices::default();
     for i in ifs {
         if i.default_route && i.up {
@@ -74,7 +79,10 @@ pub fn choices(ifs: &[IfaceInfo], wifi_ap: bool) -> Choices {
         }
     }
     if !wifi_ap {
-        c.wifi_line = Some("Wi-Fi hotspot: not available on this build".into());
+        c.wifi_line = Some(match wifi_why.map(str::trim).filter(|w| !w.is_empty()) {
+            Some(why) => format!("Wi-Fi hotspot: not available. {why}"),
+            None => "Wi-Fi hotspot: not available on this build".into(),
+        });
     }
     c
 }

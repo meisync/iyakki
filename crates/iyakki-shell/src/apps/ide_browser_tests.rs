@@ -12,7 +12,7 @@ const APP: &str = "http://192.168.1.69:30929/attendence";
 
 fn fake_helper() -> PathBuf {
     let exe = std::env::current_exe().unwrap();
-    let dir = exe.parent().unwrap().parent().unwrap().to_path_buf();
+    let dir = exe.ancestors().find(|d| d.file_name().is_some_and(|n| n == "debug" || n == "release")).expect("the profile folder (target/debug) above the test program").to_path_buf();
     let p = dir.join("iyakki-fake-webview");
     if !p.is_file() {
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
@@ -40,7 +40,12 @@ fn pump(app: &mut IdeApp, cx: &AppCx) {
 }
 
 fn pump_until(app: &mut IdeApp, cx: &AppCx, what: &str, mut f: impl FnMut(&mut IdeApp) -> bool) {
-    for i in 0..1500 {
+    // a wall-clock limit, not a count of turns: the assistant's open tool waits for the page to settle (up to 20 s with the fake engine, which never reports quiet),
+    // and a count of 1500 turns used to last long enough only because every frame buffer cost 27 ms to make (found 2026-11-14, F-BROW-28 speed fix)
+    let t0 = std::time::Instant::now();
+    let mut i = 0u32;
+    while t0.elapsed() < Duration::from_secs(60) {
+        i += 1;
         web_agent::tick(&cx.services, &cx.audit, &cx.session);
         app.handle(&Event::Tick, cx);
         // drawing is slow in a debug build; the engine only needs a frame now and then

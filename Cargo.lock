@@ -2041,8 +2041,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "iyakki-accounts"
+version = "0.1.0-alpha.3"
+dependencies = [
+ "argon2",
+ "iyakki-ledger",
+ "iyakki-schema",
+ "iyakki-sec",
+ "libc",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "iyakki-agent"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "aes",
  "argon2",
@@ -2057,12 +2071,14 @@ dependencies = [
  "iyakki-clockfloor",
  "iyakki-core-api",
  "iyakki-core-fake",
+ "iyakki-core-local",
  "iyakki-data",
  "iyakki-devctl",
  "iyakki-diskcrypt",
  "iyakki-drivers",
  "iyakki-edit",
  "iyakki-enchome",
+ "iyakki-filter",
  "iyakki-flow",
  "iyakki-fw",
  "iyakki-hotspot",
@@ -2086,17 +2102,24 @@ dependencies = [
  "iyakki-stage1",
  "iyakki-storage",
  "iyakki-tile-abi",
+ "iyakki-tile-api",
+ "iyakki-tile-chat",
+ "iyakki-tile-edit",
  "iyakki-tile-example",
  "iyakki-tile-host",
+ "iyakki-tile-runs",
+ "iyakki-tile-settings",
  "iyakki-usb",
  "iyakki-vfs",
  "iyakki-volcrypt",
  "iyakki-vpn",
+ "iyakki-vt",
  "iyakki-wake",
  "iyakki-wasm",
  "iyakki-web",
  "iyakki-webview",
  "iyakki-wordtime",
+ "iyakki-zram",
  "libc",
  "log",
  "miniz_oxide 0.8.9",
@@ -2115,7 +2138,7 @@ dependencies = [
 
 [[package]]
 name = "iyakki-archive"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "miniz_oxide 0.8.9",
  "ruzstd",
@@ -2123,7 +2146,7 @@ dependencies = [
 
 [[package]]
 name = "iyakki-battery"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -2131,7 +2154,7 @@ dependencies = [
 
 [[package]]
 name = "iyakki-bindelta"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "ruzstd",
  "sha2 0.10.9",
@@ -2139,7 +2162,7 @@ dependencies = [
 
 [[package]]
 name = "iyakki-camdetect"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "iyakki-clock",
  "iyakki-sec",
@@ -2150,12 +2173,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "iyakki-client-engine"
+version = "0.1.0-alpha.3"
+dependencies = [
+ "ed25519-dalek",
+ "iyakki-core-api",
+ "iyakki-link",
+ "miniz_oxide 0.8.9",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "iyakki-clock"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 
 [[package]]
 name = "iyakki-clockfloor"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "iyakki-clock",
  "log",
@@ -2163,7 +2199,7 @@ dependencies = [
 
 [[package]]
 name = "iyakki-connect"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "iyakki-link",
  "iyakki-sec",
@@ -2177,8 +2213,9 @@ dependencies = [
 
 [[package]]
 name = "iyakki-core"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
+ "iyakki-accounts",
  "iyakki-agent",
  "iyakki-core-api",
  "iyakki-devctl",
@@ -2207,9 +2244,13 @@ dependencies = [
 
 [[package]]
 name = "iyakki-core-api"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
+ "iyakki-devctl",
+ "iyakki-netscan",
  "iyakki-sec",
+ "iyakki-storage",
+ "iyakki-zram",
  "libc",
  "serde",
  "serde_json",
@@ -2218,7 +2259,7 @@ dependencies = [
 
 [[package]]
 name = "iyakki-core-fake"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "iyakki-core-api",
  "iyakki-sec",
@@ -2226,8 +2267,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "iyakki-core-local"
+version = "0.1.0-alpha.3"
+dependencies = [
+ "iyakki-core-api",
+ "iyakki-devctl",
+ "iyakki-drivers",
+ "iyakki-hwinfo",
+ "iyakki-netscan",
+ "iyakki-storage",
+ "iyakki-zram",
+ "libc",
+]
+
+[[package]]
 name = "iyakki-data"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "polars",
  "serde",
@@ -2237,7 +2292,7 @@ dependencies = [
 
 [[package]]
 name = "iyakki-devctl"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "iyakki-sec",
  "libc",
@@ -2247,11 +2302,11 @@ dependencies = [
 
 [[package]]
 name = "iyakki-diskcrypt"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 
 [[package]]
 name = "iyakki-drivers"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "iyakki-hwinfo",
  "libc",
@@ -2263,11 +2318,18 @@ dependencies = [
 
 [[package]]
 name = "iyakki-edit"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
+
+[[package]]
+name = "iyakki-edit-wasm"
+version = "0.1.0-alpha.3"
+dependencies = [
+ "iyakki-edit",
+]
 
 [[package]]
 name = "iyakki-enchome"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "iyakki-diskcrypt",
  "iyakki-sec",
@@ -2279,8 +2341,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "iyakki-filter"
+version = "0.1.0-alpha.3"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "iyakki-flow"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "iyakki-schema",
  "serde",
@@ -2289,7 +2359,7 @@ dependencies = [
 
 [[package]]
 name = "iyakki-fw"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "iyakki-schema",
  "libc",
@@ -2300,14 +2370,14 @@ dependencies = [
 
 [[package]]
 name = "iyakki-hotspot"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "iyakki-sec",
 ]
 
 [[package]]
 name = "iyakki-hw"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "cpal",
  "iyakki-sec",
@@ -2319,14 +2389,14 @@ dependencies = [
 
 [[package]]
 name = "iyakki-hwinfo"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "iyakki-storage",
 ]
 
 [[package]]
 name = "iyakki-js"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "iyakki-proxy",
  "iyakki-web",
@@ -2336,7 +2406,7 @@ dependencies = [
 
 [[package]]
 name = "iyakki-ledger"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.21",
@@ -2344,7 +2414,7 @@ dependencies = [
 
 [[package]]
 name = "iyakki-link"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "ed25519-dalek",
  "iyakki-sec",
@@ -2359,14 +2429,14 @@ dependencies = [
 
 [[package]]
 name = "iyakki-lint"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "iyakki-macrecovery"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "iyakki-drivers",
  "iyakki-proxy",
@@ -2375,7 +2445,7 @@ dependencies = [
 
 [[package]]
 name = "iyakki-mem"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "iyakki-vfs",
  "thiserror 2.0.21",
@@ -2383,7 +2453,7 @@ dependencies = [
 
 [[package]]
 name = "iyakki-netscan"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "libc",
  "serde_json",
@@ -2392,21 +2462,22 @@ dependencies = [
 
 [[package]]
 name = "iyakki-openpgp"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "sha2 0.10.9",
 ]
 
 [[package]]
 name = "iyakki-pdf"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
+ "fontdue",
  "iyakki-web",
 ]
 
 [[package]]
 name = "iyakki-proxy"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "iyakki-sec",
  "iyakki-wasm",
@@ -2421,21 +2492,23 @@ dependencies = [
 
 [[package]]
 name = "iyakki-qr"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 
 [[package]]
 name = "iyakki-regex"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 
 [[package]]
 name = "iyakki-relcheck"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 
 [[package]]
 name = "iyakki-remote"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "iyakki-agent",
+ "iyakki-client-engine",
+ "iyakki-connect",
  "iyakki-core-api",
  "iyakki-core-fake",
  "iyakki-flow",
@@ -2455,7 +2528,7 @@ dependencies = [
 
 [[package]]
 name = "iyakki-rfb"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "iyakki-agent",
  "miniz_oxide 0.8.9",
@@ -2463,11 +2536,11 @@ dependencies = [
 
 [[package]]
 name = "iyakki-rtsp"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 
 [[package]]
 name = "iyakki-schema"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -2475,8 +2548,9 @@ dependencies = [
 
 [[package]]
 name = "iyakki-sdk-emulator"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
+ "iyakki-core-api",
  "iyakki-tile-abi",
  "iyakki-tile-example",
  "iyakki-tile-host",
@@ -2485,7 +2559,7 @@ dependencies = [
 
 [[package]]
 name = "iyakki-sec"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "libc",
  "serde",
@@ -2495,11 +2569,15 @@ dependencies = [
 
 [[package]]
 name = "iyakki-shell"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "argon2",
  "fontdue",
+ "iyakki-accounts",
  "iyakki-agent",
+ "iyakki-core-api",
+ "iyakki-core-fake",
+ "iyakki-core-local",
  "iyakki-data",
  "iyakki-devctl",
  "iyakki-drivers",
@@ -2517,14 +2595,19 @@ dependencies = [
  "iyakki-schema",
  "iyakki-sec",
  "iyakki-storage",
+ "iyakki-tile-abi",
  "iyakki-tile-api",
  "iyakki-tile-calendar",
  "iyakki-tile-cameras",
+ "iyakki-tile-host",
+ "iyakki-tile-pdf",
+ "iyakki-tile-radio",
  "iyakki-tile-remotefiles",
  "iyakki-tile-usage",
  "iyakki-uikit",
  "iyakki-usb",
  "iyakki-vpn",
+ "iyakki-vt",
  "iyakki-web",
  "iyakki-webview",
  "iyakki-zram",
@@ -2540,14 +2623,18 @@ dependencies = [
 
 [[package]]
 name = "iyakki-sshfs"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "aes",
+ "aes-gcm",
+ "chacha20 0.9.1",
  "ctr",
  "ed25519-dalek",
  "iyakki-sec",
  "libc",
+ "poly1305",
  "rcgen",
+ "ring",
  "rustls",
  "sha2 0.10.9",
  "x25519-dalek",
@@ -2556,28 +2643,30 @@ dependencies = [
 
 [[package]]
 name = "iyakki-stage1"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "libc",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
 name = "iyakki-storage"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "iyakki-store-server"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "iyakki-agent",
 ]
 
 [[package]]
 name = "iyakki-swarm"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "futures",
  "iyakki-wasm",
@@ -2597,18 +2686,19 @@ dependencies = [
 
 [[package]]
 name = "iyakki-tile-abi"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 
 [[package]]
 name = "iyakki-tile-api"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "iyakki-uikit",
+ "serde",
 ]
 
 [[package]]
 name = "iyakki-tile-calendar"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "iyakki-tile-api",
  "iyakki-uikit",
@@ -2616,7 +2706,7 @@ dependencies = [
 
 [[package]]
 name = "iyakki-tile-cameras"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "iyakki-tile-api",
  "iyakki-uikit",
@@ -2624,8 +2714,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "iyakki-tile-chat"
+version = "0.1.0-alpha.3"
+dependencies = [
+ "iyakki-tile-host",
+ "iyakki-tile-kit",
+ "serde_json",
+]
+
+[[package]]
+name = "iyakki-tile-edit"
+version = "0.1.0-alpha.3"
+dependencies = [
+ "iyakki-edit",
+ "iyakki-tile-host",
+ "iyakki-tile-kit",
+ "serde_json",
+]
+
+[[package]]
 name = "iyakki-tile-example"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "iyakki-tile-abi",
  "iyakki-tile-host",
@@ -2633,7 +2742,7 @@ dependencies = [
 
 [[package]]
 name = "iyakki-tile-host"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "iyakki-sec",
  "iyakki-tile-abi",
@@ -2642,34 +2751,68 @@ dependencies = [
 ]
 
 [[package]]
-name = "iyakki-tile-remotefiles"
-version = "0.1.0-alpha.2"
+name = "iyakki-tile-kit"
+version = "0.1.0-alpha.3"
+dependencies = [
+ "iyakki-tile-abi",
+ "serde_json",
+]
+
+[[package]]
+name = "iyakki-tile-pdf"
+version = "0.1.0-alpha.3"
+dependencies = [
+ "iyakki-pdf",
+ "iyakki-tile-api",
+ "iyakki-uikit",
+ "tiny-skia",
+]
+
+[[package]]
+name = "iyakki-tile-radio"
+version = "0.1.0-alpha.3"
 dependencies = [
  "iyakki-tile-api",
  "iyakki-uikit",
+]
+
+[[package]]
+name = "iyakki-tile-remotefiles"
+version = "0.1.0-alpha.3"
+dependencies = [
+ "iyakki-tile-api",
+ "iyakki-uikit",
+]
+
+[[package]]
+name = "iyakki-tile-runs"
+version = "0.1.0-alpha.3"
+dependencies = [
+ "iyakki-tile-abi",
+ "iyakki-tile-host",
+ "serde_json",
+]
+
+[[package]]
+name = "iyakki-tile-settings"
+version = "0.1.0-alpha.3"
+dependencies = [
+ "iyakki-tile-host",
+ "iyakki-tile-kit",
+ "serde_json",
 ]
 
 [[package]]
 name = "iyakki-tile-usage"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "iyakki-tile-api",
  "iyakki-uikit",
 ]
 
 [[package]]
-name = "iyakki-ui"
-version = "0.1.0-alpha.2"
-dependencies = [
- "iyakki-edit",
- "iyakki-sec",
- "iyakki-vfs",
- "iyakki-wasm",
-]
-
-[[package]]
 name = "iyakki-uikit"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "fontdue",
  "rustybuzz",
@@ -2680,7 +2823,7 @@ dependencies = [
 
 [[package]]
 name = "iyakki-usb"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "iyakki-storage",
  "iyakki-zram",
@@ -2690,18 +2833,19 @@ dependencies = [
 
 [[package]]
 name = "iyakki-vfs"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "iyakki-volcrypt"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "aes",
  "argon2",
  "iyakki-sec",
+ "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.21",
  "zeroize",
@@ -2709,19 +2853,27 @@ dependencies = [
 
 [[package]]
 name = "iyakki-vpn"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
+ "iyakki-filter",
  "serde",
  "serde_json",
 ]
 
 [[package]]
+name = "iyakki-vt"
+version = "0.1.0-alpha.3"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "iyakki-wake"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 
 [[package]]
 name = "iyakki-wasm"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "iyakki-ledger",
  "iyakki-sec",
@@ -2732,19 +2884,19 @@ dependencies = [
 
 [[package]]
 name = "iyakki-web"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 
 [[package]]
 name = "iyakki-webview"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 
 [[package]]
 name = "iyakki-wordtime"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 
 [[package]]
 name = "iyakki-zram"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "libc",
 ]

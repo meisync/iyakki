@@ -459,9 +459,63 @@ pub fn append_audit(file: &std::path::Path, now: u64, c: &Change) -> Result<(), 
     writeln!(f, "{now}\t{}", c.0.replace(['\n', '\r'], " ")).map_err(|e| e.to_string())
 }
 
+/// The last `n` lines of the audit trail as (unix seconds, change), oldest first. A missing file or a line that is not
+/// `seconds <TAB> text` gives nothing for that line.
+pub fn audit_tail(file: &std::path::Path, n: usize) -> Vec<(u64, String)> {
+    let text = std::fs::read_to_string(file).unwrap_or_default();
+    let all: Vec<(u64, String)> = text.lines().filter_map(|l| l.split_once('\t').and_then(|(t, c)| Some((t.trim().parse().ok()?, c.to_string())))).collect();
+    let skip = all.len().saturating_sub(n);
+    all.into_iter().skip(skip).collect()
+}
+
+/// One page of the audit trail, newest first: `limit` lines after the `offset` newest ones, and how many lines the trail has in all.
+pub fn audit_page(file: &std::path::Path, offset: usize, limit: usize) -> (Vec<(u64, String)>, usize) {
+    let text = std::fs::read_to_string(file).unwrap_or_default();
+    let all: Vec<(u64, String)> = text.lines().filter_map(|l| l.split_once('\t').and_then(|(t, c)| Some((t.trim().parse().ok()?, c.to_string())))).collect();
+    let total = all.len();
+    (all.into_iter().rev().skip(offset).take(limit).collect(), total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_page_of_the_trail_is_newest_first_and_counts_the_whole() {
+        let d = std::env::temp_dir().join(format!("iyakki-audit-page-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let f = audit_path(&d);
+        assert_eq!(audit_page(&f, 0, 10), (vec![], 0));
+        for i in 0..7u64 {
+            append_audit(&f, 100 + i, &Change(format!("tenant: olga change {i}"))).unwrap();
+        }
+        let (p, total) = audit_page(&f, 0, 3);
+        assert_eq!((total, p.iter().map(|l| l.0).collect::<Vec<_>>()), (7, vec![106, 105, 104]));
+        let (p, _) = audit_page(&f, 3, 3);
+        assert_eq!(p.iter().map(|l| l.0).collect::<Vec<_>>(), vec![103, 102, 101]);
+        let (p, _) = audit_page(&f, 6, 3);
+        assert_eq!(p.iter().map(|l| l.0).collect::<Vec<_>>(), vec![100], "the last page is short");
+        assert!(audit_page(&f, 9, 3).0.is_empty(), "past the end is empty, not an error");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_audit_tail_gives_the_last_lines_and_skips_damaged_ones() {
+        let d = std::env::temp_dir().join(format!("iyakki-audit-tail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let f = audit_path(&d);
+        assert!(audit_tail(&f, 5).is_empty(), "no file, no lines");
+        for i in 0..7u64 {
+            append_audit(&f, 100 + i, &Change(format!("tenant: olga change {i}"))).unwrap();
+        }
+        let mut raw = std::fs::read_to_string(&f).unwrap();
+        raw.push_str("garbage without a tab\nnot-a-number\tx\n");
+        std::fs::write(&f, raw).unwrap();
+        let t = audit_tail(&f, 3);
+        assert_eq!(t, vec![(104, "tenant: olga change 4".to_string()), (105, "tenant: olga change 5".to_string()), (106, "tenant: olga change 6".to_string())]);
+        assert_eq!(audit_tail(&f, 50).len(), 7);
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     /// acme: owner `olga`, admin `adam`, members `mia`, `max`; namespace `web` (admin `mia`, editor `max`) and `data` (admin `olga`).
     fn acme() -> Roles {

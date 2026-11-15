@@ -21,14 +21,14 @@ chat: tokens system=1095 tools=2321 history=12 outputs=0 tools_offered=19 of 134
 
 `last run: ~99.0k tokens` in the footer is the sum over all steps of the run: every step resends the whole request, so the size of one request times the number of steps is what a run costs.
 
-## Measured (admin account, screen and full browser engine present, 134 tools = 17.3k tokens)
+## Measured (admin account, screen and full browser engine present, 160 tools = 20.1k tokens)
 
 Run `cargo test -p iyakki-agent --lib tokenbudget -- --nocapture` to reproduce (the `TOKENS` lines). Tool definitions only; the system prompt adds about 1.1k tokens and the TOOLS AVAILABLE NOW block about 0.3k in every case.
 
 | Context | Tools offered, before | Tokens, before | Tools offered, after | Tokens, after | Budget (test) |
 |---|---:|---:|---:|---:|---:|
 | plain chat ("what is the weather in chennai") | (not counted) | 10.8k | 19 | 2.3k (13% of all tools) | 2.6k |
-| Flows (chat opened from a flow, "why did my flow fail") | (not counted) | 10.8k | 35 | 5.4k (31%) | 6.0k |
+| Flows (chat opened from a flow, "why did my flow fail") | (not counted) | 10.8k | 44 | 6.6k (32%) | 6.7k |
 | Browser ("open gemini in the browser and ask it ...") | (not counted) | 13.1k | 46 | 6.3k (36%) | 7.5k |
 
 "Before" is the lazy-group routing that already existed (web, files, pictures, vault and everything it did not know were always offered, and flows, dashboards, tables, app authoring, cluster and workspace tools were never hidden). The test checks that each routed list is at least 50% below all tools and inside its budget.

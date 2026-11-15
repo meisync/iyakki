@@ -80,7 +80,7 @@ fn grid_of(n: usize) -> (usize, usize) {
 fn status_color(s: &Status) -> [u8; 4] {
     match s {
         Status::Live => OK,
-        Status::Connecting | Status::Busy(_) | Status::NeedsPassword(_) => AMBER,
+        Status::Connecting | Status::Busy(_) | Status::NeedsPassword(_) | Status::Dark(_) => AMBER,
         Status::Lost(_) => ERR,
         Status::NeedsAddon(_) => PURPLE,
     }
@@ -239,7 +239,10 @@ impl CamerasApp {
         let big = self.enlarged().map(str::to_string);
         match ev {
             Event::Key(Key::Esc) | Event::Key(Key::Char('q')) | Event::Key(Key::Backspace) if big.is_some() => self.screen = Screen::Grid,
-            Event::Key(Key::Esc) | Event::Key(Key::Char('q')) => return Flow::Back,
+            Event::Key(Key::Esc) | Event::Key(Key::Char('q')) => {
+                cx.cameras.release_local();
+                return Flow::Back;
+            }
             Event::Key(Key::Char(c @ ('1' | '2' | '4' | '6'))) if big.is_none() => self.set_layout(c.to_digit(10).unwrap_or(4) as usize),
             Event::Tab(t @ 1..=4) if big.is_none() => self.set_layout(LAYOUTS[*t - 1]),
             Event::Key(Key::Left) | Event::Key(Key::Up) => self.move_sel(-1),
@@ -318,6 +321,13 @@ impl CamerasApp {
                 let (x, y) = (r.x + (r.w - dw) / 2.0, r.y + (r.h - dh) / 2.0);
                 let paint = PixmapPaint { quality: FilterQuality::Bilinear, ..Default::default() };
                 g.pm.draw_pixmap(0, 0, pm.as_ref(), &paint, Transform::from_row(dw / fw, 0.0, 0.0, dh / fh, x, y), None);
+                if let Status::Dark(msg) = &c.status {
+                    // a black picture says why, in words, over the picture
+                    let tx = r.x + 12.0 * s;
+                    for (i, line) in g.wrap(12.0 * s, msg, Face::Sans, r.w - 24.0 * s).into_iter().take(4).enumerate() {
+                        g.text(tx, r.y + r.h / 2.0 - 8.0 * s + i as f32 * 16.0 * s, 12.0 * s, AMBER, &line, Face::Sans);
+                    }
+                }
             }
             None => {
                 let (title, detail) = match &c.status {
@@ -391,7 +401,12 @@ impl CamerasApp {
         if self.privacy {
             g.rrect(x, y, w, 24.0 * s, 6.0 * s, [150, 20, 20, 230]);
             g.circle(x + 14.0 * s, y + 12.0 * s, 5.0 * s, rgb(255, 255, 255));
-            g.text(x + 28.0 * s, y + 4.0 * s, 13.0 * s, rgb(255, 255, 255), "This computer's camera is on and shown in this window. Nothing is recorded.", Face::Bold);
+            // the full sentence when it fits, else the short one, else cut with an ellipsis: the text never leaves the bar
+            let room = w - 36.0 * s;
+            let full = "This computer's camera is on and shown in this window. Nothing is recorded.";
+            let text = if g.text_width(13.0 * s, full, Face::Bold) <= room { full } else { "Camera on, shown here. Nothing is recorded." };
+            let text = g.fit(13.0 * s, text, Face::Bold, room);
+            g.text(x + 28.0 * s, y + 4.0 * s, 13.0 * s, rgb(255, 255, 255), &text, Face::Bold);
             y += 30.0 * s;
         }
         let bottom = area.y + area.h - 34.0 * s;
@@ -443,7 +458,12 @@ impl CamerasApp {
         if self.privacy {
             g.rrect(x, y, w, 24.0 * s, 6.0 * s, [150, 20, 20, 230]);
             g.circle(x + 14.0 * s, y + 12.0 * s, 5.0 * s, rgb(255, 255, 255));
-            g.text(x + 28.0 * s, y + 4.0 * s, 13.0 * s, rgb(255, 255, 255), "This computer's camera is on and shown in this window. Nothing is recorded.", Face::Bold);
+            // the full sentence when it fits, else the short one, else cut with an ellipsis: the text never leaves the bar
+            let room = w - 36.0 * s;
+            let full = "This computer's camera is on and shown in this window. Nothing is recorded.";
+            let text = if g.text_width(13.0 * s, full, Face::Bold) <= room { full } else { "Camera on, shown here. Nothing is recorded." };
+            let text = g.fit(13.0 * s, text, Face::Bold, room);
+            g.text(x + 28.0 * s, y + 4.0 * s, 13.0 * s, rgb(255, 255, 255), &text, Face::Bold);
             y += 30.0 * s;
         }
         let r = R::new(x, y, w, area.y + area.h - 34.0 * s - y);
@@ -550,6 +570,11 @@ impl App for CamerasApp {
                 self.draw_grid(g, area, s, cx);
                 render_confirm(g, area, s, &format!("Remove the camera “{name}” and its stored password?"), "Remove");
             }
+        }
+        // what this frame did not draw is not looked at: another page, a smaller layout, the form or the recordings page
+        // (the motion page draws its own live picture and is left to the shell's check)
+        if !matches!(self.screen, Screen::Motion(_)) {
+            cx.cameras.release_local_except(&self.shown);
         }
         if let Some((t, ok, at)) = &self.note {
             if tick.saturating_sub(*at) < 240 && !matches!(self.screen, Screen::Form(..) | Screen::Confirm(_) | Screen::Rec(_) | Screen::Motion(_)) {

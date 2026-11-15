@@ -18,7 +18,9 @@ env_check() {
   bad=0
   [ "${IYAKKI_INCLUDE_RESTRICTED_FIRMWARE:-0}" != 1 ] || { echo "release-profile: IYAKKI_INCLUDE_RESTRICTED_FIRMWARE=1 is a build for the builder's own use and cannot be a release image" >&2; bad=1; }
   [ "${IYAKKI_WEB_H264:-${WEB_H264:-0}}" != 1 ] || { echo "release-profile: WEB_H264=1 ships H.264/AAC (gst-libav active, FFmpeg libraries); a release image does not" >&2; bad=1; }
+  [ "${WITH_PODMAN:-0}" != 1 ] || { echo "release-profile: WITH_PODMAN=1 adds a container engine (crun is GPL) to the image; a release image does not have one" >&2; bad=1; }
   [ "${WITH_FFMPEG:-0}" != 1 ] || { echo "release-profile: WITH_FFMPEG=1 ships ffmpeg and ffprobe; a release image does not (the person downloads them)" >&2; bad=1; }
+  [ "${WEB_VAAPI:-0}" != 1 ] || { echo "release-profile: WEB_VAAPI=1 drives the chip's H.264 decoder (a legal question is open: docs/FULL-BROWSER.md); a release image does not" >&2; bad=1; }
   [ "${WEB_MEDIA:-0}" != 1 ] || echo "release-profile: note: WEB_MEDIA=1 adds camera/WebRTC plugins; their licences are not reviewed for a release (docs/development/RELEASE-IMAGE-PROFILE.md)" >&2
   [ "$bad" = 0 ] || exit 1
 }

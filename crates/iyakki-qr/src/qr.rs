@@ -696,6 +696,86 @@ mod tests {
         assert!(encode(&vec![b'a'; MAX_BYTES + 1]).is_none(), "encode keeps its old limit");
     }
 
+    // ---- published vectors (ISO/IEC 18004 and the widely copied worked examples), written here from the documents, not produced by this code ----
+
+    #[test]
+    fn the_annex_example_of_the_standard_gives_its_check_codewords() {
+        // ISO/IEC 18004 annex I, "01234567" at 1-M: the 16 data codewords and the 10 check codewords printed there
+        let data = [0x10u8, 0x20, 0x0C, 0x56, 0x61, 0x80, 0xEC, 0x11, 0xEC, 0x11, 0xEC, 0x11, 0xEC, 0x11, 0xEC, 0x11];
+        assert_eq!(rs_remainder(&data, &rs_divisor(10)), [0xA5u8, 0x24, 0xD4, 0xC1, 0xED, 0x36, 0xC7, 0x87, 0x2C, 0x55]);
+        // one block at 1-M: the interleaving is the data followed by the check codewords
+        let all = all_words(&data, 1, Level::M);
+        assert_eq!(&all[..16], &data[..]);
+        assert_eq!(&all[16..], &[0xA5u8, 0x24, 0xD4, 0xC1, 0xED, 0x36, 0xC7, 0x87, 0x2C, 0x55][..]);
+    }
+
+    #[test]
+    fn the_generator_polynomials_are_the_published_ones() {
+        // the generator polynomials of degree 7 and 10 as exponents of alpha (leading 1 = alpha^0 left out), from the tutorials and the standard's annex A
+        let log: Vec<u8> = {
+            let mut t = vec![0u8; 256];
+            let mut x = 1u8;
+            for e in 0..255u32 {
+                t[x as usize] = e as u8;
+                x = gf_mul(x, 2);
+            }
+            t
+        };
+        let exps = |d: usize| rs_divisor(d).iter().map(|&c| log[c as usize] as u32).collect::<Vec<_>>();
+        // rs_divisor lists the coefficients after the leading 1, highest power first
+        assert_eq!(exps(7), [87, 229, 146, 149, 238, 102, 21]);
+        assert_eq!(exps(10), [251, 67, 46, 61, 118, 70, 64, 94, 32, 45]);
+    }
+
+    #[test]
+    fn version_information_matches_the_standards_table() {
+        // ISO/IEC 18004 table D.1: the 18 bits written for versions 7 to 10 and 40
+        for (ver, want) in [(7usize, 0x07C94usize), (8, 0x085BC), (9, 0x09A99), (10, 0x0A4D3), (40, 0x28C69)] {
+            let size = ver * 4 + 17;
+            let mut g = Grid { size, m: vec![false; size * size], f: vec![false; size * size] };
+            g.version_info(ver);
+            let mut bits = 0usize;
+            let mut twin = 0usize;
+            for i in 0..18 {
+                bits |= usize::from(g.m[(i / 3) * size + size - 11 + i % 3]) << i;
+                twin |= usize::from(g.m[(size - 11 + i % 3) * size + i / 3]) << i;
+            }
+            assert_eq!(bits, want, "version {ver}");
+            assert_eq!(twin, want, "version {ver}, the copy beside the bottom left finder");
+        }
+    }
+
+    #[test]
+    fn format_information_for_more_masks_matches_the_table() {
+        // ISO/IEC 18004 table C.1, the rows for L and M with masks 1 to 3 (the 15 bits after the XOR with 101010000010010)
+        let rows = [(Level::L, 1usize, 0b111001011110011usize), (Level::L, 2, 0b111110110101010), (Level::L, 3, 0b111100010011101), (Level::M, 1, 0b101000100100101)];
+        for (level, mask, want) in rows {
+            let mut g = Grid { size: 21, m: vec![false; 441], f: vec![false; 441] };
+            g.format_level(mask, level.format_bits());
+            let at = |x: usize, y: usize| usize::from(g.m[y * 21 + x]);
+            let mut bits = 0usize;
+            for i in 0..=5 {
+                bits |= at(8, i) << i;
+            }
+            bits |= at(8, 7) << 6 | at(8, 8) << 7 | at(7, 8) << 8;
+            for i in 9..15 {
+                bits |= at(14 - i, 8) << i;
+            }
+            assert_eq!(bits, want, "{level:?} mask {mask}");
+        }
+    }
+
+    #[test]
+    fn alignment_pattern_positions_match_the_standards_table() {
+        // ISO/IEC 18004 annex E at a spread of versions
+        assert_eq!(align_positions(2), [6, 18]);
+        assert_eq!(align_positions(14), [6, 26, 46, 66]);
+        assert_eq!(align_positions(21), [6, 28, 50, 72, 94]);
+        assert_eq!(align_positions(25), [6, 32, 58, 84, 110]);
+        assert_eq!(align_positions(28), [6, 26, 50, 74, 98, 122]);
+        assert_eq!(align_positions(35), [6, 30, 54, 78, 102, 126, 150]);
+    }
+
     /// Writes symbols as PBM files into the folder named by `QR_DUMP`, for an outside scanner (OpenCV, a phone) to read back.
     #[test]
     #[ignore]

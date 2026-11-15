@@ -108,8 +108,9 @@ pub fn hub_with(cx: &AppCx, usb: Arc<dyn agent::UsbProvider>) -> Arc<agent::Hub>
 
 fn hub_from(services: &Arc<iyakki_agent::services::Services>, audit: &Arc<crate::accounts::AuditLog>, store: &Arc<Mutex<crate::accounts::UserStore>>, usb: Arc<dyn agent::UsbProvider>) -> Arc<agent::Hub> {
     let (svc, audit, store) = (services.clone(), audit.clone(), store.clone());
-    agent::shared(agent::Env {
-        data: services.dir().to_path_buf(),
+    let data = services.dir().to_path_buf();
+    let hub = agent::shared(agent::Env {
+        data: data.clone(),
         secrets: Arc::new(agent::VaultCamSecrets(svc)),
         people: Arc::new(move || store.lock().map(|s| s.list().iter().map(|u| u.name.clone()).collect()).unwrap_or_default()),
         usb,
@@ -119,11 +120,37 @@ fn hub_from(services: &Arc<iyakki_agent::services::Services>, audit: &Arc<crate:
         audit: Arc::new(move |u, e, d| audit.record(u, e, d)),
         backoff_ms: 1000,
         idle: agent::IDLE_STOP,
-    })
+    });
+    // every use of this computer's own cameras goes through the broker, which decides and writes the access log (CORE-ACCESS-MODEL.md, slice 2)
+    if !hub.has_broker() {
+        let (broker, _) = iyakki_agent::accessbroker::local(&data, None);
+        hub.set_broker(broker, &crate::hostname::current("iyakki"));
+    }
+    hub
 }
 
 pub fn hub_for(cx: &AppCx) -> Arc<agent::Hub> {
     hub_with(cx, system_usb())
+}
+
+/// The cameras of this machine as frames for a client (EXPERIMENTAL, `clientmedia`): the installation's hub, and for each person the
+/// rights their account has (their home, the CAMERA app being allowed). A person who no longer exists sees nothing.
+pub fn client_feed(env: &crate::shell::ShellEnv) -> Arc<dyn iyakki_agent::clientmedia::CameraFeed> {
+    let hub = hub_from(&env.services, &env.audit, &env.store, system_usb());
+    let (store, data) = (env.store.clone(), env.services.dir().to_path_buf());
+    let who = Arc::new(move |person: &str| client_who(&store, &data, person));
+    Arc::new(iyakki_agent::clientmedia::HubFeed { hub, who })
+}
+
+/// What the hub needs to know about a person who is not at the screen (a client session).
+pub fn client_who(store: &Arc<Mutex<crate::accounts::UserStore>>, data: &std::path::Path, person: &str) -> agent::Who {
+    let policy = store.lock().ok().and_then(|s| s.get(person).map(|u| u.policy()));
+    let known = policy.is_some();
+    let policy = policy.unwrap_or_else(|| iyakki_sec::policy::Role::Guest.template());
+    let home = iyakki_agent::scope::FileRoots::new(&policy, person, data).home;
+    let (p2, u2) = (policy.clone(), person.to_string());
+    let may_write: Arc<dyn Fn(&std::path::Path) -> bool + Send + Sync> = Arc::new(move |dir: &std::path::Path| p2.allows_write(&u2, &dir.display().to_string()));
+    agent::Who { user: person.to_string(), manage: known && policy.manage_settings, usb_ok: known && policy.allows_app(iyakki_sec::policy::App::Camera), home, may_write }
 }
 
 /// The installation's recorder (F-CAM-03). Recording that its owner switched on resumes when the owner signs in (the key is in their
@@ -136,7 +163,7 @@ pub fn recorder_for(cx: &AppCx) -> Arc<iyakki_agent::camrec::Recorder> {
 fn motion_from(services: &Arc<iyakki_agent::services::Services>, hub: &Arc<agent::Hub>) -> Arc<iyakki_agent::camdetect::watch::MotionService> {
     let m = iyakki_agent::camdetect::watch::for_hub(hub);
     if !m.has_sink() {
-        m.set_sink(Arc::new(iyakki_agent::camdetect::watch::InboxSink(services.clone())));
+        m.set_sink(Arc::new(iyakki_agent::camvision::VisionSink { inner: Arc::new(iyakki_agent::camdetect::watch::InboxSink(services.clone())), svc: services.clone() }));
     }
     m
 }
@@ -162,7 +189,9 @@ pub fn who_for(cx: &AppCx) -> agent::Who {
     agent::Who { user, manage: policy.manage_settings, usb_ok: policy.allows_app(iyakki_sec::policy::App::Camera), home, may_write }
 }
 
-static REC_SIGN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Whether the red sign was on at the last look, per data folder (one machine has one folder; tests that run side by side each have their own, so one
+/// test's redraw never makes another test's sign look unchanged).
+static REC_SIGN: std::sync::Mutex<Vec<(std::path::PathBuf, bool)>> = std::sync::Mutex::new(Vec::new());
 
 /// What the red sign says: the cameras that record, and the cameras watched for motion all the time (a camera watched only while its
 /// picture is on a screen or recorded needs no sign of its own: the picture or the REC sign is the indicator).
@@ -177,10 +206,30 @@ pub fn stop_all_signs(data: &std::path::Path, user: &str) -> usize {
     iyakki_agent::camrec::stop_all_for(data, user) + iyakki_agent::camdetect::watch::stop_all_for(data, user)
 }
 
+/// What the red sign says, in one line. Recordings: "REC: a, b. Click to stop." A client's camera or microphone that streams to this
+/// machine (EXPERIMENTAL, `clientmedia::indicator`) is added to the same sign, never shown in a second one: "REC: a. X is in use by this
+/// machine. Click to stop." (the click stops recordings; a client device stops from the client or by revoking it in Settings).
+pub fn sign_text(names: &[String], client: Option<&str>) -> String {
+    let rec = (!names.is_empty()).then(|| format!("REC: {}.", names.join(", ")));
+    match (rec, client) {
+        (Some(r), Some(c)) => format!("{r} {c}. Click to stop."),
+        (Some(r), None) => format!("{r} Click to stop."),
+        (None, Some(c)) => format!("{c}."),
+        (None, None) => String::new(),
+    }
+}
+
 /// Whether the red REC sign has to appear or go away since the last call (the shell redraws when it does).
 pub fn rec_sign_changed(data: &std::path::Path) -> bool {
-    let on = !sign_names(data).is_empty();
-    on != REC_SIGN.swap(on, std::sync::atomic::Ordering::SeqCst)
+    let on = !sign_names(data).is_empty() || iyakki_agent::clientmedia::indicator().active();
+    let mut seen = REC_SIGN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    match seen.iter_mut().find(|(d, _)| d == data) {
+        Some((_, was)) => std::mem::replace(was, on) != on,
+        None => {
+            seen.push((data.to_path_buf(), on));
+            on
+        }
+    }
 }
 
 /// The assistant's camera tools around `inner`.
@@ -212,6 +261,7 @@ fn status_to_api(s: agent::Status) -> api::Status {
         agent::Status::NeedsAddon(m) => api::Status::NeedsAddon(m),
         agent::Status::Busy(m) => api::Status::Busy(m),
         agent::Status::NeedsPassword(m) => api::Status::NeedsPassword(m),
+        agent::Status::Dark(m) => api::Status::Dark(m),
     }
 }
 
@@ -237,7 +287,13 @@ impl api::CameraSource for ShellCameras {
             .collect()
     }
     fn view(&self, id: &str, big: bool) -> Option<api::Frame> {
-        self.hub.view(&self.who, id, big).ok().flatten().map(|f| api::Frame { seq: f.seq, width: f.width, height: f.height, rgba: f.rgba })
+        self.hub.view_on_screen(&self.who, id, big).ok().flatten().map(|f| api::Frame { seq: f.seq, width: f.width, height: f.height, rgba: f.rgba })
+    }
+    fn release_local(&self) {
+        self.hub.release_usb();
+    }
+    fn release_local_except(&self, shown: &[String]) {
+        self.hub.release_screen_except(shown);
     }
     fn snapshot(&self, id: &str) -> Result<String, String> {
         self.hub.snapshot(&self.who, id).map(|p: PathBuf| p.display().to_string())
@@ -288,6 +344,13 @@ impl api::CameraSource for ShellCameras {
             api::RecMode::Schedule => rec_agent::Mode::Schedule,
         });
         rec.set(&self.who, id, &rec_agent::Change { mode, windows, max_days: c.max_days, max_mb: c.max_mb }).map(|_| ())
+    }
+    fn rec_limits(&self) -> Option<api::RecLimits> {
+        let p = iyakki_agent::camrec::for_hub(&self.hub).policy();
+        Some(api::RecLimits { total_mb: p.total_max_mb, min_free_mb: p.min_free_mb, min_floor_mb: rec_agent::MIN_FLOOR_MB, can_change: self.who.manage })
+    }
+    fn rec_limits_set(&self, total_mb: Option<u64>, min_free_mb: Option<u64>) -> Result<(), String> {
+        iyakki_agent::camrec::for_hub(&self.hub).set_policy(&self.who, total_mb, min_free_mb).map(|_| ())
     }
     fn rec_days(&self, id: &str) -> Result<Vec<api::RecDay>, String> {
         let rec = iyakki_agent::camrec::for_hub(&self.hub);
@@ -381,7 +444,7 @@ impl CamerasApp {
 
     fn with<T>(cx: &AppCx, f: impl FnOnce(&TileCx) -> T) -> T {
         let src = ShellCameras { hub: hub_for(cx), who: who_for(cx) };
-        f(&TileCx { user: cx.session.user.as_str(), manage_settings: cx.session.policy.manage_settings, usage: &super::usage::ShellUsage(&cx.services), calendar: &iyakki_tile_api::calendar::NoCalendar, audit: &iyakki_tile_api::NoAudit, remote: &iyakki_tile_api::remote::NoRemote, cameras: &src })
+        f(&TileCx { user: cx.session.user.as_str(), manage_settings: cx.session.policy.manage_settings, usage: &super::usage::ShellUsage(&cx.services), calendar: &iyakki_tile_api::calendar::NoCalendar, audit: &iyakki_tile_api::NoAudit, remote: &iyakki_tile_api::remote::NoRemote, cameras: &src, radio: &iyakki_tile_api::radio::NoRadio })
     }
 
     /// What the tile did on its last frame (tests).

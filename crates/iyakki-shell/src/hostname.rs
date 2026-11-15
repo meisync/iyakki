@@ -5,12 +5,28 @@
 
 use std::path::Path;
 
+/// Where the name is kept for the next starts.
+pub const CONF_PATH: &str = iyakki_zram::CONF_PATH;
+
 /// Shown next to the field.
 pub const HINT: &str = "Lower-case letters a-z, digits 0-9 and '-', up to 63 characters; it cannot start or end with '-'.";
 
 /// The name now (the kernel's), else `fallback`.
 pub fn current(fallback: &str) -> String {
+    #[cfg(test)]
+    if let Some(n) = TEST_NAME.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        return n;
+    }
     iyakki_devctl::current_hostname(fallback)
+}
+
+/// Tests: the name `current` answers instead of this computer's own (so a screen test does not depend on the machine it runs on).
+#[cfg(test)]
+static TEST_NAME: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn set_test_name(name: Option<&str>) {
+    *TEST_NAME.lock().unwrap_or_else(|e| e.into_inner()) = name.map(str::to_string);
 }
 
 /// `Ok(name)` for a usable name (spaces around it dropped, capitals not accepted), else a plain sentence about what is wrong.

@@ -20,7 +20,7 @@ pub(super) const HELP: &str = "linux · Debian/Ubuntu sandboxes (Linux apps). Su
   linux run <name> <command...>           run one command (no shell: words only)
   linux apt install|remove <name> <package...>   (jobs), linux apt update|upgrade <name>
   linux apt search <name> <word...>, linux apt list <name>
-  linux net <name> on|off · linux mount <name> <folder> [mount-point] [rw] · linux unmount <name> <mount-point>
+  linux net <name> on|off|show · linux net <name> outbound [host[:port] | address/prefix ...] [dns=<address>] · linux mount <name> <folder> [mount-point] [rw] · linux unmount <name> <mount-point>
   linux import <name> <tarball> · linux delete <name> <name again> · linux log";
 
 impl Cli {
@@ -35,11 +35,9 @@ impl Cli {
 
     /// A sandbox with its network on can reach any server, so only an account that may reach every host runs it.
     fn linux_net_gate(&self, la: &LinuxApps, name: &str) -> Result<(), String> {
-        let s = la.get(name)?;
-        if s.network && !self.policy.net_hosts.iter().any(|h| h == "*") {
-            return Err(format!("{name} has its network on, so it can reach any server; only an account allowed every host may run it. Turn the network off with `linux net {name} off`"));
-        }
-        Ok(())
+        la.get(name)?;
+        let p = la.net_policy(name)?;
+        crate::linuxapps_net::host_gate(&p, &self.policy.net_hosts).map_err(|e| format!("{name}: {e}. Turn the network off with `linux net {name} off`"))
     }
 
     fn linux_scope(&self) -> impl Fn(&Path, bool) -> Result<(), String> + '_ {
@@ -131,6 +129,19 @@ impl Cli {
                 self.linux_net_gate(&la, name)?;
                 let r = la.installed(name)?;
                 Ok(out(format!("{} package(s)\n{}", r.len(), r.iter().map(|(a, b)| format!("{a} {b}")).collect::<Vec<_>>().join("\n"))))
+            }
+            ["net", name, "show"] => {
+                la.get(name)?;
+                Ok(out(crate::linuxapps_net::describe(&la.net_policy(name)?).join("\n")))
+            }
+            ["net", name, "outbound", entries @ ..] => {
+                let dns: Vec<String> = entries.iter().filter_map(|e| e.strip_prefix("dns=")).map(String::from).collect();
+                let allow: Vec<String> = entries.iter().filter(|e| !e.starts_with("dns=")).map(|e| e.to_string()).collect();
+                // the same check the run applies: open outbound or a network block needs every host, a list of names needs each name allowed
+                let wanted = crate::linuxapps_net::NetPolicy { mode: crate::linuxapps_net::Mode::OutboundOnly, allow: crate::linuxapps_net::NetPolicy::parse_allow(&allow)?, ..Default::default() };
+                crate::linuxapps_net::host_gate(&wanted, &self.policy.net_hosts)?;
+                let p = la.set_net_policy(name, crate::linuxapps_net::Mode::OutboundOnly, &allow, &dns)?;
+                Ok(out(format!("{name}: {}", crate::linuxapps_net::describe(&p).join("; "))))
             }
             ["net", name, state @ ("on" | "off")] => {
                 if *state == "on" && !self.policy.net_hosts.iter().any(|h| h == "*") {
@@ -237,6 +248,15 @@ mod tests {
         assert!(c.exec("linux run dev ls").text.contains("can reach any server"));
         assert!(c.exec("linux apt install dev curl").text.contains("can reach any server"));
         assert!(c.exec("linux net dev on").text.contains("may turn it on"));
+        // outbound-only: open needs every host too; a list of names needs each one allowed
+        assert!(c.exec("linux net dev outbound dns=9.9.9.9").text.contains("any public server"));
+        assert!(c.exec("linux net dev outbound other.example.org dns=9.9.9.9").text.contains("not in this account"));
+        assert!(c.exec("linux net dev outbound 203.0.113.0/24").text.contains("not in this account"));
+        let t = c.exec("linux net dev outbound example.com:443 dns=9.9.9.9").text;
+        assert!(t.contains("outbound only") && t.contains("example.com:443"), "{t}");
+        assert!(c.exec("linux net dev show").text.contains("Allowed only: example.com:443"));
+        assert!(c.exec("linux use dev").text.contains("inside dev"), "an outbound sandbox with an allowed list can be entered");
+        assert!(c.exec("exit").text.contains("left the sandbox"));
         // turn it off: now it can be entered, the prompt changes and `exit` leaves
         assert!(c.exec("linux net dev off").text.contains("network off"));
         assert!(c.exec("linux use dev").text.contains("inside dev"));

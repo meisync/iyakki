@@ -56,6 +56,10 @@ pub fn stop_request(prev: &Request, by: &str) -> Request {
 pub trait Backend: Send + Sync {
     fn interfaces(&self) -> Vec<IfaceInfo>;
     fn wifi_ap(&self) -> bool;
+    /// Why the Wi-Fi hotspot is not offered, in words (`None`: it is, or this backend cannot say).
+    fn wifi_ap_why(&self) -> Option<String> {
+        None
+    }
     fn status(&self) -> Status;
     fn request(&self) -> Request;
     fn submit(&self, r: &Request) -> Result<(), String>;
@@ -75,6 +79,20 @@ pub trait Backend: Send + Sync {
     fn set_hotspot_band(&self, _band: &str) -> Result<(), String> {
         Err("not available here".into())
     }
+    /// The regulatory country the hotspot asks for (two capital letters), empty when none is chosen.
+    fn hotspot_country(&self) -> String {
+        String::new()
+    }
+    fn set_hotspot_country(&self, _country: &str) -> Result<(), String> {
+        Err("not available here".into())
+    }
+    /// The hotspot's security: "wpa2", "transition" or "wpa3".
+    fn hotspot_security(&self) -> String {
+        "wpa2".into()
+    }
+    fn set_hotspot_security(&self, _security: &str) -> Result<(), String> {
+        Err("not available here".into())
+    }
     fn set_policy(&self, p: &super::policy::Policy, by: &str, is_admin: bool) -> Result<String, String>;
 }
 
@@ -88,6 +106,9 @@ impl Backend for FileBackend {
     }
     fn wifi_ap(&self) -> bool {
         real::wifi_ap_available()
+    }
+    fn wifi_ap_why(&self) -> Option<String> {
+        real::wifi_ap_why()
     }
     fn status(&self) -> Status {
         read_status(&self.data)
@@ -113,6 +134,18 @@ impl Backend for FileBackend {
     fn set_hotspot_band(&self, band: &str) -> Result<(), String> {
         real::set_hotspot_band(&self.data, band)
     }
+    fn hotspot_country(&self) -> String {
+        real::hotspot_country(&self.data)
+    }
+    fn set_hotspot_country(&self, country: &str) -> Result<(), String> {
+        real::set_hotspot_country(&self.data, country)
+    }
+    fn hotspot_security(&self) -> String {
+        real::hotspot_security(&self.data)
+    }
+    fn set_hotspot_security(&self, security: &str) -> Result<(), String> {
+        real::set_hotspot_security(&self.data, security)
+    }
     fn set_policy(&self, p: &super::policy::Policy, by: &str, is_admin: bool) -> Result<String, String> {
         super::policy::write(&self.data, p, by, is_admin, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0))
     }
@@ -123,11 +156,16 @@ pub struct MemBackend {
     inner: Mutex<(Vec<IfaceInfo>, bool, Status, Request, super::policy::Policy)>,
     /// The hotspot's name and password (checked the same way as the real ones).
     hot: Mutex<(String, String)>,
+    /// What the radios said when the hotspot is not offered.
+    why: Mutex<Option<String>>,
 }
 
 impl MemBackend {
     pub fn new(ifs: Vec<IfaceInfo>, wifi_ap: bool) -> MemBackend {
-        MemBackend { inner: Mutex::new((ifs, wifi_ap, Status::default(), Request::default(), super::policy::Policy::default())), hot: Mutex::new(("IYAKKI-TEST".into(), "first password".into())) }
+        MemBackend { inner: Mutex::new((ifs, wifi_ap, Status::default(), Request::default(), super::policy::Policy::default())), hot: Mutex::new(("IYAKKI-TEST".into(), "first password".into())), why: Mutex::new(None) }
+    }
+    pub fn set_wifi_why(&self, why: Option<&str>) {
+        *self.why.lock().unwrap_or_else(|e| e.into_inner()) = why.map(str::to_string);
     }
     pub fn set_status(&self, s: Status) {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).2 = s;
@@ -141,6 +179,9 @@ impl MemBackend {
 }
 
 impl Backend for MemBackend {
+    fn wifi_ap_why(&self) -> Option<String> {
+        self.why.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
     fn interfaces(&self) -> Vec<IfaceInfo> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).0.clone()
     }

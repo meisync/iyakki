@@ -17,13 +17,17 @@
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, "Segoe UI", Roboto, sans-serif; }
-.skip { position: absolute; left: -999px; top: 0; padding: 12px; background: var(--panel); }
+/* hidden above the page, not to the left: in a right-to-left page a box off the left edge makes the page scroll sideways */
+.skip { position: absolute; left: 8px; top: -999px; padding: 12px; background: var(--panel); }
 .skip:focus { left: 8px; top: 8px; z-index: 10; }
 .top { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 8px 14px; background: var(--panel); border-bottom: 1px solid var(--line); }
 .brand { letter-spacing: 2px; }
 nav { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; }
+/* a phone: the pages get a row of their own, so the header is two short rows and a name such as Notifications is not broken in the middle */
+@media (max-width: 520px) { .top { gap: 6px 8px; padding: 6px 10px; } nav { order: 5; flex: 1 1 100%; gap: 4px; } nav button { padding: 6px 10px; overflow-wrap: normal; white-space: nowrap; } }
 .who { color: var(--muted); font-size: 14px; }
 main { max-width: 920px; margin: 0 auto; padding: 16px 16px 48px; outline: none; }
+h1, h2, h3 { overflow-wrap: anywhere; }
 h1 { font-size: 24px; margin: 8px 0 4px; }
 h2 { font-size: 19px; margin: 22px 0 6px; }
 h3 { font-size: 16px; margin: 0; }
@@ -32,9 +36,10 @@ h3 { font-size: 16px; margin: 0; }
 .narrow { max-width: 380px; margin: 40px auto; }
 label { display: block; margin: 10px 0 4px; font-weight: 600; }
 input, select, button, textarea { font: inherit; color: inherit; min-height: 44px; border-radius: 8px; border: 1px solid var(--line); background: var(--field); padding: 8px 12px; }
-input, select, textarea { width: 100%; }
+input, select, textarea { width: 100%; max-width: 100%; }
+select { min-width: 0; text-overflow: ellipsis; }
 .inline input, .inline select { width: auto; flex: 1 1 160px; }
-button { cursor: pointer; min-width: 44px; }
+button { cursor: pointer; min-width: 44px; max-width: 100%; overflow-wrap: anywhere; } /* a button named after a long team name wraps instead of running off the screen */
 button.primary { background: var(--accent); color: var(--accent-text); border-color: transparent; font-weight: 600; margin-top: 14px; }
 button.danger { color: var(--danger); border-color: var(--danger); }
 button[aria-current="page"] { background: var(--accent); color: var(--accent-text); border-color: transparent; }
@@ -59,10 +64,11 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 /* pages: Files, Git, Flows, Runs */
 textarea { min-height: 88px; resize: vertical; border: 1px solid var(--line); background: var(--field); border-radius: 8px; padding: 8px 12px; }
 button.linkish { border-color: transparent; background: transparent; text-align: left; color: var(--accent); text-decoration: underline; }
-.crumbs button { min-height: 36px; }
+.crumbs button { min-height: 44px; }
+.row > a, .inline > a { display: inline-flex; align-items: center; min-height: 44px; padding: 0 8px; }
 .crumbs button[aria-current="location"] { background: var(--accent); color: var(--accent-text); border-color: transparent; }
-.filebtn { display: inline-flex; align-items: center; min-height: 44px; margin: 0; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--field); cursor: pointer; }
-.filebtn input { width: auto; min-height: 0; border: 0; background: transparent; padding: 0 0 0 8px; }
+.filebtn { display: inline-flex; flex-wrap: wrap; max-width: 100%; align-items: center; min-height: 44px; margin: 0; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--field); cursor: pointer; }
+.filebtn input { width: auto; max-width: 100%; min-width: 0; min-height: 0; border: 0; background: transparent; padding: 0 0 0 8px; }
 .filebtn:focus-within { outline: 3px solid var(--focus); outline-offset: 2px; }
 progress { width: 100%; height: 14px; }
 pre.viewer { max-height: 60vh; overflow: auto; white-space: pre-wrap; margin: 8px 0; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--field); }

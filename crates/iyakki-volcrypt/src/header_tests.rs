@@ -267,3 +267,39 @@ fn a_known_header_stays_readable() {
 }
 
 const KNOWN_HEADER_SHA256: &str = "3813b48a8f4dfe0e9977a6caec0995a251c448d7b8b26ee89748ad42bc999729";
+
+// ------------------------------------------------------------------------------ golden fixture (F-CORE-23, finding F-8)
+
+fn fixture_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/compat/alpha3/volume-header-v1.hex")
+}
+
+/// Writes `tests/compat/alpha3/volume-header-v1.hex` (once, when the release is cut; never edited after). The password is a made-up one.
+#[test]
+#[ignore]
+fn record_alpha3_volume_header() {
+    if std::env::var("IYAKKI_COMPAT_RECORD").is_ok() {
+        let hex: String = new_header().0.to_bytes().iter().map(|b| format!("{b:02x}")).collect();
+        std::fs::write(fixture_path(), hex + "\n").unwrap();
+    }
+}
+
+#[test]
+fn the_volume_header_alpha3_wrote_is_still_read_and_opened_and_another_magic_or_a_flipped_byte_is_refused() {
+    let text = std::fs::read_to_string(fixture_path()).unwrap();
+    let t = text.trim();
+    let bytes: Vec<u8> = (0..t.len() / 2).map(|i| u8::from_str_radix(&t[2 * i..2 * i + 2], 16).unwrap()).collect();
+    assert_eq!((bytes.len(), &bytes[..8]), (HEADER_LEN, &b"IYAKVOL1"[..]));
+    let h = Header::parse(&bytes).unwrap();
+    assert_eq!(h.list(), vec![(0, SlotKind::Person, 1000)]);
+    let u = h.unlock_password(b"correct horse").unwrap();
+    assert_eq!(u.slot, 0, "the password of alpha.3's header still opens it");
+    assert_eq!(h.unlock_password(b"correct horsf").err(), Some(VolError::WrongSecret));
+    // a header of a newer layout (another magic) is refused, not half read
+    let mut newer = bytes.clone();
+    newer[7] = b'2';
+    assert!(Header::parse(&newer).is_err());
+    let mut bad = bytes.clone();
+    bad[300] ^= 1;
+    assert!(Header::parse(&bad).is_err());
+}

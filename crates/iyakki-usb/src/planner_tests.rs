@@ -585,7 +585,7 @@ fn keep_esp_needs_a_free_unmounted_fat32_esp_with_room() {
 
 #[test]
 fn the_request_round_trips_through_the_plan_file() {
-    let r = Request { mode: Mode::Reuse, gap_start: Some(4096), boot_part: Some(2), data_part: Some(3), keep_esp: true, boot_mib: Some(600), data_mib: None, table: TableChoice::Gpt, confirm_running_disk: true, delete_parts: vec![4, 5], zram: "4G".into(), swapfile: "2G".into(), hostname: Some("box".into()) };
+    let r = Request { mode: Mode::Reuse, gap_start: Some(4096), boot_part: Some(2), data_part: Some(3), keep_esp: true, boot_mib: Some(600), data_mib: None, table: TableChoice::Gpt, confirm_running_disk: true, delete_parts: vec![4, 5], zram: "4G".into(), swapfile: "2G".into(), hostname: Some("box".into()), ..Request::default() };
     let j = r.to_json();
     assert_eq!(Request::from_json(&crate::json::Json::parse(&j.pretty()).unwrap()).unwrap(), r);
     assert!(Request::from_json(&crate::json::Json::parse("{\"mode\":\"nope\"}").unwrap()).is_err());
@@ -995,8 +995,48 @@ fn the_fat_writer_extends_a_full_directory_matches_long_names_and_refuses_to_ove
 }
 
 #[test]
+fn replacing_a_file_keeps_the_old_one_until_the_new_is_whole_frees_its_clusters_and_leaves_the_rest_alone() {
+    let (dir, _guard) = scratch("fatrep");
+    let img = foreign_esp(&dir);
+    let p = dir.join("v.img");
+    std::fs::write(&p, &img).unwrap();
+    let f = std::fs::OpenOptions::new().read(true).write(true).open(&p).unwrap();
+    let mut rw = Fat32Rw::open(&f, 0, img.len() as u64).unwrap();
+    let (d, _) = rw.mkdir_p(&["IYAKKI"]).unwrap();
+    let cb = rw.cluster_bytes() as usize;
+    rw.create_file(d, "KERNEL.BIN", (3 * cb) as u64, &mut std::io::Cursor::new(vec![1u8; 3 * cb]), &mut |_| {}).unwrap();
+    rw.create_file(d, "KEEP.TXT", 5, &mut std::io::Cursor::new(b"keep!".to_vec()), &mut |_| {}).unwrap();
+    rw.flush().unwrap();
+    let free_before = rw.free_bytes();
+    // a bigger file, then a smaller one, then an empty one: the free space follows
+    rw.replace_file(d, "KERNEL.BIN", (5 * cb + 7) as u64, &mut std::io::Cursor::new(vec![2u8; 5 * cb + 7]), &mut |_| {}).unwrap();
+    assert_eq!(rw.free_bytes(), free_before - 3 * cb as u64, "6 clusters now, 3 before");
+    rw.replace_file(d, "kernel.bin", 10, &mut std::io::Cursor::new(vec![3u8; 10]), &mut |_| {}).unwrap();
+    assert_eq!(rw.free_bytes(), free_before + 2 * cb as u64, "one cluster now");
+    // refusals: missing name, a folder, a short source (the old file stays whole)
+    assert!(rw.replace_file(d, "NOPE.BIN", 1, &mut std::io::Cursor::new(vec![0]), &mut |_| {}).unwrap_err().contains("nothing to replace"));
+    assert!(rw.replace_file(rw.root_cluster(), "IYAKKI", 1, &mut std::io::Cursor::new(vec![0]), &mut |_| {}).unwrap_err().contains("folder"));
+    assert!(rw.replace_file(d, "KERNEL.BIN", 100, &mut std::io::Cursor::new(vec![0u8; 3]), &mut |_| {}).is_err());
+    assert_eq!(rw.free_bytes(), free_before + 2 * cb as u64, "the failed attempt gave its clusters back");
+    rw.flush().unwrap();
+    rw.write_fsinfo().unwrap();
+    drop(rw);
+    let mut h = std::fs::File::open(&p).unwrap();
+    let mut vol = Fat32::open(&mut h, 0).unwrap();
+    let items = vol.walk().unwrap();
+    let k = items.iter().find(|i| i.path == "/IYAKKI/KERNEL.BIN").unwrap().clone();
+    assert_eq!(vol.read_file(&k).unwrap(), vec![3u8; 10], "the failed attempt left the last good contents");
+    let keep = items.iter().find(|i| i.path == "/IYAKKI/KEEP.TXT").unwrap().clone();
+    assert_eq!(vol.read_file(&keep).unwrap(), b"keep!");
+    assert!(items.iter().any(|i| i.path.starts_with("/EFI")), "the other system's files are still there");
+    if let Some((ok, out)) = tool("fsck.vfat", &["-n", p.to_str().unwrap()]) {
+        assert!(ok, "fsck.vfat:\n{out}");
+    }
+}
+
+#[test]
 fn the_writer_never_opens_a_block_device_in_tests() {
-    let e = apply::apply(Path::new("/dev/null"), &DiskModel { name: "x".into(), path: "/dev/null".into(), model: String::new(), serial: String::new(), size_bytes: 0, sector: 512, table: None, notes: vec![], parts: vec![], removable: false, usb: false, read_only: false, running_system: false, booted_from: false, raw_data: false, unusual_gpt: false, disk_guid: None, fingerprint: String::new() }, &free_req(), &src(&tmp("nodev")), None, true, &ApplyEnv::default(), &mut |_| {});
+    let e = apply::apply(Path::new("/dev/null"), &DiskModel { name: "x".into(), path: "/dev/null".into(), model: String::new(), serial: String::new(), size_bytes: 0, sector: 512, table: None, notes: vec![], parts: vec![], removable: false, usb: false, read_only: false, running_system: false, booted_from: false, raw_data: false, unusual_gpt: false, disk_guid: None, bios: Local(None), fingerprint: String::new() }, &free_req(), &src(&tmp("nodev")), None, true, &ApplyEnv::default(), &mut |_| {});
     assert!(e.is_err());
 }
 
@@ -1704,4 +1744,537 @@ fn the_pages_let_a_person_mark_a_partition_for_deletion_and_confirm_it_with_the_
     w.page = Page::Mode;
     w.handle(WKey::Enter);
     assert!(w.req.delete_parts.is_empty(), "a new choice of mode starts without marks");
+}
+
+/// An MBR disk with a primary NTFS partition (1000 MiB), an extended partition (1500 MiB at 1001 MiB) holding two logical partitions
+/// (NTFS 400 MiB and ext4 400 MiB, each behind its own extended boot record), and free space after it.
+fn mbr_with_logicals(dir: &Path, name: &str) -> PathBuf {
+    let path = mbr_disk(dir, name, 4 * GIB, &[(1, 1000, 0x07, Fill::Ntfs), (1001, 1500, 0x0F, Fill::Blank)]);
+    let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    let k = MIB / 512;
+    let ext = 1001 * k;
+    let ebr = |rel_start: u64, len: u64, ty: u8, next_rel: u64| -> Vec<u8> {
+        let mut b = vec![0u8; 512];
+        b[446 + 4] = ty;
+        b[446 + 8..446 + 12].copy_from_slice(&(rel_start as u32).to_le_bytes());
+        b[446 + 12..446 + 16].copy_from_slice(&(len as u32).to_le_bytes());
+        if next_rel != 0 {
+            b[462 + 4] = 0x05;
+            b[462 + 8..462 + 12].copy_from_slice(&(next_rel as u32).to_le_bytes());
+            b[462 + 12..462 + 16].copy_from_slice(&(k as u32).to_le_bytes());
+        }
+        b[510] = 0x55;
+        b[511] = 0xAA;
+        b
+    };
+    f.write_all_at(&ebr(k, 400 * k, 0x07, 500 * k), ext * 512).unwrap();
+    f.write_all_at(&ebr(k, 400 * k, 0x83, 0), (ext + 500 * k) * 512).unwrap();
+    decorate(&f, 1002 * MIB, 400 * MIB, 5, &Fill::Ntfs);
+    decorate(&f, 1502 * MIB, 400 * MIB, 6, &Fill::Ext4);
+    path
+}
+
+#[test]
+fn logical_partitions_in_an_extended_partition_are_listed_with_their_types_and_filesystems() {
+    let (dir, _guard) = scratch("logicals");
+    let path = mbr_with_logicals(&dir, "l.img");
+    let m = model_of(&path, "sdb", 4 * GIB, 512, "/dev/sdb6 /mnt/data ext4 rw 0 0\n", false);
+    let names: Vec<&str> = m.parts.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["sdb1", "sdb2", "sdb5", "sdb6"]);
+    assert!(m.parts[1].extended);
+    let (l5, l6) = (&m.parts[2], &m.parts[3]);
+    assert_eq!((l5.index, l5.first_lba, l5.sectors, l5.fs.as_str(), l5.kind.as_str()), (5, 1002 * MIB / 512, 400 * MIB / 512, "ntfs", "NTFS/exFAT"));
+    assert_eq!((l6.index, l6.first_lba, l6.fs.as_str(), l6.mbr_type), (6, 1502 * MIB / 512, "ext4", Some(0x83)));
+    assert_eq!(l6.mounts, vec!["/mnt/data".to_string()], "mount state is matched for logical partitions too");
+    assert!(m.notes.is_empty(), "{:?}", m.notes);
+    // the free space is the area after the container; the area inside it is not offered
+    let gaps = m.free_gaps(TableKind::Mbr);
+    assert_eq!(gaps.len(), 1);
+    assert_eq!(gaps[0].first_lba, 2501 * MIB / 512);
+    // a changed record changes the fingerprint
+    let before = m.fingerprint.clone();
+    let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    f.write_all_at(&[0x82], 1001 * MIB + 446 + 4).unwrap();
+    assert_ne!(model_of(&path, "sdb", 4 * GIB, 512, "", false).fingerprint, before);
+}
+
+#[test]
+fn a_broken_or_looping_logical_chain_is_cut_off_and_said_not_followed_forever() {
+    let (dir, _guard) = scratch("logicals-loop");
+    let path = mbr_with_logicals(&dir, "l.img");
+    let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    // the second record links back to the first
+    let mut b = bytes_at(&path, (1001 * 2048 + 500 * 2048) * 512, 512);
+    b[462 + 4] = 0x05;
+    b[462 + 8..462 + 12].copy_from_slice(&0u32.to_le_bytes());
+    b[462 + 8..462 + 12].copy_from_slice(&1u32.to_le_bytes());
+    f.write_all_at(&b, (1001 * 2048 + 500 * 2048) * 512).unwrap();
+    let m = model_of(&path, "sdb", 4 * GIB, 512, "", false);
+    assert_eq!(m.parts.len(), 4, "both partitions before the loop are shown");
+    assert!(m.notes.iter().any(|n| n.contains("loops")), "{:?}", m.notes);
+    // a record without the signature ends the chain
+    let mut z = bytes_at(&path, 1001 * MIB, 512);
+    z[510] = 0;
+    f.write_all_at(&z, 1001 * MIB).unwrap();
+    let m = model_of(&path, "sdb", 4 * GIB, 512, "", false);
+    assert_eq!(m.parts.len(), 2);
+    assert!(m.notes.iter().any(|n| n.contains("signature")), "{:?}", m.notes);
+    // a logical partition that reaches past its container is not shown
+    let mut o = bytes_at(&path, (1001 * 2048 + 500 * 2048) * 512, 512);
+    o[510] = 0x55;
+    o[462 + 4] = 0;
+    o[446 + 12..446 + 16].copy_from_slice(&(2000u32 * 2048).to_le_bytes());
+    f.write_all_at(&o, (1001 * 2048 + 500 * 2048) * 512).unwrap();
+    let mut a = bytes_at(&path, 1001 * MIB, 512);
+    a[510] = 0x55;
+    f.write_all_at(&a, 1001 * MIB).unwrap();
+    let m = model_of(&path, "sdb", 4 * GIB, 512, "", false);
+    assert!(m.notes.iter().any(|n| n.contains("reaches past")), "{:?}", m.notes);
+    assert!(m.parts.iter().all(|p| p.index != 6));
+}
+
+#[test]
+fn a_free_space_install_beside_logical_partitions_keeps_every_record_and_partition_byte_for_byte() {
+    let (dir, _guard) = scratch("logicals-apply");
+    let s = src(&dir);
+    let path = mbr_with_logicals(&dir, "l.img");
+    let ext_before = bytes_at(&path, 1001 * MIB, 502 * MIB as usize);
+    let second_before = bytes_at(&path, 1501 * MIB, 502 * MIB as usize);
+    let m = model_of(&path, "sdb", 4 * GIB, 512, "", true);
+    let plan = build_plan(&m, &free_req(), &spec(&s), true).unwrap();
+    assert_eq!(plan.steps.iter().filter(|st| st.action == Action::Create).count(), 2, "{}", plan.render());
+    assert_eq!(plan.steps.iter().filter(|st| st.action == Action::Keep).count(), 4, "the container and both logical partitions are kept");
+    let rep = run_apply(&path, &m, &free_req(), &s, Some(&plan.digest()), &ApplyEnv::default()).unwrap();
+    assert!(rep.verified);
+    assert_eq!(bytes_at(&path, 1001 * MIB, 502 * MIB as usize), ext_before);
+    assert_eq!(bytes_at(&path, 1501 * MIB, 502 * MIB as usize), second_before);
+    // the logical partitions take none of the four primary slots: two primaries and the two new ones fill the table, a new run is refused
+    let after = model_of(&path, "sdb", 4 * GIB, 512, "", true);
+    assert_eq!(after.parts.len(), 6);
+    assert!(after.parts.iter().filter(|p| p.index <= 4).count() == 4);
+}
+
+#[test]
+fn logical_partitions_do_not_count_as_primary_slots_and_cannot_be_deleted_or_chosen_to_format() {
+    let (dir, _guard) = scratch("logicals-rules");
+    let s = src(&dir);
+    let path = mbr_with_logicals(&dir, "l.img");
+    let m = model_of(&path, "sdb", 4 * GIB, 512, "", true);
+    assert!(build_plan(&m, &free_req(), &spec(&s), true).is_ok(), "four partitions on the disk, but only two primary slots are used");
+    let e = build_plan(&m, &Request { delete_parts: vec![5], ..free_req() }, &spec(&s), true).unwrap_err();
+    assert!(e.contains("logical partition"), "{e}");
+    let e = build_plan(&m, &Request { delete_parts: vec![2], ..free_req() }, &spec(&s), true).unwrap_err();
+    assert!(e.contains("extended"), "{e}");
+    // reuse mode: a logical partition cannot become the boot or data partition
+    let e = build_plan(&m, &Request { mode: Mode::Reuse, boot_part: Some(5), data_part: Some(6), ..Request::default() }, &spec(&s), true).unwrap_err();
+    assert!(e.contains("logical partition"), "{e}");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------
+// the raw-terminal loop on a real pseudo-terminal: the test runs this test binary again as the installer, with a pty as its
+// terminal, and types at it (arrow keys, Esc, Tab, Enter) like a person would.
+
+/// Not a test of its own: the child half of the pty test below. It does nothing unless the parent set the folder.
+#[test]
+fn pty_child_the_installer_pages_on_the_terminal_it_was_given() {
+    let Ok(dir) = std::env::var("IYAKKI_PTY_DIR") else { return };
+    let dir = PathBuf::from(dir);
+    let machine = crate::plan_cli::Machine { sys: "/nonexistent".into(), dev: "/nonexistent".into(), proc_mounts: String::new(), swaps: String::new() };
+    let args: Vec<String> = ["--plan", "--target-file", dir.join("p.img").to_str().unwrap(), dir.join("t.img").to_str().unwrap()].iter().map(|s| s.to_string()).collect();
+    let code = crate::plan_cli::run_inner(&args, &machine, false).unwrap_or(99);
+    std::process::exit(code);
+}
+
+struct Pty {
+    master: std::fs::File,
+    child: std::process::Child,
+    seen: String,
+    at: usize,
+}
+
+impl Pty {
+    fn start(dir: &Path) -> Pty {
+        use std::os::fd::FromRawFd;
+        let (mut m, mut s) = (0, 0);
+        let ws = libc::winsize { ws_row: 40, ws_col: 100, ws_xpixel: 0, ws_ypixel: 0 };
+        // SAFETY: openpty fills two descriptors; the winsize outlives the call.
+        assert_eq!(unsafe { libc::openpty(&mut m, &mut s, std::ptr::null_mut(), std::ptr::null_mut(), &ws as *const libc::winsize as *mut libc::winsize) }, 0);
+        // SAFETY: both descriptors were just made and are owned here; the slave is duplicated for the child's three streams.
+        let (master, slave) = unsafe { (std::fs::File::from_raw_fd(m), std::fs::File::from_raw_fd(s)) };
+        let stdio = || std::process::Stdio::from(slave.try_clone().unwrap());
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "planner_tests::pty_child_the_installer_pages_on_the_terminal_it_was_given", "--nocapture", "--test-threads=1"])
+            .env("IYAKKI_PTY_DIR", dir)
+            .stdin(stdio())
+            .stdout(stdio())
+            .stderr(stdio())
+            .spawn()
+            .unwrap();
+        drop(slave);
+        Pty { master, child, seen: String::new(), at: 0 }
+    }
+
+    fn type_keys(&mut self, bytes: &[u8]) {
+        use std::io::Write;
+        self.master.write_all(bytes).unwrap();
+    }
+
+    /// Read until `needle` shows up after the last match; the whole transcript is in the failure message.
+    fn expect(&mut self, needle: &str) {
+        use std::io::Read;
+        use std::os::fd::AsRawFd;
+        let t0 = std::time::Instant::now();
+        loop {
+            if let Some(p) = self.seen[self.at..].find(needle) {
+                self.at += p + needle.len();
+                return;
+            }
+            assert!(t0.elapsed() < std::time::Duration::from_secs(60), "waited for {needle:?}; the terminal showed: {}", self.seen[self.at..].replace('\x1b', "<ESC>"));
+            let mut fds = libc::pollfd { fd: self.master.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+            // SAFETY: one valid pollfd for the duration of the call.
+            if unsafe { libc::poll(&mut fds, 1, 100) } > 0 {
+                let mut buf = [0u8; 8192];
+                match self.master.read(&mut buf) {
+                    Ok(n) if n > 0 => self.seen.push_str(&String::from_utf8_lossy(&buf[..n])),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn finish(self) -> i32 {
+        self.finish_seen().0
+    }
+
+    fn finish_seen(mut self) -> (i32, String) {
+        let t0 = std::time::Instant::now();
+        loop {
+            // keep the pty drained so the child never blocks on a full buffer
+            use std::io::Read;
+            use std::os::fd::AsRawFd;
+            let mut fds = libc::pollfd { fd: self.master.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+            // SAFETY: one valid pollfd for the duration of the call.
+            if unsafe { libc::poll(&mut fds, 1, 50) } > 0 {
+                let mut buf = [0u8; 8192];
+                if let Ok(n) = self.master.read(&mut buf) {
+                    self.seen.push_str(&String::from_utf8_lossy(&buf[..n]));
+                }
+            }
+            if let Some(st) = self.child.try_wait().unwrap() {
+                return (st.code().unwrap_or(-1), self.seen);
+            }
+            assert!(t0.elapsed() < std::time::Duration::from_secs(60), "the installer did not end; it showed: {}", self.seen.replace('\x1b', "<ESC>"));
+        }
+    }
+}
+
+#[test]
+fn the_terminal_loop_on_a_real_pseudo_terminal_reads_arrows_and_esc_cancels_with_nothing_written_and_a_confirmed_install_writes() {
+    let (dir, _guard) = scratch("pty");
+    src(&dir);
+    let (path, _) = gpt_disk(&dir, "p.img", 3 * GIB, 512, &[ps(1, 500, MSDATA, "other", Fill::Ntfs)]);
+    let h0 = whole_file_hash(&path);
+
+    // first run: walk to the confirmation, go back with Esc, cancel with Tab and Enter; the drive is untouched and the terminal is given back
+    let mut t = Pty::start(&dir);
+    t.expect("step 1 of 6");
+    t.expect("testfile");
+    t.type_keys(b"\r"); // the drive
+    t.expect("step 2 of 6");
+    t.expect("Free space only");
+    t.type_keys(b"\x1b[A"); // arrow up: the mode above the free-space default
+    t.expect("> Whole disk");
+    t.type_keys(b"\x1b[B"); // and arrow down: back on it
+    t.expect("> Free space only");
+    t.type_keys(b"\r");
+    t.expect("step 3 of 6");
+    t.expect("free space at");
+    t.type_keys(b"\r");
+    t.expect("step 4 of 6");
+    t.expect("nothing is written yet");
+    t.type_keys(b"\r");
+    t.expect("step 5 of 6");
+    t.expect("Install");
+    t.type_keys(b"\x1b"); // a lone Esc goes back one page (the loop waits briefly to tell it from an arrow)
+    t.expect("step 4 of 6");
+    t.type_keys(b"\r");
+    t.expect("step 5 of 6");
+    t.type_keys(b"\t");
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    t.type_keys(b"\t");
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    t.type_keys(b"\r"); // Cancel
+    let code = t.finish_seen();
+    assert_eq!(code.0, 0, "cancelling is not an error");
+    assert!(code.1.contains("\x1b[?25l") && code.1.contains("\x1b[?25h"), "the cursor was hidden for the pages and given back");
+    assert_eq!(whole_file_hash(&path), h0, "cancelling wrote nothing");
+
+    // second run: the same walk, then Install; the write runs through the loop and the done page ends it
+    let mut t = Pty::start(&dir);
+    t.expect("testfile");
+    for step in 2..=5 {
+        t.type_keys(b"\r");
+        t.expect(&format!("step {step} of 6"));
+    }
+    t.expect("Install");
+    t.type_keys(b"\r");
+    t.expect("written and verified");
+    t.type_keys(b"\r"); // the done page
+    assert_eq!(t.finish(), 0);
+    assert_ne!(whole_file_hash(&path), h0, "the confirmed install wrote the drive");
+}
+
+// ---- legacy BIOS boot of a shared disk (F-INST-13), end to end on image files
+
+fn bios_req(dir: &Path, name: &str) -> Request {
+    Request { bios: true, bios_replace: true, bios_save: dir.join(name).display().to_string(), ..free_req() }
+}
+
+#[test]
+fn the_bios_option_saves_first_writes_grub_behind_sector_0_keeps_the_table_and_can_be_undone() {
+    let (dir, _guard) = scratch("bios-apply");
+    let s = src(&dir);
+    let path = mbr_disk(&dir, "b.img", 4 * GIB, &[(1, 1000, 0x07, Fill::Ntfs)]);
+    let s0 = bytes_at(&path, 0, 512);
+    let windows = bytes_at(&path, MIB, 4096);
+    let m = model_of(&path, "sda", 4 * GIB, 512, "", true);
+    let req = bios_req(&dir, "save.bin");
+    // without the explicit permission another system's boot code is not replaced
+    let denied = build_plan(&m, &Request { bios_replace: false, ..req.clone() }, &spec(&s), true).unwrap_err();
+    assert!(denied.contains("boot code") && denied.contains("explicitly"), "{denied}");
+    let plan = build_plan(&m, &req, &spec(&s), true).unwrap();
+    assert!(matches!(plan.bios, Some(crate::biosshared::Method::MbrGap { core_lba: 1, .. })), "{:?}", plan.bios);
+    let text = plan.render();
+    assert!(text.contains("Legacy BIOS boot: GRUB goes into the gap behind sector 0") && text.contains("save.bin"), "{text}");
+    assert!(!text.contains("is not set up: IYAKKI starts through UEFI"), "the old warning goes away: {text}");
+    assert!(plan.warnings.iter().any(|w| w.contains("chainload")), "{:?}", plan.warnings);
+    // the plan page and the dry run write nothing, not even the save file
+    run_apply(&path, &m, &req, &s, Some(&plan.digest()), &ApplyEnv { dry_run: true, ..Default::default() }).unwrap();
+    assert!(!dir.join("save.bin").exists());
+    let rep = run_apply(&path, &m, &req, &s, Some(&plan.digest()), &ApplyEnv::default()).unwrap();
+    assert!(rep.notes.iter().any(|n| n.contains("legacy BIOS boot set up") && n.contains("save.bin")), "{:?}", rep.notes);
+    // GRUB's boot code is in sector 0 with the address of the core image; the disk signature, the table and 55 AA are as they were or as
+    // the install added to them
+    let n0 = bytes_at(&path, 0, 512);
+    let bits = crate::gpt_install::grub_bits_used(&s, 1).unwrap();
+    assert_eq!(&n0[..0x5C], &bits.boot_code[..0x5C]);
+    assert_eq!(u64::from_le_bytes(n0[0x5C..0x64].try_into().unwrap()), 1);
+    assert_eq!(&n0[0x64..440], &bits.boot_code[0x64..440]);
+    assert_eq!(&n0[440..446], &s0[440..446], "the disk signature");
+    assert_eq!(&n0[446..462], &s0[446..462], "the other system's partition entry");
+    assert_eq!(&n0[510..], &[0x55, 0xAA]);
+    assert_eq!(bytes_at(&path, 512, bits.core.len()), bits.core, "the core image behind sector 0");
+    assert_eq!(bytes_at(&path, MIB, 4096), windows, "the other system's partition is untouched");
+    // the save file holds the sectors as they were just before the write, and puts them back
+    let save = crate::biosshared::Backup::decode(&std::fs::read(dir.join("save.bin")).unwrap()).unwrap();
+    assert_eq!(save.regions[0].1.len(), 512);
+    assert_eq!(&save.regions[0].1[..440], &s0[..440], "the old boot code");
+    {
+        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let mut w: &std::fs::File = &f;
+        save.restore(&mut w, 512, 4 * GIB).unwrap();
+        let _ = f.sync_all();
+    }
+    let back = bytes_at(&path, 0, 512);
+    assert_eq!(&back[..446], &s0[..446], "the old boot code is back");
+    assert_eq!(&back[446..462], &s0[446..462]);
+    assert_ne!(back[478 + 4], 0, "and the install's own partition entries are still there");
+    assert!(bytes_at(&path, 512, 64).iter().all(|b| *b == 0), "the gap is empty again");
+}
+
+#[test]
+fn the_bios_option_refuses_instead_of_skipping_when_it_cannot_be_done() {
+    let (dir, _guard) = scratch("bios-refuse");
+    let s = src(&dir);
+    let ok_disk = mbr_disk(&dir, "ok.img", 4 * GIB, &[(1, 1000, 0x07, Fill::Ntfs)]);
+    let m = model_of(&ok_disk, "sda", 4 * GIB, 512, "", true);
+    let base = bios_req(&dir, "never.bin");
+    // the save file: needed, absolute, not existing, in an existing folder
+    for (save, want) in [("", "--bios-save"), ("relative.bin", "--bios-save"), ("/no/such/folder/x.bin", "does not exist")] {
+        let e = build_plan(&m, &Request { bios_save: save.into(), ..base.clone() }, &spec(&s), true).unwrap_err();
+        assert!(e.contains(want), "{save}: {e}");
+    }
+    std::fs::write(dir.join("exists.bin"), b"x").unwrap();
+    let e = build_plan(&m, &Request { bios_save: dir.join("exists.bin").display().to_string(), ..base.clone() }, &spec(&s), true).unwrap_err();
+    assert!(e.contains("never overwritten"), "{e}");
+    // an image that carries no GRUB core
+    let e = build_plan(&m, &base, &SourceSpec { core_bytes: 0, ..spec(&s) }, true).unwrap_err();
+    assert!(e.contains("no GRUB core"), "{e}");
+    // a gap that is used, a gap that is too small
+    let used = mbr_disk(&dir, "used.img", 4 * GIB, &[(1, 1000, 0x07, Fill::Ntfs)]);
+    {
+        use std::os::unix::fs::FileExt;
+        std::fs::OpenOptions::new().write(true).open(&used).unwrap().write_all_at(&[7u8; 64], 512 + 100).unwrap();
+    }
+    let e = build_plan(&model_of(&used, "sda", 4 * GIB, 512, "", true), &base, &spec(&s), true).unwrap_err();
+    assert!(e.contains("not empty"), "{e}");
+    // a 4096-byte-sector disk and a GPT disk without a BIOS boot partition
+    let (g, _) = gpt_disk(&dir, "g.img", 3 * GIB, 512, &[ps(1, 1024, MSDATA, "other", Fill::Ntfs)]);
+    // (a free-space install makes the BIOS boot partition itself, so it is planned, not refused: see
+    // `the_bios_option_makes_the_bios_boot_partition_of_a_gpt_disk_with_a_kept_esp_and_boots_nothing_else_changes`)
+    let plan = build_plan(&model_of(&g, "sda", 3 * GIB, 512, "", true), &base, &spec(&s), true).unwrap();
+    assert!(matches!(plan.bios, Some(crate::biosshared::Method::BiosBootPartition { .. })), "{:?}", plan.bios);
+    // nothing was written by any of them
+    assert!(!dir.join("never.bin").exists());
+}
+
+#[test]
+fn the_bios_option_is_kept_in_the_plan_file() {
+    let r = Request { bios: true, bios_replace: true, bios_save: "/mnt/other/save.bin".into(), ..free_req() };
+    let back = Request::from_json(&r.to_json()).unwrap();
+    assert_eq!((back.bios, back.bios_replace, back.bios_save.as_str()), (true, true, "/mnt/other/save.bin"));
+    assert!(!Request::from_json(&free_req().to_json()).unwrap().bios);
+}
+
+#[test]
+fn the_bios_option_makes_the_bios_boot_partition_of_a_gpt_disk_with_a_kept_esp_and_boots_nothing_else_changes() {
+    let (dir, _guard) = scratch("bios-gpt-new");
+    let s = src(&dir);
+    let (path, old) = gpt_disk(&dir, "kb.img", 4 * GIB, 512, &[ps(1, 100, EFI, "EFI system partition", Fill::Raw(foreign_esp(&dir))), ps(101, 1000, MSDATA, "windows", Fill::Ntfs)]);
+    let before = old_partition_bytes(&path, &old, 512);
+    let m = model_of(&path, "sda", 4 * GIB, 512, "", false);
+    let req = Request { keep_esp: true, ..bios_req(&dir, "gsave.bin") };
+    let plan = build_plan(&m, &req, &spec(&s), true).unwrap();
+    let bios_step = plan.steps.iter().find(|st| st.role == Some(Role::Bios)).expect("a BIOS boot partition is planned");
+    assert_eq!((bios_step.action, bios_step.bytes), (Action::Create, MIB));
+    assert!(matches!(plan.bios, Some(crate::biosshared::Method::BiosBootPartition { start_lba, .. }) if start_lba == bios_step.first_lba), "{:?}", plan.bios);
+    // without --bios nothing is added when the ESP is kept
+    let plain = build_plan(&m, &Request { keep_esp: true, ..free_req() }, &spec(&s), true).unwrap();
+    assert!(plain.steps.iter().all(|st| st.role != Some(Role::Bios)));
+    // the old partitions are untouched by the plan
+    for st in plan.steps.iter().filter(|st| st.action == Action::Create) {
+        assert!(old.entries.iter().all(|e| st.first_lba > e.last_lba || st.first_lba + st.sectors <= e.first_lba), "a new partition overlaps an old one");
+    }
+    let rep = run_apply(&path, &m, &req, &s, Some(&plan.digest()), &ApplyEnv::default()).unwrap();
+    assert!(rep.notes.iter().any(|n| n.contains("legacy BIOS boot set up")), "{:?}", rep.notes);
+    let p = parsed(&path, 512, 4 * GIB);
+    assert!(p.primary_ok && p.backup_ok);
+    let e = p.table.entries.iter().find(|e| e.type_guid == gpt::TYPE_BIOS_BOOT).expect("the partition is in the table");
+    let bits = crate::gpt_install::grub_bits_used(&s, e.first_lba).unwrap();
+    assert_eq!(bytes_at(&path, e.first_lba * 512, bits.core.len()), bits.core, "GRUB's core image is at the start of the new partition");
+    let now = old_partition_bytes(&path, &old, 512);
+    assert_eq!(now[1], before[1], "the other system's partition is untouched");
+}
+
+// ---- iyakki-usb --update: the boot files of a stick replaced without mounting it (F-UPG-05) ----
+
+/// A stick whose boot volume holds `boot/KERNEL.BIN`, `boot/INITRD.GZ`, `boot/KEEP.TXT` and the loader `EFI/BOOT/BOOTX64.EFI`
+/// (the other system's `EFI/MSFT/BOOT/BOOTMGFW.EFI` is there too); returns the image path.
+fn stick_with_boot_files(dir: &Path) -> PathBuf {
+    let img = foreign_esp(dir);
+    let p = dir.join("stick.img");
+    std::fs::write(&p, &img).unwrap();
+    let f = std::fs::OpenOptions::new().read(true).write(true).open(&p).unwrap();
+    {
+        let mut rw = Fat32Rw::open(&f, 0, img.len() as u64).unwrap();
+        let (d, _) = rw.mkdir_p(&["boot"]).unwrap();
+        for (n, len, seed) in [("KERNEL.BIN", 5000usize, 1u8), ("INITRD.GZ", 9000, 2), ("KEEP.TXT", 40, 3)] {
+            rw.create_file(d, n, len as u64, &mut std::io::Cursor::new(pseudo(len, seed)), &mut |_| {}).unwrap();
+        }
+        rw.flush().unwrap();
+        rw.write_fsinfo().unwrap();
+    }
+    p
+}
+
+fn update_folder(dir: &Path) -> PathBuf {
+    let from = dir.join("pack");
+    for (rel, len, seed) in [("boot/KERNEL.BIN", 7000usize, 11u8), ("boot/INITRD.GZ", 12_000, 12), ("boot/NEW.CFG", 30, 13), ("EFI/BOOT/BOOTX64.EFI", 130_000, 14), ("README.txt", 5, 15), ("other/x.bin", 5, 16)] {
+        let p = from.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, pseudo(len, seed)).unwrap();
+    }
+    from
+}
+
+fn on_stick(p: &Path, path: &str) -> Option<Vec<u8>> {
+    let mut h = std::fs::File::open(p).unwrap();
+    let mut vol = Fat32::open(&mut h, 0).unwrap();
+    let items = vol.walk_long().unwrap();
+    let it = items.iter().find(|i| !i.dir && i.path.trim_start_matches('/').eq_ignore_ascii_case(path))?.clone();
+    Some(vol.read_file(&it).unwrap())
+}
+
+#[test]
+fn an_update_folder_is_planned_boot_files_first_and_loaders_last_and_planning_writes_nothing() {
+    use crate::stickupdate::{plan, Kind};
+    let (dir, _guard) = scratch("upd-plan");
+    let stick = stick_with_boot_files(&dir);
+    let from = update_folder(&dir);
+    let before = std::fs::read(&stick).unwrap();
+    let p = plan(&stick, &from).unwrap();
+    let names: Vec<(&str, &Kind)> = p.steps.iter().map(|s| (s.path.as_str(), &s.kind)).collect();
+    assert_eq!(names, vec![("boot/INITRD.GZ", &Kind::Replace), ("boot/KERNEL.BIN", &Kind::Replace), ("boot/NEW.CFG", &Kind::Add), ("EFI/BOOT/BOOTX64.EFI", &Kind::Replace)], "biggest boot file first, the loader last");
+    assert_eq!(p.skipped, vec!["README.txt".to_string(), "other/x.bin".to_string()], "what is not under boot/ or EFI/ is not part of an update");
+    assert_eq!(std::fs::read(&stick).unwrap(), before, "planning wrote nothing");
+}
+
+#[test]
+fn applying_replaces_the_boot_files_reads_them_back_and_leaves_everything_else_as_it_was() {
+    use crate::stickupdate::{apply, plan};
+    let (dir, _guard) = scratch("upd-apply");
+    let stick = stick_with_boot_files(&dir);
+    let from = update_folder(&dir);
+    let msft = on_stick(&stick, "EFI/MSFT/BOOT/BOOTMGFW.EFI").unwrap();
+    let keep = on_stick(&stick, "boot/KEEP.TXT").unwrap();
+    let p = plan(&stick, &from).unwrap();
+    let mut told = Vec::new();
+    apply(&stick, &from, &p, &mut |i, n, path| told.push(format!("{}/{n} {path}", i + 1))).unwrap();
+    assert_eq!(told.len(), 4);
+    assert!(told[3].ends_with("EFI/BOOT/BOOTX64.EFI"), "{told:?}");
+    for (rel, len, seed) in [("boot/KERNEL.BIN", 7000usize, 11u8), ("boot/INITRD.GZ", 12_000, 12), ("boot/NEW.CFG", 30, 13), ("EFI/BOOT/BOOTX64.EFI", 130_000, 14)] {
+        assert_eq!(on_stick(&stick, rel).unwrap(), pseudo(len, seed), "{rel}");
+    }
+    assert_eq!(on_stick(&stick, "EFI/MSFT/BOOT/BOOTMGFW.EFI").unwrap(), msft, "the other system's loader is untouched");
+    assert_eq!(on_stick(&stick, "boot/KEEP.TXT").unwrap(), keep, "a boot file that is not in the update stays");
+    assert!(on_stick(&stick, "README.txt").is_none() && on_stick(&stick, "other/x.bin").is_none());
+    if let Some((ok, out)) = tool("fsck.vfat", &["-n", stick.to_str().unwrap()]) {
+        assert!(ok, "fsck.vfat:\n{out}");
+    }
+}
+
+#[test]
+fn an_update_that_cannot_be_written_whole_is_refused_before_anything_is_written() {
+    use crate::stickupdate::{plan, read_folder};
+    let (dir, _guard) = scratch("upd-refuse");
+    let stick = stick_with_boot_files(&dir);
+    let from = update_folder(&dir);
+    let before = std::fs::read(&stick).unwrap();
+    // a new file with a long name cannot be created by the writer: the whole plan is refused
+    std::fs::write(from.join("boot/vmlinuz-6.12.112"), b"x").unwrap();
+    let e = plan(&stick, &from).unwrap_err();
+    assert!(e.contains("8.3") && e.contains("vmlinuz-6.12.112") && e.contains("Nothing was written"), "{e}");
+    std::fs::remove_file(from.join("boot/vmlinuz-6.12.112")).unwrap();
+    // a link, an unsafe name and an empty folder are refused
+    std::os::unix::fs::symlink("/etc/passwd", from.join("boot/LINK.BIN")).unwrap();
+    assert!(plan(&stick, &from).unwrap_err().contains("link"));
+    std::fs::remove_file(from.join("boot/LINK.BIN")).unwrap();
+    std::fs::write(from.join("boot/bad;name"), b"x").unwrap();
+    assert!(plan(&stick, &from).unwrap_err().contains("not safe"));
+    std::fs::remove_file(from.join("boot/bad;name")).unwrap();
+    let empty = dir.join("empty");
+    std::fs::create_dir_all(empty.join("misc")).unwrap();
+    std::fs::write(empty.join("misc/a"), b"x").unwrap();
+    assert!(read_folder(&empty).unwrap_err().contains("not an update"));
+    // not a disk with a FAT32 boot volume
+    let junk = dir.join("junk.img");
+    std::fs::write(&junk, vec![0u8; 8192]).unwrap();
+    assert!(plan(&junk, &from).is_err());
+    assert_eq!(std::fs::read(&stick).unwrap(), before);
+}
+
+#[test]
+fn the_command_shows_the_plan_and_writes_only_with_yes() {
+    let (dir, _guard) = scratch("upd-cli");
+    let stick = stick_with_boot_files(&dir);
+    let from = update_folder(&dir);
+    let before = std::fs::read(&stick).unwrap();
+    let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let (s, f) = (stick.to_str().unwrap(), from.to_str().unwrap());
+    assert_eq!(crate::stickupdate::run(&a(&["--update", s])), 2, "a folder is needed");
+    assert_eq!(crate::stickupdate::run(&a(&["--update", s, "--from", f])), 0);
+    assert_eq!(std::fs::read(&stick).unwrap(), before, "without --yes nothing is written");
+    assert_eq!(crate::stickupdate::run(&a(&["--update", s, "--from", f, "--yes"])), 0);
+    assert_eq!(on_stick(&stick, "boot/KERNEL.BIN").unwrap(), pseudo(7000, 11));
+    assert_eq!(crate::stickupdate::run(&a(&["--update", "/nonexistent/stick", "--from", f, "--yes"])), 1);
 }

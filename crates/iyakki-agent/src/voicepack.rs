@@ -247,11 +247,11 @@ pub fn configure(svc: &crate::services::Services, provider: &str) -> Result<Stri
     let data = svc.dir().to_path_buf();
     let mut rec = read_record(&data);
     let (stt, tts) = {
-        let st = svc.settings.lock().unwrap();
+        let st = svc.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let v = &st.get().voice;
         (v.stt.clone(), v.tts.clone())
     };
-    let cfg = svc.settings.lock().unwrap().get().provider(provider).cloned().ok_or("unknown provider")?;
+    let cfg = svc.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().provider(provider).cloned().ok_or("unknown provider")?;
     let base = cfg.base()?;
     let ours_stt = crate::lemonade::stt_engine(&base, WHISPER_MODEL, cfg.key_ref.clone());
     let ours_tts = crate::lemonade::tts_engine(&base, KOKORO_MODEL, None, cfg.key_ref.clone());
@@ -273,7 +273,7 @@ pub fn configure_when_ready(svc: &Arc<crate::services::Services>) -> bool {
     svc.use_local_lemonade(&base, version.as_deref());
     let want = crate::lemonade::api_base(&base);
     let id = {
-        let st = svc.settings.lock().unwrap();
+        let st = svc.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         st.get().providers.iter().find(|p| p.kind == crate::providers::Kind::Lemonade && p.base_url.as_deref().is_some_and(|u| crate::lemonade::api_base(u) == want)).map(|p| p.id.clone())
     };
     let Some(id) = id else { return false };
@@ -291,7 +291,7 @@ pub fn remove(svc: &crate::services::Services, delete: &dyn Fn(&str) -> Result<(
     let mut said: Vec<String> = Vec::new();
     if rec.configured {
         let (stt, tts) = {
-            let st = svc.settings.lock().unwrap();
+            let st = svc.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let v = &st.get().voice;
             (v.stt.clone(), v.tts.clone())
         };
@@ -299,8 +299,7 @@ pub fn remove(svc: &crate::services::Services, delete: &dyn Fn(&str) -> Result<(
         let (back_stt, back_tts) = (is_ours(&stt, WHISPER_MODEL), is_ours(&tts, KOKORO_MODEL));
         let (prev_stt, prev_tts) = (rec.previous_stt.clone(), rec.previous_tts.clone());
         svc.settings
-            .lock()
-            .unwrap()
+            .lock().unwrap_or_else(std::sync::PoisonError::into_inner)
             .update(|s| {
                 if back_stt {
                     s.voice.stt = prev_stt;

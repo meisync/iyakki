@@ -419,7 +419,7 @@ impl Metered {
     }
 
     fn note(&self, input: u64, output: u64, estimated: bool, since: std::time::Instant) {
-        let (provider, model) = self.services.settings.lock().unwrap().get().chat.as_ref().map_or(("?".to_string(), "unknown".to_string()), |c| (c.provider.clone(), c.model.clone()));
+        let (provider, model) = self.services.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().chat.as_ref().map_or(("?".to_string(), "unknown".to_string()), |c| (c.provider.clone(), c.model.clone()));
         let call = Call { src: SRC_ASSISTANT.into(), cat: SRC_ASSISTANT.into(), provider, model, input, output, estimated, failed: false, ms: since.elapsed().as_millis() as u64 };
         self.services.usage.record_call(now(), &self.user, &call);
     }

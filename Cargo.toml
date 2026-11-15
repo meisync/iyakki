@@ -3,6 +3,7 @@ resolver = "2"
 exclude = ["crates/iyakki-gui"]
 members = [
     "crates/iyakki-sec",
+    "crates/iyakki-edit-wasm",
     "crates/iyakki-vfs",
     "crates/iyakki-wasm",
     "crates/iyakki-ledger",
@@ -10,6 +11,8 @@ members = [
     "crates/iyakki-hw",
     "crates/iyakki-agent",
     "crates/iyakki-sshfs",
+    "crates/iyakki-accounts",
+    "crates/iyakki-vt",
     "crates/iyakki-camdetect",
     "crates/iyakki-diskcrypt",
     "crates/iyakki-battery",
@@ -27,10 +30,12 @@ members = [
     "crates/iyakki-core",
     "crates/iyakki-core-api",
     "crates/iyakki-core-fake",
-    "crates/iyakki-ui",
+    "crates/iyakki-core-local",
     "crates/iyakki-uikit",
     "crates/iyakki-tile-api",
     "crates/iyakki-tile-usage",
+    "crates/iyakki-tile-radio",
+    "crates/iyakki-tile-pdf",
     "crates/iyakki-tile-calendar",
     "crates/iyakki-tile-remotefiles",
     "crates/iyakki-tile-cameras",
@@ -53,6 +58,7 @@ members = [
     "crates/iyakki-zram",
     "crates/iyakki-fw",
     "crates/iyakki-vpn",
+    "crates/iyakki-filter",
     "crates/iyakki-relcheck",
     "crates/iyakki-store-server",
     "crates/iyakki-stage1",
@@ -62,6 +68,11 @@ members = [
     "crates/iyakki-tile-abi",
     "crates/iyakki-tile-host",
     "crates/iyakki-tile-example",
+    "crates/iyakki-tile-runs",
+    "crates/iyakki-tile-kit",
+    "crates/iyakki-tile-settings",
+    "crates/iyakki-tile-edit",
+    "crates/iyakki-tile-chat",
     "crates/iyakki-sdk-emulator",
     "crates/iyakki-connect",
     "crates/iyakki-hotspot",
@@ -69,15 +80,17 @@ members = [
     "crates/iyakki-enchome",
     "crates/iyakki-pdf",
     "crates/iyakki-wake",
+    "crates/iyakki-client-engine",
 ]
 
 [workspace.package]
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 edition = "2021"
 license = "Apache-2.0"
 
 [workspace.dependencies]
 iyakki-sshfs = { path = "crates/iyakki-sshfs" }
+iyakki-vt = { path = "crates/iyakki-vt" }
 iyakki-camdetect = { path = "crates/iyakki-camdetect" }
 iyakki-diskcrypt = { path = "crates/iyakki-diskcrypt" }
 iyakki-battery = { path = "crates/iyakki-battery" }
@@ -96,13 +109,13 @@ iyakki-devctl = { path = "crates/iyakki-devctl" }
 iyakki-web = { path = "crates/iyakki-web" }
 iyakki-pdf = { path = "crates/iyakki-pdf" }
 iyakki-wake = { path = "crates/iyakki-wake" }
+iyakki-client-engine = { path = "crates/iyakki-client-engine" }
 iyakki-webview = { path = "crates/iyakki-webview" }
 iyakki-rfb = { path = "crates/iyakki-rfb" }
 iyakki-js = { path = "crates/iyakki-js" }
 iyakki-vfs = { path = "crates/iyakki-vfs" }
 iyakki-wasm = { path = "crates/iyakki-wasm" }
 iyakki-agent = { path = "crates/iyakki-agent" }
-iyakki-hw = { path = "crates/iyakki-hw" }
 iyakki-mem = { path = "crates/iyakki-mem" }
 iyakki-ledger = { path = "crates/iyakki-ledger" }
 iyakki-storage = { path = "crates/iyakki-storage" }
@@ -121,6 +134,7 @@ iyakki-schema = { path = "crates/iyakki-schema" }
 iyakki-link = { path = "crates/iyakki-link" }
 iyakki-core-api = { path = "crates/iyakki-core-api" }
 iyakki-core-fake = { path = "crates/iyakki-core-fake" }
+iyakki-core-local = { path = "crates/iyakki-core-local" }
 thiserror = "2"
 log = "0.4"
 wasmtime = { version = "*", default-features = false, features = ["runtime", "cranelift", "wat", "std"] }
@@ -144,6 +158,10 @@ codegen-units = 1
 strip = true
 
 # Quick test images (IYAKKI_PROFILE=fast ./dist/buildroot/build.sh): parallel code generation, a bigger and slower binary.
+# the browser engine is downloaded by every client: small beats fast
+[profile.release.package.iyakki-client-engine]
+opt-level = "s"
+
 [profile.fast]
 inherits = "release"
 lto = "thin"

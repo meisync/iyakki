@@ -232,6 +232,8 @@ pub struct Hooks {
     pub cleanup: Option<Arc<dyn Fn(&Task) + Send + Sync>>,
     /// The run of a task, to be kept as a run log (called when it starts, every few dozen events and when it ends).
     pub record: Option<Arc<dyn Fn(RunRecord) + Send + Sync>>,
+    /// The cluster a task gets its own namespace in (created when the task is made, deleted with `cleanup`).
+    pub cluster: Option<Arc<dyn crate::taskenv::TaskCluster>>,
 }
 
 /// What a task's run looked like so far, for the run log.
@@ -471,10 +473,36 @@ struct Entry {
     tx: Option<Sender<Cmd>>,
     join: Option<std::thread::JoinHandle<()>>,
     log: VecDeque<String>,
+    /// The conversation of the run, as the person would read it in the chat: who spoke and what (never the thinking, never the
+    /// streaming deltas). Kept in memory for the run's life; the run log keeps the events.
+    chat: Vec<ChatLine>,
     approvals: Vec<Approval>,
     /// The live approval mode of the current run (None: not running).
     live: Option<Arc<crate::livemode::LiveMode>>,
 }
+
+/// One line of a task's embedded chat.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatLine {
+    pub who: ChatWho,
+    pub text: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatWho {
+    /// The request given to the task (the goal, or a follow-up).
+    You,
+    /// What the agent said.
+    Agent,
+    /// A tool the agent called, with what it answered (one short line).
+    Tool,
+    /// The harness: an approval asked for or decided, a note, the end of the run.
+    Note,
+}
+
+/// The most lines kept of a task's chat, and the longest one.
+const CHAT_CAP: usize = 600;
+const CHAT_LINE: usize = 4000;
 
 struct State {
     entries: Vec<Entry>,
@@ -502,6 +530,8 @@ struct Inner {
     plan: Mutex<Option<plan::PlanRun>>,
     /// (key, text) of the last lead summary.
     summary: Mutex<(String, String)>,
+    /// The thread writing the lead summary (it runs `git` in the task folders); `shutdown` waits for it.
+    summary_thread: Mutex<Vec<std::thread::JoinHandle<()>>>,
     last_poll: Mutex<Option<Instant>>,
 }
 
@@ -577,7 +607,7 @@ impl Manager {
                     t.last = "interrupted: the window closed while it ran; Resume continues from the saved place".into();
                     let _ = write_task(root, &t);
                 }
-                entries.push(Entry { task: t, tx: None, join: None, log: VecDeque::new(), approvals: vec![], live: None });
+                entries.push(Entry { task: t, tx: None, join: None, log: VecDeque::new(), chat: Vec::new(), approvals: vec![], live: None });
             }
         }
         entries.sort_by_key(|e| (e.task.created, e.task.id.clone()));
@@ -586,7 +616,7 @@ impl Manager {
         let auto = cfg.as_ref().and_then(|v| v.get("auto_assign").and_then(|n| n.as_str()).map(str::to_string)).unwrap_or_default();
         // agents that claim to be at work were cut off by the restart (the tasks above are already `interrupted`)
         crate::assign::update(root, |d| d.reconcile(&[], now()));
-        Manager { inner: Arc::new(Inner { root: root.into(), features: features.into(), state: Mutex::new(State { entries, max_concurrency: max, task_mb: cfg.as_ref().and_then(|v| v.get("task_memory_mb").and_then(|n| n.as_u64())).map_or(plan::DEFAULT_TASK_MB, |n| n.clamp(100, 64_000)), per_agent: BTreeMap::new(), auto_assign: AutoAssign::parse(&auto), guidance: BTreeMap::new() }), runner: Mutex::new(None), hooks: Mutex::new(Hooks::default()), merge_lock: Mutex::new(()), git_lock: Mutex::new(()), mem_source: Mutex::new(None), plan: Mutex::new(plan::PlanRun::load(root)), summary: Mutex::new((String::new(), String::new())), last_poll: Mutex::new(None) }) }
+        Manager { inner: Arc::new(Inner { root: root.into(), features: features.into(), state: Mutex::new(State { entries, max_concurrency: max, task_mb: cfg.as_ref().and_then(|v| v.get("task_memory_mb").and_then(|n| n.as_u64())).map_or(plan::DEFAULT_TASK_MB, |n| n.clamp(100, 64_000)), per_agent: BTreeMap::new(), auto_assign: AutoAssign::parse(&auto), guidance: BTreeMap::new() }), runner: Mutex::new(None), hooks: Mutex::new(Hooks::default()), merge_lock: Mutex::new(()), git_lock: Mutex::new(()), mem_source: Mutex::new(None), plan: Mutex::new(plan::PlanRun::load(root)), summary_thread: Mutex::new(Vec::new()), summary: Mutex::new((String::new(), String::new())), last_poll: Mutex::new(None) }) }
     }
 
     pub fn root(&self) -> &Path {
@@ -868,9 +898,20 @@ impl Manager {
             last: "waiting for a free place".into(),
             ..Default::default()
         };
+        let mut task = task;
+        let shared = crate::taskenv::share_dependency_folders(&self.inner.root, &task.tree);
+        if !shared.is_empty() {
+            task.note = format!("{} Shared with the main workspace: {}.", task.note, shared.join(", ")).trim().to_string();
+        }
+        if let Some(c) = self.hooks().cluster {
+            match crate::taskenv::provision(c.as_ref(), &task) {
+                Ok(n) => task.note = format!("{} {n}", task.note).trim().to_string(),
+                Err(e) => task.note = format!("{} No namespace was created ({e}); the task works without a cluster.", task.note).trim().to_string(),
+            }
+        }
         write_task(&self.inner.root, &task)?;
         self.audit("task.spawn", &format!("{id} {} · agent {} · rows {}", task.title, task.agent, task.rows.join(",")));
-        self.st().entries.push(Entry { task, tx: None, join: None, log: VecDeque::new(), approvals: vec![], live: None });
+        self.st().entries.push(Entry { task, tx: None, join: None, log: VecDeque::new(), chat: Vec::new(), approvals: vec![], live: None });
         self.pump();
         Ok(id)
     }
@@ -969,6 +1010,45 @@ impl Manager {
         self.st().entries.iter_mut().find(|e| e.task.id == id).map(f)
     }
 
+    /// Add a line to the task's embedded chat.
+    fn chat_say(&self, id: &str, who: ChatWho, text: &str) {
+        let text: String = text.trim().chars().take(CHAT_LINE).collect();
+        if text.is_empty() {
+            return;
+        }
+        self.with_entry(id, |e| {
+            e.chat.push(ChatLine { who, text });
+            while e.chat.len() > CHAT_CAP {
+                e.chat.remove(0);
+            }
+        });
+    }
+
+    /// The task's conversation as a chat: the request, what the agent said, the tools it called and how each came out, the approvals,
+    /// the end of the run (KI-640).
+    pub fn chat(&self, id: &str) -> Vec<ChatLine> {
+        self.st().entries.iter().find(|e| e.task.id == id).map(|e| e.chat.clone()).unwrap_or_default()
+    }
+
+    fn chat_event(&self, id: &str, ev: &RunEvent) {
+        match ev {
+            RunEvent::Model { text, calls } => {
+                self.chat_say(id, ChatWho::Agent, text);
+                for c in calls {
+                    self.chat_say(id, ChatWho::Tool, &format!("{}({})", c.name, crate::agent::truncate(&c.args.to_string(), 160)));
+                }
+            }
+            RunEvent::ToolResult { name, ok, text, .. } => self.chat_say(id, ChatWho::Tool, &format!("{name} {}: {}", if *ok { "ok" } else { "failed" }, crate::agent::truncate(text, 300))),
+            RunEvent::Approval { name, summary, .. } => self.chat_say(id, ChatWho::Note, &format!("Waiting for you: {name}: {summary}")),
+            RunEvent::Decision { name, approved, by, .. } => self.chat_say(id, ChatWho::Note, &format!("{name}: {} ({by})", if *approved { "approved" } else { "denied" })),
+            RunEvent::Note { text } => self.chat_say(id, ChatWho::Note, text),
+            RunEvent::Final { text } => self.chat_say(id, ChatWho::Agent, text),
+            RunEvent::Failed { error } => self.chat_say(id, ChatWho::Note, &format!("Failed: {error}")),
+            RunEvent::Stopped { reason } => self.chat_say(id, ChatWho::Note, &format!("Stopped: {reason}")),
+            _ => {}
+        }
+    }
+
     fn say(&self, id: &str, line: String) {
         let line = line.replace('\n', " ");
         self.with_entry(id, |e| {
@@ -1007,6 +1087,7 @@ impl Manager {
         let started = Instant::now();
         let began = now();
         let mut events: Vec<RunEvent> = Vec::new();
+        self.chat_say(id, ChatWho::You, &spec.prompt);
         self.record_run(&spec, &events, "running", began);
         let (mut tokens_base, mut last_tokens, mut cost_base, mut last_cost) = (self.get(id).map_or(0, |t| t.tokens), 0u64, self.get(id).map_or(0.0, |t| t.cost_cents), 0.0f64);
         let (mut stop, mut pause, mut shutdown) = (false, false, false);
@@ -1016,6 +1097,7 @@ impl Manager {
         loop {
             match handle.events.recv_timeout(Duration::from_millis(100)) {
                 Ok(ev) => {
+                    self.chat_event(id, &ev);
                     if !matches!(ev, RunEvent::Delta { .. } | RunEvent::Thinking { .. }) && events.len() < 5000 {
                         events.push(ev.clone());
                         if events.len() % 40 == 0 {
@@ -1170,6 +1252,12 @@ impl Manager {
     }
 
     fn finish(&self, id: &str, spec: &RunSpec, outcome: Outcome) {
+        // This run's command channel and waiting approvals go BEFORE the status says it is over. Done after, a Resume that saw the new status
+        // could start the next run, and this line would then take away the NEW run's channel (a Stop right after reported "not running").
+        self.with_entry(id, |e| {
+            e.approvals.clear();
+            e.tx = None;
+        });
         let title = self.get(id).map(|t| t.title).unwrap_or_default();
         let rows = crate::autopilot::Rows::read(&spec.tree, &spec.features);
         let verified = rows.total > 0 && rows.done == rows.total && rows.blocked == 0;
@@ -1226,10 +1314,6 @@ impl Manager {
                 self.reg(|d| d.set_state(id, crate::assign::AState::Interrupted, "Resume continues from the saved place", now()));
             }
         }
-        self.with_entry(id, |e| {
-            e.approvals.clear();
-            e.tx = None;
-        });
         self.save(id);
         // guidance sent while it ran: the pause landed, so it continues with the message
         let guide = self.st().guidance.remove(id);
@@ -1416,6 +1500,11 @@ impl Manager {
             s.entries.iter_mut().filter_map(|e| e.join.take()).collect()
         };
         for j in joins {
+            let _ = j.join();
+        }
+        // a summary thread started by the last finish, which may still be running git in a task's folder
+        let sums: Vec<_> = std::mem::take(&mut *self.inner.summary_thread.lock().unwrap_or_else(|e| e.into_inner()));
+        for j in sums {
             let _ = j.join();
         }
         // queued ones are not started by a closing window
@@ -1640,6 +1729,11 @@ impl Manager {
         if let Some(c) = self.hooks().cleanup {
             c(&t);
         }
+        if let Some(c) = self.hooks().cluster {
+            if let Err(e) = crate::taskenv::teardown(c.as_ref(), &t) {
+                self.audit("task.namespace", &format!("{} not deleted: {e}", t.namespace));
+            }
+        }
         Ok(summary)
     }
 
@@ -1711,6 +1805,11 @@ impl Manager {
         self.audit("task.discard", &format!("{id} {}", t.title));
         if let Some(c) = self.hooks().cleanup {
             c(&t);
+        }
+        if let Some(c) = self.hooks().cluster {
+            if let Err(e) = crate::taskenv::teardown(c.as_ref(), &t) {
+                self.audit("task.namespace", &format!("{} not deleted: {e}", t.namespace));
+            }
         }
         // a plan that waited for this task stops, and the place it held is free
         self.pump();
@@ -1833,6 +1932,8 @@ pub struct RunnerParts {
     pub executor: Option<Arc<dyn Fn(&RunSpec, Arc<dyn crate::agent::Tools>) -> Option<crate::autopilot::Executor> + Send + Sync>>,
     pub history: Option<Arc<dyn Fn(&RunSpec) -> Option<crate::history::History> + Send + Sync>>,
     pub audit: Option<Arc<dyn Fn(&str, &str) + Send + Sync>>,
+    /// The cluster behind `task_deploy` (the task's own namespace only).
+    pub cluster: Option<Arc<dyn crate::taskenv::TaskCluster>>,
 }
 
 /// The standard way to run a task: the Autopilot machinery with its own tools (rooted at the tree), board, state file, session,
@@ -1845,7 +1946,7 @@ pub fn autopilot_runner(p: RunnerParts) -> Runner {
             let a = a.clone();
             pt = pt.with_audit(Arc::new(move |k, d| a(k, d)));
         }
-        let tools: Arc<dyn crate::agent::Tools> = Arc::new(pt);
+        let tools: Arc<dyn crate::agent::Tools> = Arc::new(crate::taskenv::ReferenceTools::new(Arc::new(pt), &spec.root, &spec.task.namespace, p.cluster.clone()));
         let mut ctx = crate::autopilot::Context::new(&spec.tree, &spec.features, &spec.prompt);
         ctx.state_path = spec.state_path.clone();
         ctx.notes_root = spec.root.clone();

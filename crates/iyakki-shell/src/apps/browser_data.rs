@@ -11,6 +11,7 @@ use super::AppCx;
 pub const HISTORY_MAX: usize = 2000;
 pub const BOOKMARKS_MAX: usize = 1000;
 pub const DOWNLOADS_MAX: usize = 200;
+pub const FOLDERS_MAX: usize = 100;
 pub const ZOOM_MIN: f32 = 0.5;
 pub const ZOOM_MAX: f32 = 3.0;
 const ZOOM_STEPS: [f32; 11] = [0.5, 0.67, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 3.0];
@@ -52,9 +53,18 @@ pub struct Data {
     pub history: Vec<Visit>,
     #[serde(default)]
     pub zoom: BTreeMap<String, f32>,
+    /// Folders made by the person that may hold no bookmark yet (a folder with bookmarks needs no entry here).
+    #[serde(default)]
+    pub folders: std::collections::BTreeSet<String>,
+    /// The person switched the small pictures of often-visited sites off (`thumbnails off`).
+    #[serde(default)]
+    pub thumbs_off: bool,
     /// Sites shown in night colours (N).
     #[serde(default)]
     pub dark: std::collections::BTreeSet<String>,
+    /// Sites where the zoom makes only the letters bigger (Z), not pictures and boxes.
+    #[serde(default)]
+    pub text_zoom: std::collections::BTreeSet<String>,
     #[serde(default)]
     pub downloads: Vec<Download>,
     /// The page size of pages saved as PDF: "A4" (the default) or "Letter".
@@ -70,17 +80,21 @@ pub struct Suggestion {
     pub bookmark: bool,
 }
 
-fn path(cx: &AppCx) -> std::path::PathBuf {
-    cx.services.dir().join(format!("browser-data-{}.json", super::browser_config::who(cx)))
+/// The reader browser's data file: beside the data folder, or inside the sealed browser profile while that is protected and open
+/// (`profilepolicy::reader_data_path`); None while it is sealed, so nothing is read or written beside the sealed file.
+fn path(cx: &AppCx) -> Option<std::path::PathBuf> {
+    iyakki_agent::profilepolicy::reader_data_path(cx.services.dir(), &cx.session.user, &super::browser_config::who(cx))
 }
 
 pub fn load(cx: &AppCx) -> Data {
-    iyakki_schema::read_plain("browser data", &path(cx), iyakki_schema::now_secs()).unwrap_or_default()
+    let Some(p) = path(cx) else { return Data::default() };
+    iyakki_schema::read_plain("browser data", &p, iyakki_schema::now_secs()).unwrap_or_default()
 }
 
 pub fn save(cx: &AppCx, d: &Data) {
+    let Some(p) = path(cx) else { return };
     if let Ok(t) = serde_json::to_string(d) {
-        super::browser_config::write_checked("browser data", &path(cx), &t);
+        super::browser_config::write_checked("browser data", &p, &t);
     }
 }
 
@@ -92,6 +106,32 @@ pub fn host_of(url: &str) -> &str {
 
 fn words(s: &str) -> Vec<String> {
     s.split_whitespace().map(str::to_lowercase).collect()
+}
+
+/// The words of a typed command; a double-quoted part keeps its spaces (`folder rename "Old name" Work`).
+pub fn command_words(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let (mut quoted, mut any) = (false, false);
+    for c in line.chars() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                any = true;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if any || !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+                any = false;
+            }
+            c => cur.push(c),
+        }
+    }
+    if any || !cur.is_empty() {
+        out.push(cur);
+    }
+    out
 }
 
 /// Every word of the query appears in the title or the address.
@@ -166,9 +206,88 @@ impl Data {
         }
     }
 
-    /// The bookmarks grouped by folder: the top level first, then folders by name.
+    /// A folder name as it is kept: no control characters, at most 60 characters, no outer spaces.
+    pub fn clean_folder(name: &str) -> String {
+        name.trim().chars().filter(|c| !c.is_control()).take(60).collect::<String>().trim().to_string()
+    }
+
+    /// Make a folder (it may stay empty).
+    pub fn new_folder(&mut self, name: &str) -> Result<String, String> {
+        let name = Self::clean_folder(name);
+        if name.is_empty() {
+            return Err("a folder needs a name".into());
+        }
+        if self.folder_names().contains(&name) {
+            return Err(format!("there is already a folder {name}"));
+        }
+        if self.folder_names().len() >= FOLDERS_MAX {
+            return Err(format!("at most {FOLDERS_MAX} folders"));
+        }
+        self.folders.insert(name.clone());
+        Ok(name)
+    }
+
+    /// Every folder: the ones made by the person and the ones that hold a bookmark.
+    pub fn folder_names(&self) -> Vec<String> {
+        let mut s: std::collections::BTreeSet<String> = self.folders.clone();
+        s.extend(self.bookmarks.iter().filter(|b| !b.folder.is_empty()).map(|b| b.folder.clone()));
+        s.into_iter().collect()
+    }
+
+    /// Move a bookmark into a folder (made on the way if it is new); an empty name or `-` is the top level. False when the
+    /// address is not bookmarked.
+    pub fn move_bookmark(&mut self, url: &str, folder: &str) -> Result<bool, String> {
+        let folder = if folder.trim() == "-" { String::new() } else { Self::clean_folder(folder) };
+        if !self.is_bookmarked(url) {
+            return Ok(false);
+        }
+        if !folder.is_empty() && !self.folder_names().contains(&folder) {
+            self.new_folder(&folder)?;
+        }
+        self.set_folder(url, &folder);
+        Ok(true)
+    }
+
+    /// Rename a folder with everything in it; returns how many bookmarks moved. The new name may be an existing folder (they merge).
+    pub fn rename_folder(&mut self, old: &str, new: &str) -> Result<usize, String> {
+        let (old, new) = (Self::clean_folder(old), Self::clean_folder(new));
+        if new.is_empty() {
+            return Err("the new name is empty".into());
+        }
+        if !self.folder_names().contains(&old) {
+            return Err(format!("there is no folder {old}"));
+        }
+        let mut n = 0;
+        for b in self.bookmarks.iter_mut().filter(|b| b.folder == old) {
+            b.folder = new.clone();
+            n += 1;
+        }
+        self.folders.remove(&old);
+        self.folders.insert(new);
+        Ok(n)
+    }
+
+    /// Remove a folder; its bookmarks stay, at the top level. Returns how many moved.
+    pub fn delete_folder(&mut self, name: &str) -> Result<usize, String> {
+        let name = Self::clean_folder(name);
+        if !self.folder_names().contains(&name) {
+            return Err(format!("there is no folder {name}"));
+        }
+        let mut n = 0;
+        for b in self.bookmarks.iter_mut().filter(|b| b.folder == name) {
+            b.folder.clear();
+            n += 1;
+        }
+        self.folders.remove(&name);
+        Ok(n)
+    }
+
+    /// The bookmarks grouped by folder: the top level first, then folders by name (empty folders included).
     pub fn bookmark_folders(&self) -> Vec<(String, Vec<&Bookmark>)> {
         let mut m: BTreeMap<&str, Vec<&Bookmark>> = BTreeMap::new();
+        for f in &self.folders {
+            m.entry(f.as_str()).or_default();
+        }
         for b in &self.bookmarks {
             m.entry(b.folder.as_str()).or_default().push(b);
         }
@@ -237,6 +356,20 @@ impl Data {
     pub fn toggle_dark(&mut self, host: &str) -> bool {
         if !self.dark.remove(host) && self.dark.len() < 1000 {
             self.dark.insert(host.to_string());
+            return true;
+        }
+        false
+    }
+
+    /// Whether the zoom of this site is text-only.
+    pub fn is_text_zoom(&self, host: &str) -> bool {
+        self.text_zoom.contains(host)
+    }
+
+    /// Switch the site between page zoom and text-only zoom; returns the new state (true: text only).
+    pub fn toggle_text_zoom(&mut self, host: &str) -> bool {
+        if !self.text_zoom.remove(host) && !host.is_empty() && self.text_zoom.len() < 1000 {
+            self.text_zoom.insert(host.to_string());
             return true;
         }
         false
@@ -404,6 +537,41 @@ mod tests {
         assert!(d.suggestions("r", 10).is_empty(), "one letter is too little to guess from");
         assert_eq!(d.suggestions("rust", 2).len(), 2, "capped");
         assert_eq!(d.suggestions("docs rust", 10).len(), 1, "all words must match");
+    }
+
+    #[test]
+    fn folders_are_made_filled_renamed_merged_and_deleted_without_losing_bookmarks() {
+        let mut d = Data::default();
+        d.toggle_bookmark("https://a.org/", "A");
+        d.toggle_bookmark("https://b.org/", "B");
+        assert_eq!(d.new_folder("Work").unwrap(), "Work");
+        assert!(d.new_folder("Work").unwrap_err().contains("already"));
+        assert!(d.new_folder("  ").is_err());
+        assert_eq!(d.bookmark_folders().iter().map(|(f, v)| (f.as_str(), v.len())).collect::<Vec<_>>(), vec![("", 2), ("Work", 0)], "an empty folder is listed");
+        assert_eq!(d.move_bookmark("https://a.org/", "Work"), Ok(true));
+        assert_eq!(d.move_bookmark("https://b.org/", "Reading"), Ok(true), "a new name makes the folder");
+        assert_eq!(d.move_bookmark("https://nowhere/", "Work"), Ok(false));
+        assert_eq!(d.folder_names(), vec!["Reading".to_string(), "Work".to_string()]);
+        assert_eq!(d.rename_folder("Reading", "Work").unwrap(), 1, "renaming onto a folder merges");
+        assert_eq!(d.bookmark_folders().len(), 1);
+        assert!(d.rename_folder("Nope", "X").is_err() && d.rename_folder("Work", "").is_err());
+        assert_eq!(d.delete_folder("Work").unwrap(), 2);
+        assert!(d.bookmarks.iter().all(|b| b.folder.is_empty()) && d.folders.is_empty(), "the bookmarks are still there, at the top");
+        assert_eq!(d.move_bookmark("https://a.org/", "-"), Ok(true));
+        for i in 0..FOLDERS_MAX {
+            let _ = d.new_folder(&format!("f{i}"));
+        }
+        assert!(d.new_folder("one more").unwrap_err().contains("at most"));
+        assert_eq!(d.new_folder(&format!("long{}", "x".repeat(200))).map(|n| n.len()).unwrap_or(0), 0);
+    }
+
+    #[test]
+    fn typed_commands_split_into_words_and_quotes_keep_spaces() {
+        assert_eq!(command_words("folder move Work"), vec!["folder", "move", "Work"]);
+        assert_eq!(command_words("folder rename \"Old name\" \"New one\""), vec!["folder", "rename", "Old name", "New one"]);
+        assert_eq!(command_words("  a   b  "), vec!["a", "b"]);
+        assert_eq!(command_words("x \"\""), vec!["x", ""]);
+        assert!(command_words("").is_empty());
     }
 
     #[test]

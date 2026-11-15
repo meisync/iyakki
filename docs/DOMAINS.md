@@ -43,7 +43,7 @@ Through the assistant: `domain_route_add` (host `store.local`, port 30580), `dom
 
 ## Limits, honestly
 
-* "Who may reach it" is recorded, but the listener cannot know who a person is: `members` is **not enforced** by it. The firewall (local
+* "Who may reach it": `members` is enforced by the listener on this device (a request needs a session of the IYAKKI web service; see cloudlisten.rs), a members TLS-passthrough route is closed. The firewall (local
   network only) is the real fence, or put a sign-in in front.
 * The listener speaks HTTP/1.1 to targets in plain text; use passthrough for a target that speaks TLS (the web desktop).
 * The extra `.local` names are not probed for conflicts with another computer that already uses the name.

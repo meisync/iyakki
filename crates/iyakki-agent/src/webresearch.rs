@@ -133,7 +133,7 @@ pub fn normalize_address(s: &str) -> Result<String, String> {
 impl WebClient {
     /// The page budget of a person's current request (a new one after two quiet minutes).
     pub fn budget_for(&self, user: &str) -> Budget {
-        let mut m = self.budgets.lock().unwrap();
+        let mut m = self.budgets.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let now = Instant::now();
         match m.get_mut(user) {
             Some((t, b)) if now.duration_since(*t) < Duration::from_secs(BURST_SECS) => {
@@ -150,28 +150,28 @@ impl WebClient {
 
     /// Tests set how long a research may take.
     pub fn set_research_time(&self, d: Duration) {
-        *self.research_time.lock().unwrap() = d;
+        *self.research_time.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = d;
     }
 
     fn note_failed(&self, host: &str, why: &str) {
-        let mut f = self.failed.lock().unwrap();
+        let mut f = self.failed.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         f.retain(|_, (t, _)| t.elapsed() < Duration::from_secs(FAILED_SECS));
         f.insert(webpage::bare_host(host).to_string(), (Instant::now(), why.to_string()));
     }
 
     /// Why this site was not readable a little while ago, if it was.
     pub fn failed_reason(&self, host: &str) -> Option<String> {
-        let f = self.failed.lock().unwrap();
+        let f = self.failed.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         f.get(webpage::bare_host(host)).filter(|(t, _)| t.elapsed() < Duration::from_secs(FAILED_SECS)).map(|(_, r)| r.clone())
     }
 
     fn remembered(&self, key: &str) -> Option<Arc<Read>> {
-        let c = self.pages.lock().unwrap();
+        let c = self.pages.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         c.get(key).filter(|(t, _)| t.elapsed() < Duration::from_secs(PAGE_SECS)).map(|(_, r)| r.clone())
     }
 
     fn remember_page(&self, key: String, r: Arc<Read>) {
-        let mut c = self.pages.lock().unwrap();
+        let mut c = self.pages.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         c.retain(|_, (t, _)| t.elapsed() < Duration::from_secs(PAGE_SECS));
         if c.len() > 40 {
             c.clear();
@@ -354,7 +354,7 @@ impl WebClient {
     /// near-duplicates; returns excerpts with addresses and a coverage note for the model to summarise.
     pub fn research(&self, p: &Policy, order: &[Engine], req: &Research, budget: &Budget) -> Result<String, String> {
         let started = Instant::now();
-        let deadline = started + *self.research_time.lock().unwrap();
+        let deadline = started + *self.research_time.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let topic = clean(&req.topic, 200);
         if topic.is_empty() {
             return Err("missing `topic`".into());
@@ -575,7 +575,7 @@ impl WebClient {
                         break;
                     }
                     let r = if Instant::now() >= deadline { Err(format!("{}: not read, the time limit for this research was reached", host_of(&jobs[i].url))) } else { self.read(p, &jobs[i].url, budget) };
-                    slots.lock().unwrap()[i] = Some(r);
+                    slots.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[i] = Some(r);
                 });
             }
         });

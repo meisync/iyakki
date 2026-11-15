@@ -61,7 +61,7 @@ impl FakeHs {
         format!("http://127.0.0.1:{}", self.port)
     }
     pub fn reqs(&self) -> Vec<Req> {
-        self.st.lock().unwrap().reqs.clone()
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).reqs.clone()
     }
     pub fn count(&self, method: &str, needle: &str) -> usize {
         self.reqs().iter().filter(|r| r.method == method && r.path.contains(needle)).count()
@@ -106,7 +106,7 @@ fn serve(mut c: TcpStream, st: Arc<Mutex<Hs>>) {
     }
     let body = buf[head_end..].to_vec();
     let req = Req { method, path, auth, ctype, body };
-    let (status, extra, text) = handle(&mut st.lock().unwrap(), &req);
+    let (status, extra, text) = handle(&mut st.lock().unwrap_or_else(std::sync::PoisonError::into_inner), &req);
     let reason = match status {
         200 => "OK",
         302 => "Found",

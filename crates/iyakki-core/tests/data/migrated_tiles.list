@@ -1,0 +1,11 @@
+# Tiles that were moved onto the standard of docs/development/APP-DEVELOPMENT-PROCEDURE.md section 10 (the shell's context is reached only through a port trait).
+# One line per file: <path> <most mentions of `AppCx` allowed>. A listed file may not name `Services`, `.services`, or the shell context's other handles
+# (`cx.host`, `cx.web`, `cx.chat`, `cx.store`, `cx.session`, `cx.audit`) in non-test code; the number is the entry points the shell calls (the App trait's
+# methods and the import). The list only grows (a tile is added when it is migrated); a number may only go down.
+crates/iyakki-shell/src/apps/mcp.rs 3
+crates/iyakki-shell/src/apps/media.rs 7
+crates/iyakki-shell/src/apps/skills.rs 4
+crates/iyakki-shell/src/apps/data.rs 5
+crates/iyakki-shell/src/apps/auth/mod.rs 4
+crates/iyakki-shell/src/apps/camera.rs 3
+crates/iyakki-shell/src/apps/users.rs 3

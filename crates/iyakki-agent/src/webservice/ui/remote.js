@@ -52,6 +52,7 @@
     let st = null;
     let asking = false; // the exposure warning is shown and waits for "Yes, serve"
     let sig = "";
+    let focusId = null; // the control that gets the keyboard focus after the next draw (the page is drawn again from scratch, which would drop it)
 
     async function load(force) {
       const r = await api.get("/api/v1/webaccess");
@@ -73,6 +74,7 @@
       const r = await api.post("/api/v1/webaccess", payload);
       say(r.ok ? okText : r.message, r.ok ? "ok" : "err");
       asking = false;
+      if (payload.on !== undefined) focusId = "remote-main";
       await load(true);
     }
 
@@ -89,17 +91,17 @@
         el("p", {}, [ "Remote access: ", el("strong", { class: w.cls, text: w.text }) ]),
         el("p", { class: "muted", text: "Port " + st.port + " (HTTPS only)" }),
         st.boot ? el("p", { class: "muted", text: "It was started at boot; the switch leaves that one alone." }) : null,
-        asking ? el("div", { role: "alertdialog", "aria-label": "What this exposes" }, [
+        asking ? el("div", { role: "alertdialog", "aria-label": "What this exposes", onkeydown: (ev) => { if (ev.key === "Escape") { asking = false; focusId = "remote-main"; draw(); } } }, [
           el("h2", { text: "What this exposes" }),
           el("p", { class: "warn", text: st.exposes }),
           el("div", { class: "inline" }, [
             el("button", { type: "button", class: "primary", text: "Yes, serve this desktop", onclick: () => change({ on: true }, "Serving this desktop to browsers. Turn it off when you are done.") }),
-            el("button", { type: "button", text: "Cancel", onclick: () => { asking = false; draw(); } }),
+            el("button", { type: "button", id: "remote-cancel", text: "Cancel", onclick: () => { asking = false; focusId = "remote-main"; draw(); } }),
           ]),
         ]) : el("div", { class: "inline" }, [
           st.on
-            ? el("button", { type: "button", class: "danger", text: "Stop serving this desktop", onclick: () => change({ on: false }, "No longer serving this desktop to browsers: the port is closed within a few seconds and open sessions end.") })
-            : el("button", { type: "button", class: "primary", text: "Serve this desktop to browsers", onclick: () => { asking = true; draw(); } }),
+            ? el("button", { type: "button", id: "remote-main", class: "danger", text: "Stop serving this desktop", onclick: () => change({ on: false }, "No longer serving this desktop to browsers: the port is closed within a few seconds and open sessions end.") })
+            : el("button", { type: "button", id: "remote-main", class: "primary", text: "Serve this desktop to browsers", onclick: () => { asking = true; focusId = "remote-cancel"; draw(); } }),
         ]),
       ]));
 
@@ -126,11 +128,12 @@
         body.appendChild(card);
       }
       body.appendChild(el("p", { class: "muted", text: "Turn it off when you are done. The firewall port is opened for the local networks only while it is on, and closed when it is off." }));
+      if (focusId) { const t = body.querySelector("#" + focusId); focusId = null; if (t && t.focus) t.focus(); }
     }
 
     await load(true);
-    // TODO(web-ui): polling stands in for the events WebSocket the API does not have yet (see app.js, poll).
-    ctx.poll(() => load(false), 5000);
+    // refreshed by the event stream when it is up, by the timer otherwise (app.js, poll)
+    ctx.poll(() => load(false), 5000, { push: true });
   }
 
   const exported = { page, parsePort, fingerprintLines, stateWord };

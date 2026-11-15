@@ -539,6 +539,9 @@ pub fn deploys_to_cluster(item: Item) -> bool {
 }
 
 pub struct Setup {
+    /// A press on a tile while the page scrolls: the card opens when the pointer is released, unless the press became a drag
+    /// that scrolled the page (a finger moving the list must not open what it passes over).
+    pending_open: Option<Item>,
     pub facts: Option<Facts>,
     /// The facts were given (tests): do not read the machine.
     fixed: bool,
@@ -628,6 +631,7 @@ impl Default for Setup {
 impl Setup {
     pub fn new() -> Setup {
         Setup {
+            pending_open: None,
             facts: None,
             fixed: false,
             slot: Default::default(),
@@ -1820,6 +1824,16 @@ impl Setup {
         if let Some(item) = self.popup {
             return self.popup_event(item, ev, cx);
         }
+        if let Event::MouseUp(..) = ev {
+            if let Some(it) = self.pending_open.take() {
+                let dragged = self.list.body_dragging();
+                self.list.event(ev, BAR);
+                if !dragged {
+                    self.open_popup(it);
+                }
+                return Some(Flow::Stay);
+            }
+        }
         if self.list.event(ev, BAR) {
             return Some(Flow::Stay);
         }
@@ -1843,8 +1857,13 @@ impl Setup {
                 Some(Flow::Stay)
             }
             Event::Tab(n) if (TILE..TILE + Item::ALL.len()).contains(n) => {
+                self.pending_open = None;
                 if let Some(it) = Item::ALL.get(n - TILE) {
-                    self.open_popup(*it);
+                    if self.list.body_press() {
+                        self.pending_open = Some(*it);
+                    } else {
+                        self.open_popup(*it);
+                    }
                 }
                 Some(Flow::Stay)
             }

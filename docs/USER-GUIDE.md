@@ -28,8 +28,37 @@ Contents: [Global keys](#global-keys-and-the-help-overlay) · [Launcher](#the-la
 | **Esc** | Back (leaves a text field first) |
 | **Ctrl+V** | Paste the latest copy |
 | **Ctrl+Shift+V** or right-click | Clipboard history; its **Scan QR** button (Ctrl+K) copies text from a QR code held up to the camera (see below) |
-| `o` (launcher) | Sign out |
+| `o` (launcher) | Sign out, after a small card "Sign out? Open apps close and the vault locks." (Enter or `y` signs out, Esc or `n` stays); the Sign out button in the top bar signs out at once |
+| **Ctrl+Cmd+Q** (Mac profile; Ctrl+Option+Q too) or **Ctrl+Windows+Q** (PC profile) | Sign out from any screen, with the same confirm card |
+| **Ctrl+Cmd+L** (Mac profile; Ctrl+Option+L too) or **Super+L** (PC profile) | Lock the screen |
 | `p` (launcher) | Power menu: anyone signed in at the machine's own screen; over the browser or cloud only if your role allows |
+
+### Keys on Home
+
+Every key of the Home screen, what it does and whether it asks first. Only signing out ends something at once, so the keys that sign
+out ask (a small card: Enter or `y` signs out, Esc or `n` stays; a second Esc never signs out). Nothing else on Home loses anything.
+
+| Key | What it does | Asks first? |
+|---|---|---|
+| Arrow keys, Home, End | Choose a tile (past the edge of a page turns it) | no, nothing changes |
+| Tab / Shift+Tab | Next / previous group | no |
+| PageUp / PageDown, mouse wheel | Turn the page | no |
+| Enter | Open the chosen tile | no |
+| `1` to `9` | Open the Nth tile of the All list | no |
+| `s` | Settings | no |
+| `v` | Volume bar | no |
+| `t` | Startup apps strip | no |
+| `m` | Move the chosen tile to another group (menu) | the menu is the question |
+| `g` | The group's menu (new, rename, delete); delete asks "Delete the group?" | yes, for delete |
+| `u` | Undo the last tile move (offered for ten seconds) | no, it is the undo |
+| `[` and `]` | Move the chosen tile earlier / later in its group | no, undo with `u` |
+| `p` | Power menu (power off, restart, sleep, lock; only if your role allows) | the menu is the question |
+| `o`, `q` or Esc | Sign out | yes: "Sign out? Open apps close and the vault locks." |
+| Ctrl+Cmd+Q (Mac profile; Ctrl+Option+Q too) or Ctrl+Windows+Q (PC profile) | Sign out from any screen | yes, the same card |
+| Ctrl+Cmd+L (Mac profile; Ctrl+Option+L too) or Super+L (PC profile) | Lock the screen (you stay signed in; the vault closes) | no, a lock only protects |
+| F1 | Help for this screen | no |
+| F7, F8, F9, F10, F11, F12 | Clock, Devices, Inbox, IYAKKI menu, Home, Screenshot | no |
+| Top bar Sign out button | Sign out | no, it is a deliberate click |
 
 **Selecting and copying.** Drag over text in the chat transcript, terminal output and detail panes to select (double-click
 a word, triple-click a paragraph, Shift+click to extend), then **Ctrl+C**. A plain click does not copy; hover a message
@@ -167,6 +196,13 @@ The layout is yours: other accounts keep theirs, and it changes only where a til
 * **Too many chips for the width** (a phone, many groups): the row ends with a **…** chip that lists the rest; the shown group always has its chip.
 * **Settings → Home layout** does the same with lists: every group (rename, delete, earlier/later), every tile with the group it is in (Move tile,
   Put tile back) and *Reset to default layout* (tiles back, your groups stay).
+* **Desktop views.** Settings, Desktop views: several named views on one screen, up to 9, each with its own open apps and panes (you start with one, *Main*).
+  Switching closes nothing: Ctrl+Alt+Super+1 to 9 jump to a view, Ctrl+Alt+PageUp / PageDown or Control+Command+Left / Right step (you choose which set in
+  *Keys*), and a small strip of chips at the bottom right (shown when you have two or more views) switches by click. *From a template* makes a view that
+  opens its apps the first time (Work: EDIT and CLI; Media: MEDIA and RADIO; Monitoring: SYSTEM, USAGE and MESH). *Lock on/off* makes a view ask for your
+  password each time you switch to it (the lock screen appears, and the view opens when the password is right). *After the lock* chooses whether unlocking
+  returns to the first view (default: stay where you were). The role still decides which apps open in any view. The views and the active one are kept
+  when you sign out.
 * **Apps that name a group.** A Store app's app.json may say `"group": "Games"`. If that is a group you have (any capitals) the app goes there. If not, a
   card asks once: *This app wants to be in the group “Games”. Create it?* **Create** or **Put it in Work**; the answer is remembered for that app. If you
   move the app yourself, your choice wins over the app's `group` on later updates.
@@ -385,7 +421,7 @@ Name of this computer, Where my data is kept). After a crash or a power cut it a
 
 The list on the left has eight headings, in this order, and the pages under them:
 **Overview** · **Account & people** (Account, Vault, Secret providers) · **Apps & AI** (Models, Agents, Skills, RAG, Voice,
-Browser, Host access) · **Network & sharing** (Network, Firewall, Shared folders) · **Display & sound** (Display, Displays, Screen saver, Home layout,
+Browser, Host access) · **Network & sharing** (Network, Firewall, Shared folders) · **Display & sound** (Display, Displays, Screen saver, Home layout, Desktop views,
 Sound, System sounds) · **Devices** (Bluetooth, Keyboard) · **System** (Time, Host name, Memory, Storage, Install to disk, Cloud mode) ·
 **Developer** (Developer mode, Dev cluster, Git and SSH keys). The left and right arrow keys walk the pages in that order.
 
@@ -462,6 +498,8 @@ this site · `c` developer panel · `+ - 0` zoom · `R` reader · `U` view sourc
 **`F` the full web engine** (WebKit, needs its helper, [`FULL-BROWSER.md`](FULL-BROWSER.md)) · `Q` ask / `S` summarise / `T`
 translate / `M` keep in knowledge (asks each time). **Searching:** words typed in the bar are searched on Bing's plain results page (Settings, Browser: DuckDuckGo, Brave Search or Wikipedia); if that page is busy or asks for a check, the next one is tried and a note says so. Google's own results page only answers with "enable JavaScript", so Google searches are run on your chosen engine too. A name that does not exist (`youtub.com`) shows "Couldn't find ..." with a search for it and, for near misses of popular sites, "Did you mean youtube.com?". YouTube, Gmail, Google sign-in and similar apps need the full engine: the `web` or `macweb` image (the Mac image with the web engine). **In the full engine** click a box and type; the keyboard goes to the page (Esc gives it back to the browser, Ctrl+L is the address bar, Ctrl+T/Ctrl+W tabs); Ctrl+C/Ctrl+V and a page's own Copy button use IYAKKI's clipboard; use a mouse (touchpads are not read). **Limits:** no video, canvas or IndexedDB in the built-in engine; CJK
 and emoji show as boxes; heavy web apps need `F`. Honest list: [`BROWSER-ROADMAP.md`](BROWSER-ROADMAP.md).
+
+**Newer in the built-in browser (alpha.3).** *Bookmark folders:* in the address bar `folder new NAME`, `folder move`, `folder rename`, `folder delete` and `folder list` (deleting a folder keeps its bookmarks); `M` on a selected bookmark opens `folder move`; Ctrl+B lists bookmarks by folder. *History search:* `history: WORDS` in the address bar, or `S` on the History page. *Zoom:* `+ - 0` zoom the page (remembered for each site), **`Y` makes only the letters bigger** (text-only zoom, per site), and Ctrl with `+ - 0` or with the mouse wheel zooms too; the full web engine keeps whole-page zoom only. *Start page pictures:* a site you visited at least twice over https gets a small picture beside its link in Most visited (never a page with a password or file field); `thumbnails off` in the address bar switches them off and deletes them, `thumbnails clear` deletes them, Shift+D and `X` delete them too. *Downloads:* a file is fetched in 1 MB ranged pieces with a progress bar, Esc stops it and removes the part, and nothing appears under the final name until it is whole; a file field in a form takes the path of a file you may read (16 MB cap); a saved file opens from the Downloads list in the tile that suits it (text in EDIT, tables in DATA, music and video in MEDIA, PDFs in the viewer). *Forms:* `profile set` keeps a name, e-mail, phone and address in your vault and `Ctrl+Y` fills them. *`!`* writes one line about a broken site (host, status, script notes, never the path or query) to a file on this computer; nothing is sent. *Ad blocking:* Settings, Browser, **Ads and trackers** has a **uBlock filters** button (key `v`) that downloads a filter list only when you press it ([`CONTENT-BLOCKING.md`](CONTENT-BLOCKING.md)); the assistant has chat tools for the same (status free, the rest ask). Chat tools also exist for bookmarks, history, zoom and saved details. Several of these are tested on fixture sites only; the start page pictures and the text-only zoom have not been looked at on a screen.
 
 **The Browser's tool bar and tabs.** Left to right: Back, Forward, Reload, Start page; then the address bar with the padlock chip (*Secure* or *Not secure*) inside its left edge and the star (bookmark) and **Go** inside its right end (Enter does the same); then small chips: **Reader** (back to the built-in reader), **Notes**, **Scripts on / Scripts off** (a shield: *Scripts allowed on this site* runs the page's programs, which video, maps and mail need; *Scripts blocked* is faster and safer but some sites stop working; hover it for the sentence), **Play**, and the developer-tools chip. A thin bar under the tool bar slides while a page loads and fills as the engine reports; the page area is dark until the first picture arrives. After 15 seconds a card says the page is taking a while, with **Stop** and **Retry**; a page that cannot be reached shows a card in plain words (can't reach the site, you are offline, the certificate cannot be trusted) with **Retry**. Tabs show a spinner while loading and cut long titles with an ellipsis.
 

@@ -40,6 +40,15 @@ impl Ctx<'_> {
     pub(super) fn data_dir(&self) -> std::path::PathBuf {
         super::tenants::data_dir_for(self.sh, self.token, self.principal.map(|p| p.user.as_str()).unwrap_or(""))
     }
+    /// A function that puts one event on this person's stream (their tenant's bus, only they receive it).
+    pub(super) fn notifier(&self) -> super::runs::Notify {
+        let bus = crate::notifyhub::events::bus_for(&self.data_dir());
+        let user = self.who().user.clone();
+        std::sync::Arc::new(move |ev: String| {
+            bus.publish(&user, &ev);
+        })
+    }
+
     fn query_num(&self, key: &str, max: u64) -> u64 {
         self.req.query.get(key).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0).min(max)
     }
@@ -92,7 +101,13 @@ pub fn dispatch(id: &str, c: &Ctx) -> Out {
             // tenant approvals only as an eligible approver. A person with neither gets an empty list (200), by design.
             let p = c.who();
             let chat = p.policy.agent && p.policy.apps.contains(&iyakki_sec::policy::App::Chat);
-            let v: Vec<Value> = if chat { c.sh.deps.store.pending_approvals(Some(&p.user)).into_iter().map(approval_json).collect() } else { vec![] };
+            let mut v: Vec<Value> = if chat { c.sh.deps.store.pending_approvals(Some(&p.user)).into_iter().map(approval_json).collect() } else { vec![] };
+            if chat {
+                // a tile in the browser that wants a tool which asks first (the run is "tile", the call is the question's id)
+                for a in c.sh.tiles.asks.waiting(&p.user) {
+                    v.push(json!({"run": "tile", "call": a.id, "tool": a.tool, "summary": if a.summary.is_empty() { format!("tile \"{}\" wants to use {}", a.tile, a.tool) } else { format!("tile \"{}\": {}", a.tile, a.summary) }, "detail": a.detail, "risk": crate::runs::approval_risk(&a.tool), "since": crate::tenantconfig::now_secs() as i64 - a.age_secs as i64}));
+                }
+            }
             ok(super::notifyapi::unify(c, v))
         }
         "approvals_decide" => approvals_decide(c),
@@ -122,6 +137,10 @@ pub fn dispatch(id: &str, c: &Ctx) -> Out {
         "flows_run" => super::flowruns::start(c),
         "flows_runs" => super::flowruns::list(c),
         "flows_run_get" => super::flowruns::view(c),
+        "flows_import" => super::flowruns::import(c),
+        "flows_validate" => super::flowruns::validate(c),
+        "flows_run_stop" => super::flowruns::stop(c),
+        "flows_run_decide" => super::flowruns::decide(c),
         "git_clone" => super::files::clone(c),
         "git_clones" => super::files::clones(c),
         "webaccess_get" => {
@@ -132,6 +151,7 @@ pub fn dispatch(id: &str, c: &Ctx) -> Out {
         "tenants_list" => super::tenants::list(c),
         "tenant_switch" => super::tenants::switch(c),
         "tenant_view" => tenant_view(c),
+        "tenant_audit" => tenant_audit(c),
         "tenant_bootstrap" => tenant_bootstrap(c),
         "tenant_member" => tenant_member(c),
         "ns_manage" => ns_manage(c),
@@ -140,7 +160,7 @@ pub fn dispatch(id: &str, c: &Ctx) -> Out {
         id if id.starts_with("tile_") => super::tiles::handle(c, id),
         id if id.starts_with("notif_") => super::notifyapi::handle(c, id),
         "events" => Err(Fail::new(426, "invalid_input", "this is a WebSocket: connect with an Upgrade request")),
-        id if id.starts_with("tcfg_") || id.starts_with("tapprovals_") || id.starts_with("tteam_") => super::tenantcfg::handle(c, id),
+        id if id.starts_with("tcfg_") || id.starts_with("tcfgme_") || id.starts_with("tapprovals_") || id.starts_with("tteam_") => super::tenantcfg::handle(c, id),
         _ => Err(Fail::new(501, "unsupported", "not implemented")),
     }
 }
@@ -156,7 +176,37 @@ struct LoginReq {
     password: String,
 }
 
+/// A program signs in with the developer key of a paired computer instead of a password: the request is signed (`devmode::auth`,
+/// bound to this service's certificate fingerprint, a fresh nonce, the clock) and the token it gets can call only the route
+/// families granted to that computer as `api:*` scopes.
+fn paired_login(c: &Ctx) -> Out {
+    let headers = |n: &str| c.req.header(n).map(str::to_string);
+    let query: Vec<(String, String)> = c.req.query.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let now = crate::clock::now_unix();
+    let denied = |why: &str| {
+        c.sh.deps.audit.record("-", "api.login.denied", &format!("paired program: {why} addr={}", c.ip));
+        Fail::new(401, "unauthorized", "this request is not signed by a paired developer key")
+    };
+    if c.sh.fingerprint.is_empty() {
+        return Err(Fail::new(501, "unsupported", "this service has no certificate of its own, so programs cannot sign in with a key here"));
+    }
+    let key = crate::devmode::auth::check(&headers, &c.req.method, &c.req.path, &query, &c.req.body, &c.sh.fingerprint, now, &c.sh.nonces, &|k| c.sh.deps.extras.paired_program(k).is_some()).map_err(|e| denied(&e.to_string()))?;
+    let (computer, account) = c.sh.deps.extras.paired_program(&key).ok_or_else(|| denied("unknown key"))?;
+    let scopes = c.sh.deps.extras.program_scopes(&computer);
+    if scopes.is_empty() {
+        c.sh.deps.audit.record("-", "api.login.denied", &format!("paired program {computer}: no api scope granted addr={}", c.ip));
+        return Err(Fail::new(403, "denied", "no api scope has been granted to this computer; an administrator grants them on the device (Settings, Developer mode)"));
+    }
+    let Some(p) = c.sh.deps.auth.lookup(&account) else { return Err(denied("the account is gone")) };
+    let t = c.sh.tokens.issue_program(&p.user, &computer).map_err(|e| Fail::new(503, "unavailable", &e))?;
+    c.sh.deps.audit.record(&p.user, "api.login.paired", &format!("computer={computer} scopes={} addr={}", scopes.join(","), c.ip));
+    Ok((200, json!({"token": t, "expires_in": c.sh.cfg.limits.token_lifetime_secs, "user": p.user, "role": p.role, "computer": computer, "scopes": scopes}), String::new()))
+}
+
 fn login(c: &Ctx) -> Out {
+    if c.req.header(crate::devmode::auth::H_KEY).is_some() {
+        return paired_login(c);
+    }
     let req: LoginReq = serde_json::from_value(json_body(c.req)?).map_err(|_| Fail::new(400, "invalid_input", "send {\"name\":..., \"password\":...}"))?;
     let shown = if iyakki_sec::policy::valid_username(&req.name) { req.name.clone() } else { "?".to_string() };
     match c.sh.deps.auth.login(&req.name, &req.password) {
@@ -196,8 +246,18 @@ fn runs_start(c: &Ctx) -> Out {
         (None, None) => None,
         _ => return Err(Fail::new(400, "invalid_input", "give provider and model together, or neither")),
     };
-    agent_gate(c, model, r.namespace.as_deref())?;
-    let id = c.sh.runs.start(c.who(), &r.prompt, model, allowed, c.sh.cfg.limits.concurrent_runs)?;
+    // a team's own model host or provider: the run's backend is the team's (gate, counters and audit on every call)
+    let team_backend = match model {
+        Some((pr, m)) => super::tenantcfg::team_backend(c, pr, m, r.namespace.as_deref())?,
+        None => None,
+    };
+    let id = match team_backend {
+        Some(b) => c.sh.runs.start_with_backend(c.who(), &r.prompt, b, allowed, c.sh.cfg.limits.concurrent_runs, Some(c.notifier()))?,
+        None => {
+            agent_gate(c, model, r.namespace.as_deref())?;
+            c.sh.runs.start(c.who(), &r.prompt, model, allowed, c.sh.cfg.limits.concurrent_runs, Some(c.notifier()))?
+        }
+    };
     Ok((200, json!({"id": id}), format!("run={id} chars={}", r.prompt.len())))
 }
 
@@ -254,6 +314,12 @@ fn approvals_decide(c: &Ctx) -> Out {
         _ => return Err(Fail::new(400, "invalid_input", "the verdict is \"approve\" or \"deny\"")),
     };
     let (run, call) = (&c.params[0], &c.params[1]);
+    if run == "tile" {
+        let approve = verdict == Verdict::Approve;
+        let (tile, tool) = c.sh.tiles.asks.decide(&me.user, call, approve).map_err(|e| if e.contains("already") { Fail::new(409, "busy", "already answered") } else { Fail::new(404, "not_found", "no such waiting request") })?;
+        let word = if approve { "approve" } else { "deny" };
+        return Ok((200, json!({"run": run, "call": call, "tool": tool, "verdict": word}), format!("tile={tile} tool={tool} verdict={word}")));
+    }
     let store = &c.sh.deps.store;
     let pending = store.pending_approvals(None).into_iter().find(|a| a.run_id == *run && a.call_id == *call);
     let Some(a) = pending else {
@@ -381,6 +447,26 @@ fn tenant_view(c: &Ctx) -> Out {
     let members: Vec<Value> = if admin { r.tenant.iter().map(|(n, t)| json!({"name": n, "role": format!("{t:?}").to_lowercase()})).collect() } else { vec![] };
     let namespaces: Vec<Value> = r.visible_namespaces(me).into_iter().map(|(n, m)| json!({"name": n, "role": m.map(|x| format!("{x:?}").to_lowercase()), "joined": m.is_some()})).collect();
     ok(json!({"user": me, "tenant_role": role.map(|t| format!("{t:?}").to_lowercase()), "members": members, "namespaces": namespaces}))
+}
+
+/// `GET /api/v1/tenant/audit?limit=&offset=`: a page of the role-change trail, newest first (`cloudroles::audit_page`; 100 lines by
+/// default, at most 200), with the number of lines in all and whether older ones follow; for tenant owners and administrators.
+fn tenant_audit(c: &Ctx) -> Out {
+    let acc = access(c);
+    denied(&acc.check(&c.who().user, &Action::EnterTenant))?;
+    let r = acc.roles().ok().flatten().ok_or_else(|| Fail::new(403, "denied", "no access"))?;
+    if !r.tenant_role(&c.who().user).is_some_and(|t| t >= TenantRole::Admin) {
+        return Err(Fail::new(403, "denied", "only tenant owners and administrators may read the trail"));
+    }
+    let limit = match c.query_num("limit", 200) {
+        0 => 100,
+        n => n as usize,
+    };
+    let offset = c.query_num("offset", u32::MAX as u64) as usize;
+    let (page, total) = crate::cloudroles::audit_page(&crate::cloudroles::audit_path(&c.data_dir()), offset, limit);
+    let lines: Vec<Value> = page.into_iter().map(|(t, ch)| json!({"time": t, "change": ch})).collect();
+    let more = offset + lines.len() < total;
+    ok(json!({"lines": lines, "total": total, "offset": offset, "limit": limit, "more": more}))
 }
 
 fn tenant_bootstrap(c: &Ctx) -> Out {

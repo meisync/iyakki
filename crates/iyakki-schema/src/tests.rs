@@ -8,6 +8,14 @@ fn dir(tag: &str) -> PathBuf {
     d
 }
 
+/// The note queue is one list for the whole process and `drain_notes` empties it, so tests that drain it take turns. Tests that only
+/// add notes need no lock: an extra note never breaks an `any` check.
+static NOTES_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn notes_turn() -> std::sync::MutexGuard<'static, ()> {
+    NOTES_TURN.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn add_level(v: &mut Value) {
     if let Some(o) = v.as_object_mut() {
         o.entry("level").or_insert(Value::from(3));
@@ -142,6 +150,7 @@ fn only_the_newest_three_damaged_copies_are_kept() {
 
 #[test]
 fn a_plain_file_that_is_damaged_is_set_aside_reported_and_never_saved_over() {
+    let _turn = notes_turn();
     let d = dir("plain");
     let p = d.join("list.json");
     assert_eq!(read_plain::<Vec<String>>("list", &p, 1), None, "no file: nothing to report");
@@ -176,6 +185,7 @@ fn unlock_dir(d: &Path) {
 
 #[test]
 fn a_damaged_plain_file_that_cannot_be_moved_aside_stays_untouched_and_blocks_a_save() {
+    let _turn = notes_turn();
     let d = dir("nomove-plain");
     let p = d.join("list.json");
     fs::write(&p, r#"["a","#).unwrap();
@@ -204,4 +214,26 @@ fn a_damaged_store_file_that_cannot_be_moved_aside_reports_no_place_and_is_not_r
     unlock_dir(&d);
     assert!(matches!(out, Outcome::Corrupt { moved_to: None, .. }), "the file is damaged and stays");
     assert_eq!(fs::read(&p).unwrap(), b"{ not json");
+}
+
+#[test]
+fn a_plain_file_a_newer_release_reshaped_is_left_alone_not_set_aside() {
+    let _turn = notes_turn();
+    let d = dir("plain-newer");
+    let p = d.join("stations.json");
+    let newer = r#"{"schema":2,"stations":[{"name":"A","url":"https://a.example.org/x.mp3","codec":"opus"}]}"#;
+    fs::write(&p, newer).unwrap();
+    let _ = drain_notes();
+    assert_eq!(read_plain::<Vec<String>>("radio stations", &p, 9), None, "this release cannot read it");
+    assert_eq!(fs::read_to_string(&p).unwrap(), newer, "the file stays where it is, byte for byte");
+    assert!(!d.join("stations.json.corrupt-9").exists(), "it is not damaged, so it is not moved");
+    let w = plain_writable("radio stations", &p).unwrap_err();
+    assert!(w.contains("newer IYAKKI") && w.contains("schema 2"), "{w}");
+    assert!(drain_notes().iter().any(|n| n.starts_with("radio stations ") && n.contains("newer release")));
+    // a list is still ours, and an object without a stamp is still damaged
+    fs::write(&p, r#"["x"]"#).unwrap();
+    assert!(plain_writable("radio stations", &p).is_ok());
+    fs::write(&p, r#"{"stations":[]}"#).unwrap();
+    assert_eq!(read_plain::<Vec<String>>("radio stations", &p, 10), None);
+    assert!(d.join("stations.json.corrupt-10").exists());
 }

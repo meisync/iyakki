@@ -80,5 +80,16 @@ check "post-build.sh skips the prune when the cache was restored" "grep -q 'IYAK
 check "repack.sh syntax is valid" "bash -n '$REAL/repack.sh'"
 check "repack.sh builds both programs in one cargo call" "grep -q -- '-p iyakki-core -p iyakki-store-server' '$REAL/repack.sh'"
 
+# the optional linker (linker.sh): off by default, never for release, never required
+. "$REAL/linker.sh"
+FB="$W/fakebin"; mkdir -p "$FB"; printf '#!/bin/sh\n' > "$FB/ld.lld"; chmod +x "$FB/ld.lld"
+MUSL=x86_64-unknown-linux-musl
+check "linker: off by default (no output)" "[ -z \"\$(env -u IYAKKI_LINKER sh -c '. $REAL/linker.sh; iyakki_linker_env $MUSL device' 2>&1)\" ]"
+check "linker: lld picked when asked and present, stack size kept" "IYAKKI_LINKER=lld PATH='$FB':\$PATH sh -c '. $REAL/linker.sh; iyakki_linker_env $MUSL device 2>/dev/null' | grep -q '^CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=.*stack-size=8388608.*fuse-ld=lld'"
+check "linker: ignored for a release program" "[ -z \"\$(IYAKKI_LINKER=lld PATH='$FB':\$PATH sh -c '. $REAL/linker.sh; iyakki_linker_env $MUSL release 2>/dev/null')\" ]"
+check "linker: missing linker is a note, not an error" "IYAKKI_LINKER=mold PATH='$FB' /bin/sh -c '. $REAL/linker.sh; iyakki_linker_env $MUSL device' 2>&1 | grep -q 'default linker'"
+check "linker: repack.sh and quick-push.sh use it" "grep -q iyakki_linker_env '$REAL/repack.sh' && grep -q iyakki_linker_env '$REAL/quick-push.sh' && bash -n '$REAL/quick-push.sh'"
+check "release path: repack.sh without IYAKKI_LINKER passes no extra environment" "[ -z \"\$(env -u IYAKKI_LINKER sh -c '. $REAL/linker.sh; iyakki_linker_env $MUSL release' 2>&1)\" ]"
+
 echo "$pass passed, $fail failed"
 [ "$fail" = 0 ]

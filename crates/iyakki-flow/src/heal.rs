@@ -661,7 +661,7 @@ mod tests {
 
     #[test]
     fn the_context_is_compact_and_mentions_consumers() {
-        let mut run = Run { grants: vec![], id: "r1".into(), flow_id: "f".into(), flow: flow(), trigger: TriggerInfo::default(), status: RunStatus::Healing, inputs: Value::Null, outputs: Value::Null, nodes: Default::default(), edges: Default::default(), created_ms: 0, scheduled_ms: None, started_ms: 0, ended_ms: 0, error: String::new(), blocked: String::new(), idempotency_key: None, parent: None, heal: vec![], patches: vec![], heal_spent: 0, heal_cents: 0, pending_updates: Default::default(), log: vec![], rev: 0, runner_note: String::new() };
+        let mut run = Run { grants: vec![], run_token: String::new(), id: "r1".into(), flow_id: "f".into(), flow: flow(), trigger: TriggerInfo::default(), status: RunStatus::Healing, inputs: Value::Null, outputs: Value::Null, nodes: Default::default(), edges: Default::default(), created_ms: 0, scheduled_ms: None, started_ms: 0, ended_ms: 0, error: String::new(), blocked: String::new(), idempotency_key: None, parent: None, heal: vec![], patches: vec![], heal_spent: 0, heal_cents: 0, pending_updates: Default::default(), log: vec![], rev: 0, runner_note: String::new() };
         let mut nr = NodeRun::default();
         for n in 1..=5 {
             nr.attempts.push(Attempt { n, error: format!("HTTP 503 try {n}"), class: "retryable".into(), logs: vec!["line".into(); 30], ..Default::default() });

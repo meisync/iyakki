@@ -304,7 +304,7 @@ mod tests {
         assert!(!msgs(&h).iter().any(|m| m.contains("sandbox")));
         let mut t = linear();
         t.nodes[1] = Node::new("a", "thrift", json!({"endpoint": "x:1", "service": "S", "method": "m"}));
-        assert!(msgs(&t).iter().any(|m| m.contains("planned")));
+        assert!(msgs(&t).iter().any(|m| m.contains("http://")), "only Thrift over HTTP is available");
         let mut r = linear();
         r.nodes[1].retry = Some(crate::retry::RetryPolicy::exponential(3, 100, 0.2, 10, 3.0));
         assert!(msgs(&r).iter().filter(|m| m.contains("retry:")).count() >= 2);

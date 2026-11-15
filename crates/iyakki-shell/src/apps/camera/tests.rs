@@ -415,6 +415,24 @@ fn hotplug_adds_and_removes_rows_and_a_pulled_camera_falls_back_to_the_built_in_
 }
 
 #[test]
+fn opening_the_camera_dialog_looks_again_so_a_camera_plugged_in_a_moment_ago_is_listed_without_pressing_refresh() {
+    let mut r = rig("openscan", 0, FakeOpener::default());
+    r.machine.plug_webcam(0, "FaceTime HD Camera (Built-in):");
+    r.app = CameraApp::with_parts(r.machine.presence(), r.opener.clone(), r.dir.join("Pictures"), r.dir.join("Videos"));
+    ready(&mut r);
+    assert_eq!(r.app.camera_names().len(), 1);
+    // plugged in after the tile started and before any 60-tick look: the page does not know it yet
+    r.machine.plug_webcam(2, "EMEET SmartCam Nova 4K");
+    assert_eq!(r.app.camera_names().len(), 1, "no scan has happened since");
+    key(&mut r, Key::Char('c'));
+    assert!(matches!(r.app.overlay, Overlay::Cameras));
+    assert_eq!(r.app.camera_names().len(), 2, "opening the dialog scanned");
+    let mut g = Gfx::new(1280, 720);
+    r.app.render(&mut g, R::new(0.0, 46.0, 1280.0, 674.0), 1.0, &r.cx, 0);
+    assert_eq!(rows(&g).len(), 2);
+}
+
+#[test]
 fn the_dialog_says_there_is_no_other_camera_and_hidden_cameras_are_left_out() {
     let mut r = rig("empty", 1, FakeOpener::default());
     ready(&mut r);
@@ -438,4 +456,35 @@ fn the_dialog_says_there_is_no_other_camera_and_hidden_cameras_are_left_out() {
     use iyakki_agent::camtools::CameraBackend;
     let a = crate::camera::agentcam::AgentCamera::with(m.presence(), Arc::new(FakeOpener::default()));
     assert_eq!(a.cameras(), vec!["video0: Secret Cam", "video2: C270"]);
+}
+
+#[test]
+fn opening_the_change_dialog_looks_again_so_a_camera_plugged_in_meanwhile_is_a_row_without_pressing_refresh() {
+    let mut r = rig("rescan", 1, FakeOpener::default());
+    ready(&mut r);
+    assert_eq!(r.app.camera_names().len(), 1);
+    // plugged in after the screen was set up, no hotplug message, nobody pressed Refresh
+    r.machine.plug_webcam(2, "EMEET SmartCam Nova 4K");
+    key(&mut r, Key::Char('c'));
+    assert!(matches!(r.app.overlay, Overlay::Cameras));
+    let mut g = Gfx::new(1280, 720);
+    r.app.render(&mut g, R::new(0.0, 46.0, 1280.0, 674.0), 1.0, &r.cx, 0);
+    assert_eq!(rows(&g).len(), 2, "the dialog scanned when it opened");
+    assert_eq!(r.app.camera_names().len(), 2);
+}
+
+#[test]
+fn a_failure_is_reworded_by_the_core_when_the_drive_is_gone_and_left_alone_when_it_is_healthy() {
+    use iyakki_core_fake::{Canned, FakeOs};
+    let mut r = rig("drivegone", 1, FakeOpener::default());
+    r.cx.os = Arc::new(FakeOs::with(Canned { drive_gone: Some("The boot drive is gone.".into()), ..Canned::default() }));
+    r.app.handle(&Event::Tick, &r.cx);
+    r.app.say("Could not save the photo: I/O error", false);
+    assert_eq!(r.app.status.as_ref().unwrap().0, "The boot drive is gone.");
+    r.app.say("Timer cancelled.", true);
+    assert_eq!(r.app.status.as_ref().unwrap().0, "Timer cancelled.", "a good message is never reworded");
+    r.cx.os = Arc::new(FakeOs::new());
+    r.app.handle(&Event::Tick, &r.cx);
+    r.app.say("Could not save the photo: I/O error", false);
+    assert_eq!(r.app.status.as_ref().unwrap().0, "Could not save the photo: I/O error");
 }

@@ -113,6 +113,17 @@ Every call is written to the usage log with the app's id, its outcome and its ti
 against fakes: `T.fake.llm.reply('text')`, `.fail('Unavailable')`, `.usage(in, out)`, `T.fake.models.set([...])`, `T.fake.speech.busy('the radio')`, `.said()`, `T.fake.approve('allow'|'deny'|'ask')`,
 `T.fake.budget.set({tokensPerDay})`, `T.fake.clock.advance(ms)`, `T.fake.notify.sent()`; `T.test(name, async () => {...})` may return a promise. Arguments, capabilities, quotas and codes are the real ones.
 
+**SDK 1.2 (bridge v2, alpha.3).** New namespaces, each optional and declared in `app.json` by its capability: `markdown` (render, view, openFile), `embed` (mount another view in a pane of your app),
+`dash` (query a dashboard source, add a panel), `flows` (list, run, status, cancel), `k3s` (read, or manage with `apply` and `restart`), `media` and `audio` (play, queue, volume), `speech.listen`
+(through the `microphone` capability) and `money` (a per-app, per-day limit in the minor units of one currency, **default 0**; only the person raises it; no payment provider is called). Ask the
+bridge what it has instead of guessing a version: `iyakki.has('embed')`, `iyakki.capabilities()`, `iyakki.version`, and `iyakki.call(op, args)` for a name an older bridge has no function for. A name the host
+does not know answers `Unsupported` (the same whether or not you hold the capability); a call that changes state, spends or listens always asks. Old apps keep working, and a newer app can list
+new capability keys under `requires.capabilities_optional` so an older host ignores them. Rules and the full list with approval classes: [`development/SDK-BRIDGE-V2.md`](development/SDK-BRIDGE-V2.md); the calls:
+[`development/SDK-API.md`](development/SDK-API.md) section 14; the fake services for tests: [`SDK-EMULATOR.md`](SDK-EMULATOR.md). The bridge side is built and tested with fakes; the host side of the viewer, embed painting, cluster,
+flow engine, player and microphone is not driven end to end. Chat tools: `app_sdk_status`, `app_money_limit_status`, `app_money_limit_set` (asks).
+
+**WASM tiles and picture icons (experimental, alpha.3).** A tile app can carry a WebAssembly module that speaks the tile ABI ([`development/TILE-ABI.md`](development/TILE-ABI.md)): put the binary `.wasm` file in the app and name it in `app.json` with `"wasm": "tile.wasm"` (text WAT is refused in a bundle; `crates/iyakki-tile-example/tile.wasm` is a working one). The shell runs it in the sandboxed tile host (time, fuel and memory limits, no tools, no files) and paints its display list with the host's reference renderer, but **only while Settings -> Developer mode -> WASM tiles (experimental) is on** (key W, or the assistant's `wasm_tiles_status` and `wasm_tiles_set`, which asks); it is off by default and a wasm tile then says why it does not start. The `index.html` of such an app is still required but is not shown. An `"icon"` that is a `.png` in the app is drawn on the launcher tile; an emoji or an `.svg` icon still shows the first letter of the title.
+
 **Security.** The app's origin is its own, so it shares nothing with a site, the shell or another app (each person's saved data is separate too). Its page gets the
 standard web modules and the bridge, nothing else: no vault, no other tile, no `file:` address. Its network is **only the hosts it declared that the person's host policy
 also allows**; none by default. Code is never made from text: `eval`, `new Function` and the other function constructors throw (decision: this is strict and has no

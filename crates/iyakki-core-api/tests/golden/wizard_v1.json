@@ -1,0 +1,40 @@
+[
+  {
+    "wizard_version": 1,
+    "id": "first-setup",
+    "title": "Set up the weather app",
+    "trigger": {"on": "on_install"},
+    "steps": [
+      {"kind": "form", "id": "account", "title": "Your account", "fields": [
+        {"id": "city", "label": "City", "kind": "text", "required": true, "default": "Berlin", "rules": [{"rule": "min_len", "value": 2}, {"rule": "max_len", "value": 60}]},
+        {"id": "units", "label": "Units", "kind": "choice", "choices": [{"value": "metric", "label": "Metric"}, {"value": "imperial", "label": "Imperial"}], "default": "metric"},
+        {"id": "token", "label": "Service token", "kind": "secret", "required": true, "help": "kept in the vault"},
+        {"id": "folder", "label": "Save reports in", "kind": "path", "default": "/data/reports", "rules": [{"rule": "absolute_path"}]},
+        {"id": "alerts", "label": "Send alerts", "kind": "toggle", "default": true}
+      ]},
+      {"kind": "check", "id": "reach", "title": "Can the service be reached", "check": "net.reach", "param": "api.weather.example:443"},
+      {"kind": "summary", "id": "done", "title": "Ready", "text": "The weather app is set up."}
+    ]
+  },
+  {
+    "wizard_version": 1,
+    "id": "from-one",
+    "trigger": {"on": "on_update", "from": ">=1 <2"},
+    "steps": [
+      {"kind": "migration", "id": "notes", "title": "Move your notes", "migration": "migrations/notes-2.json", "from": "1.0.0", "to": "2.0.0"},
+      {"kind": "summary", "id": "done", "text": "Your notes were moved."}
+    ]
+  },
+  {
+    "wizard_version": 1,
+    "id": "change-city",
+    "trigger": {"on": "reconfigure"},
+    "steps": [{"kind": "form", "id": "again", "fields": [{"id": "city2", "label": "City", "kind": "text"}]}]
+  },
+  {
+    "wizard_version": 1,
+    "id": "export-first",
+    "trigger": {"on": "on_remove"},
+    "steps": [{"kind": "form", "id": "keep", "fields": [{"id": "export", "label": "Export my data first", "kind": "toggle", "default": true}]}]
+  }
+]

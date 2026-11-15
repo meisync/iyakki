@@ -3,6 +3,7 @@
 //! to it), to use UTC, to choose a zone by hand, or to leave it. It is asked once; whatever the answer, it is remembered
 //! (`TimeSettings::zone_asked`) and every choice stays in Settings -> Time. Nothing is sent until the person presses the first button.
 
+use crate::stale_stats::mark_stale;
 use super::*;
 
 pub(super) const AUTO: usize = 0x4D40;
@@ -35,14 +36,14 @@ impl Shell {
         let online = crate::loginbar::network_chip(self.devpop.snapshot().as_ref()).1;
         if due(&t, admin, online) {
             self.tzask.open = true;
-            self.stale = true;
+            mark_stale!(self);
         }
     }
 
     pub(super) fn tzask_event(&mut self, id: usize) {
         let Some(user) = self.session.as_ref().map(|s| s.user.clone()) else { return };
         self.tzask.open = false;
-        self.stale = true;
+        mark_stale!(self);
         let save = |sh: &mut Shell, f: &dyn Fn(&mut iyakki_agent::settings::TimeSettings)| {
             let _ = sh.env.services.settings.lock().map(|mut s| s.update(|st| f(&mut st.time)));
         };

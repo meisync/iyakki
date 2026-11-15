@@ -80,3 +80,28 @@ fn the_cli_runner_keeps_the_output_of_a_program_whose_status_was_taken_and_still
     assert_eq!(crate::clis::run_quiet("sh", &["-c", "exit 3"], 10).unwrap_err(), "sh failed: no message");
     assert!(crate::clis::run_quiet("sh", &["-c", "sleep 5"], 1).unwrap_err().contains("did not finish"));
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn kubectl_whose_status_was_taken_gives_its_answer_unless_it_wrote_an_error() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("iyakki-kube-gone-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mk = |name: &str, body: &str| {
+        let p = dir.join(name);
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p.display().to_string()
+    };
+    let ok = crate::sandbox::kube::Kubectl { program: mk("gone-kube-1", "echo answer; sleep 0.3"), kubeconfig: None, timeout: Duration::from_secs(10) };
+    let thief = steal_status_of_marked("gone-kube-1", Duration::from_secs(5));
+    let r = ok.run(&["get", "pods"], None, 1000);
+    assert_ne!(thief.join().unwrap(), 0, "the test could not take the status");
+    assert_eq!(String::from_utf8_lossy(&r.expect("a lost status with an answer is not an error")).trim(), "answer");
+    let bad = crate::sandbox::kube::Kubectl { program: mk("gone-kube-2", "echo boom >&2; sleep 0.3"), kubeconfig: None, timeout: Duration::from_secs(10) };
+    let thief = steal_status_of_marked("gone-kube-2", Duration::from_secs(5));
+    let r = bad.run(&["get", "pods"], None, 1000);
+    thief.join().unwrap();
+    assert!(r.is_err(), "an error on standard error is still a failure");
+    let _ = std::fs::remove_dir_all(&dir);
+}

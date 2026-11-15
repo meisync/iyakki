@@ -75,6 +75,12 @@ impl MemFacts {
     pub fn known(self) -> bool {
         self.total > 0
     }
+
+    /// Count the memory compression saved (F-BOOT-31): only while the experiment is On, half of the saving, never past `total`.
+    pub fn with_compressed_credit(self, experiment: iyakki_zram::compressed::Experiment, stored_orig: u64, ram_used: u64) -> MemFacts {
+        let credit = iyakki_zram::compressed::gate_credit(experiment, stored_orig, ram_used);
+        MemFacts { total: self.total, available: iyakki_zram::compressed::available_with_credit(self.available, self.total, credit) }
+    }
 }
 
 /// Read memory from a root with a `proc/meminfo` (the real machine: `/`). Missing or garbled gives unknown.
@@ -87,9 +93,55 @@ pub fn read_mem(root: &Path) -> MemFacts {
     MemFacts { total: m.total, available: m.available }
 }
 
-/// The real machine's memory.
+/// What compression holds now: (bytes stored before compression, bytes of RAM they take), from `Zswapped` and `Zswap` in
+/// `proc/meminfo` and from the zram devices' `mm_stat`. Zero when neither is in use.
+pub fn compressed_figures(root: &Path) -> (u64, u64) {
+    let meminfo = std::fs::read_to_string(root.join("proc/meminfo")).unwrap_or_default();
+    let kb = |key: &str| meminfo.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix(':')?.split_whitespace().next()?.parse::<u64>().ok()).unwrap_or(0).saturating_mul(1024);
+    let (mut orig, mut used) = (kb("Zswapped"), kb("Zswap"));
+    let env = iyakki_zram::apply::Env::under(root);
+    if let Some(z) = iyakki_zram::stats::zram_stats(&env) {
+        orig = orig.saturating_add(z.orig);
+        used = used.saturating_add(z.mem_used);
+    }
+    (orig, used)
+}
+
+/// [`read_mem`] with the credit of compressed memory counted (F-BOOT-31): while the experiment is On (system.conf or the command
+/// line say so), half of what zram and zswap saved is added to what is available, never past the total.
+pub fn read_mem_credited(root: &Path, cmdline: &str, conf: &str) -> MemFacts {
+    let base = read_mem(root);
+    let (experiment, _) = iyakki_zram::compressed::resolve_experiment(cmdline, conf);
+    if !base.known() || experiment == iyakki_zram::compressed::Experiment::Off {
+        return base;
+    }
+    let (orig, used) = compressed_figures(root);
+    base.with_compressed_credit(experiment, orig, used)
+}
+
+/// The real machine's memory, with the credit of compressed memory when the experiment is on.
 pub fn read_mem_now() -> MemFacts {
-    read_mem(Path::new("/"))
+    let conf = std::fs::read_to_string(iyakki_zram::CONF_PATH).unwrap_or_default();
+    read_mem_credited(Path::new("/"), &iyakki_agent::sysinfo::cmdline(iyakki_agent::sysinfo::proc_root()), &conf)
+}
+
+/// The machine's memory through the core API (`cx.os`), with the credit of compressed memory when the experiment is on. A machine whose `/proc` the
+/// core cannot read gives unknown, as [`read_mem`] does.
+pub fn read_mem_os(os: &dyn iyakki_core_api::Os) -> MemFacts {
+    let Ok(m) = os.sysinfo().meminfo() else { return MemFacts::default() };
+    let (total, available) = (m.total_kb.saturating_mul(1024), m.available_kb.saturating_mul(1024));
+    if total == 0 || available > total {
+        return MemFacts::default();
+    }
+    let base = MemFacts { total, available };
+    let cmdline = os.sysinfo().cmdline().unwrap_or_default();
+    let conf = std::fs::read_to_string(iyakki_zram::CONF_PATH).unwrap_or_default();
+    let (experiment, _) = iyakki_zram::compressed::resolve_experiment(&cmdline, &conf);
+    if experiment == iyakki_zram::compressed::Experiment::Off {
+        return base;
+    }
+    let (orig, used) = compressed_figures(Path::new("/"));
+    base.with_compressed_credit(experiment, orig, used)
 }
 
 /// A display's mode in pixels.

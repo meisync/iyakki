@@ -297,6 +297,28 @@ fn a_quiz_with_problems_is_refused_with_each_exact_problem() {
     assert!(st.quizzes("amy").is_empty());
 }
 
+#[test]
+fn the_limits_themselves_are_accepted_and_control_characters_become_spaces() {
+    // 50 questions, 2 and 6 options, text exactly at the caps: all accepted
+    let (_, qs) = validate_quiz("T", 50, &good(50)).unwrap();
+    assert_eq!(qs.len(), 50);
+    let six = ["a", "b", "c", "d", "e", "f"];
+    let (_, qs) = validate_quiz("T", 2, &json!([q("Q1?", &["x", "y"], json!(1)), q("Q2?", &six, json!("F"))])).unwrap();
+    assert_eq!((qs[0].options.len(), qs[1].options.len(), qs[1].answer), (2, 6, 5));
+    let (_, qs) = validate_quiz("T", 1, &json!([q(&"q".repeat(400), &["a", &"o".repeat(200)], json!(0))])).unwrap();
+    assert_eq!((qs[0].text.chars().count(), qs[0].options[1].chars().count()), (400, 200));
+    // a control character inside an option is a space, never kept
+    let (_, qs) = validate_quiz("T", 1, &json!([q("Q?", &["a\u{7}b", "c"], json!(0))])).unwrap();
+    assert_eq!(qs[0].options[0], "a b");
+    // the answer given as a letter beyond the options, an empty string and a float are each refused with a reason
+    for bad in [json!("g"), json!(""), json!(1.5), json!(null)] {
+        assert!(validate_quiz("T", 1, &json!([q("Q?", &["a", "b", "c"], bad.clone())])).is_err(), "{bad}");
+    }
+    // a topic that is empty or too long is refused too
+    assert!(validate_quiz("  ", 1, &good(1)).is_err());
+    assert!(validate_quiz(&"t".repeat(121), 1, &good(1)).unwrap_err().contains("longer than 120"));
+}
+
 fn three() -> Quiz {
     validate_quiz("Trivia", 3, &json!([q("Q one?", &["a", "b", "c", "d"], json!(0)), q("Q two?", &["a", "b", "c", "d"], json!(2)), q("Q three?", &["a", "b", "c", "d"], json!(3))])).map(|(topic, questions)| Quiz { id: "q1".into(), topic, created: 0, questions, attempts: vec![], progress: vec![] }).unwrap()
 }

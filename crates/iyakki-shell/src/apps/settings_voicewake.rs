@@ -36,6 +36,63 @@ impl SettingsApp {
         }
     }
 
+    pub(super) fn vo_spoken_toggle(&mut self, cx: &AppCx) {
+        let svc = Self::svc(cx).clone();
+        let on = !svc.voice_settings().spoken_approvals;
+        let r = svc.settings.lock().unwrap_or_else(|e| e.into_inner()).update(|s| s.voice.spoken_approvals = on).map_err(|e| e.to_string());
+        match r {
+            Ok(()) => {
+                cx.audit.record(&cx.session.user, "voice.assistant", if on { "spoken-approvals-on" } else { "spoken-approvals-off" });
+                self.ok(if on {
+                    "Spoken approvals are on: in a voice session a spoken yes can approve an ordinary ask. Deleting, installing, sending, secrets, the camera, the screen and shells still need a tap or a key."
+                } else {
+                    "Spoken approvals are off: approvals in a voice session need a tap or a key."
+                });
+            }
+            Err(e) => self.fail(e),
+        }
+    }
+
+    /// `E`: take the assistant's own voice out of what the microphone heard while it spoke (F-VOICE-36). Off by default.
+    pub(super) fn vo_echo_toggle(&mut self, cx: &AppCx) {
+        let svc = Self::svc(cx).clone();
+        let on = !svc.voice_settings().echo_cancel;
+        let r = svc.settings.lock().unwrap_or_else(|e| e.into_inner()).update(|s| s.voice.echo_cancel = on).map_err(|e| e.to_string());
+        match r {
+            Ok(()) => {
+                cx.audit.record(&cx.session.user, "voice.assistant", if on { "echo-cancel-on" } else { "echo-cancel-off" });
+                self.ok(if on {
+                    "Echo cancellation is on: what the microphone heard while the assistant spoke has the assistant's own voice taken out before it is understood. Experimental: it has not been tried on real speakers and microphones."
+                } else {
+                    "Echo cancellation is off."
+                });
+            }
+            Err(e) => self.fail(e),
+        }
+    }
+
+    /// The row of the page for echo cancellation.
+    pub(super) fn vo_echo_row(cx: &AppCx) -> (&'static str, String, [u8; 4]) {
+        let on = Self::svc(cx).voice_settings().echo_cancel;
+        let text = if on {
+            "on (experimental): the assistant's own voice is taken out of what the microphone heard while it spoke (E switches off)"
+        } else {
+            "off: press E to take the assistant's own voice out of what the microphone hears while it speaks (experimental)"
+        };
+        ("Echo cancellation", text.to_string(), if on { ACCENT } else { OK })
+    }
+
+    /// The row of the page for spoken approvals.
+    pub(super) fn vo_spoken_row(cx: &AppCx) -> (&'static str, String, [u8; 4]) {
+        let on = Self::svc(cx).voice_settings().spoken_approvals;
+        let text = if on {
+            "on: a spoken yes can approve an ordinary ask in a voice session; the hard-ask list always needs a tap or key (A switches off)"
+        } else {
+            "off: approvals in a voice session need a tap or key; a spoken yes does nothing (A switches on)"
+        };
+        ("Spoken approvals", text.to_string(), if on { ACCENT } else { OK })
+    }
+
     /// The two rows of the page: the switch with its reason, and the sensitivity.
     pub(super) fn vo_wake_rows(cx: &AppCx) -> [(&'static str, String, [u8; 4]); 2] {
         let svc = Self::svc(cx);

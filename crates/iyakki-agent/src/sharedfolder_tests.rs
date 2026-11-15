@@ -122,6 +122,69 @@ fn listing_and_download_work() {
 }
 
 #[test]
+fn a_folder_comes_as_one_zip_with_what_the_listing_shows_and_nothing_else() {
+    let f = fixture();
+    let s = f.site(|_| {});
+    assert!(get(&s, "/").text().contains("?zip"), "the listing offers it");
+    let r = run(&s, Req { raw_path: "/".into(), query: "zip".into(), ..Req::get("/") }, LAN);
+    assert_eq!(r.status, 200);
+    assert_eq!(r.h("content-type").unwrap(), "application/zip");
+    assert!(r.h("content-disposition").unwrap().contains("attachment") && r.h("content-disposition").unwrap().contains("demo.zip"), "{:?}", r.h("content-disposition"));
+    assert_eq!(r.h("cache-control").unwrap(), "no-store");
+    let out = f.root.parent().unwrap().join("unzipped");
+    let zip = f.root.parent().unwrap().join("got.zip");
+    std::fs::write(&zip, &r.body).unwrap();
+    iyakki_archive::archive::unzip(&zip, &out).unwrap();
+    let mut names: Vec<String> = Vec::new();
+    fn walk(d: &Path, base: &Path, out: &mut Vec<String>) {
+        for e in std::fs::read_dir(d).unwrap().flatten() {
+            let p = e.path();
+            out.push(p.strip_prefix(base).unwrap().to_string_lossy().into_owned());
+            if p.is_dir() {
+                walk(&p, base, out);
+            }
+        }
+    }
+    walk(&out, &out, &mut names);
+    names.sort();
+    assert!(names.contains(&"demo/a.txt".to_string()) && names.contains(&"demo/sub/b.md".to_string()) && names.contains(&"demo/link_in.txt".to_string()), "{names:?}");
+    assert_eq!(std::fs::read_to_string(out.join("demo/a.txt")).unwrap(), "hello world\n");
+    assert!(!names.iter().any(|n| n.contains(".secret") || n.contains(".hid") || n.contains("link_out") || n.contains("link_dir") || n.contains("link_hid") || n.contains("TOP")), "hidden files and links out stay out: {names:?}");
+    // a sub-folder is named after itself
+    let r = run(&s, Req { raw_path: "/sub/".into(), query: "zip".into(), ..Req::get("/sub/") }, LAN);
+    assert!(r.h("content-disposition").unwrap().contains("sub.zip"));
+    // the gate still applies: a secret-link share refuses a zip without the secret, and website mode has no zip
+    let sec = f.site(|c| {
+        c.access = Access::Token;
+        c.token = "0123456789abcdef0123456789abcdef".into();
+    });
+    assert_ne!(run(&sec, Req { raw_path: "/".into(), query: "zip".into(), ..Req::get("/") }, LAN).status, 200);
+    std::fs::write(f.root.join("index.html"), "<p>site</p>").unwrap();
+    let web = f.site(|c| c.mode = Mode::Website);
+    assert_ne!(run(&web, Req { raw_path: "/".into(), query: "zip".into(), ..Req::get("/") }, LAN).h("content-type").unwrap_or_default(), "application/zip");
+    // nothing is left in the temporary folder
+    let left = std::fs::read_dir(std::env::temp_dir()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&format!("iyakki-share-zip-{}-", std::process::id()))).count();
+    assert_eq!(left, 0);
+}
+
+#[test]
+fn a_folder_that_is_too_big_to_zip_says_so_and_a_link_loop_does_not_hang() {
+    let f = fixture();
+    for i in 0..5100 {
+        std::fs::write(f.root.join("sub").join(format!("n{i}")), b"").unwrap();
+    }
+    let s = f.site(|_| {});
+    let r = run(&s, Req { raw_path: "/sub/".into(), query: "zip".into(), ..Req::get("/sub/") }, LAN);
+    assert_eq!(r.status, 413, "{}", r.text());
+    assert!(r.text().contains("more than 5000"));
+    let f2 = fixture();
+    std::os::unix::fs::symlink(&f2.root, f2.root.join("sub/loop")).unwrap();
+    let s2 = f2.site(|_| {});
+    let r = run(&s2, Req { raw_path: "/".into(), query: "zip".into(), ..Req::get("/") }, LAN);
+    assert_eq!(r.status, 200, "a link back to the folder itself is visited once");
+}
+
+#[test]
 fn the_upload_and_new_folder_forms_come_before_a_long_list_so_nobody_scrolls_to_find_them() {
     let f = fixture();
     for i in 0..300 {
@@ -624,6 +687,60 @@ fn a_real_server_answers_on_loopback_and_stops_cleanly() {
 }
 
 #[test]
+fn a_share_for_this_machine_only_also_answers_on_the_ipv6_loopback_and_its_links_are_bracketed() {
+    let f = fixture();
+    let mut run = sharedsite::start(local_cfg(&f), f.env()).unwrap();
+    if run.listens_on_ipv6_loopback() {
+        let a6 = std::net::SocketAddr::new(std::net::Ipv6Addr::LOCALHOST.into(), run.addr.port());
+        let r = talk(a6, b"GET /a.txt HTTP/1.1\r\nHost: [::1]\r\n\r\n");
+        assert!(r.starts_with("HTTP/1.1 200 OK") && r.ends_with("hello world\n"), "{r}");
+        // the rules are the same: a foreign name is refused on this address too
+        let r = talk(a6, b"GET /a.txt HTTP/1.1\r\nHost: evil.example\r\n\r\n");
+        assert!(r.starts_with("HTTP/1.1 403"), "{r}");
+    } else {
+        eprintln!("no IPv6 loopback on this machine: the second listener was not made");
+    }
+    let (a4, port) = (run.addr, run.addr.port());
+    run.stop();
+    assert!(refused(a4), "the port is closed");
+    assert!(refused(std::net::SocketAddr::new(std::net::Ipv6Addr::LOCALHOST.into(), port)), "and so is the IPv6 one");
+    // an IPv6 address may be named to listen on; "all IPv6" is not offered and says what to do
+    let c6 = |bind: &str| ShareCfg { access: Access::Open, bind: bind.into(), port: 9000, ..Default::default() };
+    assert_eq!(sharedsite::bind_addr(&c6("::1")).unwrap().to_string(), "[::1]:9000");
+    assert_eq!(sharedsite::bind_addr(&c6("fd00::7")).unwrap().to_string(), "[fd00::7]:9000");
+    assert!(sharedsite::bind_addr(&c6("::")).unwrap_err().contains("name one address"));
+    // the link of a share on an IPv6 address has brackets
+    let m = manager(&f, true);
+    let urls = m.urls(&c6("::1"), 9000);
+    assert_eq!(urls, vec!["http://[::1]:9000/".to_string()]);
+}
+
+/// A second implementation: the system's own `curl` fetches the file over `http://[::1]:port/` (skipped, printing why, without curl or IPv6).
+#[test]
+fn curl_fetches_a_file_from_a_this_machine_only_share_over_the_ipv6_loopback() {
+    let f = fixture();
+    let mut run = sharedsite::start(local_cfg(&f), f.env()).unwrap();
+    if !run.listens_on_ipv6_loopback() {
+        eprintln!("skipped: no IPv6 loopback on this machine");
+        return;
+    }
+    let url = format!("http://[::1]:{}/a.txt", run.addr.port());
+    let out = match std::process::Command::new("curl").args(["-g", "-sS", "--max-time", "10", &url]).output() {
+        Ok(o) => o,
+        Err(_) => {
+            eprintln!("skipped: curl is not on this machine");
+            return;
+        }
+    };
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hello world\n");
+    // and a name that is not this machine's is refused over the same address
+    let bad = std::process::Command::new("curl").args(["-g", "-sS", "--max-time", "10", "-o", "/dev/null", "-w", "%{http_code}", "-H", "Host: evil.example", &url]).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&bad.stdout), "403");
+    run.stop();
+}
+
+#[test]
 fn header_size_and_slow_clients_are_limited() {
     let f = fixture();
     let run = sharedsite::start(local_cfg(&f), f.env()).unwrap();
@@ -895,6 +1012,9 @@ fn an_administrator_may_map_any_folder_of_the_disks_but_not_the_whole_system_its
     }
     assert!(validate_folder("/", &yes, &[], &Scope::Admin).unwrap_err().contains("whole system"));
     for p in ["/proc", "/sys", "/dev"] {
+        if !Path::new(p).exists() {
+            continue; // no such system interface on this machine (macOS has no /proc or /sys)
+        }
         assert!(validate_folder(p, &yes, &[], &Scope::Admin).unwrap_err().contains("system interface"), "{p}");
     }
     // the system's private data is never shared, by anyone
@@ -943,4 +1063,115 @@ fn a_shares_rules_follow_the_role_each_time_and_a_demoted_account_cannot_start_a
     // and a new one outside the home is refused at creation
     d.name = "again".into();
     assert!(m.create(&d).unwrap_err().contains("inside your own home folder"));
+}
+
+/// `curl` as a second, independent HTTP client against the real server: skipped when there is no curl.
+fn curl(args: &[&str]) -> Option<(i32, String)> {
+    let o = std::process::Command::new("curl").args(["-sS", "--max-time", "10"]).args(args).output().ok()?;
+    Some((o.status.code().unwrap_or(-1), String::from_utf8_lossy(&o.stdout).into_owned()))
+}
+
+#[test]
+fn a_real_server_is_driven_by_curl_as_a_second_http_client_for_listing_ranges_conditionals_uploads_and_traversal() {
+    if curl(&["--version"]).is_none() {
+        eprintln!("skipped: no curl on this machine");
+        return;
+    }
+    let f = fixture();
+    let mut c = local_cfg(&f);
+    c.upload = true;
+    let mut run = sharedsite::start(c, f.env()).unwrap();
+    let base = format!("http://127.0.0.1:{}", run.addr.port());
+    // the file, a range, the head and the listing
+    assert_eq!(curl(&[&format!("{base}/a.txt")]).unwrap(), (0, "hello world\n".to_string()));
+    assert_eq!(curl(&["-r", "6-", &format!("{base}/a.txt")]).unwrap(), (0, "world\n".to_string()));
+    let (_, head) = curl(&["-I", &format!("{base}/a.txt")]).unwrap();
+    assert!(head.starts_with("HTTP/1.1 200") && head.to_ascii_lowercase().contains("content-length: 12"), "{head}");
+    let (_, listing) = curl(&[&format!("{base}/")]).unwrap();
+    assert!(listing.contains("a.txt"), "{listing}");
+    // a conditional request with the server's own validator is answered 304 without a body
+    let etag = head.lines().find(|l| l.to_ascii_lowercase().starts_with("etag:")).map(|l| l.split_once(':').unwrap().1.trim().to_string());
+    if let Some(e) = etag {
+        let (_, h) = curl(&["-s", "-o", "/dev/null", "-w", "%{http_code}", "-H", &format!("If-None-Match: {e}"), &format!("{base}/a.txt")]).unwrap();
+        assert_eq!(h, "304");
+    }
+    // an upload by curl lands in the folder; a missing file is 404; a path that climbs out never gives the system's files
+    let src = f.root.join("..").join(format!("curl-up-{}.txt", std::process::id()));
+    std::fs::write(&src, b"from curl").unwrap();
+    let (_, code) = curl(&["-o", "/dev/null", "-w", "%{http_code}", "-T", src.to_str().unwrap(), &format!("{base}/up.txt")]).unwrap();
+    let _ = std::fs::remove_file(&src);
+    assert_eq!(code, "201");
+    assert_eq!(std::fs::read(f.root.join("up.txt")).unwrap(), b"from curl");
+    assert_eq!(curl(&["-o", "/dev/null", "-w", "%{http_code}", &format!("{base}/nothing-here")]).unwrap().1, "404");
+    let (_, out) = curl(&["--path-as-is", "-w", "%{http_code}", &format!("{base}/../../../../etc/passwd")]).unwrap();
+    assert!(!out.contains("root:") && !out.ends_with("200"), "{out}");
+    // a foreign Host name is refused for a share of this machine only
+    assert_eq!(curl(&["-o", "/dev/null", "-w", "%{http_code}", "-H", "Host: evil.example", &format!("{base}/a.txt")]).unwrap().1, "403");
+    run.stop();
+}
+
+/// A real second network stack with the real `curl` (ignored by default: needs root, `ip`, `curl`, `nsenter` and `unshare`; run as root inside a throw-away network
+/// namespace, `dist/linux-host/kernel-tests.sh`). Two more namespaces are joined to this one by veth pairs: B on a private address (10.77.0.2) and C on a public one
+/// (198.51.100.5). The share listens on every address; B fetches, browses and uploads with `curl`, C is refused because the share is for the local network only.
+#[test]
+#[ignore]
+fn a_real_second_network_stack_uses_a_share_with_curl_and_the_local_network_rule_keeps_a_public_address_out() {
+    use std::process::{Command, Stdio};
+    let sh = |cmd: &str| -> (bool, String) {
+        let o = Command::new("sh").args(["-c", &format!("export PATH=$PATH:/usr/sbin:/sbin; {cmd}")]).output().unwrap();
+        (o.status.success(), format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)))
+    };
+    // SAFETY: getuid has no preconditions.
+    let root = unsafe { libc::getuid() } == 0 && std::env::var("IYAKKI_IN_SANDBOX").as_deref() == Ok("1");
+    if !(root && sh("command -v curl >/dev/null && command -v nsenter >/dev/null && command -v unshare >/dev/null && command -v ip >/dev/null").0) {
+        eprintln!("skipped: needs root, curl, nsenter, unshare and ip (run it through dist/linux-host/kernel-tests.sh)");
+        return;
+    }
+    sh("ip link set lo up");
+    let mk = || Command::new("unshare").args(["-n", "sleep", "300"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+    let (mut b, mut c) = (mk(), mk());
+    std::thread::sleep(Duration::from_millis(300));
+    let guard = |ch: &mut std::process::Child| {
+        let _ = ch.kill();
+        let _ = ch.wait();
+    };
+    let (bp, cp) = (b.id(), c.id());
+    for (pid, a_if, n_if, a_ip, n_ip) in [(bp, "vAB", "vBA", "10.77.0.1/24", "10.77.0.2/24"), (cp, "vAC", "vCA", "198.51.100.1/24", "198.51.100.5/24")] {
+        let (ok, out) = sh(&format!("ip link add {a_if} type veth peer name {n_if} && ip link set {n_if} netns {pid} && ip addr add {a_ip} dev {a_if} && ip link set {a_if} up && nsenter -t {pid} -n sh -c 'ip link set lo up && ip addr add {n_ip} dev {n_if} && ip link set {n_if} up'"));
+        assert!(ok, "{out}");
+    }
+    let f = fixture();
+    let mut cfg = f.cfg();
+    cfg.access = Access::Open;
+    cfg.bind = "all".into();
+    cfg.port = 0;
+    cfg.upload = true;
+    let mut run = sharedsite::start(cfg, f.env()).unwrap();
+    let port = run.addr.port();
+    let from = |pid: u32, args: &str| sh(&format!("nsenter -t {pid} -n curl -sS --max-time 8 {args}"));
+
+    // B (a private address): the real curl lists, downloads, resumes by range and uploads
+    let (ok, out) = from(bp, &format!("http://10.77.0.1:{port}/a.txt"));
+    assert!(ok && out == "hello world\n", "B downloads: {out}");
+    let (ok, out) = from(bp, &format!("http://10.77.0.1:{port}/"));
+    assert!(ok && out.contains("a.txt") && out.contains("sub"), "B sees the listing: {out}");
+    assert!(!out.contains(".secret") && !out.contains("link_out"), "hidden files and links out of the folder are not listed: {out}");
+    let (ok, out) = from(bp, &format!("-H 'Range: bytes=6-' http://10.77.0.1:{port}/a.txt"));
+    assert!(ok && out == "world\n", "B resumes with a range: {out}");
+    let (_, code) = from(bp, &format!("-o /dev/null -w '%{{http_code}}' http://10.77.0.1:{port}/../../etc/passwd --path-as-is"));
+    assert!(code.trim() == "404" || code.trim() == "400" || code.trim() == "403", "B cannot leave the folder: {code}");
+    std::fs::write(f.root.join("upload-src.txt"), "from the other machine\n").unwrap();
+    let (ok, out) = from(bp, &format!("-T {}/upload-src.txt -o /dev/null -w '%{{http_code}}' http://10.77.0.1:{port}/up.txt", f.root.display()));
+    assert!(ok && out.trim().starts_with("20"), "B uploads with PUT: {out}");
+    assert_eq!(std::fs::read_to_string(f.root.join("up.txt")).unwrap(), "from the other machine\n", "the uploaded file is on the disk");
+    // C (a public address) is kept out by the local-network rule, over a real network path
+    let (_, code) = from(cp, &format!("-o /dev/null -w '%{{http_code}}' http://198.51.100.1:{port}/a.txt"));
+    assert!(code.trim() != "200", "a public address must not be served: {code}");
+    let (_, body) = from(cp, &format!("http://198.51.100.1:{port}/a.txt"));
+    assert!(!body.contains("hello world"), "and gets none of the file: {body}");
+    let audit = f.log.lock().unwrap().join("\n");
+    assert!(audit.contains("10.77.0.2"), "the audit trail names the peer's address: {audit}");
+    run.stop();
+    guard(&mut b);
+    guard(&mut c);
 }

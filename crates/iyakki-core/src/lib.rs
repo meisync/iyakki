@@ -3,6 +3,8 @@
 pub mod boot;
 pub mod bootconfirm;
 pub mod bootlog;
+pub mod bootprefetch;
+pub mod selfcheck;
 pub use iyakki_storage::crashlog;
 pub mod coldplug;
 pub mod homebind;
@@ -13,11 +15,11 @@ pub mod storageloss;
 pub mod web;
 pub mod console;
 pub mod keepalive;
-#[cfg(feature = "shell")]
+#[cfg(feature = "headless")]
 pub mod host;
 #[cfg(feature = "shell")]
 pub mod browsertest;
-#[cfg(feature = "shell")]
+#[cfg(feature = "headless")]
 pub mod svc;
 pub mod net;
 pub mod cloudnode;
@@ -81,6 +83,9 @@ pub fn detect_env() -> HostEnv {
     )
 }
 
+/// Set at start from `IYAKKI_LOG_FORMAT=json`: one JSON object per line on standard error, never the kernel log.
+static JSON_LOGS: AtomicBool = AtomicBool::new(false);
+
 struct StderrLogger;
 impl log::Log for StderrLogger {
     fn enabled(&self, m: &log::Metadata) -> bool {
@@ -88,6 +93,11 @@ impl log::Log for StderrLogger {
     }
     fn log(&self, r: &log::Record) {
         if self.enabled(r.metadata()) {
+            if JSON_LOGS.load(std::sync::atomic::Ordering::Relaxed) {
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                console::err_write(&format!("{}\n", console::format_log_json(now, r.level(), r.args())));
+                return;
+            }
             let line = console::format_log(r.level(), r.args());
             // the kernel log reaches every console (including the screen); stderr is best effort and never panics
             if !console::kmsg(console::level_to_kernel(r.level()), &line) {
@@ -100,6 +110,7 @@ impl log::Log for StderrLogger {
 
 /// Install the logger (kernel log, falling back to stderr). Level from `IYAKKI_LOG` (error|warn|info|debug|trace), default info.
 pub fn init_logger() {
+    JSON_LOGS.store(console::json_logs_asked(std::env::var("IYAKKI_LOG_FORMAT").ok().as_deref()), std::sync::atomic::Ordering::Relaxed);
     let lvl = std::env::var("IYAKKI_LOG").ok().and_then(|s| s.parse().ok()).unwrap_or(log::LevelFilter::Info);
     if log::set_logger(&StderrLogger).is_ok() {
         log::set_max_level(lvl);

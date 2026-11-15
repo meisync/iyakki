@@ -25,6 +25,16 @@ pub const SOCKET_NAME: &str = "display.sock";
 /// The X display number inside the sandbox. Not `:0` or `:1`: a sandbox with its network on shares the host's abstract sockets, where a desktop's X server may
 /// already be `:0` or `:1`, and X clients try the abstract socket first.
 pub const DISPLAY_NUM: u32 = 73;
+/// Windows that run at once in one tile: each has its own slot, so its own display number, socket and X authority file.
+pub const MAX_SLOTS: u32 = 4;
+/// The socket's file name for a slot: slot 0 keeps the name it always had.
+pub fn socket_name(slot: u32) -> String {
+    if slot == 0 {
+        SOCKET_NAME.to_string()
+    } else {
+        format!("display-{slot}.sock")
+    }
+}
 pub const SCRIPT_REL: &str = "usr/local/bin/iyakki-window-session";
 pub const SCRIPT_IN: &str = "/usr/local/bin/iyakki-window-session";
 /// Installed by the Setup item: the display server, the window manager, a font, software OpenGL and a small test program.
@@ -41,21 +51,27 @@ pub const NOTE: &str = "Linux windows run a graphical program of a Debian sandbo
 pub fn session_script() -> String {
     format!(
         r#"#!/bin/sh
-# Written by IYAKKI (Linux windows). Usage: iyakki-window-session WIDTH HEIGHT PROGRAM [ARGUMENT...]
+# Written by IYAKKI (Linux windows). Usage: iyakki-window-session [--slot N] WIDTH HEIGHT PROGRAM [ARGUMENT...]
+SLOT=0
+if [ "$1" = "--slot" ]; then SLOT="$2"; shift 2; fi
+case "$SLOT" in ""|*[!0-9]*) exit 2;; esac
+[ "$SLOT" -lt {MAX_SLOTS} ] || exit 2
+SUF=""; [ "$SLOT" = 0 ] || SUF="-$SLOT"
+DN=$((SLOT + {DISPLAY_NUM}))
 W="$1"; H="$2"
 [ "$#" -ge 3 ] || exit 2
 shift 2
 case "$W$H" in ""|*[!0-9]*) exit 2;; esac
-export HOME=/home/user DISPLAY=:{DISPLAY_NUM} XDG_RUNTIME_DIR=/tmp/xdg-run LIBGL_ALWAYS_SOFTWARE=1 GDK_BACKEND=x11 NO_AT_BRIDGE=1
-export XAUTHORITY="$XDG_RUNTIME_DIR/Xauthority"
+export HOME=/home/user DISPLAY=":$DN" XDG_RUNTIME_DIR=/tmp/xdg-run LIBGL_ALWAYS_SOFTWARE=1 GDK_BACKEND=x11 NO_AT_BRIDGE=1
+export XAUTHORITY="$XDG_RUNTIME_DIR/Xauthority$SUF"
 mkdir -p -m 700 "$XDG_RUNTIME_DIR"
 mkdir -p -m 1777 /tmp/.X11-unix
 # no abstract socket (it would be in the host's network namespace when the network is on), and only clients that know a secret key
 rm -f "$XAUTHORITY"
-xauth -q -f "$XAUTHORITY" add :{DISPLAY_NUM} . "$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')" || exit 4
-SOCK={RUN_DST}/{SOCKET_NAME}
+xauth -q -f "$XAUTHORITY" add ":$DN" . "$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')" || exit 4
+SOCK="{RUN_DST}/display$SUF.sock"
 rm -f "$SOCK"
-Xvnc :{DISPLAY_NUM} -geometry "${{W}}x${{H}}" -depth 24 -rfbunixpath "$SOCK" -rfbport -1 -SecurityTypes None -nolisten tcp -nolisten local -auth "$XAUTHORITY" -AlwaysShared &
+Xvnc ":$DN" -geometry "${{W}}x${{H}}" -depth 24 -rfbunixpath "$SOCK" -rfbport -1 -SecurityTypes None -nolisten tcp -nolisten local -auth "$XAUTHORITY" -AlwaysShared &
 XPID=$!
 i=0
 while [ ! -S "$SOCK" ] && [ "$i" -lt 100 ]; do
@@ -364,17 +380,32 @@ impl Spawn for System {
 
 /// The exact argument array of a window: the script, the size, then the program's words.
 pub fn session_command(w: u32, h: u32, program: &[String]) -> Result<Vec<String>, String> {
+    session_command_slot(0, w, h, program)
+}
+
+/// [`session_command`] for a slot: slot 0 is the plain form; another slot adds `--slot N` in front of the size.
+pub fn session_command_slot(slot: u32, w: u32, h: u32, program: &[String]) -> Result<Vec<String>, String> {
+    if slot >= MAX_SLOTS {
+        return Err(format!("at most {MAX_SLOTS} windows run at once"));
+    }
     if program.is_empty() || program.iter().any(|a| a.is_empty() || a.contains('\0')) {
         return Err("no program".into());
     }
     let (w, h) = (w.clamp(MIN_SIZE, MAX_SIZE), h.clamp(MIN_SIZE, MAX_SIZE));
-    let mut v = vec![SCRIPT_IN.to_string(), w.to_string(), h.to_string()];
+    let mut v = vec![SCRIPT_IN.to_string()];
+    if slot > 0 {
+        v.push("--slot".into());
+        v.push(slot.to_string());
+    }
+    v.push(w.to_string());
+    v.push(h.to_string());
     v.extend(program.iter().cloned());
     Ok(v)
 }
 
 pub struct Window {
     la_name: String,
+    slot: u32,
     run_dir: PathBuf,
     log: PathBuf,
     proc: Option<Box<dyn Proc>>,
@@ -393,14 +424,23 @@ impl std::fmt::Debug for Window {
 impl Window {
     /// Start `program` (a launcher entry) in a window of `w` x `h` pixels. Returns at once; [`Window::wait_socket`] waits for the display.
     pub fn start(la: &LinuxApps, spawn: &dyn Spawn, program: &Program, w: u32, h: u32) -> Result<Window, String> {
+        Window::start_slot(la, spawn, program, w, h, 0)
+    }
+
+    /// [`Window::start`] in a slot (0 to `MAX_SLOTS - 1`): several windows of one sandbox run side by side, each with its own display and socket.
+    /// A script written before slots existed is replaced first (a slot above 0 needs the new one).
+    pub fn start_slot(la: &LinuxApps, spawn: &dyn Spawn, program: &Program, w: u32, h: u32, slot: u32) -> Result<Window, String> {
         if !ready(la) {
             return Err("Linux windows are not installed: Store, Setup, Linux windows".into());
         }
-        let cmd = session_command(w, h, &program.exec)?;
+        let cmd = session_command_slot(slot, w, h, &program.exec)?;
+        if slot > 0 && std::fs::read(la.rootfs_of(SANDBOX).join(SCRIPT_REL)).ok().as_deref() != Some(session_script().as_bytes()) {
+            write_script(la)?;
+        }
         let own = la.dir_of(SANDBOX);
         let run_dir = own.join(RUN_DIR);
         rootfs::make_dir_in(&own, RUN_DIR, 0o700, (1000, 1000), la.id_shift(SANDBOX))?;
-        let sock = run_dir.join(SOCKET_NAME);
+        let sock = run_dir.join(socket_name(slot));
         if sock.as_os_str().len() > 100 {
             return Err("the data folder path is too long for a socket".into());
         }
@@ -411,11 +451,15 @@ impl Window {
         let log = own.join("session.log");
         let proc = spawn.spawn(&argv, &own, &log)?;
         let nla = la.clone_audit();
-        Ok(Window { la_name: SANDBOX.into(), run_dir, log, proc: Some(proc), program: program.id.clone(), started: Instant::now(), audit: nla, argv })
+        Ok(Window { la_name: SANDBOX.into(), slot, run_dir, log, proc: Some(proc), program: program.id.clone(), started: Instant::now(), audit: nla, argv })
     }
 
     pub fn socket(&self) -> PathBuf {
-        self.run_dir.join(SOCKET_NAME)
+        self.run_dir.join(socket_name(self.slot))
+    }
+
+    pub fn slot(&self) -> u32 {
+        self.slot
     }
 
     pub fn alive(&mut self) -> bool {

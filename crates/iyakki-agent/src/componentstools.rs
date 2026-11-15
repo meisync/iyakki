@@ -153,6 +153,12 @@ impl ComponentsTools {
 }
 
 impl Tools for ComponentsTools {
+
+    fn inner_tools(&self) -> Option<&dyn Tools> {
+
+        Some(&*self.inner)
+
+    }
     fn defs(&self) -> Vec<ToolDef> {
         let mut v = self.inner.defs();
         v.retain(|d| !is_components_tool(&d.spec.name));

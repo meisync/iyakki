@@ -171,3 +171,99 @@ fn the_update_check_does_not_run_for_an_ordinary_user() {
     std::thread::sleep(std::time::Duration::from_millis(300));
     assert!(!file.exists());
 }
+
+/// The power key pressed and let go, in a heartbeat of its own.
+fn pwr(sh: &mut Shell) {
+    sh.handle(&Event::Tick);
+    sh.handle(&Event::Tick);
+    sh.handle(&Event::Fn(crate::fnkeys::FnKey::Power, true));
+    sh.handle(&Event::Fn(crate::fnkeys::FnKey::Power, false));
+}
+
+fn lid(d: &Path, state: &str) {
+    put(d, "proc/acpi/button/lid/LID0/state", &format!("state:      {state}"));
+}
+
+#[test]
+fn closing_the_lid_locks_or_sleeps_as_chosen_and_only_when_it_closes() {
+    let (mut sh, host, clock, d) = shell("shp-lid", 0, false);
+    lid(&d, "open");
+    run(&mut sh, &clock, 5000, 250);
+    // the default is nothing
+    lid(&d, "closed");
+    run(&mut sh, &clock, 5000, 250);
+    assert!(!sh.is_locked() && slept(&host) == 0, "off by default");
+    lid(&d, "open");
+    run(&mut sh, &clock, 5000, 250);
+    sh.env.services.settings.lock().unwrap().update(|s| s.power.lid = iyakki_agent::power::LidAction::Lock).unwrap();
+    lid(&d, "closed");
+    run(&mut sh, &clock, 5000, 250);
+    assert!(sh.is_locked() && slept(&host) == 0, "locked, not asleep");
+    // sleep: the screen locks first and the host sleeps once, not again while the lid stays shut
+    lid(&d, "open");
+    run(&mut sh, &clock, 5000, 250);
+    sh.env.services.settings.lock().unwrap().update(|s| s.power.lid = iyakki_agent::power::LidAction::Sleep).unwrap();
+    lid(&d, "closed");
+    run(&mut sh, &clock, 5000, 250);
+    assert_eq!(slept(&host), 1);
+    run(&mut sh, &clock, 20_000, 250);
+    assert_eq!(slept(&host), 1, "the lid staying shut does not sleep it again");
+    let audit = std::fs::read_to_string(sh.env.audit.path()).unwrap_or_default();
+    assert!(audit.contains("power.lock") && audit.contains("power.sleep") && audit.contains("lid closed"), "{audit}");
+}
+
+#[test]
+fn with_another_screen_connected_closing_the_lid_only_locks() {
+    let (mut sh, host, clock, d) = shell("shp-lid3", 0, false);
+    sh.env.services.settings.lock().unwrap().update(|s| s.power.lid = iyakki_agent::power::LidAction::Sleep).unwrap();
+    put(&d, "class/drm/card0-eDP-1/status", "connected");
+    put(&d, "class/drm/card0-HDMI-A-1/status", "connected");
+    lid(&d, "open");
+    run(&mut sh, &clock, 5000, 250);
+    lid(&d, "closed");
+    run(&mut sh, &clock, 5000, 250);
+    assert!(sh.is_locked() && slept(&host) == 0, "docked: locked, not asleep");
+}
+
+#[test]
+fn a_lid_that_is_shut_when_the_shell_starts_does_nothing_and_a_host_that_cannot_sleep_gets_a_lock() {
+    let (mut sh, host, clock, d) = shell("shp-lid2", 0, false);
+    sh.env.services.settings.lock().unwrap().update(|s| s.power.lid = iyakki_agent::power::LidAction::Sleep).unwrap();
+    lid(&d, "closed");
+    run(&mut sh, &clock, 5000, 250);
+    assert!(!sh.is_locked() && slept(&host) == 0, "already shut at the first look: no action");
+    lid(&d, "open");
+    run(&mut sh, &clock, 5000, 250);
+    *host.sleepable.lock().unwrap() = false;
+    lid(&d, "closed");
+    run(&mut sh, &clock, 5000, 250);
+    assert!(sh.is_locked() && slept(&host) == 0, "the host cannot sleep: it locks");
+}
+
+#[test]
+fn the_power_button_does_what_the_page_says_and_asks_nothing_by_default() {
+    let (mut sh, host, clock, _d) = shell("shp-btn", 0, false);
+    pwr(&mut sh);
+    assert!(sh.fnk.power_card, "the default opens the card, as before");
+    sh.handle(&Event::Key(Key::Esc));
+    assert!(!sh.fnk.power_card);
+    let set = |sh: &Shell, b| sh.env.services.settings.lock().unwrap().update(|s| s.power.button = b).unwrap();
+    set(&sh, iyakki_agent::power::ButtonAction::Nothing);
+    pwr(&mut sh);
+    assert!(!sh.fnk.power_card && !sh.is_locked() && slept(&host) == 0, "ignored");
+    set(&sh, iyakki_agent::power::ButtonAction::Lock);
+    pwr(&mut sh);
+    assert!(sh.is_locked() && !sh.fnk.power_card);
+    // unlock again for the next step by signing in afresh
+    let (mut sh, host, _clock2, d) = shell("shp-btn2", 0, false);
+    put(&d, "power/state", "freeze mem");
+    sh.env.services.settings.lock().unwrap().update(|s| s.power.button = iyakki_agent::power::ButtonAction::Sleep).unwrap();
+    pwr(&mut sh);
+    assert_eq!(slept(&host), 1, "sleep: locked first, then the host sleeps");
+    let _ = clock;
+    let (mut sh, host, _c, _d) = shell("shp-btn3", 0, false);
+    *host.sleepable.lock().unwrap() = false;
+    sh.env.services.settings.lock().unwrap().update(|s| s.power.button = iyakki_agent::power::ButtonAction::Sleep).unwrap();
+    pwr(&mut sh);
+    assert!(sh.fnk.power_card && slept(&host) == 0, "cannot sleep: the card opens instead");
+}

@@ -211,6 +211,16 @@ fn the_helper_source_asks_the_shell_for_media_and_denies_on_silence() {
 }
 
 #[test]
+fn the_helper_source_reports_the_engines_response_headers_with_the_number_the_shell_reads() {
+    // helper.c is NOT compiled here (no WPE headers on this machine): the test only pins the wiring and the message number
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../dist/webview/wpe-helper/helper.c")).unwrap();
+    let hdr = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../dist/webview/wpe-helper/proto.h")).unwrap();
+    assert!(hdr.contains("F_CAPTURE_STATE, F_RESPONSE_HEADERS }"), "the new message follows the last one: 0x93");
+    assert_eq!(iyakki_webview::proto::FromHelper::ResponseHeaders { url: String::new(), status: 0, headers: String::new() }.encode()[4], 0x93);
+    assert!(src.contains("webkit_uri_response_get_http_headers") && src.contains("send_msg(F_RESPONSE_HEADERS") && src.contains("e == WEBKIT_LOAD_COMMITTED"));
+}
+
+#[test]
 fn the_media_build_switch_is_off_by_default_and_the_test_pages_are_in_place() {
     // the Buildroot side is not run here; this pins the files and the wiring so a rename or a deleted line is noticed
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -505,4 +515,40 @@ fn a_sub_notch_wheel_step_reaches_the_helper_exactly_and_the_c_helper_dispatches
     let src = include_str!("../../../dist/webview/wpe-helper/helper.c");
     assert!(src.contains("wpe_input_axis_event_type_motion_smooth") && src.contains("wpe_input_axis_event_type_mask_2d"));
     assert!(src.contains("(double)dy * 53.0 / 120.0"), "the pixel amount follows the units exactly");
+}
+
+#[test]
+fn the_extension_snapshot_reaches_the_helper_and_only_matching_hosts_get_headers() {
+    use iyakki_webview::ext::{encode_header_rules, hook, Entry, Hook, HeaderRule, Pat, Snapshot};
+    let rule = HeaderRule { header: "X-Token".into(), value: "s3cr3t-value".into(), replace: false, domains: vec![Pat { scheme: 0, suffix: false, host: "api.example.org".into(), port: 0, segs: vec![] }], prefix: vec![] };
+    let snap = Snapshot {
+        entries: vec![Entry {
+            id: "browser-headers".into(),
+            version: "1".into(),
+            caps: vec!["web.request.headers".into()],
+            hooks: vec![Hook { kind: hook::REQUEST_HEADERS, payload: encode_header_rules(&[rule]) }, Hook { kind: 4242, payload: vec![1] }],
+        }],
+    };
+    let mut v = WebView::start(config(&["--static"], 320, 200)).unwrap();
+    until(&mut v, 10, |_, e| e.contains(&Event::Frame));
+    v.send(ToHelper::Extensions(snap.encode()));
+    let ev = until(&mut v, 10, |_, e| has_log(e, "extensions:"));
+    assert!(has_log(&ev, "1 header rules") && has_log(&ev, "kind 4242 is unknown"), "{ev:?}");
+    v.send(ToHelper::Navigate("https://api.example.org/x".into()));
+    v.send(ToHelper::Navigate("https://other.example/x".into()));
+    let ev = until(&mut v, 10, |_, e| has_log(e, "for other.example"));
+    assert!(has_log(&ev, "for api.example.org: [X-Token]"), "{ev:?}");
+    assert!(has_log(&ev, "for other.example: []"), "{ev:?}");
+    // no value in any event the helper sent back
+    assert!(!format!("{ev:?}").contains("s3cr3t"));
+    // a snapshot of another layout version is refused and clears what was held
+    let mut bad = snap.encode();
+    bad.0[0] = 9;
+    v.send(ToHelper::Extensions(bad));
+    let ev = until(&mut v, 10, |_, e| has_log(e, "refused"));
+    assert!(has_log(&ev, "version 9"), "{ev:?}");
+    v.send(ToHelper::Navigate("https://api.example.org/y".into()));
+    std::thread::sleep(Duration::from_millis(100));
+    let ev = v.poll();
+    assert!(!has_log(&ev, "[X-Token]"));
 }

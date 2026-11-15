@@ -1004,6 +1004,8 @@ pub struct K3sDev {
     /// The unexpected exposure last reported (so one change gives one warning).
     exposure_seen: Mutex<String>,
     disk_alerted: AtomicBool,
+    /// A test fed its own disk figure: the machine's measured one no longer counts (the host's disk may be over the limit).
+    disk_fed: AtomicBool,
     /// An outage was already announced (cleared when the node is Ready again or the cluster is started by hand).
     outage: AtomicBool,
     audit: Mutex<Option<AuditFn>>,
@@ -1056,6 +1058,7 @@ impl K3sDev {
             alerts: Mutex::new(Vec::new()),
             exposure_seen: Mutex::new(String::new()),
             disk_alerted: AtomicBool::new(false),
+            disk_fed: AtomicBool::new(false),
             outage: AtomicBool::new(false),
             audit: Mutex::new(None),
             sandbox_up: Mutex::new(None),
@@ -1222,6 +1225,34 @@ impl K3sDev {
         let why = if self.clock_src().is_some_and(|c| c.synced()) { "a time server answered" } else { "no time server answered; the saved time is good enough" };
         self.log_line(&format!("the clock is plausible ({why}), starting k3s"));
         self.current(gen)
+    }
+
+    /// Is k3s (native: the process; Podman: the container) running right now?
+    fn backend_running(&self, backend: Backend) -> bool {
+        match backend {
+            Backend::Native => lock(&self.child).as_mut().is_some_and(|ch| iyakki_core_api::child_status(ch).is_running()),
+            Backend::Podman => {
+                let o = self.run.run(&std::env::temp_dir(), &["podman".into(), "inspect".into(), "--format".into(), "{{.State.Status}} {{.State.ExitCode}}".into(), self.inst.pod_name.clone()], &[], Duration::from_secs(20), 4096, None);
+                o.ok() && o.stdout.trim().starts_with("running")
+            }
+        }
+    }
+
+    /// Stop k3s and start it again (native: its process group; Podman: the container, `podman stop -t 30` then `podman start`). Not a failure:
+    /// nothing is counted or alerted.
+    fn restart_for_clock(&self, backend: Backend, action: &str, why: &str) -> Result<(), String> {
+        if backend == Backend::Podman {
+            self.audit("system", action, why);
+            self.log_line(&format!("restarting k3s: {why}"));
+            self.set_svc(Svc::Starting);
+            let o = self.run.run(&std::env::temp_dir(), &["podman".into(), "stop".into(), "-t".into(), "30".into(), self.inst.pod_name.clone()], &[], Duration::from_secs(60), 4096, None);
+            if !o.ok() {
+                return Err(format!("podman stop failed: {}", o.combined().lines().last().unwrap_or("no message").trim()));
+            }
+            let _ = std::fs::remove_file(self.layout.kubeconfig());
+            return self.spawn_backend(backend);
+        }
+        self.restart_native_for_clock(backend, action, why)
     }
 
     /// Stop the running k3s (its process group) and start it again. Not a failure: nothing is counted or alerted.
@@ -1816,6 +1847,7 @@ impl K3sDev {
                 return Err(format!("podman create failed: {}", c.combined().lines().last().unwrap_or("no message").trim()));
             }
         }
+        *lock(&self.spawn_mark) = self.clock_src().map(|c| (c.mono(), 0));
         let o = self.run.run(&tmp, &["podman".into(), "start".into(), self.inst.pod_name.clone()], &[], Duration::from_secs(120), 16 * 1024, None);
         if o.ok() { Ok(()) } else { Err(format!("podman start failed: {}", o.combined().lines().last().unwrap_or("no message").trim())) }
     }
@@ -1984,7 +2016,8 @@ impl K3sDev {
                 return "could not start k3s".into();
             }
         }
-        let clock = if backend == Backend::Native { self.clock_src() } else { None };
+        // both variants watch the clock: a step or a certificate complaint restarts k3s (Podman: the container) once (F-K3S-30)
+        let clock = self.clock_src();
         let mut last_look = clock.as_ref().map(|c| (c.wall(), c.mono()));
         let mut clock_restarts = 0usize;
         let mut last_step_mono: Option<Duration> = None;
@@ -2012,9 +2045,9 @@ impl K3sDev {
                 }
             }
             if let (Some(jump), true) = (stepped, clock_restarts < MAX_CLOCK_RESTARTS) {
-                if lock(&self.child).as_mut().is_some_and(|ch| matches!(ch.try_wait(), Ok(None))) {
+                if self.backend_running(backend) {
                     clock_restarts += 1;
-                    if let Err(e) = self.restart_native_for_clock(backend, "devcluster.restart-clock-step", &format!("the clock moved by {jump} s")) {
+                    if let Err(e) = self.restart_for_clock(backend, "devcluster.restart-clock-step", &format!("the clock moved by {jump} s")) {
                         self.set_svc(Svc::Failed(format!("clock step; restarting failed: {e}")));
                         return "restarting failed".into();
                     }
@@ -2027,9 +2060,9 @@ impl K3sDev {
             if let (Some(c), false) = (&clock, cert_restarted) {
                 let mark = *lock(&self.spawn_mark);
                 if let Some((m0, off)) = mark {
-                    if c.mono().saturating_sub(m0) <= CERT_WINDOW && self.clock_ready_now() && log_shows_clock_trouble(&read_from(&self.layout.log(), off, 256 * 1024)) {
+                    if c.mono().saturating_sub(m0) <= CERT_WINDOW && self.clock_ready_now() && log_shows_clock_trouble(&if backend == Backend::Podman { self.log_tail(80) } else { read_from(&self.layout.log(), off, 256 * 1024) }) {
                         cert_restarted = true;
-                        if let Err(e) = self.restart_native_for_clock(backend, "devcluster.restart-clock-cert", "k3s reported a certificate that is not valid yet") {
+                        if let Err(e) = self.restart_for_clock(backend, "devcluster.restart-clock-cert", "k3s reported a certificate that is not valid yet") {
                             self.set_svc(Svc::Failed(format!("certificate trouble; restarting failed: {e}")));
                             return "restarting failed".into();
                         }
@@ -2043,7 +2076,7 @@ impl K3sDev {
             if backend == Backend::Native && forced.is_none() {
                 let (then, now_ip) = (lock(&self.spawn_ip).clone(), self.default_ip());
                 if let (true, Some(a), Some(b)) = (self.has_route(), then, now_ip) {
-                    if a != b && lock(&self.child).as_mut().is_some_and(|ch| matches!(ch.try_wait(), Ok(None))) {
+                    if a != b && lock(&self.child).as_mut().is_some_and(|ch| iyakki_core_api::child_status(ch).is_running()) {
                         *lock(&self.spawn_ip) = Some(b.clone());
                         let fixed = lock(&self.node_ip_used).clone();
                         if let Some(n) = fixed.map(|n| n.ip) {
@@ -2328,6 +2361,12 @@ impl K3sDev {
     /// Tests: feed a disk figure to the alert rule.
     #[doc(hidden)]
     pub fn check_disk_for_test(&self, pct: u8) {
+        // from here on the figure is the test's own: what the host's disk measured before (a laptop over the limit) is forgotten, and a later
+        // measurement does not count, so the result does not depend on how full the machine running the test is
+        if !self.disk_fed.swap(true, Ordering::SeqCst) {
+            self.disk_alerted.store(false, Ordering::SeqCst);
+            lock(&self.alerts).retain(|a| !matches!(a, Alert::Disk(_)));
+        }
         self.check_disk(&Health { disk_pct: Some(pct), ..Default::default() });
     }
 
@@ -2357,7 +2396,9 @@ impl K3sDev {
     /// `check_disk_for_test`).
     fn check_disk_measured(&self, h: &Health) {
         #[cfg(not(test))]
-        self.check_disk(h);
+        if !self.disk_fed.load(Ordering::SeqCst) {
+            self.check_disk(h);
+        }
         #[cfg(test)]
         let _ = h;
     }
@@ -2395,6 +2436,18 @@ impl K3sDev {
     /// `kubectl` against the managed cluster: `k3s kubectl` (native) or `podman exec` (Podman). Never needs a kubectl on the machine.
     pub fn kubectl(&self, args: &[&str]) -> Out {
         self.kubectl_cap(args, KUBECTL_CAP)
+    }
+
+    /// `k3s ctr ARGS` against the managed cluster's containerd (an image import for a Linux app pod, F-LINAPP-14). Native installs only: the
+    /// Podman backend has no `k3s` program on this machine, and says so.
+    pub fn ctr(&self, args: &[&str]) -> Out {
+        let backend = self.installed().map(|s| s.backend).unwrap_or_default();
+        if backend != Backend::Native {
+            return Out { code: Some(1), stderr: "importing an image needs the native dev cluster (this one runs in Podman)".into(), ..Default::default() };
+        }
+        let mut argv: Vec<String> = vec![self.layout.bin().display().to_string(), "ctr".into()];
+        argv.extend(args.iter().map(|s| s.to_string()));
+        self.run.run(&self.layout.root, &argv, &[], Duration::from_secs(600), KUBECTL_CAP, None)
     }
 
     /// [`K3sDev::kubectl`] with a larger output limit (the dashboards read every pod of the cluster).

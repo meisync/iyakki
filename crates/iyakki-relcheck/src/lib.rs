@@ -6,9 +6,11 @@ pub mod cargolic;
 pub mod cpio;
 pub mod downloads;
 pub mod features;
+pub mod fsimage;
 pub mod gate;
 pub mod imagescan;
 pub mod legalinfo;
+pub mod manifest;
 pub mod notices;
 pub mod profile;
 pub mod spdx;
@@ -17,3 +19,8 @@ pub mod links;
 pub mod sbom;
 pub mod secrets;
 pub mod version;
+
+#[cfg(test)]
+mod fsimage_tests;
+#[cfg(test)]
+mod fsimage_real_tests;

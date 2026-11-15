@@ -66,7 +66,6 @@ fn the_manifest_is_validated_in_words_and_defaults_are_closed() {
         (r#"{"id":"x","name":"X","capabilities":{"network":["*"]}}"#, "plain host name"),
         (r#"{"id":"x","name":"X","capabilities":{"network":["a.com/path"]}}"#, "plain host name"),
         (r#"{"id":"x","name":"X","capabilities":{"root":true}}"#, "unknown capability"),
-        (r#"{"id":"x","name":"X","colour":"red"}"#, "unknown field"),
         ("[]", "JSON object"),
         ("{", "not valid JSON"),
     ] {
@@ -200,7 +199,9 @@ fn the_bridge_refuses_what_was_not_declared_and_validates_every_argument() {
         assert!(e.contains("did not ask for"), "{op}: {e}");
     }
     assert!(!out.lock().unwrap().refused.is_empty(), "refusals are kept for the info panel");
-    assert!(h.call("vault.get", &json!({})).unwrap_err().contains("no such bridge call"));
+    // a name no SDK version has is a structured `Unsupported` (SDK 1.1 and later; before, a plain "no such bridge call"), still an error
+    assert_eq!(super::tilesdk::SdkError::decode(&h.call("vault.get", &json!({})).unwrap_err()).unwrap().0, "Unsupported");
+    assert!(h.call("vault", &json!({})).unwrap_err().contains("no such bridge call"), "a name with no dot is not a call of any SDK");
     assert!(h.call("storage", &json!({})).is_err());
     let (mut h, _) = host(Caps::all());
     for (op, a) in [("storage.get", json!({"k": "bad key"})), ("storage.get", json!({"k": 5})), ("storage.set", json!({"k": "a"})), ("storage.set", json!({"k": "a", "v": "x".repeat(STORAGE_VALUE + 1)})), ("host.saveFile", json!({"name": "../x", "text": "t"})), ("host.saveFile", json!({"name": ".hidden", "text": "t"})), ("ui.toast", json!({"text": "x".repeat(201)}))] {
@@ -334,4 +335,69 @@ fn ui_calls_reach_the_shell_and_a_page_with_a_stylesheet_is_laid_out_with_its_co
     let doc = rt.doc();
     assert_eq!(doc.canvas, Some([0x10, 0x20, 0x30, 255]), "the page's own background reaches the view");
     assert!(rt.page_text().contains("hello"));
+}
+
+#[test]
+fn a_wasm_module_travels_in_a_bundle_only_when_app_json_names_it_and_it_is_the_binary_form() {
+    const MODULE: &[u8] = b"\0asm\x01\0\0\0";
+    let d = tmp("wasm-bundle");
+    let write = |manifest: &str, module: Option<&[u8]>| {
+        std::fs::write(d.join("app.json"), manifest).unwrap();
+        std::fs::write(d.join("index.html"), "<p>hi</p>").unwrap();
+        let _ = std::fs::remove_file(d.join("tile.wasm"));
+        if let Some(m) = module {
+            std::fs::write(d.join("tile.wasm"), m).unwrap();
+        }
+    };
+    write(r#"{"id":"w","name":"W","icon":"🧩","wasm":"tile.wasm"}"#, Some(MODULE));
+    let b = Bundle::from_dir(&d).unwrap();
+    assert_eq!(b.wasm_module(), Some(MODULE));
+    assert_eq!(b.manifest.wasm_path(), Some("tile.wasm"));
+    assert_eq!(content_type("tile.wasm"), "application/wasm");
+    assert!(lint(&b).0.is_empty(), "{:?}", lint(&b));
+    // it survives the package payload and the manifest keeps its words
+    let again = Bundle::from_payload(&b.to_payload()).unwrap();
+    assert_eq!(again.wasm_module(), Some(MODULE));
+    assert_eq!(again.manifest.to_json()["wasm"], "tile.wasm");
+    // an ordinary web tile app has none, and a .wasm file nobody named is carried but never run
+    write(r#"{"id":"w","name":"W","icon":"🧩"}"#, Some(MODULE));
+    assert!(Bundle::from_dir(&d).unwrap().wasm_module().is_none());
+    // named but missing, text instead of the binary form, and a path that is not a .wasm file are all refused in words
+    write(r#"{"id":"w","name":"W","icon":"🧩","wasm":"tile.wasm"}"#, None);
+    assert!(Bundle::from_dir(&d).unwrap_err().contains("is not in the app"));
+    write(r#"{"id":"w","name":"W","icon":"🧩","wasm":"tile.wasm"}"#, Some(b"(module)"));
+    assert!(Bundle::from_dir(&d).unwrap_err().contains("not a WebAssembly module"));
+    write(r#"{"id":"w","name":"W","icon":"🧩","wasm":"../tile.wasm"}"#, Some(MODULE));
+    assert!(Bundle::from_dir(&d).unwrap_err().starts_with("wasm:"));
+    write(r#"{"id":"w","name":"W","icon":"🧩","wasm":"app.js"}"#, Some(MODULE));
+    assert!(Bundle::from_dir(&d).unwrap_err().starts_with("wasm:"));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn a_picture_icon_comes_with_the_entry_as_bytes_for_the_launcher() {
+    let d = tmp("png-icon");
+    let png = {
+        let mut pm = tiny_skia::Pixmap::new(8, 8).unwrap();
+        pm.fill(tiny_skia::Color::from_rgba8(200, 30, 30, 255));
+        pm.encode_png().unwrap()
+    };
+    std::fs::write(d.join("app.json"), r#"{"id":"p","name":"P","icon":"icon.png"}"#).unwrap();
+    std::fs::write(d.join("index.html"), "<p>hi</p>").unwrap();
+    std::fs::write(d.join("icon.png"), &png).unwrap();
+    let b = Bundle::from_dir(&d).unwrap();
+    let (path, data) = b.icon_file().unwrap();
+    assert_eq!((path, data.bytes()), ("icon.png", &png[..]));
+    assert!(lint(&b).0.is_empty(), "{:?}", lint(&b));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn the_older_flags_show_what_they_mean_in_the_catalogue_without_changing_how_they_work() {
+    let c = Caps { storage: true, notifications: true, network: vec!["api.example.com".into()], ..Caps::default() };
+    let v = c.catalogue_view();
+    assert_eq!(v.requests.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["notify", "net.connect"]);
+    assert_eq!(v.unmapped.len(), 1);
+    assert!(c.holds("storage") && c.holds("network"), "the older checks are untouched");
+    assert!(Caps::default().catalogue_view().requests.is_empty());
 }

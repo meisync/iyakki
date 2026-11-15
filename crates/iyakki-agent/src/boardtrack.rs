@@ -201,7 +201,23 @@ impl Tracker {
         if let Some(d) = self.state.parent() {
             let _ = std::fs::create_dir_all(d);
         }
-        let _ = std::fs::write(&self.state, serde_json::json!({"ids": ids, "seen": seen, "verified": self.verified_ids()}).to_string());
+        let _ = std::fs::write(&self.state, serde_json::json!({"ids": ids, "seen": seen, "verified": self.verified_ids(), "refused": self.refused_ids()}).to_string());
+    }
+
+    /// Rows whose claim of done the harness refused (no verification had run): a row that is done later without a check was forced, not set by hand.
+    pub fn refused_ids(&self) -> BTreeSet<String> {
+        let v: Value = std::fs::read_to_string(&self.state).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
+        v.get("refused").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default()
+    }
+
+    pub fn mark_refused(&self, id: &str) {
+        let (ids, seen) = self.read_state();
+        let mut all = self.refused_ids();
+        all.insert(id.to_string());
+        if let Some(d) = self.state.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        let _ = std::fs::write(&self.state, serde_json::json!({"ids": ids, "seen": seen, "verified": self.verified_ids(), "refused": all}).to_string());
     }
 
     /// The rows the tracker has seen proved by a tool (a successful, verified step): the only rows `board_update` may set to
@@ -222,7 +238,7 @@ impl Tracker {
         if let Some(d) = self.state.parent() {
             let _ = std::fs::create_dir_all(d);
         }
-        let _ = std::fs::write(&self.state, serde_json::json!({"ids": ids, "seen": seen, "verified": all}).to_string());
+        let _ = std::fs::write(&self.state, serde_json::json!({"ids": ids, "seen": seen, "verified": all, "refused": self.refused_ids()}).to_string());
     }
 
     /// The assistant added this row: from now on the tracker may move it.

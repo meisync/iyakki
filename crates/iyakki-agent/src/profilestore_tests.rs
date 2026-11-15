@@ -408,3 +408,189 @@ fn the_key_and_status_texts_never_show_a_key() {
         assert!(!e.to_string().contains('/'), "no paths in messages");
     }
 }
+
+#[test]
+fn a_sealed_file_moves_without_ever_being_opened_and_only_opens_with_the_same_key() {
+    let k = key(1);
+    let (d, st) = protected("move", "alice", &k);
+    st.seal(&k).ok();
+    // open: refused; sealed: copied, byte for byte, as the owner alone may read it
+    let (d2, st2) = (temp("move-b"), ());
+    let _ = st2;
+    let other = ProfileStore::new(&d2, "alice");
+    let out = d.join("export.iykbp");
+    st.open(&k).unwrap();
+    assert_eq!(st.export_sealed(&out, "laptop", 1_000), Err(ProfileError::Open));
+    st.seal(&k).unwrap();
+    let n = st.export_sealed(&out, "laptop", 1_000).unwrap();
+    assert_eq!(std::fs::read(&out).unwrap(), std::fs::read(d.join("web-profile/alice.sealed")).unwrap());
+    assert_eq!(n, std::fs::metadata(&out).unwrap().len());
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(std::fs::metadata(&out).unwrap().permissions().mode() & 0o777, 0o600);
+    assert!(st.export_sealed(&out, "laptop", 1_001).is_err(), "never over an existing file");
+    assert_assume_no_plaintext(&out);
+    // the other machine: the wrong key, a damaged copy and a plain file are refused and change nothing
+    assert_eq!(other.import_sealed(&out, &key(2), "desktop", 2_000), Err(ProfileError::WrongKey));
+    let mut bad = std::fs::read(&out).unwrap();
+    let last = bad.len() - 3;
+    bad[last] ^= 0xFF;
+    let badf = d.join("bad.iykbp");
+    std::fs::write(&badf, bad).unwrap();
+    assert!(matches!(other.import_sealed(&badf, &k, "desktop", 2_000), Err(ProfileError::Damaged(_))));
+    std::fs::write(d.join("plain.txt"), "hello").unwrap();
+    assert!(other.import_sealed(&d.join("plain.txt"), &k, "desktop", 2_000).is_err());
+    assert_eq!(other.status(), Status::Off, "nothing was taken in");
+    // the right key: taken in, opens with the key, and the files are the person's own
+    other.import_sealed(&out, &k, "desktop", 2_000).unwrap();
+    assert_eq!(other.status(), Status::Sealed);
+    assert!(other.open(&k).unwrap() == false);
+    assert_eq!(read(&other, "data/cookies.sqlite").contains(MARK), true);
+    other.seal(&k).unwrap();
+    // a second import keeps the first as the backup
+    other.import_sealed(&out, &k, "desktop", 3_000).unwrap();
+    assert!(d2.join("web-profile/alice.sealed.bak").exists());
+}
+
+fn assert_assume_no_plaintext(p: &Path) {
+    let b = std::fs::read(p).unwrap();
+    assert!(!b.windows(MARK.len()).any(|w| w == MARK.as_bytes()), "the moved file holds no readable cookie");
+}
+
+#[test]
+fn one_session_holds_a_profile_at_a_time_and_a_claim_runs_out_or_is_given_back() {
+    let k = key(1);
+    let (d, st) = protected("lease", "alice", &k);
+    assert_eq!(st.lease(100), None);
+    st.take_lease("laptop", 100, 600).unwrap();
+    assert_eq!(st.lease(150).unwrap().holder, "laptop");
+    let e = st.take_lease("desktop", 150, 600).unwrap_err();
+    assert!(e.contains("laptop") && e.contains("minute"), "{e}");
+    st.take_lease("laptop", 200, 600).unwrap();
+    // an export by another holder is refused while the claim stands; the sealed file is untouched
+    assert!(st.export_sealed(&d.join("x.iykbp"), "desktop", 300).is_err());
+    assert!(!d.join("x.iykbp").exists());
+    // only the holder gives it back; others cannot
+    st.release_lease("desktop", 300);
+    assert!(st.lease(300).is_some());
+    st.release_lease("laptop", 300);
+    assert_eq!(st.lease(300), None);
+    // it runs out by itself
+    st.take_lease("laptop", 1_000, 600).unwrap();
+    assert!(st.lease(1_599).is_some() && st.lease(1_600).is_none());
+    st.take_lease("desktop", 1_700, 600).unwrap();
+    assert!(st.take_lease("", 1_700, 60).is_err() && st.take_lease("bad\nname", 1_700, 60).is_err());
+    // a move takes the claim for its own length and gives it back
+    st.release_lease("desktop", 1_700);
+    st.export_sealed(&d.join("y.iykbp"), "laptop", 2_000).unwrap();
+    assert_eq!(st.lease(2_000), None);
+    // refused while protection was never on, and while a plain profile stands beside a sealed one
+    let off = ProfileStore::new(&temp("lease-off"), "bob");
+    assert_eq!(off.export_sealed(&d.join("z.iykbp"), "laptop", 1), Err(ProfileError::NotProtected));
+}
+
+// ---- more checks of the move (F-VAULT-11, lane P-B), on the API above (export to a file, import from a file, one claim at a time)
+
+#[test]
+fn a_cut_or_wrongly_keyed_file_leaves_the_profile_here_byte_identical_and_no_half_written_file_behind() {
+    let k = key(21);
+    let (d, st) = protected("move-p1", "cy", &k);
+    let before = std::fs::read(d.join("web-profile/cy.sealed")).unwrap();
+    let (_d2, other) = protected("move-p2", "cy", &key(22));
+    let theirs = d.join("theirs.iykbp");
+    other.export_sealed(&theirs, "m", 1).unwrap();
+    // sealed with another key
+    assert_eq!(st.import_sealed(&theirs, &k, "m", 2), Err(ProfileError::WrongKey));
+    // half of a good file
+    let good = std::fs::read(&theirs).unwrap();
+    let cut = d.join("cut.iykbp");
+    std::fs::write(&cut, &good[..good.len() / 2]).unwrap();
+    assert!(st.import_sealed(&cut, &key(22), "m", 2).is_err());
+    assert_eq!(std::fs::read(d.join("web-profile/cy.sealed")).unwrap(), before, "the profile here is untouched");
+    assert!(!d.join("web-profile/cy.sealed.new").exists(), "no half-written file");
+    assert_eq!(st.lease(3), None, "a refused import gives its claim back");
+    // a good import replaces it and the old file is the backup, byte for byte
+    st.import_sealed(&theirs, &key(22), "m", 4).unwrap();
+    assert_eq!(std::fs::read(d.join("web-profile/cy.sealed.bak")).unwrap(), before);
+}
+
+#[test]
+fn an_import_waits_for_the_holder_of_the_claim_and_goes_through_once_the_claim_ran_out() {
+    let k = key(23);
+    let (d, st) = protected("move-p3", "di", &k);
+    let (_d2, other) = protected("move-p4", "di", &k);
+    let file = d.join("in.iykbp");
+    other.export_sealed(&file, "m", 1).unwrap();
+    st.take_lease("tenant-1", 100, 600).unwrap();
+    let e = st.import_sealed(&file, &k, "machine-a", 200).unwrap_err();
+    assert!(e.to_string().contains("tenant-1"), "the refusal says who has it: {e}");
+    assert!(!d.join("web-profile/di.sealed.bak").exists(), "nothing changed");
+    // after the claim of tenant-1 ran out the import goes through
+    st.import_sealed(&file, &k, "machine-a", 1_000).unwrap();
+    assert_eq!(st.lease(1_001), None);
+}
+
+#[test]
+fn what_travels_holds_no_plain_content_and_opens_on_the_other_machine_with_the_same_key_after_the_first_one_closed_it() {
+    let k = key(24);
+    let (d, here) = protected("move-p5", "ed", &k);
+    here.open(&k).unwrap();
+    assert_eq!(here.export_sealed(&d.join("x.iykbp"), "m", 1), Err(ProfileError::Open), "nothing moves while it is open here");
+    here.seal_for_exit(&k).unwrap();
+    let out = d.join("x.iykbp");
+    here.export_sealed(&out, "m", 2).unwrap();
+    assert_assume_no_plaintext(&out);
+    let d2 = temp("move-p6");
+    let there = ProfileStore::with_run_root(&d2, "ed", &d2.join("run"));
+    there.import_sealed(&out, &k, "tenant-1", 3).unwrap();
+    there.open(&k).unwrap();
+    assert!(read(&there, "data/cookies.sqlite").contains(MARK));
+    there.seal_for_exit(&k).unwrap();
+}
+
+#[test]
+fn a_running_session_holds_the_claim_a_second_machine_cannot_open_it_and_a_crashed_one_runs_out() {
+    let k = key(1);
+    let (d, st) = protected("claim", "alice", &k);
+    let now = 1_000_000u64;
+    // machine A signs in: opened, claim taken
+    assert!(matches!(on_sign_in_as(&d, "alice", Some(key(1)), "pod-a", now), SignIn::Opened { .. }));
+    assert_eq!(st.lease(now + 1).unwrap().holder, "pod-a");
+    // machine B on the same volume: refused, and it says who has it; nothing is opened by B
+    let live_before = st.status();
+    match on_sign_in_as(&d, "alice", Some(key(1)), "pod-b", now + 5) {
+        SignIn::Locked(m) => assert!(m.contains("pod-a") && m.contains("in use"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(st.status(), live_before);
+    // A renews while open; the claim moves on and B is still refused near its end
+    assert!(renew_claim(&d, "alice", "pod-a", now + 100));
+    assert!(matches!(on_sign_in_as(&d, "alice", Some(key(1)), "pod-b", now + 200), SignIn::Locked(_)));
+    // B cannot renew a claim that is not its own
+    assert!(!renew_claim(&d, "alice", "pod-b", now + 110));
+    // A signs out: sealed and the claim given back (through the holder name of this process)
+    st.release_lease("pod-a", now + 120);
+    on_sign_out(&d, "alice").unwrap();
+    assert_eq!(st.status(), Status::Sealed);
+    assert!(matches!(on_sign_in_as(&d, "alice", Some(key(1)), "pod-b", now + 130), SignIn::Opened { .. }), "after the claim was given back B may open");
+    // B crashes: its claim runs out by itself and A may take over (the RAM copy of B is gone with its machine, here we seal it first)
+    on_sign_out(&d, "alice").unwrap();
+    st.take_lease("pod-b", now + 200, SESSION_CLAIM_SECS).unwrap();
+    assert!(matches!(on_sign_in_as(&d, "alice", Some(key(1)), "pod-a", now + 200 + SESSION_CLAIM_SECS - 1), SignIn::Locked(_)));
+    assert!(matches!(on_sign_in_as(&d, "alice", Some(key(1)), "pod-a", now + 200 + SESSION_CLAIM_SECS + 1), SignIn::Opened { .. }));
+    // a wrong key gives the claim back so the next try is not blocked by the failed one
+    on_sign_out(&d, "alice").ok();
+    st.release_lease("pod-a", now + 1_000);
+    assert!(matches!(on_sign_in_as(&d, "alice", Some(key(9)), "pod-a", now + 1_001), SignIn::Locked(_)));
+    assert_eq!(st.lease(now + 1_002), None);
+}
+
+#[test]
+fn the_holder_name_is_the_host_or_a_name_kept_once_beside_the_sealed_files() {
+    let d = temp("holder");
+    let a = holder_id(&d);
+    assert!(!a.is_empty() && a.len() < 70);
+    assert_eq!(holder_id(&d), a, "the same name every time");
+    if std::env::var("HOSTNAME").map(|h| h.trim().is_empty()).unwrap_or(true) {
+        assert!(a.starts_with("machine-") && d.join("web-profile/.holder").exists());
+    }
+}

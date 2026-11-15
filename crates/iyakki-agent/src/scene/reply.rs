@@ -244,7 +244,7 @@ enum Cand {
     Link(String),
 }
 
-fn host_of(url: &str) -> String {
+pub fn host_of(url: &str) -> String {
     url.split("://").nth(1).unwrap_or(url).split(['/', '?', '#']).next().unwrap_or("").to_string()
 }
 
@@ -325,6 +325,64 @@ fn candidates(reply: &str, workdir: Option<&Path>) -> Vec<Cand> {
     }
     out.sort_by_key(|c| c.0);
     out.into_iter().map(|c| c.1).collect()
+}
+
+/// The https links to pictures a reply holds (at most three, each once): offered to the person, never fetched by themselves.
+pub fn web_links(reply: &str) -> Vec<String> {
+    let mut v: Vec<String> = Vec::new();
+    for c in candidates(reply, None) {
+        if let Cand::Link(u) = c {
+            if u.starts_with("https://") && u.len() <= 500 && !u.chars().any(|c| c.is_control() || c.is_whitespace()) && !v.contains(&u) && v.len() < 3 {
+                v.push(u);
+            }
+        }
+    }
+    v
+}
+
+/// A message in the story's conversation that gives an https address for one picture ("use https://... for picture 2", "scene 3: https://...
+/// "): the scene (0-based) and the address. With one picture only, the number may be left out. `None` for any other message.
+pub fn asks_for_link(text: &str, scenes: usize) -> Option<(usize, String)> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let url = words.iter().find_map(|w| {
+        let w = w.trim_matches(|c: char| matches!(c, '(' | ')' | '<' | '>' | ',' | ';' | '"' | '\'' | '.' | '!' | '?'));
+        (w.starts_with("https://") && w.len() > 12 && w.len() <= 500).then(|| w.to_string())
+    })?;
+    let lower = text.to_ascii_lowercase();
+    if !["picture", "image", "scene", "illustration", "photo"].iter().any(|k| lower.contains(k)) {
+        return None;
+    }
+    let n = words.windows(2).find_map(|w| {
+        let first = w[0].trim_matches(|c: char| !c.is_alphanumeric()).to_ascii_lowercase();
+        matches!(first.as_str(), "picture" | "image" | "scene" | "illustration" | "photo" | "no" | "number").then(|| w[1].trim_matches(|c: char| !c.is_ascii_digit()).parse::<usize>().ok()).flatten()
+    });
+    match (n, scenes) {
+        (Some(n), s) if n >= 1 && n <= s => Some((n - 1, url)),
+        (None, 1) => Some((0, url)),
+        _ => None,
+    }
+}
+
+/// Fetch ONE picture the person approved, by address: https only, never an address on this computer or its network, through the
+/// account's own host rules at every redirect, size caps, and the same judging by first bytes and decode as any picture from a model.
+/// Nothing is fetched until the shell calls this after the person said yes to that address.
+pub fn fetch_link(url: &str, web: &dyn iyakki_web::Fetch, allow: &dyn Fn(&str) -> bool, allow_video: bool) -> Result<Found, String> {
+    let u = iyakki_web::Url::parse(url).map_err(|_| "that is not a web address".to_string())?;
+    if !u.https {
+        return Err("only https links are fetched".into());
+    }
+    let ok = |h: &str| allow(h) && !crate::tenantconfig::catalog::is_private_host(h);
+    if !ok(&u.host) {
+        return Err(format!("{} is not an address this account may fetch from (this computer, its network and hosts your account does not allow are refused)", u.host));
+    }
+    let (_, r) = iyakki_web::fetch_following(web, iyakki_web::Request::get(&u), &ok, None)?;
+    if r.status != 200 {
+        return Err(format!("{} answered {}", u.host, r.status));
+    }
+    if r.body.len() > MAX_VIDEO_BYTES {
+        return Err(format!("the file is too large ({} bytes)", r.body.len()));
+    }
+    validate(r.body, allow_video, "a link you approved")
 }
 
 /// The first usable picture in a reply, or why none was: each candidate that failed is named. Addresses on the web are not

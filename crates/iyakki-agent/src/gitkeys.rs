@@ -67,27 +67,27 @@ pub struct MemStore {
 
 impl SecretStore for MemStore {
     fn get(&self, name: &str) -> Result<Zeroizing<String>, String> {
-        if *self.locked.lock().unwrap() {
+        if *self.locked.lock().unwrap_or_else(std::sync::PoisonError::into_inner) {
             return Err("your vault is locked".into());
         }
-        self.map.lock().unwrap().get(name).map(|v| Zeroizing::new(v.clone())).ok_or_else(|| format!("`{name}` is not in your vault"))
+        self.map.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(name).map(|v| Zeroizing::new(v.clone())).ok_or_else(|| format!("`{name}` is not in your vault"))
     }
     fn set(&self, name: &str, value: &str) -> Result<(), String> {
-        if *self.locked.lock().unwrap() {
+        if *self.locked.lock().unwrap_or_else(std::sync::PoisonError::into_inner) {
             return Err("your vault is locked".into());
         }
         if !crate::vault::valid_secret_name(name) {
             return Err(format!("`{name}` is not a valid vault name"));
         }
-        self.map.lock().unwrap().insert(name.into(), value.into());
+        self.map.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(name.into(), value.into());
         Ok(())
     }
     fn delete(&self, name: &str) -> Result<(), String> {
-        self.map.lock().unwrap().remove(name);
+        self.map.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(name);
         Ok(())
     }
     fn names(&self) -> Result<Vec<String>, String> {
-        Ok(self.map.lock().unwrap().keys().cloned().collect())
+        Ok(self.map.lock().unwrap_or_else(std::sync::PoisonError::into_inner).keys().cloned().collect())
     }
 }
 
@@ -203,21 +203,21 @@ pub enum Who {
 
 impl Session {
     pub fn remember_passphrase(&self, id: &str, pass: &str) {
-        self.pass.lock().unwrap().insert(id.into(), Zeroizing::new(pass.into()));
+        self.pass.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(id.into(), Zeroizing::new(pass.into()));
     }
     pub fn passphrase(&self, id: &str) -> Option<Zeroizing<String>> {
-        self.pass.lock().unwrap().get(id).cloned()
+        self.pass.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(id).cloned()
     }
     /// Whether an assistant must ask the person before using this key now. The person's own actions never ask again.
     pub fn needs_approval(&self, who: Who, key_id: &str) -> bool {
-        who == Who::Assistant && !self.approved.lock().unwrap().contains(key_id)
+        who == Who::Assistant && !self.approved.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains(key_id)
     }
     pub fn approve(&self, key_id: &str) {
-        self.approved.lock().unwrap().insert(key_id.into());
+        self.approved.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key_id.into());
     }
     pub fn forget(&self) {
-        self.pass.lock().unwrap().clear();
-        self.approved.lock().unwrap().clear();
+        self.pass.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+        self.approved.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
     }
 }
 

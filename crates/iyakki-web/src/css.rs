@@ -32,11 +32,13 @@ pub struct Viewport {
     /// The person asked for less motion (`prefers-reduced-motion: reduce`) / more contrast (`prefers-contrast: more`).
     pub reduce_motion: bool,
     pub more_contrast: bool,
+    /// Device pixels per CSS pixel the page is drawn at (the page scale of the reader): `srcset` and `min-resolution` are judged against it.
+    pub dppx: f32,
 }
 
 impl Default for Viewport {
     fn default() -> Self {
-        Viewport { width: 1280.0, height: 800.0, reduce_motion: false, more_contrast: false }
+        Viewport { width: 1280.0, height: 800.0, reduce_motion: false, more_contrast: false, dppx: 1.0 }
     }
 }
 
@@ -188,6 +190,96 @@ pub fn parse_sheet(src: &str, vp: &Viewport, order: &mut u32) -> Sheet {
     let mut sheet = Sheet::default();
     parse_into(&text, vp, order, &mut sheet, 0);
     sheet
+}
+
+// ------------------------------------------------------------------------------------------------ the parsed-style cache (F-BROX-14)
+
+/// A style sheet that was parsed once is kept by its text and the window it was read for (media queries are decided while reading), so a
+/// sheet used again (the same file on the next page of a site, after Back, a reload) is not parsed again. Rule order numbers are
+/// rebased to where the sheet stands this time. At most this many sheets and this many bytes of text are kept; the one used longest ago goes first.
+const SHEET_CACHE_ITEMS: usize = 64;
+const SHEET_CACHE_BYTES: usize = 8 << 20;
+
+type SheetKey = (usize, u64, u64, [u32; 2], [bool; 2]);
+
+#[derive(Default)]
+pub struct SheetCache {
+    map: std::collections::HashMap<SheetKey, (Sheet, u32, usize, u64)>,
+    bytes: usize,
+    tick: u64,
+    pub hits: u64,
+    pub misses: u64,
+}
+
+fn sheet_key(src: &str, vp: &Viewport) -> SheetKey {
+    let (mut a, mut b) = (0xcbf29ce484222325u64, 0x9e3779b97f4a7c15u64);
+    for &x in src.as_bytes() {
+        a = (a ^ x as u64).wrapping_mul(0x100000001b3);
+        b = (b.rotate_left(5) ^ x as u64).wrapping_mul(0x9e3779b97f4a7c15);
+    }
+    (src.len(), a, b, [vp.width.to_bits(), vp.height.to_bits()], [vp.reduce_motion, vp.more_contrast])
+}
+
+impl SheetCache {
+    /// Like [`parse_sheet`]; the flag says the sheet came from the cache.
+    pub fn parse(&mut self, src: &str, vp: &Viewport, order: &mut u32) -> (Sheet, bool) {
+        let key = sheet_key(src, vp);
+        self.tick += 1;
+        let start = *order;
+        if let Some(e) = self.map.get_mut(&key) {
+            e.3 = self.tick;
+            self.hits += 1;
+            let mut sheet = e.0.clone();
+            for r in &mut sheet.rules {
+                r.order += start;
+            }
+            *order = start + e.1;
+            return (sheet, true);
+        }
+        self.misses += 1;
+        let mut from_zero = 0u32;
+        let sheet = parse_sheet(src, vp, &mut from_zero);
+        if src.len() <= SHEET_CACHE_BYTES / 4 {
+            while (self.bytes + src.len() > SHEET_CACHE_BYTES || self.map.len() >= SHEET_CACHE_ITEMS) && !self.map.is_empty() {
+                let oldest = self.map.iter().min_by_key(|(_, v)| v.3).map(|(k, _)| *k);
+                if let Some(k) = oldest {
+                    if let Some(v) = self.map.remove(&k) {
+                        self.bytes -= v.2;
+                    }
+                }
+            }
+            self.map.insert(key, (sheet.clone(), from_zero, src.len(), self.tick));
+            self.bytes += src.len();
+        }
+        let mut out = sheet;
+        for r in &mut out.rules {
+            r.order += start;
+        }
+        *order = start + from_zero;
+        (out, false)
+    }
+
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+}
+
+static SHEETS: std::sync::Mutex<Option<SheetCache>> = std::sync::Mutex::new(None);
+
+/// [`parse_sheet`] through the shared cache.
+pub fn parse_sheet_cached(src: &str, vp: &Viewport, order: &mut u32) -> Sheet {
+    let mut g = SHEETS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    g.get_or_insert_with(SheetCache::default).parse(src, vp, order).0
+}
+
+/// How the shared cache did so far: (hits, misses, sheets kept).
+pub fn sheet_cache_stats() -> (u64, u64, usize) {
+    let g = SHEETS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    g.as_ref().map_or((0, 0, 0), |c| (c.hits, c.misses, c.len()))
 }
 
 fn parse_into(text: &str, vp: &Viewport, order: &mut u32, sheet: &mut Sheet, depth: u32) {
@@ -1220,6 +1312,65 @@ mod tests {
         assert_eq!(s.rules.len(), 1);
         let names: Vec<_> = s.rules[0].decls.iter().map(|d| d.prop.as_str()).collect();
         assert_eq!(names, vec!["color", "margin"]);
+    }
+
+    fn rules_text(s: &Sheet) -> String {
+        s.rules.iter().map(|r| format!("{}:{}:{}", r.order, r.selectors.len(), r.decls.iter().map(|d| format!("{}={}", d.prop, d.value)).collect::<Vec<_>>().join(","))).collect::<Vec<_>>().join("|")
+    }
+
+    #[test]
+    fn a_sheet_parsed_once_comes_from_the_cache_with_the_same_rules_and_its_order_rebased() {
+        let css = "a { color: red } .b, .c { margin: 1px 2px } @media (max-width: 500px) { p { color: blue } } @import url(x.css);";
+        let vp = Viewport::default();
+        let mut c = SheetCache::default();
+        let mut o1 = 0;
+        let (first, hit) = c.parse(css, &vp, &mut o1);
+        assert!(!hit);
+        let mut plain_order = 0;
+        let plain = parse_sheet(css, &vp, &mut plain_order);
+        assert_eq!(rules_text(&first), rules_text(&plain));
+        assert_eq!((o1, first.imports.clone()), (plain_order, plain.imports.clone()));
+        // the same text again, standing after 10 rules of the page: the same rules, numbered from 11, and the counter moves on as a parse would
+        let mut o2 = 10;
+        let (second, hit) = c.parse(css, &vp, &mut o2);
+        assert!(hit, "kept");
+        let mut check = 10;
+        let again = parse_sheet(css, &vp, &mut check);
+        assert_eq!(rules_text(&second), rules_text(&again));
+        assert_eq!(o2, check);
+        assert_eq!((c.hits, c.misses, c.len()), (1, 1, 1));
+    }
+
+    #[test]
+    fn another_window_or_another_text_is_another_entry_and_the_cache_forgets_the_oldest_when_full() {
+        let mut c = SheetCache::default();
+        let css = "@media (max-width: 600px) { p { color: red } } a { color: blue }";
+        let (wide, narrow) = (Viewport { width: 1280.0, ..Viewport::default() }, Viewport { width: 400.0, ..Viewport::default() });
+        let (mut a, mut b) = (0, 0);
+        let (sw, _) = c.parse(css, &wide, &mut a);
+        let (sn, hit) = c.parse(css, &narrow, &mut b);
+        assert!(!hit, "a narrow window reads the media query differently");
+        assert_ne!(sw.rules.len(), sn.rules.len());
+        assert_eq!(c.len(), 2);
+        for i in 0..SHEET_CACHE_ITEMS + 5 {
+            let mut o = 0;
+            c.parse(&format!("p{i} {{ margin: {i}px }}"), &wide, &mut o);
+        }
+        assert_eq!(c.len(), SHEET_CACHE_ITEMS, "never more than the limit");
+        let mut o = 0;
+        assert!(!c.parse(css, &wide, &mut o).1, "the first one went first");
+    }
+
+    #[test]
+    fn the_shared_cache_is_used_by_the_page_loader_so_a_second_page_with_the_same_sheet_does_not_read_it_again() {
+        let css = "h1 { color: #123456; border-width: 7px } .unique-for-this-test-4711 { margin: 3px }";
+        let vp = Viewport::default();
+        let (h0, _, _) = sheet_cache_stats();
+        let (mut a, mut b) = (0, 0);
+        let one = parse_sheet_cached(css, &vp, &mut a);
+        let two = parse_sheet_cached(css, &vp, &mut b);
+        assert_eq!(rules_text(&one), rules_text(&two));
+        assert!(sheet_cache_stats().0 > h0, "the second use was a hit");
     }
 }
 

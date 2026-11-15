@@ -163,6 +163,22 @@ pub fn plan_flush(q: &mut Queue, healthy: bool, due: bool) -> Flush {
     Flush::Append(q.take())
 }
 
+/// Writes `text` as the whole file and makes it durable before returning (data and metadata). The session record is the only thing
+/// that tells the next boot that this one never ended: written without this it can be lost in the minutes after boot, when a power
+/// cut leaves a new file empty or missing (seen on the real image, `dist/qemu/unclean-shutdown-test.py`).
+pub fn write_synced(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(path)?;
+    f.write_all(text.as_bytes())?;
+    f.sync_all()?;
+    if let Some(d) = path.parent() {
+        if let Ok(dir) = std::fs::File::open(d) {
+            let _ = dir.sync_all();
+        }
+    }
+    Ok(())
+}
+
 /// Append `text` to `path` and flush it to the disk. A file already at `MAX_FILE_BYTES` gets one closing line and nothing more.
 pub fn append_synced(path: &Path, text: &str) -> std::io::Result<()> {
     let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
@@ -294,6 +310,46 @@ pub fn last_lines(path: &Path, n: usize) -> Vec<String> {
     all[all.len().saturating_sub(n)..].iter().map(|s| s.to_string()).collect()
 }
 
+/// How much of a kept log is copied to a person's folder (the end of it, where a crash is).
+pub const COPY_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Copy the end of the kept log `name` (a bare file name inside `log_dir`) to a new file in `dest_dir`, for a person who wants to send
+/// it or look at it elsewhere. The copy starts at a line start, is named `iyakki-session-log-<date>-<time>.log` (a number is added when
+/// that exists; nothing is ever overwritten), is private to its owner (mode 0600) and holds the same text the viewer shows. Returns the
+/// new path. `now_unix` only names the file.
+pub fn copy_to_folder(log_dir: &Path, name: &str, dest_dir: &Path, now_unix: i64) -> Result<PathBuf, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    if name.is_empty() || name.contains('/') || name.contains("..") || !is_log_file(name) {
+        return Err("that is not a kept kernel log".into());
+    }
+    let src = log_dir.join(name);
+    if !src.is_file() {
+        return Err("that log is not there any more".into());
+    }
+    if !dest_dir.is_dir() {
+        return Err("the folder to copy into does not exist".into());
+    }
+    let mut text = tail_text(&src, COPY_BYTES);
+    if std::fs::metadata(&src).map(|m| m.len()).unwrap_or(0) > COPY_BYTES {
+        // the cut is almost always inside a line: start at the next one
+        text = text.split_once('\n').map(|(_, rest)| rest.to_string()).unwrap_or_default();
+    }
+    let stamp = wall(now_unix).replace(['-', ':'], "").replace(' ', "-");
+    for n in 0..100u32 {
+        let file = if n == 0 { format!("iyakki-session-log-{stamp}.log") } else { format!("iyakki-session-log-{stamp}-{n}.log") };
+        let path = dest_dir.join(&file);
+        match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path) {
+            Ok(mut f) => {
+                f.write_all(text.as_bytes()).and_then(|_| f.sync_all()).map_err(|e| format!("{file}: {e}"))?;
+                return Ok(path);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("{file}: {e}")),
+        }
+    }
+    Err("too many copies with the same name; delete some".into())
+}
+
 /// Kernel seconds of a log line (`... [  123.456789] ...`).
 pub fn line_uptime(line: &str) -> Option<u64> {
     let a = line.find('[')? + 1;
@@ -362,11 +418,11 @@ pub fn begin_session(dir: &Path, now: &Session) -> Option<Unclean> {
         append_session_history(dir, &p, if p.clean && !marker { "clean" } else if p.clean { "clean-with-errors" } else { "unclean" }, uptime);
         if !p.clean {
             let u = Unclean { boot_id: p.boot_id.clone(), started: p.started, last_line: last, uptime_s: uptime, file: kept, audited: false, seen: false, marker };
-            let _ = std::fs::write(dir.join(UNCLEAN_FILE), u.to_json());
+            let _ = write_synced(&dir.join(UNCLEAN_FILE), &u.to_json());
             found = Some(u);
         }
     }
-    let _ = std::fs::write(dir.join(SESSION_FILE), now.to_json());
+    let _ = write_synced(&dir.join(SESSION_FILE), &now.to_json());
     enforce_dir_bound(dir, MAX_DIR_BYTES, &|n| mtime(dir, n));
     found
 }
@@ -396,7 +452,7 @@ fn append_session_history(dir: &Path, p: &Session, how: &str, uptime: u64) {
 pub fn mark_clean(dir: &Path) {
     if let Some(mut s) = std::fs::read_to_string(dir.join(SESSION_FILE)).ok().and_then(|t| Session::parse(&t)) {
         s.clean = true;
-        let _ = std::fs::write(dir.join(SESSION_FILE), s.to_json());
+        let _ = write_synced(&dir.join(SESSION_FILE), &s.to_json());
     }
 }
 

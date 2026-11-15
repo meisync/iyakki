@@ -27,6 +27,98 @@ const FONT: [[u8; 5]; 59] = [
     [0x07, 0x08, 0x70, 0x08, 0x07], [0x61, 0x51, 0x49, 0x45, 0x43],
 ];
 
+/// Most pictures, most bytes of decoded pixels and the longest side of one picture a tile's table holds.
+pub const TABLE_PICTURES: usize = 64;
+pub const TABLE_BYTES: usize = 4 << 20;
+pub const TABLE_SIDE: i32 = 1024;
+
+/// A decoded picture a tile may draw by handle: `w` x `h` pixels, 4 bytes each (red, green, blue, alpha; straight alpha).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Picture {
+    pub w: i32,
+    pub h: i32,
+    pub rgba: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TableError {
+    BadSize,
+    TooBig,
+    TableFull,
+}
+
+impl std::fmt::Display for TableError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TableError::BadSize => write!(f, "the picture's size and its pixels do not match"),
+            TableError::TooBig => write!(f, "the picture is larger than {TABLE_SIDE} x {TABLE_SIDE} pixels"),
+            TableError::TableFull => write!(f, "the tile's picture table is full ({TABLE_PICTURES} pictures or {} MB)", TABLE_BYTES >> 20),
+        }
+    }
+}
+
+/// The pictures one tile may draw, by handle. The host fills it (from the pictures the tile's bundle declares, decoded when the tile
+/// is loaded); a tile only names a handle in an `Image` operation. Size-capped per tile; a handle that is not in the table draws as a
+/// grey box, as before.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ImageTable {
+    pics: std::collections::BTreeMap<u32, Picture>,
+    bytes: usize,
+}
+
+impl ImageTable {
+    pub fn new() -> ImageTable {
+        ImageTable::default()
+    }
+
+    /// Puts a picture under `handle` (replacing what was there).
+    pub fn put(&mut self, handle: u32, w: i32, h: i32, rgba: Vec<u8>) -> Result<(), TableError> {
+        if w <= 0 || h <= 0 || rgba.len() != (w as usize) * (h as usize) * 4 {
+            return Err(TableError::BadSize);
+        }
+        if w > TABLE_SIDE || h > TABLE_SIDE {
+            return Err(TableError::TooBig);
+        }
+        let old = self.pics.get(&handle).map_or(0, |p| p.rgba.len());
+        if (self.pics.len() >= TABLE_PICTURES && !self.pics.contains_key(&handle)) || self.bytes - old + rgba.len() > TABLE_BYTES {
+            return Err(TableError::TableFull);
+        }
+        self.bytes = self.bytes - old + rgba.len();
+        self.pics.insert(handle, Picture { w, h, rgba });
+        Ok(())
+    }
+
+    pub fn get(&self, handle: u32) -> Option<&Picture> {
+        self.pics.get(&handle)
+    }
+
+    pub fn remove(&mut self, handle: u32) -> bool {
+        match self.pics.remove(&handle) {
+            Some(p) => {
+                self.bytes -= p.rgba.len();
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.pics.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pics.is_empty()
+    }
+
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (u32, &Picture)> {
+        self.pics.iter().map(|(h, p)| (*h, p))
+    }
+}
+
 fn glyph(c: char) -> &'static [u8; 5] {
     let u = c.to_ascii_uppercase();
     let i = (u as u32).wrapping_sub(0x20) as usize;
@@ -87,8 +179,14 @@ impl Pen<'_> {
     }
 }
 
-/// Draw `list` on a `w` x `h` surface cleared to `bg`.
+/// Draw `list` on a `w` x `h` surface cleared to `bg`; pictures are grey boxes (no table).
 pub fn render(list: &DisplayList, w: i32, h: i32, bg: Color) -> Image {
+    render_with(list, w, h, bg, &ImageTable::default())
+}
+
+/// Like [`render`], with the pictures a tile may draw by handle. A picture is scaled to its rectangle by nearest neighbour in whole
+/// numbers (the browser renderer does the same sums, so both draw the same pixels) and laid over what is there by its alpha.
+pub fn render_with(list: &DisplayList, w: i32, h: i32, bg: Color, images: &ImageTable) -> Image {
     let mut img = Image::new(w, h, bg);
     let surface = Rect::new(0, 0, w, h);
     let mut clips = vec![surface];
@@ -144,9 +242,22 @@ pub fn render(list: &DisplayList, w: i32, h: i32, bg: Color) -> Image {
                     }
                 }
             }
-            Op::Image { r, .. } => {
-                pen.fill(*r, Color(128, 128, 128, 255));
-            }
+            Op::Image { handle, r } => match images.get(*handle) {
+                Some(p) if r.w > 0 && r.h > 0 => {
+                    let v = r.intersect(&clip);
+                    for y in v.y..v.y + v.h {
+                        let sy = ((y - r.y) as i64 * p.h as i64 / r.h as i64) as usize;
+                        for x in v.x..v.x + v.w {
+                            let sx = ((x - r.x) as i64 * p.w as i64 / r.w as i64) as usize;
+                            let i = (sy * p.w as usize + sx) * 4;
+                            if p.rgba[i + 3] > 0 {
+                                pen.img.blend(x, y, Color(p.rgba[i], p.rgba[i + 1], p.rgba[i + 2], p.rgba[i + 3]));
+                            }
+                        }
+                    }
+                }
+                _ => pen.fill(*r, Color(128, 128, 128, 255)),
+            },
             Op::PushClip { r } => {
                 let c = r.intersect(&clip);
                 clips.push(c);

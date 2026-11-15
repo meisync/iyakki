@@ -23,7 +23,8 @@ impl Tmp {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("work/sub")).unwrap();
         std::fs::create_dir_all(d.join("outside")).unwrap();
-        Tmp(d)
+        // the real path: on a Mac the temporary folder is a link (/var -> /private/var), and a scope is compared with real paths
+        Tmp(std::fs::canonicalize(&d).unwrap())
     }
     fn work(&self) -> PathBuf {
         std::fs::canonicalize(self.0.join("work")).unwrap()
@@ -112,10 +113,20 @@ fn starting_a_job_asks_and_in_auto_still_asks_for_what_run_command_always_asks_f
 fn start_status_tail_list_wait_and_stop_work_end_to_end() {
     let t = Tmp::new("flow");
     let (jt, jobs) = tools(&t, policy_for(&t.work()), None);
-    let out = jt.call("job_start", &json!({"command": "echo step one; sleep 0.4; echo step two", "label": "demo"})).unwrap();
+    // the job stays running until the test writes a byte into this pipe (a fixed `sleep` could run out while the test thread waited
+    // for a CPU on a loaded machine, and the "running" checks would then see a finished job)
+    assert!(std::process::Command::new("mkfifo").arg(t.work().join("gate")).status().unwrap().success());
+    let out = jt.call("job_start", &json!({"command": "echo step one; head -c 1 gate; echo step two", "label": "demo"})).unwrap();
     assert!(out.contains("Started job j1 “demo”") && out.contains("job_wait"), "{out}");
     assert!(jt.jobs_running().iter().any(|l| l.contains("demo")), "{:?}", jt.jobs_running());
     assert!(jt.call("job_list", &json!({})).unwrap().contains("j1 · demo · running"));
+    // opened for reading and writing (does not wait for the reader) and kept open so the byte is not lost if the job has not opened it yet
+    let _gate = {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().read(true).write(true).open(t.work().join("gate")).unwrap();
+        f.write_all(b"g").unwrap();
+        f
+    };
     let w = jt.call("job_wait", &json!({"id": "j1", "timeout_seconds": 600})).unwrap();
     assert!(w.contains("succeeded") && w.contains("Finished.") && w.contains("step two"), "{w}");
     assert!(jt.take_notes().is_empty(), "the assistant already has the result from job_wait: no note follows");

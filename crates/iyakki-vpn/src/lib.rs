@@ -17,22 +17,17 @@
 pub mod b64;
 pub mod dnsroute;
 pub mod dnswire;
-pub mod error;
-pub mod filter;
 pub mod inspect;
-pub mod net;
 pub mod ovpn;
 pub mod plan;
+pub mod policyroute;
 pub mod profile;
 pub mod secret;
-pub mod text;
 pub mod wgconf;
 pub mod wgnl;
 
 #[cfg(test)]
 mod dns_tests;
-#[cfg(test)]
-mod filter_tests;
 #[cfg(test)]
 mod inspect_tests;
 #[cfg(test)]
@@ -46,8 +41,8 @@ mod wgconf_tests;
 #[cfg(test)]
 mod wgnl_tests;
 
-pub use error::VpnError;
-pub use net::Cidr;
-pub use filter::FilterSet;
+// The matcher, the address checks and the error type live in iyakki-filter (F-BROW-79); the old paths stay.
+pub use iyakki_filter::{error, filter, net, text};
+pub use iyakki_filter::{Cidr, FilterSet, VpnError};
 pub use profile::{Kind, Mode, Profile, Settings};
 pub use secret::Secret;

@@ -5,7 +5,7 @@
 use iyakki_agent::webservice::config::{ServiceConfig, DEFAULT_PATH};
 use iyakki_agent::webservice::{self, PortOpener};
 use iyakki_core_api::{ApiError, ApiResult, AuditSink, Authenticator, Principal};
-use iyakki_shell::accounts::{AccountError, AuditLog, UserStore};
+use iyakki_accounts::{AccountError, AuditLog, UserStore};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
@@ -127,8 +127,64 @@ pub fn load(ask: &Ask) -> Result<webservice::config::Checked, String> {
     cfg.with_overrides(ask.profile.as_deref(), ask.listen.as_deref()).check()
 }
 
-/// Run the service over the shell's environment until `stop`.
-pub fn run(chk: &webservice::config::Checked, env: iyakki_shell::shell::ShellEnv, stop: &AtomicBool) -> Result<(), String> {
+/// What the service needs of the machine, and nothing of the desktop: the accounts, the audit log, the agent's services and the
+/// running system. The shell's own environment (`ShellEnv`) is turned into one of these ([`ServiceEnv::from_shell`]); a build without
+/// the shell makes one itself ([`ServiceEnv::headless`]). Nothing below this line knows which of the two it got.
+pub struct ServiceEnv {
+    pub store: Arc<Mutex<UserStore>>,
+    pub audit: Arc<AuditLog>,
+    pub services: Arc<iyakki_agent::services::Services>,
+    pub host: Arc<dyn iyakki_agent::HostApi>,
+}
+
+impl ServiceEnv {
+    /// The same accounts, audit log, services and host the shell works over (one set of them on a machine).
+    #[cfg(feature = "shell")]
+    pub fn from_shell(env: &iyakki_shell::shell::ShellEnv) -> ServiceEnv {
+        ServiceEnv { store: env.store.clone(), audit: env.audit.clone(), services: env.services.clone(), host: env.host.clone() }
+    }
+}
+
+/// Where a headless service keeps its files (the same places the shell uses).
+pub const USERS_PATH: &str = "/var/lib/iyakki/users.json";
+pub const AUDIT_PATH: &str = "/var/lib/iyakki/audit.log";
+pub const DATA_PATH: &str = "/var/lib/iyakki";
+
+impl ServiceEnv {
+    /// A set made without the shell: the services over `data`, the accounts file and the audit log. It does what the shell's start does
+    /// for the service (the streamers for downloads and model answers, the programs installed from the CLI list, the chosen time zone)
+    /// and nothing for the screen: no display or sound set-up and no desktop hooks.
+    pub fn headless(host: Arc<dyn iyakki_agent::HostApi>) -> Result<ServiceEnv, String> {
+        // the same overrides `iyakki user` and `iyakki doctor` read, so a test or a container can keep everything in one folder
+        let get = |k: &str, d: &str| std::env::var(k).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| d.to_string());
+        Self::headless_at(std::path::Path::new(&get("IYAKKI_USERS", USERS_PATH)), std::path::Path::new(&get("IYAKKI_AUDIT", AUDIT_PATH)), std::path::Path::new(&get("IYAKKI_DATA", DATA_PATH)), host)
+    }
+
+    pub fn headless_at(users: &std::path::Path, audit: &std::path::Path, data: &std::path::Path, host: Arc<dyn iyakki_agent::HostApi>) -> Result<ServiceEnv, String> {
+        use iyakki_agent::iyakki_proxy::https::{UreqStreamer, UreqUpstream};
+        use iyakki_agent::iyakki_proxy::Upstream;
+        use std::time::Duration;
+        let quick: Arc<dyn Upstream> = Arc::new(UreqUpstream::with_timeout(Duration::from_secs(10)));
+        let slow: Arc<dyn Upstream> = Arc::new(UreqUpstream::with_timeout(Duration::from_secs(300)));
+        let services = iyakki_agent::services::Services::open(data, quick, slow).map_err(|e| format!("the services could not be opened: {e}"))?;
+        iyakki_agent::enginelog::set_dir(&data.join("log"));
+        services.radio.set_streamer(Arc::new(UreqStreamer::default()));
+        services.clis.export_path();
+        services.clis.set_detect_present(true);
+        services.set_streamer(Arc::new(UreqStreamer::default()));
+        services.set_chat_streamer(Arc::new(UreqStreamer::with_response_timeout(Duration::from_secs(600))));
+        if let Ok(st) = services.settings.lock() {
+            iyakki_agent::clock::set_chosen_zone(&st.get().time.zone);
+        }
+        let store = UserStore::open(users).map_err(|e| format!("the accounts could not be read: {e}"))?;
+        let audit = Arc::new(AuditLog::new(audit));
+        audit.flush_notes();
+        Ok(ServiceEnv { store: Arc::new(Mutex::new(store)), audit, services, host })
+    }
+}
+
+/// Run the service over this environment until `stop`.
+pub fn run(chk: &webservice::config::Checked, env: ServiceEnv, stop: &AtomicBool) -> Result<(), String> {
     let deps = webservice::real::assemble(Arc::new(ShellAuth(env.store.clone())), Arc::new(ShellAudit(env.audit.clone())), env.services.clone(), env.host.clone());
     webservice::run(chk, deps, &FirewallOpener, stop)
 }
@@ -141,7 +197,7 @@ pub fn summary(chk: &webservice::config::Checked) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iyakki_shell::accounts::UserStore;
+    use iyakki_accounts::UserStore;
 
     fn no_env(_: &str) -> Option<String> {
         None

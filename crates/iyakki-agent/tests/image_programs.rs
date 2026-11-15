@@ -97,6 +97,10 @@ fn spawned(line: &str) -> Vec<String> {
     if (t.starts_with("let mut argv") || t.starts_with("let argv") || t.starts_with("let mut cmd") || t.starts_with("let cmd")) && owned(line) {
         v.extend(literal_after(line, "vec![\"").iter().take(1).map(|s| s.to_string()));
     }
+    // `sound_player_argv(&["aplay", ...])` (voice.rs): the sound player's argument list, which a test binary swaps for a stand-in; the first literal is the program
+    if let Some(i) = line.find("sound_player_argv(&[\"") {
+        v.extend(literal_after(&line[i..], "sound_player_argv(&[\"").iter().take(1).map(|s| s.to_string()));
+    }
     v
 }
 

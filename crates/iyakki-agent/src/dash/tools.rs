@@ -787,6 +787,12 @@ For \"why\" questions: query the related metrics for the window, use dash_explai
 Credentials: never ask for or repeat them; connectors and secrets are managed by the person in the Sources screen (you can only use a source by name). Board and feature-row rules do not apply here.";
 
 impl Tools for DashTools {
+
+    fn inner_tools(&self) -> Option<&dyn Tools> {
+
+        Some(&*self.inner)
+
+    }
     fn defs(&self) -> Vec<ToolDef> {
         let mut v = self.inner.defs();
         v.retain(|d| !is_dash_tool(&d.spec.name));

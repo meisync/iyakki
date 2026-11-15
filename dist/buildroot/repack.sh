@@ -38,6 +38,7 @@
 # The pruned, signed modules + firmware are cached (dist/buildroot/repack-cache.sh, in target/repack-cache, IYAKKI_REPACK_CACHE=0 turns it off):
 #     the first run with a given donor, firmware set, keep lists and signing key prunes and signs as always and saves the result; the next
 #     runs with the same inputs restore it and skip the copy of linux-firmware, the signing of every module and the 1 280 MiB prune.
+# IYAKKI_LINKER=lld|mold|auto: optional faster linker for the --cargo build of a non-release profile (dist/buildroot/linker.sh); default off.
 # IYAKKI_REPACK_BIN=FILE: install this program instead of target/.../iyakki (dist/buildroot/quick-push.sh uses it).
 #       IYAKKI_IMAGE_PROFILE=release ./dist/buildroot/repack.sh pc --base target/buildroot-web --kernel-from target/buildroot-mac
 # Secure Boot: run it with the same IYAKKI_SB_KEY / IYAKKI_SB_CERT as the build (a change from signed to unsigned is FULL for
@@ -191,12 +192,14 @@ if [ "$CARGO" = 1 ]; then
   # iyakki-proxy and iyakki-agent twice: 3 m 49 s in the 2026-11-07 log). The feature sets of the two programs were compared before this
   # was merged (docs/development/COMPILE-SPEED-PLAN.md, "Measured results"). If the store server cannot be built the main program still is:
   # the old two-step build is the fallback, and the image then goes without the store server, as before.
-  if (cd "$ROOT" && cargo build $PFLAG --target "$RUST_TARGET" -p iyakki-core -p iyakki-store-server); then
+  # shellcheck source=linker.sh
+  . "$HERE/linker.sh"; iyakki_export_rustflags "$RUST_TARGET"; LDENV="$(iyakki_linker_env "$RUST_TARGET" "$PROFILE")"   # optional IYAKKI_LINKER=lld|mold|auto; empty by default
+  if (cd "$ROOT" && env $LDENV cargo build $PFLAG --target "$RUST_TARGET" -p iyakki-core -p iyakki-store-server); then
     export IYAKKI_STORE_SERVER_BIN="$SBIN"
   else
     echo "repack: WARNING: the joint build failed; building the main program alone" >&2
-    (cd "$ROOT" && cargo build $PFLAG --target "$RUST_TARGET" -p iyakki-core)
-    (cd "$ROOT" && cargo build $PFLAG --target "$RUST_TARGET" -p iyakki-store-server) && export IYAKKI_STORE_SERVER_BIN="$SBIN" \
+    (cd "$ROOT" && env $LDENV cargo build $PFLAG --target "$RUST_TARGET" -p iyakki-core)
+    (cd "$ROOT" && env $LDENV cargo build $PFLAG --target "$RUST_TARGET" -p iyakki-store-server) && export IYAKKI_STORE_SERVER_BIN="$SBIN" \
       || echo "repack: WARNING: iyakki-store-server did not build; the image will not carry it" >&2
   fi
 fi

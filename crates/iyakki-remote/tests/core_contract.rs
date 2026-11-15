@@ -56,6 +56,11 @@ impl Drop for Fx {
 }
 
 fn fx(tag: &str) -> Fx {
+    // the flows of "root" live in `<home>/Flows`; without this the real `$HOME` would be used (a folder `ask-first` appeared in the
+    // real ~/Flows). Set once, before the first server thread of the process starts.
+    static HOME: std::sync::Once = std::sync::Once::new();
+    HOME.call_once(|| std::env::set_var("HOME", std::env::temp_dir().join(format!("iyakki-core-home-{}", std::process::id()))));
+    std::fs::create_dir_all(std::env::var("HOME").unwrap()).unwrap(); // home-ok: HOME was just set to a temp folder
     let d = std::env::temp_dir().join(format!("iyakki-core-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
@@ -168,7 +173,7 @@ fn hello_negotiates_the_version_and_tells_a_client_which_domains_it_can_use() {
     let (st, v) = post(&c, "/v1/dev/core/hello", json!({"contract": {"major": 0, "minor": 1}, "wants": ["settings", "flows", "browser"]}));
     assert_eq!(st, 200);
     let r = &v["result"];
-    assert_eq!(r["hello"]["contract"], json!({"major": 0, "minor": 1}));
+    assert_eq!(r["hello"]["contract"], json!({"major": 0, "minor": 2}));
     assert_eq!(r["hello"]["machine"], "iyakki-test");
     assert_eq!(r["negotiated"]["version"], json!({"major": 0, "minor": 1}));
     assert_eq!(r["negotiated"]["usable"], json!(["settings", "flows"]));
@@ -179,7 +184,7 @@ fn hello_negotiates_the_version_and_tells_a_client_which_domains_it_can_use() {
     assert!(r["hello"]["rate_limit"]["calls"].as_u64().unwrap() > 0);
     // a newer client minor still works at the machine's version; another major gets no calls at all; one too old gets none either
     let (_, newer) = post(&c, "/v1/dev/core/hello", json!({"contract": {"major": 0, "minor": 9}, "wants": ["settings"]}));
-    assert_eq!(newer["result"]["negotiated"]["version"], json!({"major": 0, "minor": 1}));
+    assert_eq!(newer["result"]["negotiated"]["version"], json!({"major": 0, "minor": 2}));
     for old in [json!({"major": 1, "minor": 0}), json!({"major": 0, "minor": 0})] {
         let (_, v) = post(&c, "/v1/dev/core/hello", json!({"contract": old, "wants": ["settings"]}));
         assert_eq!(v["result"]["negotiated"]["version"], Value::Null);
@@ -402,6 +407,15 @@ fn flows_run_over_the_channel_and_a_large_frame_is_read_in_chunks_that_resume() 
     }
     assert_eq!((got.len(), n), (200_000, 13));
     assert_eq!(got, payload, "every byte, in order");
+    // contract 0.2: the same bytes as one base64 text, a quarter of the size; an unknown encoding is refused
+    let (st, b) = post(&c, "/v1/dev/core/stream/read", json!({"id": handle.id.0, "offset": 0, "max_len": 1 << 20, "encoding": "base64"}));
+    assert_eq!((st, b["ok"].clone()), (200, json!(true)), "{b}");
+    let r = &b["result"];
+    assert_eq!((r["encoding"].clone(), r["offset"].clone(), r["last"].clone()), (json!("base64"), json!(0), json!(false)));
+    let dec = iyakki_agent::models::b64_decode(r["data"].as_str().unwrap()).expect("valid base64");
+    assert_eq!(dec, payload[..16 * 1024].to_vec(), "the same bytes as the list form");
+    assert!(r.to_string().len() < 16 * 1024 * 2, "compact: {} bytes", r.to_string().len());
+    assert_eq!(post(&c, "/v1/dev/core/stream/read", json!({"id": handle.id.0, "offset": 0, "encoding": "hex"})).1["error"]["code"], "invalid_input");
     // another computer without flows:read cannot read the handle, and a past-the-end offset is invalid
     assert_eq!(read(&reader, 0).1["error"]["code"], "denied");
     assert_eq!(read(&c, 200_001).1["error"]["code"], "invalid_input");

@@ -115,7 +115,9 @@ fn bench_page() {
         html = html.replacen("<head>", &format!("<head><script>{pre}</script>"), 1);
     }
     let t = Instant::now();
-    let r = run_page(&html, &u, web, |_| true, &SiteData::default(), big());
+    // IYAKKI_BENCH_VIEWPORT=1: give the page a window, as the browser does (scripts then get estimated sizes)
+    let data = SiteData { viewport: std::env::var_os("IYAKKI_BENCH_VIEWPORT").map(|_| iyakki_web::css::Viewport { width: 1280.0, height: 720.0, ..Default::default() }), ..SiteData::default() };
+    let r = run_page(&html, &u, web, |_| true, &data, big());
     eprintln!("BENCH page {url}: {:.2} s  ran {} failed {} skipped {}", t.elapsed().as_secs_f64(), r.report.ran, r.report.failed, r.report.skipped);
     for l in r.report.lines().iter().take(30) {
         eprintln!("  {}", l.chars().take(4000).collect::<String>());
@@ -137,4 +139,18 @@ fn bench_hostcall() {
     run_inline("200k raw __host calls (connected)", "var t=0; for (var i=0;i<200000;i++){ t+=__host('dom','connected','{\"n\":0}').length; } console.log(t);");
     run_inline("200k JSON.parse+stringify small", "var t=0; for (var i=0;i<200000;i++){ t+=JSON.parse(JSON.stringify({n:i,k:'abc'})).n; } console.log(t);");
     run_inline("200k empty loop", "var t=0; for (var i=0;i<200000;i++){ t+=i; } console.log(t);");
+}
+
+#[test]
+#[ignore]
+fn bench_blank_page() {
+    // a page with one tiny script: the cost of everything that is not the page's own code (engine instance, the platform preludes)
+    let html = "<body><p>x</p><script>1</script></body>";
+    let web: Arc<dyn Fetch> = Arc::new(iyakki_web::fetch::NoNetwork);
+    let u = Url::parse("https://a.org/").unwrap();
+    for i in 0..6 {
+        let t = Instant::now();
+        let r = run_page(html, &u, web.clone(), |_| true, &SiteData::default(), big());
+        eprintln!("BENCH blank page run {i}: {:.1} ms (ran {})", t.elapsed().as_secs_f64() * 1000.0, r.report.ran);
+    }
 }

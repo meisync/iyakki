@@ -339,3 +339,45 @@ fn the_workspace_bar_icons_do_not_overlap_the_buttons_and_home_goes_back_in_the_
         sh.handle(&Event::Layout(LayoutKey::Apply(1)));
     }
 }
+
+#[test]
+fn the_microphone_glyph_is_on_the_bar_only_while_my_iyakki_listens_or_is_muted() {
+    use iyakki_agent::voiceassist::MicGlyph;
+    let sh = signed("tb-mic", ("root", "rootpass12"));
+    let off = sh.bar_slots_with(MicGlyph::Off);
+    assert!(off.mic.is_none());
+    assert_eq!(sh.wanted_extras_with(MicGlyph::Off, true), vec![Extra::Settings, Extra::Speaker, Extra::Home]);
+    for g in [MicGlyph::Listening, MicGlyph::Muted] {
+        let on = sh.bar_slots_with(g);
+        assert!(on.mic.is_some() && on.count == off.count + 1, "{g:?}: one more icon, left of the speaker");
+        assert!(on.mic.unwrap() < on.speaker.unwrap());
+        assert_eq!(sh.wanted_extras_with(g, true)[0], Extra::Mic);
+    }
+    assert_ne!(super::volbar_impl::mic_ink_tip().1, "");
+}
+
+#[test]
+fn the_microphone_glyph_is_drawn_inside_the_bar_at_the_five_sizes_apart_from_its_neighbours_and_a_click_opens_the_voice_tile() {
+    use iyakki_agent::voiceassist::MicGlyph;
+    for glyph in [MicGlyph::Listening, MicGlyph::Muted] {
+        for (w, h) in SIZES {
+            let mut sh = signed("tb-mic5", ("root", "rootpass12"));
+            super::volbar_impl::GLYPH_OVERRIDE.with(|c| c.set(Some(glyph)));
+            let mut g = Gfx::new(w, h);
+            sh.screen = Screen::Launcher;
+            sh.render(&mut g);
+            let mic = sh.hits().iter().rev().find(|x| x.ev == Event::Tab(super::volbar_impl::MIC_TAB)).map(|x| (x.rect, x.label.clone())).unwrap_or_else(|| panic!("{glyph:?} {w}x{h}: no microphone icon"));
+            let sc = scale_for(w, h);
+            assert!(mic.0.x >= 0.0 && mic.0.x + mic.0.w <= w as f32 && mic.0.y >= 0.0 && mic.0.y < 40.0 * sc && mic.0.y + mic.0.h <= h as f32, "{glyph:?} {w}x{h}: {:?} is in the bar", mic.0);
+            let others: Vec<R> = sh.hits().iter().filter(|x| x.ev != Event::Tab(super::volbar_impl::MIC_TAB) && x.rect.y < 40.0 * sc && x.rect.h < 40.0 * sc).map(|x| x.rect).collect();
+            for o in &others {
+                assert!(disjoint(mic.0, *o), "{glyph:?} {w}x{h}: the microphone icon {:?} overlaps {o:?}", mic.0);
+            }
+            assert_eq!(mic.1.contains("Microphone open"), glyph == MicGlyph::Listening, "the words follow the state: {}", mic.1);
+            // a click on it opens the Voice tile
+            sh.handle(&Event::Tab(super::volbar_impl::MIC_TAB));
+            assert_eq!(sh.screen_name(), "app:voice", "{glyph:?} {w}x{h}");
+            super::volbar_impl::GLYPH_OVERRIDE.with(|c| c.set(None));
+        }
+    }
+}

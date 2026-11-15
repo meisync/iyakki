@@ -105,6 +105,26 @@ pub struct Summary {
     pub line: String,
 }
 
+/// [`Manager::guard_line`] over rows (pure).
+pub fn guard_line_of(rows: &[Row]) -> Option<String> {
+    let names: Vec<(&str, bool)> = rows
+        .iter()
+        .filter(|r| r.enabled && r.status.guard)
+        .filter_map(|r| match r.profile.settings.mode {
+            Mode::Full if r.profile.settings.kill_switch => Some((r.profile.name.as_str(), true)),
+            Mode::Hybrid if r.profile.settings.fail_closed => Some((r.profile.name.as_str(), false)),
+            _ => None,
+        })
+        .collect();
+    let (first, full) = *names.first()?;
+    let more = if names.len() > 1 { format!(" and {} more", names.len() - 1) } else { String::new() };
+    Some(if full {
+        format!("VPN kill switch is active ({first}{more}): traffic outside the VPN is blocked while it is down. Your local network keeps working. Change it in Settings, Network, VPN.")
+    } else {
+        format!("VPN guard is active ({first}{more}): traffic that must go through the VPN is blocked while it is down. Change it in Settings, Network, VPN.")
+    })
+}
+
 pub fn ago(s: u64) -> String {
     match s {
         0..=59 => format!("{s} s"),
@@ -144,7 +164,7 @@ impl Rt {
 
     /// One event for the forwarder, if this profile has one.
     fn fwd_event(&self, ev: DnsEvent) -> Vec<Action> {
-        self.fwd.as_ref().map(|f| f.lock().unwrap().handle(ev)).unwrap_or_default()
+        self.fwd.as_ref().map(|f| f.lock().unwrap_or_else(std::sync::PoisonError::into_inner).handle(ev)).unwrap_or_default()
     }
 }
 
@@ -158,7 +178,7 @@ struct Live {
 
 impl crate::vpn_dns::EventSink for Live {
     fn event(&self, ev: DnsEvent, now: u64) -> Vec<Action> {
-        let acts = self.fwd.lock().unwrap().handle(ev);
+        let acts = self.fwd.lock().unwrap_or_else(std::sync::PoisonError::into_inner).handle(ev);
         apply_route_actions(&*self.sys, &self.routes, acts, now)
     }
 }
@@ -173,14 +193,14 @@ fn apply_route_actions(sys: &dyn Sys, host_routes: &Mutex<BTreeSet<IpAddr>>, act
                 let r = Route { dest: host_cidr(ip), via: None, dev: IFNAME.into() };
                 if sys.ip(&r.ip_args(true)).is_ok() {
                     let _ = sys.guard_set(ip, Some(expires.saturating_sub(now).max(1)), true);
-                    host_routes.lock().unwrap().insert(ip);
+                    host_routes.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(ip);
                 }
             }
             Action::RouteDel { ip } => {
                 let r = Route { dest: host_cidr(ip), via: None, dev: IFNAME.into() };
                 let _ = sys.ip(&r.ip_args(false));
                 let _ = sys.guard_set(ip, None, false);
-                host_routes.lock().unwrap().remove(&ip);
+                host_routes.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&ip);
             }
             Action::Note(_) => {}
             other => io.push(other),
@@ -315,13 +335,18 @@ impl Manager {
         ALL.get_or_init(|| Mutex::new(HashMap::new()))
     }
 
+    /// The manager of this account if one was already started (reads only; never starts a VPN or a supervisor).
+    pub fn peek(dir: &std::path::Path, user: &str) -> Option<Arc<Manager>> {
+        Self::registry().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&format!("{}|{user}", dir.display())).cloned()
+    }
+
     pub fn shared(svc: &Arc<crate::services::Services>, user: &str, audit: AuditFn) -> Arc<Manager> {
-        Self::registry().lock().unwrap().entry(format!("{}|{user}", svc.dir().display())).or_insert_with(|| Arc::new(Manager::for_services(svc, user, audit))).clone()
+        Self::registry().lock().unwrap_or_else(std::sync::PoisonError::into_inner).entry(format!("{}|{user}", svc.dir().display())).or_insert_with(|| Arc::new(Manager::for_services(svc, user, audit))).clone()
     }
 
     pub fn ensure_supervised(self: &Arc<Manager>) {
         if self.auto {
-            let mut sup = self.sup.lock().unwrap();
+            let mut sup = self.sup.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if sup.is_none() {
                 *sup = Some(self.supervise());
             }
@@ -329,7 +354,7 @@ impl Manager {
     }
 
     pub fn end_supervision(&self) {
-        let sup = self.sup.lock().unwrap().take();
+        let sup = self.sup.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
         drop(sup);
         self.stop_all();
     }
@@ -353,7 +378,7 @@ impl Manager {
     }
 
     pub fn rows(&self) -> Vec<Row> {
-        let st = self.state.lock().unwrap();
+        let st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         self.store.list().into_iter().map(|s| Row { status: st.get(&s.profile.id).map(|r| r.status.clone()).unwrap_or_default(), enabled: s.enabled, profile: s.profile }).collect()
     }
 
@@ -371,6 +396,13 @@ impl Manager {
             State::Stopped => (Light::Open, format!("VPN not connected: {}; traffic goes direct", s.profile.name)),
         };
         Some(Summary { light, line })
+    }
+
+    /// The line the Firewall page shows while a VPN guard is in the kernel right now: a FULL profile with its kill switch, or a HYBRID
+    /// profile that fails closed. `None` when nothing is blocking (no enabled profile, no guard, or a guard the profile does not ask for).
+    /// It reads the manager's state only and never touches the machine.
+    pub fn guard_line(&self) -> Option<String> {
+        guard_line_of(&self.rows())
     }
 
     /// Tell the startup registry how the VPN is: nothing enabled is "disabled" (nothing to wait for), connected is ready, coming up is starting,
@@ -393,7 +425,7 @@ impl Manager {
     }
 
     pub fn status(&self, id: &str) -> Status {
-        self.state.lock().unwrap().get(id).map(|r| r.status.clone()).unwrap_or_default()
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(id).map(|r| r.status.clone()).unwrap_or_default()
     }
 
     // ---------------------------------------------------------------- import
@@ -401,7 +433,7 @@ impl Manager {
     /// Parses a pasted or read file, keeps the secrets in the vault and the rest in the profile list. The profile starts
     /// **disabled** and in FULL mode with every option off. The error words never contain a value from the file.
     pub fn import(&self, name: &str, input: &[u8]) -> Result<Imported, String> {
-        let _op = self.op.lock().unwrap();
+        let _op = self.op.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut all = self.store.list();
         if all.len() >= MAX_PROFILES {
             return Err(format!("at most {MAX_PROFILES} VPN profiles"));
@@ -487,7 +519,7 @@ impl Manager {
     pub fn set_settings(&self, id: &str, settings: Settings, now: u64) -> Result<Profile, String> {
         settings.validate().map_err(|e| e.to_string())?;
         let live = {
-            let _op = self.op.lock().unwrap();
+            let _op = self.op.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut all = self.store.list();
             let s = all.iter_mut().find(|s| s.profile.id == id).ok_or("that VPN profile is gone")?;
             let ctx = self.import_context();
@@ -509,7 +541,7 @@ impl Manager {
     /// disables the others. Returns the profile.
     pub fn set_enabled(&self, id: &str, on: bool, now: u64) -> Result<Profile, String> {
         let p = {
-            let _op = self.op.lock().unwrap();
+            let _op = self.op.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut all = self.store.list();
             let p = all.iter().find(|s| s.profile.id == id).map(|s| s.profile.clone()).ok_or("that VPN profile is gone")?;
             if on && p.kind() != iyakki_vpn::Kind::Wireguard {
@@ -534,7 +566,7 @@ impl Manager {
         };
         self.say(if on { "enable" } else { "disable" }, &p.name);
         if on {
-            self.state.lock().unwrap().insert(id.to_string(), Rt::new());
+            self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(id.to_string(), Rt::new());
             self.tick(now);
         }
         Ok(p)
@@ -542,13 +574,13 @@ impl Manager {
 
     /// Deletes the profile: disconnects, removes its secrets from the vault and everything it put on the system.
     pub fn remove(&self, id: &str) -> Result<Vec<String>, String> {
-        let _op = self.op.lock().unwrap();
+        let _op = self.op.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut all = self.store.list();
         let p = all.iter().find(|s| s.profile.id == id).map(|s| s.profile.clone()).ok_or("that VPN profile is gone")?;
         self.stop_locked(id, true);
         all.retain(|s| s.profile.id != id);
         self.store.write(&all)?;
-        self.state.lock().unwrap().remove(id);
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(id);
         let mut done = vec![format!("the VPN profile {}", p.name)];
         let names = secret_names(id, &p);
         let mut gone = 0;
@@ -567,18 +599,18 @@ impl Manager {
     /// Clears a failure so the next tick tries again.
     pub fn retry(&self, id: &str, now: u64) {
         {
-            let _op = self.op.lock().unwrap();
+            let _op = self.op.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             self.stop_locked(id, false);
-            self.state.lock().unwrap().insert(id.to_string(), Rt::new());
+            self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(id.to_string(), Rt::new());
         }
         self.tick(now);
     }
 
     fn restart(&self, id: &str, now: u64) {
         {
-            let _op = self.op.lock().unwrap();
+            let _op = self.op.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             self.stop_locked(id, true);
-            self.state.lock().unwrap().insert(id.to_string(), Rt::new());
+            self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(id.to_string(), Rt::new());
         }
         self.tick(now);
     }
@@ -588,7 +620,7 @@ impl Manager {
     /// Stops one profile. With `drop_guard` the guard table goes too (disable, delete); without it the guard stays if the
     /// profile asks for one (a retry, a lost connection).
     fn stop_locked(&self, id: &str, drop_guard: bool) {
-        let rt = self.state.lock().unwrap().remove(id);
+        let rt = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(id);
         let keep = !drop_guard && self.get(id).is_some_and(|p| wants_guard(&p.settings));
         if let Some(mut rt) = rt {
             self.teardown(&mut rt, !keep);
@@ -599,13 +631,13 @@ impl Manager {
             self.sys.remove_guard();
         }
         // a record that says "stopped" so the page shows it
-        self.state.lock().unwrap().insert(id.to_string(), Rt::new());
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(id.to_string(), Rt::new());
     }
 
     fn teardown(&self, rt: &mut Rt, drop_guard: bool) {
         // the socket loop first (it joins), so no route is added behind our back
         rt.dns = None;
-        for ip in std::mem::take(&mut *rt.host_routes.lock().unwrap()) {
+        for ip in std::mem::take(&mut *rt.host_routes.lock().unwrap_or_else(std::sync::PoisonError::into_inner)) {
             let _ = self.sys.guard_set(ip, None, false);
             let r = Route { dest: host_cidr(ip), via: None, dev: IFNAME.into() };
             let _ = self.sys.ip(&r.ip_args(false));
@@ -614,6 +646,7 @@ impl Manager {
         if let Some(a) = rt.applied.take() {
             self.undo(&a, drop_guard);
         }
+        self.sys.tunnel_networks(&[]);
         rt.status.state = State::Stopped;
         rt.status.guard = self.sys.guard_present();
     }
@@ -648,19 +681,19 @@ impl Manager {
     }
 
     pub fn stop_all(&self) {
-        let _op = self.op.lock().unwrap();
-        let ids: Vec<String> = self.state.lock().unwrap().keys().cloned().collect();
+        let _op = self.op.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let ids: Vec<String> = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).keys().cloned().collect();
         for id in ids {
             self.stop_locked(&id, true);
         }
-        self.state.lock().unwrap().clear();
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
     }
 
     /// After a crash or a restart: removes the interface, the DNS capture and a leftover DNS file; keeps the guard only when an
     /// enabled profile asks for one. Nothing is read from a journal: names are fixed.
     pub fn recover(&self) {
-        let _op = self.op.lock().unwrap();
-        let live = self.state.lock().unwrap().values().any(|r| r.applied.is_some());
+        let _op = self.op.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let live = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).values().any(|r| r.applied.is_some());
         if live {
             return;
         }
@@ -808,6 +841,9 @@ impl Manager {
                 Err(e) => rt_warnings.push(format!("domain rules will not work: {e}")),
             }
         }
+        // the firewall may count the tunnel's own network as the local network (its setting "Networks of a connected VPN")
+        let nets: Vec<String> = w.addresses.iter().map(|c| c.network()).map(|n| format!("{}/{}", n.addr, n.prefix)).collect();
+        self.sys.tunnel_networks(&nets);
         Ok(())
     }
 
@@ -851,7 +887,7 @@ impl Manager {
     }
 
     fn connect(&self, id: &str, now: u64) {
-        let _op = self.op.lock().unwrap();
+        let _op = self.op.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(p) = self.get(id) else { return };
         if !self.is_enabled(id) {
             return;
@@ -859,7 +895,7 @@ impl Manager {
         let mut applied = Applied::default();
         let mut warnings = Vec::new();
         let r = self.bring_up(id, &p, &mut applied, &mut warnings);
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let rt = st.entry(id.to_string()).or_insert_with(Rt::new);
         rt.status.attempts += 1;
         match r {
@@ -884,12 +920,12 @@ impl Manager {
                 drop(st);
                 let keep = wants_guard(&p.settings) && applied.guard;
                 applied.dns = None; // stop the socket loop (joins) before anything it uses is removed
-                for ip in std::mem::take(&mut *applied.host_routes.lock().unwrap()) {
+                for ip in std::mem::take(&mut *applied.host_routes.lock().unwrap_or_else(std::sync::PoisonError::into_inner)) {
                     let _ = self.sys.guard_set(ip, None, false);
                     let _ = self.sys.ip(&Route { dest: host_cidr(ip), via: None, dev: IFNAME.into() }.ip_args(false));
                 }
                 self.undo(&applied, !keep);
-                let mut st = self.state.lock().unwrap();
+                let mut st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 let rt = st.entry(id.to_string()).or_insert_with(Rt::new);
                 rt.status.state = State::Stopped;
                 rt.status.guard = self.sys.guard_present();
@@ -919,7 +955,7 @@ impl Manager {
             }
             let id = s.profile.id.clone();
             let (live, retry_at, needs_you) = {
-                let st = self.state.lock().unwrap();
+                let st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 match st.get(&id) {
                     Some(r) => (r.applied.is_some(), r.status.retry_at, r.status.needs_you),
                     None => (false, None, false),
@@ -935,14 +971,14 @@ impl Manager {
     }
 
     fn watch(&self, id: &str, now: u64) {
-        let _op = self.op.lock().unwrap();
+        let _op = self.op.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let p = self.get(id);
         let gone = !self.sys.link_exists(IFNAME);
         let status = if gone { Err("the VPN interface disappeared".to_string()) } else { self.sys.wg_status(IFNAME) };
         let mut actions = Vec::new();
         let mut lost: Option<String> = None;
         {
-            let mut st = self.state.lock().unwrap();
+            let mut st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let Some(rt) = st.get_mut(id) else { return };
             match status {
                 Err(e) => lost = Some(e),
@@ -976,7 +1012,7 @@ impl Manager {
         if let Some(e) = lost {
             // tunnel parts go, the guard stays when the profile asks for it
             let keep = p.as_ref().is_some_and(|p| wants_guard(&p.settings));
-            let old = self.state.lock().unwrap().remove(id);
+            let old = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(id);
             if let Some(mut rt) = old {
                 self.teardown(&mut rt, !keep);
                 let mut n = Rt::new();
@@ -984,11 +1020,11 @@ impl Manager {
                 n.status.error = Some(e);
                 n.status.retry_at = Some(now + backoff(n.status.attempts));
                 n.status.guard = self.sys.guard_present();
-                self.state.lock().unwrap().insert(id.to_string(), n);
+                self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(id.to_string(), n);
             }
             return;
         }
-        let routes = self.state.lock().unwrap().get(id).map(|r| r.host_routes.clone());
+        let routes = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(id).map(|r| r.host_routes.clone());
         if let Some(routes) = routes {
             let _ = apply_route_actions(&*self.sys, &routes, actions, now);
         }
@@ -997,11 +1033,11 @@ impl Manager {
     /// One event for the DNS forwarder of the connected HYBRID profile (the socket loop of [`crate::vpn_dns`] feeds the same state
     /// machine without this lock; this entry is for tests and tools). Route changes are applied; the packets to send are returned.
     pub fn dns_event(&self, ev: DnsEvent, now: u64) -> Vec<Action> {
-        let _op = self.op.lock().unwrap();
-        let found = self.state.lock().unwrap().values().find_map(|rt| rt.fwd.clone().map(|f| (f, rt.host_routes.clone())));
+        let _op = self.op.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let found = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).values().find_map(|rt| rt.fwd.clone().map(|f| (f, rt.host_routes.clone())));
         match found {
             Some((f, routes)) => {
-                let acts = f.lock().unwrap().handle(ev);
+                let acts = f.lock().unwrap_or_else(std::sync::PoisonError::into_inner).handle(ev);
                 apply_route_actions(&*self.sys, &routes, acts, now)
             }
             None => vec![],
@@ -1065,7 +1101,7 @@ pub fn start_for_login(svc: &Arc<crate::services::Services>, user: &str, audit: 
 
 /// **Sign-out hook.** Stops the tunnel and removes everything it made (the vault closes with the session).
 pub fn on_logout(svc: &Arc<crate::services::Services>, user: &str) {
-    let m = Manager::registry().lock().unwrap().get(&format!("{}|{user}", svc.dir().display())).cloned();
+    let m = Manager::registry().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&format!("{}|{user}", svc.dir().display())).cloned();
     if let Some(m) = m {
         m.end_supervision();
     }

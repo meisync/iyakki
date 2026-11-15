@@ -9,13 +9,25 @@ use crate::engine::WebModule;
 
 pub struct EnvModule {
     url: Url,
+    vp: iyakki_web::css::Viewport,
     /// Where a script asked to go (`location.href = ...`); the browser decides whether to follow.
     pub navigation: Option<String>,
 }
 
 impl EnvModule {
     pub fn new(url: Url) -> EnvModule {
-        EnvModule { url, navigation: None }
+        EnvModule { url, vp: iyakki_web::css::Viewport { width: 1280.0, height: 720.0, ..Default::default() }, navigation: None }
+    }
+
+    /// Tell the page a new window size (the embedder resized it); see [`crate::resize`].
+    pub fn set_viewport(&mut self, vp: iyakki_web::css::Viewport) {
+        self.vp = vp;
+    }
+
+    /// The window the page is told it has (`innerWidth`, `matchMedia`).
+    pub fn with_viewport(mut self, vp: iyakki_web::css::Viewport) -> EnvModule {
+        self.vp = vp;
+        self
     }
 }
 
@@ -42,7 +54,7 @@ impl WebModule for EnvModule {
     }
 
     fn prelude(&self) -> &'static str {
-        include_str!("env.js")
+        concat!(include_str!("env.js"), include_str!("env_extra.js"))
     }
 
     fn call(&mut self, op: &str, args: &serde_json::Value) -> Result<serde_json::Value, String> {
@@ -69,6 +81,8 @@ impl WebModule for EnvModule {
                 self.navigation = Some(target.to_string());
                 Ok(serde_json::Value::Null)
             }
+            "viewport" => Ok(serde_json::json!({ "w": self.vp.width, "h": self.vp.height, "d": self.vp.dppx })),
+            "media" => Ok(serde_json::json!(iyakki_web::css::media_matches(args["q"].as_str().unwrap_or(""), &self.vp))),
             "random" => {
                 let n = args["n"].as_u64().unwrap_or(0).min(65_536) as usize;
                 Ok(serde_json::json!(random_bytes(n)))

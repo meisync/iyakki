@@ -252,6 +252,7 @@ fn status_text(s: &Status) -> String {
         Status::NeedsAddon(_) => "needs the audio and video add-on (H.264)".into(),
         Status::Busy(m) => format!("in use ({})", show(m)),
         Status::NeedsPassword(m) => format!("needs the password ({})", show(m)),
+        Status::Dark(m) => format!("live, but the picture is black ({})", show(m)),
     }
 }
 
@@ -428,6 +429,12 @@ impl CameraViewTools {
                 l.push_str(&format!("; stored: {} files, {} MB", st.segments, st.bytes / (1024 * 1024)));
                 if let (Some(a), Some(b)) = (st.oldest_ms, st.newest_ms) {
                     l.push_str(&format!(", from {} to {}", rec.time_text(a), rec.time_text(b)));
+                }
+                for p in st.file_problems.iter().take(5) {
+                    l.push_str(&format!("; WARNING: {}", show(p)));
+                }
+                if st.file_problems.len() > 5 {
+                    l.push_str(&format!("; and {} more recordings with problems", st.file_problems.len() - 5));
                 }
             } else {
                 l.push_str(&format!("; owner {} (only the owner can open the recordings)", show(&c.owner)));
@@ -632,6 +639,12 @@ fn spec(name: &str, desc: &str, schema: Value) -> ToolSpec {
 }
 
 impl Tools for CameraViewTools {
+
+    fn inner_tools(&self) -> Option<&dyn Tools> {
+
+        Some(&*self.inner)
+
+    }
     fn defs(&self) -> Vec<ToolDef> {
         let mut v = self.inner.defs();
         v.retain(|d| !is_camera_view_tool(&d.spec.name));

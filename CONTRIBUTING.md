@@ -48,7 +48,7 @@ its **inodes** and every tool starts failing with `ENOSPC: no space left on devi
 
 **The feature matrix (`FEATURES.md`).** A feature is not finished until it has a row and tests that exercise it. One row per
 feature: ID `F-<AREA>-<nn>` (next free number; IDs are never reused), phase, status (`done`, `partial`, `planned`, `blocked`,
-`deprecated`), priority, progress, the tests, notes. `done` needs 100%, `planned` 0%, `partial` 1-99%, `blocked` below 100%. `done`, `partial` and `deprecated` rows need at least one test
+`deprecated`), priority, Impl/Test (e.g. `100/60`), Manual, the tests, notes. `done` needs Impl 100, Test 100 and Manual none or passed, `planned` is 0/0, `partial` is anything between (see FEATURES.md, "How to use it"); the number of `partial` rows may not exceed docs/development/partial-ceiling.txt. `done`, `partial` and `deprecated` rows need at least one test
 (or a `script:` check that exists); `partial`, `blocked` and `deprecated` rows need a note saying why (a deprecated row names its replacement);
 the totals line between `<!-- summary:start -->` and `<!-- summary:end -->` must match the rows. Check with
 `cargo test -p iyakki-core --test feature_matrix`. A row may not cite a test that does not exist

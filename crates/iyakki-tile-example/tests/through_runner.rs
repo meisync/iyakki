@@ -1,6 +1,6 @@
 //! The example tile, driven through the host runner (the real iyakki-wasm sandbox).
 use iyakki_tile_abi::{Color, DisplayList, Event, Op};
-use iyakki_tile_example::{Counter, TILE_WAT};
+use iyakki_tile_example::{Counter, TILE_WASM, TILE_WAT};
 use iyakki_tile_host::export::{to_json, to_svg};
 use iyakki_tile_host::render::render;
 use iyakki_tile_host::{Budgets, TileManifest, TileRunner};
@@ -141,4 +141,19 @@ fn time_for_init_and_one_frame() {
     frames.sort();
     println!("init+frame median {:?}; click+frame median {:?}", inits[100], frames[100]);
     assert!(frames[100] < std::time::Duration::from_millis(20), "far above any sane value");
+}
+
+#[test]
+fn wasm_tile_bundle_file_runs_like_the_wat() {
+    assert!(TILE_WASM.starts_with(b"\0asm"), "the binary form, not text");
+    let mut bin = TileRunner::load(TILE_WASM, TileManifest::new("counter", &[]), Budgets::default(), None, 7).unwrap();
+    bin.init(320, 200, 100, THEME).unwrap();
+    let mut wat = runner();
+    assert_eq!(bin.frame().unwrap(), wat.frame().unwrap());
+    for r in [&mut bin, &mut wat] {
+        r.click(30, 80).unwrap();
+        r.click(30, 80).unwrap();
+    }
+    assert_eq!(texts(&bin.frame().unwrap())[2], "2");
+    assert_eq!(bin.frame().unwrap(), wat.frame().unwrap());
 }

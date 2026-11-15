@@ -74,6 +74,14 @@ impl CertSource for VaultCerts {
         }
         self.text(name)
     }
+
+    fn load_pod_client(&self, name: &str) -> Result<super::podtls::Material, String> {
+        super::podtls::read_material(&*self.reader, name, "client")
+    }
+
+    fn load_pod_server(&self, name: &str) -> Result<super::podtls::Material, String> {
+        super::podtls::read_material(&*self.reader, name, "server")
+    }
 }
 
 /// How long the real vault is given per secret (the client has its own 15 s limit; this is documentation for callers that wrap it).

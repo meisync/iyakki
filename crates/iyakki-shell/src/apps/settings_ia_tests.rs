@@ -186,7 +186,7 @@ struct Self_;
 impl Self_ {
     fn choose_model(a: &mut SettingsApp, cx: &AppCx) {
         SettingsApp::svc(cx).settings.lock().unwrap().update(|s| {
-            s.providers.push(ProviderCfg { id: "p".into(), kind: Kind::Ollama, base_url: Some("http://127.0.0.1:1".into()), key_ref: None, models: vec!["m".into()], default_model: Some("m".into()), enabled: true, model_kinds: Default::default() });
+            s.providers.push(ProviderCfg { id: "p".into(), kind: Kind::Ollama, base_url: Some("http://127.0.0.1:1".into()), key_ref: None, models: vec!["m".into()], default_model: Some("m".into()), enabled: true, model_kinds: Default::default(), native_pdf_output: false });
             s.chat = Some(ModelChoice { provider: "p".into(), model: "m".into() });
         }).unwrap();
         let _ = a;
@@ -327,4 +327,86 @@ fn the_actions_that_once_had_only_a_key_now_also_have_a_button_to_click_or_touch
     a.go_to(Tab::Firewall);
     a.fw.advanced = true;
     has(&a, "rcib");
+}
+
+/// F-DISP-02: at the largest text size on a small window the action buttons keep to a third of the window and scroll, so the page
+/// under the title is not pushed off the screen; every button is still reachable by scrolling the bar.
+#[test]
+fn at_the_largest_text_size_the_button_bar_keeps_to_a_third_of_the_window_and_scrolls_to_every_button() {
+    crate::ui::set_ui_size(2.0);
+    let (mut a, cx) = admin_app("ia-hugebar");
+    let admin = true;
+    let mut scrolled_pages = 0;
+    for i in 0..a.tabs().len() {
+        a.tab = i;
+        for (w, h) in [(800u32, 480u32), (360, 740)] {
+            // twice: the first frame lets a page load what it lists
+            let _ = draw(&mut a, &cx, w, h);
+            let g = draw(&mut a, &cx, w, h);
+            let want: Vec<char> = a.buttons_for(admin).iter().map(|b| b.2).collect();
+            if !g.hits.iter().any(|x| matches!(x.ev, Event::Area(id) if id == BTN_BAR)) {
+                continue;
+            }
+            scrolled_pages += 1;
+            let view = a.btn_bar.view;
+            assert!(view.h <= h as f32 / 3.0 + 1.0, "{:?} {w}x{h}: the bar is {} tall", a.tab(), view.h);
+            assert!(g.hits.iter().any(|x| matches!(x.ev, Event::Area(id) if id == BTN_BAR)), "{:?} {w}x{h}: the bar has a scroll bar", a.tab());
+            // scroll from the top to the end: every button of the page shows up inside the bar at some point
+            let mut seen: std::collections::BTreeSet<char> = Default::default();
+            a.btn_bar.offset = 0.0;
+            for _ in 0..40 {
+                let g = draw(&mut a, &cx, w, h);
+                for x in &g.hits {
+                    if let Event::Key(Key::Char(c)) = x.ev {
+                        if x.rect.y >= view.y - 1.0 && x.rect.y + x.rect.h <= view.y + view.h + 1.0 && want.contains(&c) {
+                            seen.insert(c);
+                        }
+                    }
+                }
+                if a.btn_bar.offset >= a.btn_bar.max {
+                    break;
+                }
+                a.btn_bar.by(a.btn_bar.row);
+            }
+            for c in &want {
+                assert!(seen.contains(c), "{:?} {w}x{h}: button {c:?} cannot be reached by scrolling the bar (want {want:?}, seen {seen:?}, bar {:?} max {})", a.tab(), a.btn_bar.view, a.btn_bar.max);
+            }
+            a.btn_bar.offset = 0.0;
+        }
+    }
+    assert!(scrolled_pages >= 5, "the bar scrolled on {scrolled_pages} page/size pairs");
+    crate::ui::set_ui_size(1.0);
+}
+
+/// F-DISP-02: a page that does not scroll itself and is taller than its room at the largest text size gets a scroll bar; the wheel and
+/// the bar move it and what was below the window can be reached.
+#[test]
+fn a_page_taller_than_its_room_at_the_largest_text_size_scrolls_and_shows_its_last_line() {
+    crate::ui::set_ui_size(2.0);
+    let (mut a, cx) = admin_app("ia-hugebody");
+    a.go_to(Tab::Account);
+    let g = draw(&mut a, &cx, 800, 480);
+    assert!(a.body_bar.scrolls(), "the Account page is taller than 800x480 at 200% text");
+    assert!(g.hits.iter().any(|x| matches!(x.ev, Event::Area(id) if id == BODY_BAR)), "the page has a scroll bar");
+    let last_before: f32 = g.text_log.iter().map(|t| t.1).fold(0.0, f32::max);
+    let view = a.body_bar.view;
+    // the wheel over the page moves it
+    a.handle(&Event::MouseMove(view.x as i32 + 40, view.y as i32 + 40), &cx);
+    a.mouse = (view.x as i32 + 40, view.y as i32 + 40);
+    a.handle(&Event::Scroll(-3), &cx);
+    assert!(a.body_bar.offset > 0.0, "the wheel scrolled the page");
+    // all the way down: the lowest text of the page now sits inside the room
+    a.body_bar.offset = a.body_bar.max;
+    let g = draw(&mut a, &cx, 800, 480);
+    let lowest_visible = g.text_log.iter().filter(|t| t.1 >= view.y && t.1 < view.y + view.h).map(|t| t.1).fold(0.0, f32::max);
+    assert!(lowest_visible > 0.0 && last_before > view.y + view.h, "the page ran past its room before ({last_before}) and shows its end now ({lowest_visible})");
+    // another page starts at the top again
+    a.go_to(Tab::Display);
+    let _ = draw(&mut a, &cx, 800, 480);
+    assert_eq!(a.body_bar.offset, 0.0, "a new page starts at its top");
+    // at the normal size nothing needs it
+    crate::ui::set_ui_size(1.0);
+    a.go_to(Tab::Account);
+    let _ = draw(&mut a, &cx, 1920, 1080);
+    assert!(!a.body_bar.scrolls() && !a.btn_bar.scrolls(), "no bar when the page fits");
 }

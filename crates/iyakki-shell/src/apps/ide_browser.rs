@@ -759,7 +759,7 @@ impl DevScan {
 
     #[cfg(test)]
     pub fn set_for_test(&mut self, ports: &[u16]) {
-        *self.found.lock().unwrap() = ports.to_vec();
+        *self.found.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = ports.to_vec();
     }
 }
 

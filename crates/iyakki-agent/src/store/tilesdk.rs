@@ -63,6 +63,8 @@ pub mod code {
     pub const TIMEOUT: &str = "Timeout";
     pub const BLOCKED: &str = "Blocked";
     pub const FAILED: &str = "Failed";
+    /// A name this SDK version does not know (docs/development/SDK-BRIDGE-V2.md).
+    pub const UNSUPPORTED: &str = "Unsupported";
 }
 
 /// An error with a code the page can test (`e.code`), plain words, and the extra fields of its code (`limit`, `resets_at`, `holder`, `fix`).
@@ -228,8 +230,8 @@ impl FakeLlm {
     }
 }
 
-fn code_named(c: &str) -> &'static str {
-    [code::DENIED, code::BAD_ARGUMENT, code::QUOTA, code::BUDGET_STOP, code::UNAVAILABLE, code::BUSY, code::TIMEOUT, code::BLOCKED, code::FAILED].into_iter().find(|k| *k == c).unwrap_or(code::FAILED)
+pub(super) fn code_named(c: &str) -> &'static str {
+    [code::NO_CAPABILITY, code::UNSUPPORTED, code::DENIED, code::BAD_ARGUMENT, code::QUOTA, code::BUDGET_STOP, code::UNAVAILABLE, code::BUSY, code::TIMEOUT, code::BLOCKED, code::FAILED].into_iter().find(|k| *k == c).unwrap_or(code::FAILED)
 }
 
 pub fn fake_model() -> ModelInfo {
@@ -446,7 +448,7 @@ struct State {
     warned_day: i64,
 }
 
-type Clock = Box<dyn Fn() -> u64 + Send + Sync>;
+type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 
 /// One app's SDK state and backends.
 pub struct TileSdk {
@@ -459,24 +461,54 @@ pub struct TileSdk {
     state: Mutex<State>,
     clock: Clock,
     fakes: Option<Fakes>,
+    /// SDK 1.2: markdown, embed, dash, flows, k3s, media, audio, speech.listen, money (store/sdkv2.rs).
+    v2: super::sdkv2::Sdk2,
 }
 
 fn ms_now() -> Clock {
     let t0 = std::time::Instant::now();
-    Box::new(move || t0.elapsed().as_millis() as u64)
+    Arc::new(move || t0.elapsed().as_millis() as u64)
 }
 
 impl TileSdk {
     pub fn new(app: &str, user: &str, llm: Arc<dyn LlmBackend>, speech: Arc<dyn SpeechBackend>, meter: Arc<dyn Meter>, out: Arc<Mutex<Outbox>>, state_file: Option<&Path>) -> TileSdk {
         let saved = state_file.and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
         let st = State { saved, path: state_file.map(Path::to_path_buf), llm_calls: vec![], says: vec![], jobs: HashMap::new(), warned_day: 0 };
-        TileSdk { app: app.into(), user: user.into(), llm, speech, meter, out, state: Mutex::new(st), clock: ms_now(), fakes: None }
+        let clock = ms_now();
+        let v2 = super::sdkv2::Sdk2::new(app, user, out.clone(), super::sdkv2_backends::Backends::missing(), state_file.map(|p| p.with_extension("sdk2.json")), Zone::utc(), clock.clone());
+        TileSdk { app: app.into(), user: user.into(), llm, speech, meter, out, state: Mutex::new(st), clock, fakes: None, v2 }
+    }
+
+    /// The SDK 1.2 part: its state, limits and backends.
+    pub fn v2(&self) -> &super::sdkv2::Sdk2 {
+        &self.v2
+    }
+
+    /// Wire the backends of SDK 1.2 (the shell's viewer, the engines). Without them those calls answer `Unavailable` with a fix line.
+    pub fn with_backends(mut self, b: super::sdkv2_backends::Backends) -> TileSdk {
+        self.v2 = self.v2.with_backends(b);
+        self
+    }
+
+    /// Play an older host: calls newer than `level` are unknown (tests).
+    pub fn with_level(mut self, level: iyakki_core_api::sdkbridge::Version) -> TileSdk {
+        self.v2 = self.v2.with_level(level);
+        self
     }
 
     /// The running system: the person's providers, the voice of Settings -> Voice, the usage log of the data folder.
     pub fn for_services(svc: &Arc<Services>, user: &str, app: &str, out: Arc<Mutex<Outbox>>) -> TileSdk {
         let file = svc.dir().join("appdata").join("tile-sdk").join(user).join(format!("{app}.json"));
-        TileSdk::new(app, user, Arc::new(ServicesLlm { svc: svc.clone() }), Arc::new(SystemSpeech::new(svc.clone())), Arc::new(ServicesMeter(svc.clone())), out, Some(&file))
+        let mut s = TileSdk::new(app, user, Arc::new(ServicesLlm { svc: svc.clone() }), Arc::new(SystemSpeech::new(svc.clone())), Arc::new(ServicesMeter(svc.clone())), out, Some(&file));
+        s.v2 = s.v2.with_zone(Zone::system());
+        s
+    }
+
+    /// [`TileSdk::for_services`] with the backends that are built for the person's policy: dashboards and flows through their engines.
+    pub fn for_services_as(svc: &Arc<Services>, user: &str, app: &str, out: Arc<Mutex<Outbox>>, policy: &iyakki_sec::policy::Policy) -> TileSdk {
+        let mut s = TileSdk::for_services(svc, user, app, out);
+        s.v2 = s.v2.with_backends(super::sdkv2_backends::Backends::missing().with_engines(svc, policy));
+        s
     }
 
     /// Fakes for every backend, a usage log in `dir`, and the first-use cards answered "allow" until a test says otherwise.
@@ -485,11 +517,14 @@ impl TileSdk {
         let (llm, speech) = (Arc::new(FakeLlm::default()), Arc::new(FakeSpeech::default()));
         let mut s = TileSdk::new(app, "tester", llm.clone(), speech.clone(), Arc::new(LogMeter(UsageLog::open(&dir.join("usage.jsonl")))), out, None);
         s.fakes = Some(Fakes { llm, speech, skew_ms: AtomicU64::new(0), approve: Mutex::new(Approve::Allow) });
+        s.v2 = s.v2.with_fakes();
         s
     }
 
     pub fn with_clock(mut self, c: impl Fn() -> u64 + Send + Sync + 'static) -> TileSdk {
-        self.clock = Box::new(c);
+        let c: Clock = Arc::new(c);
+        self.v2 = self.v2.with_clock(c.clone());
+        self.clock = c;
         self
     }
 
@@ -549,6 +584,8 @@ impl TileSdk {
         st.saved.llm = false;
         st.saved.speech = false;
         Self::save(&st);
+        drop(st);
+        self.v2.revoke();
     }
 
     /// The limit now in force: the person's, else the default for the model in use.
@@ -823,7 +860,7 @@ impl TileSdk {
 
     /// The person answered a first-use card.
     pub fn answer(self: &Arc<Self>, id: u32, allow: bool) -> bool {
-        let Some(job) = self.st().jobs.remove(&id) else { return false };
+        let Some(job) = self.st().jobs.remove(&id) else { return self.v2.answer(id, allow) };
         self.out().requests.retain(|r| r.id != id);
         let stream = matches!(job.work, Work::Chat { stream: true, .. });
         if !allow {
@@ -941,6 +978,7 @@ impl TileSdk {
 
     /// Time limits: a card nobody answered in two minutes is a `Denied`, a call that takes over a minute a `Timeout`.
     pub fn tick(&self) {
+        self.v2.tick();
         let now = self.now();
         let mut late: Vec<(u32, bool, SdkError)> = vec![];
         {
@@ -977,6 +1015,7 @@ impl TileSdk {
         st.jobs.clear();
         drop(st);
         self.speech.stop(&self.app, None);
+        self.v2.close();
     }
 
     /// Everything this person's log holds by source (tests; the Settings page reads the log itself).
@@ -986,7 +1025,7 @@ impl TileSdk {
 
     /// Calls and requests still waiting (tests).
     pub fn waiting(&self) -> usize {
-        self.st().jobs.len()
+        self.st().jobs.len() + self.v2.waiting()
     }
 
     /// `T.fake.*`: only a runtime built with fakes answers.
@@ -1014,11 +1053,22 @@ impl TileSdk {
                     let mut st = self.st();
                     st.saved.llm = false;
                     st.saved.speech = false;
+                    drop(st);
+                    self.v2.revoke();
+                }
+                if let Some(f2) = self.v2.fakes() {
+                    *f2.first_use.lock().unwrap_or_else(|e| e.into_inner()) = match text("mode").as_str() {
+                        "allow" => Some(true),
+                        "deny" => Some(false),
+                        _ => None,
+                    };
                 }
             }
+            op if op.starts_with("v2.") => return self.v2.fake_op(&op[3..], a),
             "budget.set" => self.set_tokens_per_day(a["tokensPerDay"].as_u64()),
             "clock.advance" => {
                 f.skew_ms.fetch_add(a["ms"].as_u64().unwrap_or(0), Ordering::SeqCst);
+                self.v2.skew_ms.fetch_add(a["ms"].as_u64().unwrap_or(0), Ordering::SeqCst);
             }
             _ => return Err(format!("no such fake: {op}")),
         }

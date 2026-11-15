@@ -105,8 +105,13 @@ fn meta_load(buf: &mut Vec<u8>, key: u32) {
 }
 
 fn payload_load(buf: &mut Vec<u8>, base: u32, off: u32, len: u32) {
+    payload_load_to(buf, REG1, base, off, len);
+}
+
+/// A payload load into register `dreg` (the 32-bit registers start at 8: `REG32_00` is 8, the next four bytes 9, and so on).
+fn payload_load_to(buf: &mut Vec<u8>, dreg: u32, base: u32, off: u32, len: u32) {
     expr(buf, "payload", |b| {
-        attr(b, 1, &be32(REG1));
+        attr(b, 1, &be32(dreg));
         attr(b, 2, &be32(base));
         attr(b, 3, &be32(off));
         attr(b, 4, &be32(len));
@@ -171,7 +176,7 @@ fn range_or_eq(buf: &mut Vec<u8>, lo: &[u8], hi: &[u8]) {
 }
 
 /// The expressions of one step.
-fn encode_step(buf: &mut Vec<u8>, s: &Step) {
+fn encode_step(buf: &mut Vec<u8>, s: &Step, sets: &[crate::ruleset::AddrSet]) {
     match s {
         Step::Iif { name, prefix } => {
             meta_load(buf, META_IIFNAME);
@@ -223,6 +228,39 @@ fn encode_step(buf: &mut Vec<u8>, s: &Step) {
                     cmp(buf, CMP_EQ, &addr_bytes(ip));
                 }
             }
+        }
+        Step::SaddrSet(name) => {
+            // a set the ruleset does not have is a bug of the builder; make the rule match nothing rather than everything
+            let Some((idx, s)) = sets.iter().enumerate().find(|(_, s)| &s.name == name) else {
+                meta_load(buf, META_L4PROTO);
+                cmp(buf, CMP_EQ, &[255]);
+                cmp(buf, CMP_NEQ, &[255]);
+                return;
+            };
+            let (off, len) = if s.v4 { (12, 4) } else { (8, 16) };
+            payload_load(buf, PAYLOAD_NETWORK, off, len);
+            expr(buf, "lookup", |b| {
+                attr(b, 1, &cstr(name)); // SET
+                attr(b, 2, &be32(REG1)); // SREG
+                attr(b, 4, &be32(idx as u32 + 1)); // SET_ID
+            });
+        }
+        Step::SaddrDportSet(name) => {
+            let Some((idx, s)) = sets.iter().enumerate().find(|(_, s)| &s.name == name) else {
+                meta_load(buf, META_L4PROTO);
+                cmp(buf, CMP_EQ, &[255]);
+                cmp(buf, CMP_NEQ, &[255]);
+                return;
+            };
+            let (off, len) = if s.v4 { (12, 4) } else { (8, 16) };
+            // the address into the first words of register 1 (= the 32-bit register 8), the port into the next word
+            payload_load(buf, PAYLOAD_NETWORK, off, len);
+            payload_load_to(buf, 8 + len / 4, PAYLOAD_TRANSPORT, 2, 2);
+            expr(buf, "lookup", |b| {
+                attr(b, 1, &cstr(name)); // SET
+                attr(b, 2, &be32(REG1)); // SREG
+                attr(b, 4, &be32(idx as u32 + 1)); // SET_ID
+            });
         }
         Step::Dport(lo, hi) => {
             payload_load(buf, PAYLOAD_TRANSPORT, 2, 2);
@@ -277,6 +315,8 @@ pub fn encode_replace(rs: &Ruleset, seq0: u32) -> (Vec<u8>, usize) {
         table_msg(&mut out, seq, t, fl);
         acks += 1;
     }
+    let set_specs: Vec<tablegen::SetSpec> = rs.sets.iter().map(|s| tablegen::SetSpec { name: s.name.clone(), v4: s.v4, timeout: false, members: s.members.clone(), ranges: s.ranges.clone(), concat: s.concat.clone() }).collect();
+    tablegen::encode_sets(&mut out, TABLE, &set_specs, &mut seq, &mut acks);
     seq += 1;
     acks += 1;
     msg(&mut out, ty(NFT_MSG_NEWCHAIN), NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE, seq, NFPROTO_INET, 0, |b| {
@@ -297,7 +337,7 @@ pub fn encode_replace(rs: &Ruleset, seq0: u32) -> (Vec<u8>, usize) {
             attr(b, 2, &cstr(CHAIN));
             nest(b, 4, |e| {
                 for s in &r.steps {
-                    encode_step(e, s);
+                    encode_step(e, s, &rs.sets);
                 }
             });
         });
@@ -358,13 +398,15 @@ pub fn attrs(mut b: &[u8]) -> Vec<(u16, &[u8])> {
     v
 }
 
-/// Packets and bytes of every `counter` in the rules of a dump reply.
-pub fn counters_of_dump(reply: &[u8]) -> (u64, u64) {
-    let (mut pk, mut by) = (0u64, 0u64);
+/// The `counter` of every rule of a dump reply, in the order the kernel listed the rules (the order they were added in):
+/// `(packets, bytes)` summed over the counters of the rule, `None` for a rule without one.
+pub fn rule_counters_of_dump(reply: &[u8]) -> Vec<Option<(u64, u64)>> {
+    let mut rules = Vec::new();
     for (t, payload) in split_messages(reply) {
         if t != ty(NFT_MSG_NEWRULE) || payload.len() < 4 {
             continue;
         }
+        let mut found: Option<(u64, u64)> = None;
         for (at, av) in attrs(&payload[4..]) {
             if at != 4 {
                 continue;
@@ -375,6 +417,7 @@ pub fn counters_of_dump(reply: &[u8]) -> (u64, u64) {
                 if name != Some(b"counter") {
                     continue;
                 }
+                let (mut pk, mut by) = found.unwrap_or((0, 0));
                 if let Some((_, d)) = a.iter().find(|(t, _)| *t == 2) {
                     for (ct, cv) in attrs(d) {
                         let n = cv.get(..8).map(|x| u64::from_be_bytes(x.try_into().unwrap_or([0; 8]))).unwrap_or(0);
@@ -385,10 +428,18 @@ pub fn counters_of_dump(reply: &[u8]) -> (u64, u64) {
                         }
                     }
                 }
+                found = Some((pk, by));
             }
         }
+        rules.push(found);
     }
-    (pk, by)
+    rules
+}
+
+/// Packets and bytes the blocked-attempts counter has seen: the last rule that has a counter (the ruleset builder puts that rule
+/// after every other counted rule, so the per-rule counters of allowed traffic never mix into this total).
+pub fn counters_of_dump(reply: &[u8]) -> (u64, u64) {
+    rule_counters_of_dump(reply).into_iter().rev().flatten().next().unwrap_or((0, 0))
 }
 
 /// What the kernel said.
@@ -518,8 +569,17 @@ mod sock {
             first_err.map_or(Ok(()), Err)
         }
 
-        /// Read the packet and byte counters of our rules.
+        /// Read the packet and byte counters of the blocked-attempts rule.
         pub fn counters(&mut self) -> Result<(u64, u64), NlError> {
+            Ok(counters_of_dump(&self.dump_rules()?))
+        }
+
+        /// Read the counter of every rule of our chain, in order (see [`rule_counters_of_dump`]).
+        pub fn rule_counters(&mut self) -> Result<Vec<Option<(u64, u64)>>, NlError> {
+            Ok(rule_counters_of_dump(&self.dump_rules()?))
+        }
+
+        fn dump_rules(&mut self) -> Result<Vec<u8>, NlError> {
             let seq = self.next_seq();
             self.send(&encode_dump_rules(seq))?;
             let mut all = Vec::new();
@@ -542,20 +602,30 @@ mod sock {
                     break;
                 }
             }
-            Ok(counters_of_dump(&all))
+            Ok(all)
         }
 
         /// Put `spec` in place of whatever table of that name exists, all or nothing (see [`tablegen`]).
         pub fn apply_table(&mut self, spec: &tablegen::TableSpec) -> Result<(), NlError> {
+            self.apply_table_in(spec, tablegen::Family::Inet)
+        }
+
+        /// [`NfSocket::apply_table`] for a table of the given family (a bridge table needs the kernel's `nf_tables_bridge`).
+        pub fn apply_table_in(&mut self, spec: &tablegen::TableSpec, family: tablegen::Family) -> Result<(), NlError> {
             let seq = self.next_seq();
-            let (b, acks) = tablegen::encode_apply(spec, seq).map_err(NlError::Failed)?;
+            let (b, acks) = tablegen::encode_apply_in(spec, family, seq).map_err(NlError::Failed)?;
             self.run(&b, acks)
         }
 
         /// Take the table out (nothing else is touched).
         pub fn remove_table(&mut self, name: &str) -> Result<(), NlError> {
+            self.remove_table_in(tablegen::Family::Inet, name)
+        }
+
+        /// [`NfSocket::remove_table`] for a table of the given family.
+        pub fn remove_table_in(&mut self, family: tablegen::Family, name: &str) -> Result<(), NlError> {
             let seq = self.next_seq();
-            let (b, acks) = tablegen::encode_remove(name, seq).map_err(NlError::Failed)?;
+            let (b, acks) = tablegen::encode_remove_in(family, name, seq).map_err(NlError::Failed)?;
             self.run(&b, acks)
         }
 
@@ -568,13 +638,18 @@ mod sock {
 
         /// Is there a table of that name?
         pub fn table_exists(&mut self, name: &str) -> Result<bool, NlError> {
+            self.table_exists_in(tablegen::Family::Inet, name)
+        }
+
+        /// [`NfSocket::table_exists`] for a table of the given family; a kernel without that family answers "not there".
+        pub fn table_exists_in(&mut self, family: tablegen::Family, name: &str) -> Result<bool, NlError> {
             let seq = self.next_seq();
-            self.send(&tablegen::encode_get_table(name, seq))?;
+            self.send(&tablegen::encode_get_table_in(family, name, seq))?;
             let r = self.recv()?;
             for (t, p) in split_messages(&r) {
                 if t == 2 && p.len() >= 4 {
                     let code = i32::from_ne_bytes([p[0], p[1], p[2], p[3]]);
-                    return if code == -libc::ENOENT { Ok(false) } else if code == 0 { Ok(true) } else { Err(errno_error(-code)) };
+                    return if code == -libc::ENOENT || code == -libc::EAFNOSUPPORT { Ok(false) } else if code == 0 { Ok(true) } else { Err(errno_error(-code)) };
                 }
                 if t == ty(NFT_MSG_NEWTABLE) {
                     return Ok(true);

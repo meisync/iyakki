@@ -15,10 +15,12 @@ use super::*;
 #[derive(Default)]
 pub(super) struct MatrixPanel {
     pub(super) pending: Option<Receiver<(bool, String)>>,
+    /// Which saved room the next `r` switches (it goes round the rooms).
+    pub(super) room_cursor: usize,
 }
 
 impl SettingsApp {
-    fn matrix_service(cx: &AppCx) -> MessageService {
+    pub(super) fn matrix_service(cx: &AppCx) -> MessageService {
         let audit = cx.audit.clone();
         let user = cx.session.user.clone();
         let log: AuditFn = Arc::new(move |a, d| audit.record(&user, a, d));
@@ -33,8 +35,36 @@ impl SettingsApp {
             None => "Where to reach me: nothing set up. Press a to connect a Matrix account (your own server or any homeserver).".into(),
             Some(a) => {
                 let rooms = ms.accounts().rooms(&a.id);
-                let room = rooms.first().map_or("no room yet".to_string(), |r| format!("room \"{}\"", r.name));
-                format!("Where to reach me: Matrix \"{}\" ({}), {room}. t sends a test message, x removes it. Flows send through the Notify step (Also tell me by: matrix).", a.label, a.user_id)
+                let on = ms.accounts().mirror_on(&a.id);
+                let unread = if on { iyakki_agent::msg::mirror::Mirror { svc: &ms, inbox: &cx.services.inbox, user: &cx.session.user }.unread_by_room(&a.id).unwrap_or_default() } else { Vec::new() };
+                let room = Self::rooms_words(&rooms, &unread);
+                let copy = if ms.accounts().mirror_on(&a.id) { "New messages of your saved rooms are copied into the INBOX (m turns that off)." } else { "m copies new messages of your saved rooms into the INBOX (off now)." };
+                format!("Where to reach me: Matrix \"{}\" ({}), {room}. t sends a test message, x removes it. {copy} Flows send through the Notify step (Also tell me by: matrix).", a.label, a.user_id)
+            }
+        }
+    }
+
+    /// The saved rooms in words: `room "main"`, or `rooms "main" (2 unread), "alerts" (left out)` when there are several or a room is
+    /// left out of the copy or has unread copies.
+    pub(super) fn rooms_words(rooms: &[iyakki_agent::msg::RoomRef], unread: &[(String, usize)]) -> String {
+        match rooms {
+            [] => "no room yet".to_string(),
+            [r] if r.mirror && unread.iter().all(|(_, n)| *n == 0) => format!("room \"{}\"", r.name),
+            _ => {
+                let parts: Vec<String> = rooms
+                    .iter()
+                    .map(|r| {
+                        let n = unread.iter().find(|(name, _)| name == &r.name).map_or(0, |(_, n)| *n);
+                        if !r.mirror {
+                            format!("\"{}\" (left out)", r.name)
+                        } else if n > 0 {
+                            format!("\"{}\" ({n} unread)", r.name)
+                        } else {
+                            format!("\"{}\"", r.name)
+                        }
+                    })
+                    .collect();
+                format!("{} {}", if rooms.len() == 1 { "room" } else { "rooms" }, parts.join(", "))
             }
         }
     }
@@ -129,6 +159,47 @@ impl SettingsApp {
         });
         self.matrix.pending = Some(rx);
         self.ok("Sending a test message…");
+    }
+
+    /// `m`: copy new messages of the saved rooms into the INBOX, or stop. Read only; the first copy starts from now (no history).
+    pub(super) fn matrix_mirror_toggle(&mut self, cx: &AppCx) {
+        let ms = Self::matrix_service(cx);
+        let Some(a) = ms.accounts().list().into_iter().next() else {
+            self.fail("Connect a Matrix account first (press a).");
+            return;
+        };
+        let on = !ms.accounts().mirror_on(&a.id);
+        match ms.accounts().set_mirror(&a.id, on) {
+            Ok(()) => {
+                cx.audit.record(&cx.session.user, "msg.mirror.set", &format!("account={} on={on}", a.id));
+                self.ok(if on { format!("New messages of the rooms you saved for {} are now copied into the INBOX, about once a minute. Nothing is sent because of them.", a.label) } else { format!("Messages of {} are no longer copied into the INBOX.", a.label) });
+            }
+            Err(e) => self.fail(e),
+        }
+    }
+
+    /// `r`: switch one saved room in or out of the copy into the INBOX, going round the rooms one press at a time.
+    pub(super) fn matrix_room_toggle(&mut self, cx: &AppCx) {
+        let ms = Self::matrix_service(cx);
+        let Some(a) = ms.accounts().list().into_iter().next() else {
+            self.fail("Connect a Matrix account first (press a).");
+            return;
+        };
+        let rooms = ms.accounts().rooms(&a.id);
+        if rooms.is_empty() {
+            self.fail("There is no saved room yet.");
+            return;
+        }
+        let r = &rooms[self.matrix.room_cursor % rooms.len()];
+        self.matrix.room_cursor = (self.matrix.room_cursor + 1) % rooms.len();
+        match ms.accounts().set_room_mirror(&a.id, &r.name, !r.mirror) {
+            Ok(now) => {
+                cx.audit.record(&cx.session.user, "msg.mirror.room", &format!("account={} room=\"{}\" on={}", a.id, now.name, now.mirror));
+                let more = if rooms.len() > 1 { " Press r again for the next room." } else { "" };
+                self.ok(if now.mirror { format!("The room \"{}\" is copied into the INBOX again.{more}", now.name) } else { format!("The room \"{}\" is left out of the copy into the INBOX; what is there stays.{more}", now.name) });
+            }
+            Err(e) => self.fail(e),
+        }
     }
 
     pub(super) fn matrix_remove(&mut self, cx: &AppCx) {

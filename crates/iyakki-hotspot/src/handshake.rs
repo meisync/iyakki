@@ -181,6 +181,16 @@ impl Authenticator {
         vec![Action::InstallPtk { peer: self.cfg.spa, tk }, Action::Authorized]
     }
 
+    /// After the handshake finished: a group key exchange with this client's keys for a new group key (`gtk_id` 1 to 3). `None` while
+    /// the handshake is not done. The counter continues after the last one this handshake used.
+    pub fn group_rekey(&self, gtk: [u8; 16], gtk_id: u8) -> Option<crate::groupkey::GroupRekey> {
+        if self.state != State::Done {
+            return None;
+        }
+        let ptk = self.ptk.as_ref()?;
+        Some(crate::groupkey::GroupRekey::new(ptk.kck, ptk.kek, gtk, gtk_id, self.replay + 1))
+    }
+
     /// Call now and then (every 100 ms is plenty): resends a message that got no answer, or gives up.
     pub fn tick(&mut self, now_ms: u64) -> Vec<Action> {
         if !matches!(self.state, State::WaitM2 | State::WaitM4) || now_ms < self.deadline {

@@ -18,6 +18,8 @@ use std::time::Duration;
 use crate::browserjobs::BrowserJobs;
 
 pub const MAX_PENDING: usize = 10;
+/// The `payload` of a question a client device asked (`ConsentStore::create_device`): the shell shows these over the screen.
+pub const DEVICE_PAYLOAD: &str = "client-device";
 /// A plain "Allow" to look at a host lasts this long.
 pub const LOOK_SHORT_SECS: i64 = 5 * 60;
 /// "Approve all" is dropped after this many seconds without an action.
@@ -173,6 +175,21 @@ impl ConsentStore {
         Ok(id)
     }
 
+    /// A client device asks to use something of this machine (a hard ask, answered on the machine, every use): one question with
+    /// "Allow this time" and "Deny", shown over the screen of the person it is for. `payload` is [`DEVICE_PAYLOAD`].
+    pub fn create_device(&self, user: &str, device: &str, title: &str, text: &str, now: i64) -> Result<String, String> {
+        let mut g = self.lock();
+        if g.open.iter().filter(|r| r.user == user).count() >= MAX_PENDING {
+            return Err("too many questions are waiting; answer them first".into());
+        }
+        g.next += 1;
+        let id = format!("bc{}", g.next);
+        let clean = |s: &str, n: usize| -> String { s.chars().filter(|c| !c.is_control() || *c == '\n').take(n).collect() };
+        let choices = vec![choice(Answer::Allow, "Allow this time"), choice(Answer::Deny, "Deny")];
+        g.open.push(ConsentRequest { id: id.clone(), user: user.into(), kind: ConsentKind::Step, domain: clean(device, 80), title: clean(title, 160), text: clean(text, 600), detail: String::new(), choices, since: now, payload: DEVICE_PAYLOAD.into(), quiet: false });
+        Ok(id)
+    }
+
     /// A flow's permission request. One per (person, run, step, permission): a repeat returns `Ok(None)` and adds nothing.
     #[allow(clippy::too_many_arguments)]
     pub fn create_permission(&self, user: &str, flow_id: &str, title: &str, text: &str, payload: &str, now: i64) -> Result<Option<String>, String> {
@@ -220,6 +237,9 @@ impl ConsentStore {
         let Some(pos) = g.open.iter().position(|r| r.id == id && r.user == user) else { return Err("that question is not waiting any more".into()) };
         if !g.open[pos].choices.iter().any(|c| c.answer == answer) {
             return Err("that is not one of the choices".into());
+        }
+        if g.open[pos].payload == DEVICE_PAYLOAD && g.synthetic {
+            return Err("A client device is allowed on the machine itself: input sent from a paired computer (developer mode) cannot give it.".into());
         }
         if g.open[pos].kind == ConsentKind::Permission {
             if g.synthetic {

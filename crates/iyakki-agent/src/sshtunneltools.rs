@@ -227,6 +227,12 @@ fn one_line(t: &Tunnel, st: &crate::sshtunnel_mgr::Status, now: u64) -> String {
 }
 
 impl Tools for SshTunnelTools {
+
+    fn inner_tools(&self) -> Option<&dyn Tools> {
+
+        Some(&*self.inner)
+
+    }
     fn defs(&self) -> Vec<ToolDef> {
         let mut v = self.inner.defs();
         v.retain(|d| !is_tunnel_tool(&d.spec.name));

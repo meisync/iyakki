@@ -1,0 +1,40 @@
+# Layer split rules for lean-image.sh --layers (docs/development/LAYERED-ROOT-DESIGN.md). Read by dist/buildroot/layers.py.
+#
+#   layer NAME [provides K=V ...] [requires K=LO..HI ...] [optional]
+#       the layers, bottom first. provides/requires are interface numbers (the compat charter's surfaces): a layer set whose requires
+#       are not met by its own provides is refused by the device before anything is written.
+#   rule NAME GLOB
+#       every file, link or device node of the root goes to the layer of the FIRST rule whose glob matches its path (no leading slash).
+#       `*` is any characters except `/`, `**` is anything including `/`, `?` is one character. Folders are not matched: a folder is
+#       in every layer that has something under it.
+#
+# Stable things sit in base, the iyakki programs of the core side in core, the shell, tiles and their assets in ui. While the shell is still
+# inside the one `iyakki` program (the core/UI split is not finished), that program is core; when the shell program is its own file, one rule
+# moves it to ui and a shell change stops touching core.
+
+layer base provides base_abi=1
+layer core provides core_iface=1 requires base_abi=1..1
+layer ui   requires core_iface=1..1 base_abi=1..1
+
+# ui: what the person sees
+rule ui usr/share/fonts/**
+rule ui usr/share/icons/**
+rule ui usr/share/iyakki/samples/**
+rule ui usr/share/iyakki/ui/**
+rule ui usr/share/iyakki/theme/**
+rule ui usr/libexec/iyakki/webview-helper
+
+# core: the iyakki programs and their data, the release stamp, the notices
+rule core usr/bin/iyakki
+rule core usr/bin/iyakki-*
+rule core usr/share/iyakki/**
+rule core usr/libexec/iyakki/**
+rule core usr/lib/iyakki-av/**
+rule core usr/lib/gstreamer-1.0/libgstiyakki*
+rule core usr/share/doc/iyakki/**
+rule core etc/iyakki/**
+rule core etc/iyakki-release
+rule core etc/modprobe.d/iyakki-*
+
+# base: everything else (libraries, BusyBox, the web engine, firmware, kernel modules)
+rule base **

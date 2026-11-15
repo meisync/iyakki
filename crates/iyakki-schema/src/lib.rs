@@ -243,6 +243,13 @@ pub fn copy_aside(path: &Path, now: u64) -> Option<PathBuf> {
     Some(to)
 }
 
+/// A plain file (this release writes no stamp into it) that is a JSON object with a `schema` number was written by a newer release,
+/// which changed its shape: it is neither damaged nor ours to overwrite.
+fn newer_plain(bytes: &[u8]) -> Option<u32> {
+    let v: Value = serde_json::from_slice(bytes).ok()?;
+    Some(version_of(&v)).filter(|n| *n > 0 && v.is_object())
+}
+
 /// Read a plain JSON file that has no schema stamp (a per-person list or settings file). `None` when there is no file, or when it
 /// is damaged (not JSON, or it does not fit `T`): a damaged file is moved to `<file>.corrupt-<now>` (nothing is deleted, the
 /// newest [`KEEP_CORRUPT`] copies are kept) and a sentence for the audit log is queued with [`report`]. The caller then uses its defaults.
@@ -257,6 +264,10 @@ pub fn read_plain<T: serde::de::DeserializeOwned>(what: &str, path: &Path, now: 
     };
     match serde_json::from_slice::<T>(&bytes) {
         Ok(v) => Some(v),
+        Err(_) if newer_plain(&bytes).is_some() => {
+            report(format!("{what} {}: written by a newer release (schema {}); it is left as it is and nothing is saved over it until IYAKKI is updated", path.display(), newer_plain(&bytes).unwrap_or(0)));
+            None
+        }
         Err(e) => {
             let moved = move_aside(path, now);
             report(format!("{what} {}: damaged ({e}); {} and started with the defaults", path.display(), moved.as_ref().map(|m| format!("moved to {}", m.display())).unwrap_or_else(|| "could not be moved aside, so nothing will be saved over it".into())));
@@ -269,6 +280,7 @@ pub fn read_plain<T: serde::de::DeserializeOwned>(what: &str, path: &Path, now: 
 /// never overwrites a damaged file that was not set aside first.
 pub fn plain_writable(what: &str, path: &Path) -> Result<(), String> {
     match fs::read(path) {
+        Ok(b) if newer_plain(&b).is_some() => Err(format!("The {what} file was written by a newer IYAKKI (schema {}); it is kept as it is and cannot be changed here until IYAKKI is updated: {}", newer_plain(&b).unwrap_or(0), path.display())),
         Ok(b) if serde_json::from_slice::<Value>(&b).is_err() => Err(format!("The {what} file is damaged and could not be moved aside; it is left as it is: {}", path.display())),
         Ok(_) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),

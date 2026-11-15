@@ -9,6 +9,7 @@ use std::sync::Arc;
 use iyakki_core_api::OutAttachment;
 use iyakki_flow::host::{ChannelNotice, Notice};
 
+use super::channel_policy::{Decision, Held};
 use super::host::AgentHost;
 use crate::inbox::{Kind, Link};
 
@@ -55,9 +56,20 @@ impl AgentHost {
             let text = format!("{}\n{}", n.title.trim(), n.body.trim());
             // the flow's own switch (off for an imported flow) and the cool-down, before anything leaves
             self.chan.permit(&n.flow_id, &c.dedupe_key, crate::clock::now_unix())?;
+            let now = crate::clock::now_unix().max(0) as u64;
+            if !c.dry_run {
+                // quiet hours: the INBOX note is already made; the message waits (as text, without the picture) and goes when they end
+                if let Decision::HoldUntil(until) = self.msg_policy.decide(&n.level, n.needs_you, now) {
+                    self.msg_policy.hold(Held { flow: n.flow_id.clone(), room: c.room.clone(), text: text.trim().to_string(), key: c.dedupe_key.clone(), until });
+                    return Ok::<_, String>(vec![format!("held until the quiet hours end ({} s from now)", until.saturating_sub(now))]);
+                }
+            }
             let r = ms.send("", &c.room, text.trim(), attach, &c.dedupe_key, c.dry_run)?;
             if !c.dry_run {
                 self.chan.sent(&n.flow_id, &c.dedupe_key, crate::clock::now_unix());
+                if n.needs_you {
+                    self.msg_policy.watch(&n.flow_id, &c.dedupe_key, text.trim(), now);
+                }
             }
             Ok::<_, String>(vec![r.note])
         })();
@@ -66,5 +78,31 @@ impl AgentHost {
             let _ = self.svc.notify_once(&self.user, Kind::Warning, "Message not sent", &e.chars().take(300).collect::<String>(), Some(Link::new("flows", &n.flow_id)));
         }
         result
+    }
+
+    /// About once a minute: send the messages held for quiet hours that are due, and ask again in the second room for those nobody
+    /// acknowledged in time. Failures stay quiet here (the INBOX notes exist); a held message that cannot go is dropped, not repeated.
+    pub(super) fn tick_channels(&self) {
+        let now = crate::clock::now_unix().max(0) as u64;
+        let due = self.msg_policy.take_due(now);
+        let esc = self.msg_policy.escalations_due(now);
+        if due.is_empty() && esc.is_empty() {
+            return;
+        }
+        let sink = self.audit_sink.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let (svc, user) = (self.svc.clone(), self.user.clone());
+        let audit: crate::gitkeys::AuditFn = Arc::new(move |a, d| match &sink {
+            Some(f) => f(&user, a, d),
+            None => svc.browser.audit(&user, a, d),
+        });
+        let ms = crate::msg::MessageService::for_services(&self.svc, &self.user, audit);
+        for h in due {
+            let _ = ms.send("", &h.room, &h.text, None, &h.key, false);
+        }
+        let room = self.msg_policy.policy().escalate_room;
+        for w in esc {
+            let text = format!("Nobody answered yet: {}", w.text);
+            let _ = ms.send("", &room, &text, None, &format!("esc-{}", w.key), false);
+        }
     }
 }

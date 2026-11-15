@@ -1305,8 +1305,9 @@ mod tests {
         fakes(&d);
         let spec = Spec { kind: Kind::SpdSay, program: d.join("spd-say").to_string_lossy().to_string(), voice: None };
         let mut p = speak(&spec, "Hello there", Some("ta-IN"), 1.0, "").unwrap();
-        for _ in 0..100 {
-            if d.join("pid").exists() {
+        // the script writes its pid first and reads its input after it: wait for both before stopping it
+        for _ in 0..300 {
+            if d.join("pid").exists() && std::fs::read_to_string(d.join("log.in")).is_ok_and(|t| !t.trim().is_empty()) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -1360,8 +1361,9 @@ mod tests {
         svc.host_tts.scan_now();
         assert!(matches!(svc.effective_tts(None), Some(SpeechEngine::Host { ref engine, .. }) if engine == "espeak-ng"));
         let mut p = svc.speak_player("Hello **there** https://example.org/x").unwrap();
-        for _ in 0..100 {
-            if d.join("log.in").exists() {
+        // the engine writes its input first and its arguments after it: stopping it between the two would lose the arguments, so wait for both
+        for _ in 0..300 {
+            if std::fs::read_to_string(d.join("log.in")).is_ok_and(|t| !t.trim().is_empty()) && std::fs::read_to_string(d.join("log.args")).is_ok_and(|t| !t.trim().is_empty()) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(20));

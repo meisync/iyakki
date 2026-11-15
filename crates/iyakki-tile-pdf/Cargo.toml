@@ -1,0 +1,18 @@
+[package]
+name = "iyakki-tile-pdf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The PDF tile and the viewer component (`PdfView`) that the browser also hosts. Rule (crates/iyakki-core/tests/dependency_ratchet.rs): depends on
+# `iyakki-uikit` and `iyakki-tile-api` and never on the agent; its tests run against a fake `PdfFiles`. The one documented exception is the
+# reader library `iyakki-pdf` (parser and renderer for untrusted files, no I/O, no agent), see tests/data/tile_crate_deps.allow.
+
+[dependencies]
+iyakki-uikit = { path = "../iyakki-uikit" }
+iyakki-tile-api = { path = "../iyakki-tile-api" }
+iyakki-pdf.workspace = true
+tiny-skia = "0.11"
+
+[dev-dependencies]
+iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }

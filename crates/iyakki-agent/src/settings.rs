@@ -87,6 +87,22 @@ impl Default for SigninSaver {
     }
 }
 
+/// How long one provider's model may think or stay silent before a call is abandoned (0 = the machine-wide value, then the default).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProviderLimits {
+    pub think_secs: u32,
+    pub silence_secs: u32,
+}
+
+impl Settings {
+    /// The limits for a call to `provider`: its own when set, else the machine-wide ones; 0 means "the default".
+    pub fn stall_limits(&self, provider: &str) -> (u32, u32) {
+        let own = self.provider_limits.get(provider).copied().unwrap_or_default();
+        (if own.think_secs > 0 { own.think_secs } else { self.think_limit_secs }, if own.silence_secs > 0 { own.silence_secs } else { self.silence_limit_secs })
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -136,10 +152,14 @@ pub struct Settings {
     pub think_limit_secs: u32,
     /// Seconds with no token of any kind before a model call is abandoned (0 = the default, 120).
     pub silence_limit_secs: u32,
+    /// The stall limits of one provider (by its id in Settings -> Models), over the machine-wide `think_limit_secs` and `silence_limit_secs`.
+    pub provider_limits: std::collections::BTreeMap<String, ProviderLimits>,
     /// Turn the workspace history off (it is on by default: Autopilot steps and summaries are kept in the workspace's own knowledge base).
     pub no_workspace_history: bool,
     /// Settings → Models → Tool routing: off offers the model every tool on every request (on by default: only the groups the chat needs; `more_tools` loads the rest).
     pub no_tool_routing: bool,
+    /// Settings -> Developer mode -> "WASM tiles (experimental)": let tile apps that carry a `.wasm` module run it in the sandboxed tile host. Off by default.
+    pub wasm_tiles: bool,
     /// External coding agents (Claude Code, GitHub Copilot, custom commands): Settings → Agents.
     pub agents: crate::extagent::AgentsCfg,
     /// Settings → Cloud mode → "Show all AI tools": show the AI tools the machine's hardware profile would hide (docs/AI-HARDWARE.md).
@@ -150,6 +170,9 @@ pub struct Settings {
     /// Settings -> Remote access (web) -> "Serve this desktop to browsers" (`webaccess`): off by default; `web_port` 0 is the default port 8443.
     pub web_access: bool,
     pub web_port: u16,
+    /// Settings -> Startup disk -> "Restart into IYAKKI": a restart asked through `iyakki dev reboot` sets the firmware's one-time next boot (`BootNext`) to
+    /// IYAKKI's own entry first. Off by default (`startupdisk::before_dev_reboot`).
+    pub startup_reboot_into_iyakki: bool,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -488,10 +511,12 @@ mod tests {
         let p = tmp("voice");
         let mut s = SettingsStore::open(&p).unwrap();
         assert!(s.get().voice.stt.is_none() && s.get().voice.record_cmd.starts_with("arecord"));
+        assert!(!s.get().voice.spoken_approvals, "spoken approvals are off by default");
         s.update(|x| {
             x.voice.stt = Some(SpeechEngine::Http { url: "http://127.0.0.1:8080/v1/audio/transcriptions".into(), model: "tiny.en".into(), key_ref: None, voice: None, language: Some("en".into()) });
             x.voice.tts = Some(SpeechEngine::Command { command: "piper -m voice.onnx -f {out}".into() });
             x.voice.speak_replies = true;
+            x.voice.spoken_approvals = true;
         })
         .unwrap();
         assert_eq!(SettingsStore::open(&p).unwrap().get().voice, s.get().voice);

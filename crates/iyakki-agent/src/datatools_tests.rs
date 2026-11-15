@@ -182,6 +182,22 @@ fn the_model_creates_a_csv_of_five_rows_after_approval_then_queries_it() {
     assert!(asked[0].1.contains("items.csv") && asked[0].1.contains("id, item, qty") && asked[0].1.contains("5 rows") && !asked[0].1.contains("item 3"), "{}", asked[0].1);
     assert!(offered[0].iter().any(|t| t == "data_create") && offered[0].iter().any(|t| t == "data_append"));
     assert!(std::fs::read_to_string(d.join("items.csv")).unwrap().starts_with("id,item,qty\n1,item 1,10\n"));
+    // the tool log (kept in the service's folder) says what was done, never the cells
+    fn files_under(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                files_under(&p, out);
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    files_under(&d.join("svc"), &mut files);
+    let all: String = files.iter().filter_map(|f| std::fs::read(f).ok()).map(|b| String::from_utf8_lossy(&b).into_owned()).collect();
+    assert!(all.contains("data_create") && all.contains("items.csv"), "the call is in the log");
+    assert!(!all.contains("item 3") && !all.contains("item 5"), "no cell value reached the log or anything else in the service folder");
 }
 
 #[test]

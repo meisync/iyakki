@@ -25,6 +25,7 @@ mod live_tests;
 mod security_tests;
 pub mod model;
 pub mod neo4j;
+pub mod s3;
 pub mod prom;
 pub mod readonly;
 pub mod registry;

@@ -41,6 +41,26 @@ You choose the folder or stick; nothing is pre-chosen and nothing is written els
 renamed when complete; an existing file is never replaced; free space is checked first. It is named
 `iyakki-backup-<account>-<date>-<time>.iybak`.
 
+## From the command line: `iyakki backup`
+
+For a computer without a screen, or a script (alpha.3; code `crates/iyakki-agent/src/backup_cli.rs`). It uses the same functions as the page, for one account's own data.
+`--data DIR` is the data folder (default `IYAKKI_DATA`, else `/var/lib/iyakki`).
+
+```
+iyakki backup areas
+iyakki backup preview --user NAME [--areas a,b]
+iyakki backup create  --user NAME --to DIR [--areas a,b] [--pass-stdin | --pass-file FILE]
+iyakki backup inspect --file FILE [--user NAME] [--pass-stdin | --pass-file FILE]
+iyakki backup restore --user NAME --file FILE --areas a,b --yes [--other-account] [--pass-stdin | --pass-file FILE]
+```
+
+* `areas` lists the area names to use with `--areas`; `preview` says what would go in (files and size per area, and what is left out and why).
+* `create` writes one file into the existing folder `--to`. It is encrypted only when you give a passphrase, and the last line says **NOT encrypted** otherwise.
+  A passphrase is never an argument (it would show in the process list): give one line on standard input or a file.
+* `restore` never runs without `--yes` and an explicit `--areas` list; what was there is kept, renamed `…before-restore-<time>`. A file of another account needs `--other-account`.
+* Exit codes: 0 done, 1 refused or failed (the line says why), 2 bad use.
+* Tested with temporary folders (create, inspect and restore round trip; a short or missing passphrase refused); not tried on a real stick.
+
 ## Restoring
 
 1. Open the file. The whole file is read and checked (format, every file's SHA-256, the total checksum, no extra bytes). Only then
@@ -55,10 +75,19 @@ renamed when complete; an existing file is never replaced; free space is checked
 
 A running session keeps its old data in memory until it is reopened. After restoring the vault, sign out and in.
 
+## Schedule (M44, 2026-11-13)
+
+Settings, Backup, key H: every 1 to 31 days from an hour of the day into an existing folder, keeping the newest 1 to 50 files of the account
+(`iyakki_agent::backup_schedule`; the assistant has `backup_schedule`). It runs while the person is signed in and the screen is not locked, on a worker
+thread; a computer that was off runs it at the next sign-in; a failure waits for the next slot. An unattended run cannot ask for a passphrase and a
+passphrase never goes through the chat, so an encrypted schedule names a file the person made (its first line is the passphrase); with no file the
+files are not encrypted, and the page, the status and the chat card say so. A backup started from the page shows a bar and the S key stops it.
+
 ## Not done
 
-Schedule, a network share as destination, the `iyakki backup` command, system-wide data (VPN profiles, Git connections, Gitea,
-the store), incremental backups, a progress bar and cancel (a big backup runs in the background but says only "Backing up").
+A network share as destination of its own (it works as a folder that is already mounted; mounting needs a decision where the credentials live),
+system-wide data (VPN profiles, Git connections, Gitea, the store: keys and tokens, an owner decision) and incremental backups (a new file format,
+because the manifest at the front holds every file's hash).
 Older-schema files are lifted by the loaders of each file on the next start, not by the restore.
 
 ## Trying it (for the owner, on real media)

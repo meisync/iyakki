@@ -155,7 +155,14 @@ fn a_person_signs_in_and_sees_and_drives_the_real_desktop_from_the_browser() {
 
     // a key press changes the picture (the help popup opens on F1)
     s.write_all(&masked(r#"{"t":"key","key":"F1"}"#)).unwrap();
-    let (op, m) = frame(&mut s);
+    // (a one-line strip, such as the status line or clock, can repaint on its own while the key is in flight: it is not the answer to the key)
+    let (op, m) = loop {
+        let (op, m) = frame(&mut s);
+        if op == 2 && png_size(&m[8..]).1 <= 30 {
+            continue;
+        }
+        break (op, m);
+    };
     assert_eq!(op, 2);
     let (w, h) = png_size(&m[8..]);
     assert!(w > 50 && h > 50 && w <= 800 && h <= 600, "a part of the screen changed: {w}x{h}");

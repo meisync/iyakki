@@ -2,8 +2,9 @@
 //! own Linux builds use x86 BCJ; IA-64 and RISC-V are refused) and an MD5 digest, so IYAKKI can unpack the static
 //! ffmpeg build the vendor ships as `.tar.xz` and check it against the `.md5` file next to it, with no extra program or library.
 //!
-//! The reader decodes one or more streams of blocks into any [`Write`]; the check bytes (CRC) are skipped (the caller checks the
-//! whole file against the vendor's digest). A dictionary larger than [`MAX_DICT`] is refused.
+//! The reader decodes one or more streams of blocks into any [`Write`]. Each block header's CRC32 and each block's check (CRC32,
+//! CRC64 or SHA-256 of the uncompressed data) are verified; a mismatch is an error (the caller may still check the whole file
+//! against the vendor's digest). A dictionary larger than [`MAX_DICT`] is refused.
 
 use std::io::Write;
 
@@ -557,6 +558,152 @@ impl Fin for Stage<'_> {
     }
 }
 
+/// CRC-32 (IEEE, as the xz format uses for headers and check type 1).
+pub fn crc32(data: &[u8]) -> u32 {
+    crc32_update(0, data)
+}
+
+fn crc32_update(prev: u32, data: &[u8]) -> u32 {
+    let mut c = !prev;
+    for &b in data {
+        c ^= b as u32;
+        for _ in 0..8 {
+            c = (c >> 1) ^ (0xEDB8_8320 & (c & 1).wrapping_neg());
+        }
+    }
+    !c
+}
+
+fn crc64_update(prev: u64, data: &[u8]) -> u64 {
+    let mut c = !prev;
+    for &b in data {
+        c ^= b as u64;
+        for _ in 0..8 {
+            c = (c >> 1) ^ (0xC96C_5795_D787_0F42 & (c & 1).wrapping_neg());
+        }
+    }
+    !c
+}
+
+/// CRC-64 (ECMA-182 as xz uses it, check type 4).
+pub fn crc64(data: &[u8]) -> u64 {
+    crc64_update(0, data)
+}
+
+const SHA_K: [u32; 64] = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+    0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+    0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+];
+
+/// SHA-256 (check type 10), incremental.
+#[derive(Clone)]
+struct Sha256 {
+    h: [u32; 8],
+    buf: Vec<u8>,
+    len: u64,
+}
+
+impl Sha256 {
+    fn new() -> Sha256 {
+        Sha256 { h: [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19], buf: Vec::new(), len: 0 }
+    }
+    fn block(&mut self, b: &[u8]) {
+        let mut w = [0u32; 64];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes([b[4 * i], b[4 * i + 1], b[4 * i + 2], b[4 * i + 3]]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
+        }
+        let mut v = self.h;
+        for i in 0..64 {
+            let s1 = v[4].rotate_right(6) ^ v[4].rotate_right(11) ^ v[4].rotate_right(25);
+            let ch = (v[4] & v[5]) ^ (!v[4] & v[6]);
+            let t1 = v[7].wrapping_add(s1).wrapping_add(ch).wrapping_add(SHA_K[i]).wrapping_add(w[i]);
+            let s0 = v[0].rotate_right(2) ^ v[0].rotate_right(13) ^ v[0].rotate_right(22);
+            let mj = (v[0] & v[1]) ^ (v[0] & v[2]) ^ (v[1] & v[2]);
+            let t2 = s0.wrapping_add(mj);
+            v = [t1.wrapping_add(t2), v[0], v[1], v[2], v[3].wrapping_add(t1), v[4], v[5], v[6]];
+        }
+        for i in 0..8 {
+            self.h[i] = self.h[i].wrapping_add(v[i]);
+        }
+    }
+    fn update(&mut self, data: &[u8]) {
+        self.len += data.len() as u64;
+        self.buf.extend_from_slice(data);
+        let whole = self.buf.len() / 64 * 64;
+        let chunk: Vec<u8> = self.buf.drain(..whole).collect();
+        for b in chunk.chunks(64) {
+            self.block(b);
+        }
+    }
+    fn finish(mut self) -> [u8; 32] {
+        let bits = self.len * 8;
+        let mut pad = vec![0x80u8];
+        while (self.buf.len() + pad.len()) % 64 != 56 {
+            pad.push(0);
+        }
+        pad.extend_from_slice(&bits.to_be_bytes());
+        let l = self.len;
+        self.update(&pad);
+        self.len = l;
+        let mut o = [0u8; 32];
+        for i in 0..8 {
+            o[4 * i..4 * i + 4].copy_from_slice(&self.h[i].to_be_bytes());
+        }
+        o
+    }
+}
+
+/// Passes the decoded bytes on and sums them with the block's check type.
+struct Summed<'a> {
+    out: &'a mut dyn Write,
+    c32: u32,
+    c64: u64,
+    sha: Option<Sha256>,
+    kind: u8,
+}
+
+impl<'a> Summed<'a> {
+    fn new(out: &'a mut dyn Write, kind: u8) -> Summed<'a> {
+        Summed { out, c32: 0, c64: 0, sha: if kind == 10 { Some(Sha256::new()) } else { None }, kind }
+    }
+    fn expected(&self) -> Vec<u8> {
+        match self.kind {
+            1 => self.c32.to_le_bytes().to_vec(),
+            4 => self.c64.to_le_bytes().to_vec(),
+            10 => self.sha.clone().map(|s| s.finish().to_vec()).unwrap_or_default(),
+            _ => Vec::new(),
+        }
+    }
+}
+
+impl Write for Summed<'_> {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.out.write_all(b)?;
+        match self.kind {
+            1 => self.c32 = crc32_update(self.c32, b),
+            4 => self.c64 = crc64_update(self.c64, b),
+            10 => {
+                if let Some(s) = self.sha.as_mut() {
+                    s.update(b)
+                }
+            }
+            _ => {}
+        }
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.out.flush()
+    }
+}
+
 fn varint(b: &[u8], i: &mut usize) -> Result<u64, String> {
     let mut r = 0u64;
     for k in 0..9 {
@@ -568,6 +715,38 @@ fn varint(b: &[u8], i: &mut usize) -> Result<u64, String> {
         }
     }
     Err("damaged xz header".into())
+}
+
+/// The index and the footer of a stream (xz file format 1.1): the number of records and each record's sizes must be those of the blocks
+/// that were decoded, the padding is zero, the index has its CRC32, and the footer has its CRC32, the backward size of the index, the same
+/// stream flags as the header and the magic `YZ`. `at` is the index indicator; returns the position after the footer.
+fn check_index_and_footer(data: &[u8], at: usize, stream_start: usize, records: &[(u64, u64)]) -> Result<usize, String> {
+    let bad = |what: &str| Err(format!("damaged xz file ({what})"));
+    let mut i = at + 1;
+    if varint(data, &mut i)? != records.len() as u64 {
+        return bad("the index counts other blocks than the file has");
+    }
+    for r in records {
+        let (unpadded, uncomp) = (varint(data, &mut i)?, varint(data, &mut i)?);
+        if (unpadded, uncomp) != *r {
+            return bad("the index sizes differ from the blocks");
+        }
+    }
+    let padded = (i + 3) & !3;
+    if data.get(i..padded).is_none_or(|p| p.iter().any(|b| *b != 0)) {
+        return bad("the index padding");
+    }
+    let crc = data.get(padded..padded + 4).ok_or("the xz file ends early")?;
+    if crc32(&data[at..padded]).to_le_bytes() != crc {
+        return bad("the index check does not match");
+    }
+    let end = padded + 4;
+    let footer = data.get(end..end + 12).ok_or("the xz file ends early")?;
+    let backward = u32::from_le_bytes([footer[4], footer[5], footer[6], footer[7]]) as u64;
+    if crc32(&footer[4..10]).to_le_bytes() != footer[..4] || (backward + 1) * 4 != (end - at) as u64 || footer[8..10] != data[stream_start + 6..stream_start + 8] || &footer[10..] != b"YZ" {
+        return bad("the stream footer");
+    }
+    Ok(end + 12)
 }
 
 /// Decode the `.xz` file `data` into `out`; at most `limit` bytes are produced.
@@ -585,7 +764,13 @@ pub fn decompress<W: Write>(data: &[u8], out: &mut W, limit: u64) -> Result<u64,
             return Err("not an xz file".into());
         }
         streams += 1;
-        let check = match data[at + 7] & 0x0F {
+        let stream_start = at;
+        let mut records: Vec<(u64, u64)> = Vec::new();
+        if data[at + 6] != 0 || crc32(&data[at + 6..at + 8]).to_le_bytes() != data[at + 8..at + 12] {
+            return Err("damaged xz header (its check does not match)".into());
+        }
+        let check_kind = data[at + 7] & 0x0F;
+        let check = match check_kind {
             0 => 0,
             1 => 4,
             4 => 8,
@@ -596,14 +781,8 @@ pub fn decompress<W: Write>(data: &[u8], out: &mut W, limit: u64) -> Result<u64,
         loop {
             let hb = *data.get(at).ok_or("the xz file ends early")?;
             if hb == 0 {
-                // the index and footer follow: this stream is done
-                let mut i = at + 1;
-                let n = varint(data, &mut i)?;
-                for _ in 0..n * 2 {
-                    varint(data, &mut i)?;
-                }
-                i = (i + 3) & !3;
-                at = i + 4 + 12; // CRC32 of the index, the 12-byte footer
+                // the index and the footer follow: the records must be the blocks just read, the index and the footer must check out
+                at = check_index_and_footer(data, at, stream_start, &records)?;
                 break;
             }
             let hsize = (hb as usize + 1) * 4;
@@ -611,14 +790,18 @@ pub fn decompress<W: Write>(data: &[u8], out: &mut W, limit: u64) -> Result<u64,
                 return Err("the xz file ends early".into());
             }
             let h = &data[at..at + hsize];
+            if crc32(&h[..hsize - 4]).to_le_bytes() != h[hsize - 4..] {
+                return Err("damaged xz header (its check does not match)".into());
+            }
             let flags = h[1];
             let nfilters = (flags & 0x03) as usize + 1;
             let mut i = 2;
+            let (mut want_comp, mut want_uncomp) = (None, None);
             if flags & 0x40 != 0 {
-                varint(h, &mut i)?;
+                want_comp = Some(varint(h, &mut i)?);
             }
             if flags & 0x80 != 0 {
-                varint(h, &mut i)?;
+                want_uncomp = Some(varint(h, &mut i)?);
             }
             // the filter chain: any number of simple filters (BCJ, delta), then LZMA2 last
             let mut kinds: Vec<Kind> = Vec::new();
@@ -644,8 +827,11 @@ pub fn decompress<W: Write>(data: &[u8], out: &mut W, limit: u64) -> Result<u64,
             if dict > MAX_DICT {
                 return Err(format!("the xz dictionary ({} MB) is larger than allowed", dict >> 20));
             }
+            let block_start = at;
             at += hsize;
-            let mut chain = build_chain(&kinds, &mut *out);
+            let data_start = at;
+            let mut summed = Summed::new(&mut *out, check_kind);
+            let mut chain = build_chain(&kinds, &mut summed);
             let mut d = Dict { buf: vec![0; dict.max(4096)], pos: 0, full: 0, total: 0, out: &mut chain, pending: Vec::new(), written: total, limit };
             let mut m = Model::new();
             loop {
@@ -710,9 +896,24 @@ pub fn decompress<W: Write>(data: &[u8], out: &mut W, limit: u64) -> Result<u64,
             drop(d);
             chain.fin().map_err(|e| e.to_string())?;
             drop(chain);
+            let (comp, uncomp) = ((at - data_start) as u64, written - total);
+            if want_comp.is_some_and(|w| w != comp) || want_uncomp.is_some_and(|w| w != uncomp) {
+                return Err("an xz block is not the size its header says (damaged file)".into());
+            }
+            records.push(((at - block_start) as u64 + check as u64, uncomp));
             total = written;
-            // block padding to four bytes, then the check
-            at = ((at + 3) & !3) + check;
+            // block padding to four bytes (zeros), then the check
+            let padded = (at + 3) & !3;
+            if data.get(at..padded).is_none_or(|p| p.iter().any(|b| *b != 0)) {
+                return Err("the xz block padding is damaged".into());
+            }
+            at = padded + check;
+            if check > 0 {
+                let stored = data.get(at - check..at).ok_or("the xz file ends early")?;
+                if stored != summed.expected().as_slice() {
+                    return Err("the xz data does not match its check (damaged file)".into());
+                }
+            }
         }
     }
     if streams == 0 {
@@ -821,8 +1022,17 @@ pub fn untar_xz(src: &std::path::Path, dest: &std::path::Path, scratch: &std::pa
 /// in uncompressed LZMA2 chunks (valid format, no compression).
 #[doc(hidden)]
 pub fn make_xz_stored(data: &[u8]) -> Vec<u8> {
-    let mut x = vec![0xFD, b'7', b'z', b'X', b'Z', 0, 0, 4, 0, 0, 0, 0];
-    x.extend_from_slice(&[2, 0, 0x21, 1, 0x16, 0, 0, 0, 0, 0, 0, 0]);
+    make_xz_with_check(data, 4)
+}
+
+/// Like [`make_xz_stored`] with the stream's check type chosen (0 none, 1 CRC32, 4 CRC64, 10 SHA-256).
+#[doc(hidden)]
+pub fn make_xz_with_check(data: &[u8], kind: u8) -> Vec<u8> {
+    let mut x = vec![0xFD, b'7', b'z', b'X', b'Z', 0, 0, kind];
+    x.extend_from_slice(&crc32(&[0, kind]).to_le_bytes());
+    let hdr = [2u8, 0, 0x21, 1, 0x16, 0, 0, 0];
+    x.extend_from_slice(&hdr);
+    x.extend_from_slice(&crc32(&hdr).to_le_bytes());
     for (i, c) in data.chunks(65536).enumerate() {
         x.push(if i == 0 { 1 } else { 2 });
         x.extend_from_slice(&((c.len() - 1) as u16).to_be_bytes());
@@ -832,15 +1042,78 @@ pub fn make_xz_stored(data: &[u8]) -> Vec<u8> {
     while x.len() % 4 != 0 {
         x.push(0);
     }
-    x.extend_from_slice(&[0; 8]); // the check
-    x.extend_from_slice(&[0, 1, 0, 0, 0, 0, 0, 0]); // index: indicator, one record (sizes not read), padding
-    x.extend_from_slice(&[0; 4]);
-    x.extend_from_slice(&[0; 12]);
+    match kind {
+        1 => x.extend_from_slice(&crc32(data).to_le_bytes()),
+        4 => x.extend_from_slice(&crc64(data).to_le_bytes()),
+        10 => {
+            let mut s = Sha256::new();
+            s.update(data);
+            x.extend_from_slice(&s.finish());
+        }
+        _ => {}
+    }
+    let unpadded = 12 + data.chunks(65536).map(|c| c.len() + 3).sum::<usize>() as u64 + 1 + check_len(kind) as u64;
+    xz_tail(&mut x, kind, &[(unpadded, data.len() as u64)]);
     x
+}
+
+fn check_len(kind: u8) -> usize {
+    match kind {
+        1 => 4,
+        4 => 8,
+        10 => 32,
+        _ => 0,
+    }
+}
+
+/// For tests: the index (one record per block: unpadded size, uncompressed size) and the footer of a stream with check type `kind`.
+#[doc(hidden)]
+pub fn xz_tail(x: &mut Vec<u8>, kind: u8, records: &[(u64, u64)]) {
+    fn put(v: &mut Vec<u8>, mut n: u64) {
+        while n >= 0x80 {
+            v.push(n as u8 | 0x80);
+            n >>= 7;
+        }
+        v.push(n as u8);
+    }
+    let mut idx = vec![0u8];
+    put(&mut idx, records.len() as u64);
+    for (a, b) in records {
+        put(&mut idx, *a);
+        put(&mut idx, *b);
+    }
+    while idx.len() % 4 != 0 {
+        idx.push(0);
+    }
+    let c = crc32(&idx).to_le_bytes();
+    idx.extend_from_slice(&c);
+    let backward = (idx.len() as u32 / 4 - 1).to_le_bytes();
+    let mut tail = backward.to_vec();
+    tail.extend_from_slice(&[0, kind]);
+    x.extend_from_slice(&idx);
+    x.extend_from_slice(&crc32(&tail).to_le_bytes());
+    x.extend_from_slice(&tail);
+    x.extend_from_slice(b"YZ");
 }
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn an_index_that_claims_an_enormous_record_count_is_an_error_and_not_a_panic_or_a_long_loop() {
+        // stream header, then the index indicator (0) and a record count of 2^62 as a 9-byte varint, and nothing more
+        let mut x = vec![0xFD, b'7', b'z', b'X', b'Z', 0, 0, 4];
+        x.extend_from_slice(&crc32(&[0, 4]).to_le_bytes());
+        x.push(0);
+        x.extend_from_slice(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x40]);
+        let t0 = std::time::Instant::now();
+        assert!(decompress(&x, &mut Vec::new(), 1 << 20).is_err());
+        assert!(t0.elapsed() < std::time::Duration::from_secs(2), "{:?}", t0.elapsed());
+        // the largest count a varint can hold (63 bits) doubles without wrapping
+        let mut y = x[..13].to_vec();
+        y.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F]);
+        assert!(decompress(&y, &mut Vec::new(), 1 << 20).is_err());
+    }
     use super::*;
 
     #[test]
@@ -965,7 +1238,7 @@ mod tests {
 
     /// Replace the filter list of the first block header of a plain LZMA2 file (made by `make_xz_stored`) and fix the sizes.
     fn with_filters(filters: &[u8], count: u8) -> Vec<u8> {
-        // header: size byte, flags, filters..., padding, crc32 (not read)
+        // header: size byte, flags, filters..., padding, crc32
         let mut hdr = vec![0u8, count - 1];
         hdr.extend_from_slice(filters);
         while (hdr.len() + 4) % 4 != 0 {
@@ -973,14 +1246,18 @@ mod tests {
         }
         hdr.extend_from_slice(&[0; 4]);
         hdr[0] = (hdr.len() / 4 - 1) as u8;
-        let mut x = vec![0xFD, b'7', b'z', b'X', b'Z', 0, 0, 4, 0, 0, 0, 0];
+        let n = hdr.len() - 4;
+        let c = crc32(&hdr[..n]).to_le_bytes();
+        hdr[n..].copy_from_slice(&c);
+        let mut x = vec![0xFD, b'7', b'z', b'X', b'Z', 0, 0, 4];
+        x.extend_from_slice(&crc32(&[0, 4]).to_le_bytes());
         x.extend_from_slice(&hdr);
         x.extend_from_slice(&[1, 0, 4, b'a', b'b', b'c', b'd', b'e', 0]);
         while x.len() % 4 != 0 {
             x.push(0);
         }
-        x.extend_from_slice(&[0; 8]);
-        x.extend_from_slice(&[0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        x.extend_from_slice(&crc64(b"abcde").to_le_bytes());
+        xz_tail(&mut x, 4, &[(hdr.len() as u64 + 9 + 8, 5)]);
         x
     }
 
@@ -1001,7 +1278,7 @@ mod tests {
             ([&[0x04u8, 0][..], &[0x04, 0]].concat(), 2, "last filter"),
             ([&[0x21u8, 1, 0x16][..], &lz].concat(), 2, "damaged"),
             ([&[0x04u8, 9][..], &lz].concat(), 2, "damaged"),
-            ([&[0x04u8][..]].concat(), 2, "last filter"),
+            ([&[0x04u8][..]].concat(), 2, "damaged"),
         ];
         for (f, n, why) in bad {
             let x = with_filters(&f, n);
@@ -1015,6 +1292,54 @@ mod tests {
         // the output limit holds through a filter
         let big = with_filters(&[&[0x04u8, 0][..], &lz].concat(), 2);
         assert!(decompress(&big, &mut Vec::new(), 2).is_err());
+    }
+
+    fn sha_hex(data: &[u8]) -> String {
+        let mut s = Sha256::new();
+        s.update(data);
+        s.finish().iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn crc_and_sha_known_values() {
+        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+        assert_eq!(crc64(b"123456789"), 0x995D_C9BB_DF19_39FA);
+        assert_eq!(sha_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        assert_eq!(sha_hex(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(sha_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"), "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+    }
+
+    #[test]
+    fn every_check_type_is_verified_and_a_damaged_file_is_refused() {
+        let data: Vec<u8> = (0..150_000u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        for kind in [0u8, 1, 4, 10] {
+            let good = make_xz_with_check(&data, kind);
+            let mut out = Vec::new();
+            assert_eq!(decompress(&good, &mut out, 1 << 24).unwrap(), data.len() as u64, "type {kind}");
+            assert_eq!(out, data);
+            if kind == 0 {
+                continue;
+            }
+            // one flipped bit in the stored data is not accepted
+            let mut bad = good.clone();
+            bad[12 + 12 + 3 + 77] ^= 1;
+            let e = decompress(&bad, &mut Vec::new(), 1 << 24).unwrap_err();
+            assert!(e.contains("check"), "type {kind}: {e}");
+            // a wrong stored check is not accepted
+            let size = [0, 4, 0, 0, 8][..].get(kind as usize).copied().unwrap_or(32);
+            let size = if kind == 10 { 32 } else if kind == 1 { 4 } else { size };
+            let at = good.len() - 24 - size;
+            let mut bad = good.clone();
+            bad[at] ^= 0x80;
+            assert!(decompress(&bad, &mut Vec::new(), 1 << 24).unwrap_err().contains("check"), "type {kind}");
+        }
+    }
+
+    #[test]
+    fn a_damaged_block_header_is_refused() {
+        let mut bad = make_xz_stored(b"hello");
+        bad[13] ^= 1;
+        assert!(decompress(&bad, &mut Vec::new(), 1 << 20).unwrap_err().contains("header"));
     }
 
     /// Set IYAKKI_XZ_FILE to an .xz file and IYAKKI_XZ_MD5 to the md5 of what it unpacks to.

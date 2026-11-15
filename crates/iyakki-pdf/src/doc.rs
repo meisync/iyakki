@@ -59,7 +59,7 @@ pub fn text_string(b: &[u8]) -> String {
     }
 }
 
-fn rect(f: &File, o: &Obj) -> Option<[f64; 4]> {
+pub(crate) fn rect(f: &File, o: &Obj) -> Option<[f64; 4]> {
     let a = f.resolve(o);
     let v: Vec<f64> = a.arr()?.iter().filter_map(|x| f.resolve(x).num()).collect();
     if v.len() < 4 || v.iter().any(|x| !x.is_finite() || x.abs() > 1e7) {
@@ -70,7 +70,12 @@ fn rect(f: &File, o: &Obj) -> Option<[f64; 4]> {
 
 impl Document {
     pub fn open(bytes: Vec<u8>) -> Result<Document, PdfError> {
-        let file = File::open(bytes)?;
+        Document::open_with_password(bytes, "")
+    }
+
+    /// Like [`Document::open`] for a file protected with a password (see [`File::open_with_password`]).
+    pub fn open_with_password(bytes: Vec<u8>, password: &str) -> Result<Document, PdfError> {
+        let file = File::open_with_password(bytes, password)?;
         let mut d = Document { file, pages: vec![] };
         d.pages = d.collect_pages();
         if d.pages.is_empty() {
@@ -242,7 +247,13 @@ impl Document {
         let mut sink = TextSink::default();
         it.run(&data, &p.res, GState::new(Matrix::ID), &mut sink, 0);
         // text in form XObjects is reached through Do; annotation text (form values) is not
-        Ok((sink.lines, it.rep))
+        Ok((crate::order::reading_order(sink.lines), it.rep))
+    }
+
+    /// The characters of a page with their boxes, for selecting text (see [`text::char_boxes`]).
+    pub fn page_chars(&self, i: usize) -> Result<Vec<text::CharBox>, PdfError> {
+        let (lines, _) = self.page_lines(i)?;
+        Ok(text::char_boxes(&lines))
     }
 
     pub fn page_text(&self, i: usize) -> Result<String, PdfError> {

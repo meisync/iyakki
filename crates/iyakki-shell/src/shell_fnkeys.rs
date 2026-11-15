@@ -2,6 +2,7 @@
 //! for the kernel, the power card and applying the saved keyboard settings. The pure parts (key map, curves, backlight and
 //! rfkill writers, drawing) are in `fnkeys.rs`.
 
+use crate::stale_stats::mark_stale;
 use super::*;
 use crate::fnkeys::{self, FnKey, KbdOp, Osd, OsdKind, Radio, VolOp};
 
@@ -10,7 +11,7 @@ pub(crate) const NO_SOUND: &str = "No sound output";
 impl Shell {
     fn fn_show(&mut self, o: Osd) {
         self.fnk.osd = Some(o);
-        self.stale = true;
+        mark_stale!(self);
     }
 
     pub(super) fn fn_notice(&mut self, text: impl Into<String>) {
@@ -22,13 +23,13 @@ impl Shell {
     pub(super) fn handle_fn_event(&mut self, ev: &Event) -> bool {
         if let Event::Fn(key, down) = ev {
             // cloud mode: no Fn, volume, brightness or media key does anything (the power keys still do)
-            if self.cloud.fn_keys_off && !matches!(key, FnKey::Power | FnKey::Sleep | FnKey::Lock) {
+            if self.cloud.fn_keys_off && !matches!(key, FnKey::Power | FnKey::Sleep | FnKey::Lock | FnKey::SignOut) {
                 return true;
             }
             // the power key again closes the card it opened
             if self.fnk.power_card && *down && matches!(key, FnKey::Power | FnKey::Sleep) {
                 self.fnk.power_card = false;
-                self.stale = true;
+                mark_stale!(self);
                 return true;
             }
             self.handle_fn(*key, *down);
@@ -95,6 +96,7 @@ impl Shell {
                 }
             }
             FnKey::PlayPause | FnKey::Next | FnKey::Prev | FnKey::Stop => self.fn_media(key),
+            FnKey::Power if self.session.is_some() && self.power_button_pressed(self.saver_now_ms()) => {}
             FnKey::Sleep | FnKey::Power => self.fn_power_card(),
             FnKey::RfKill | FnKey::Wlan | FnKey::Bluetooth => {
                 let radio = match key {
@@ -112,6 +114,8 @@ impl Shell {
                 }
             }
             FnKey::Lock => self.lock_key(),
+            FnKey::Saver => self.start_screen_saver(None),
+            FnKey::SignOut => self.signout_ask(),
             // the accessibility chords are taken earlier (`shell_access.rs`) and never get here
             FnKey::ScreenReader | FnKey::AccessNext | FnKey::AccessPrev | FnKey::AccessActivate | FnKey::AccessRepeat => {}
             FnKey::Calc => self.fn_notice("There is no calculator app yet"),
@@ -119,7 +123,7 @@ impl Shell {
                 let allowed = self.session.as_ref().is_some_and(|s| s.policy.allows_app(PApp::Browser));
                 if allowed && matches!(self.screen, Screen::Launcher) {
                     self.open(PApp::Browser);
-                    self.stale = true;
+                    mark_stale!(self);
                 } else if allowed && !matches!(self.screen, Screen::App(_, PApp::Browser)) {
                     self.fn_notice("Return to the launcher to open the browser");
                 }
@@ -202,7 +206,7 @@ impl Shell {
             return self.fn_notice("This account may not shut down the computer");
         }
         self.fnk.power_card = true;
-        self.stale = true;
+        mark_stale!(self);
     }
 
     /// The power card never acts on its own: a choice is needed (y off, r restart, anything else closes it).
@@ -229,7 +233,7 @@ impl Shell {
             }
             _ => self.fnk.power_card = false,
         }
-        self.stale = true;
+        mark_stale!(self);
     }
 
     /// Lock (`shell_lock.rs`): the screen asks for the password and the personal vault closes; the person stays signed in.
@@ -239,7 +243,7 @@ impl Shell {
         if !self.lock_screen("power menu") {
             self.sign_out();
         }
-        self.stale = true;
+        mark_stale!(self);
     }
 
     /// Sleep: lock the screen first (apps and runs go on; a guest, who has no password, is signed out), audit it, then suspend. The
@@ -248,7 +252,7 @@ impl Shell {
         if self.session.is_some() && !self.lock_screen("sleep") {
             self.sign_out();
         }
-        self.stale = true;
+        mark_stale!(self);
         self.env.audit.record(if user.is_empty() { "login screen" } else { user }, "power.sleep", detail);
         self.env.host.sleep();
     }
@@ -257,7 +261,7 @@ impl Shell {
     pub(super) fn fn_tick(&mut self) {
         if self.fnk.osd.as_ref().is_some_and(|o| o.until <= self.tick) {
             self.fnk.osd = None;
-            self.stale = true;
+            mark_stale!(self);
         }
         if let Some((key, since, last)) = self.fnk.held {
             let (delay_ms, period_ms) = crate::input::current_repeat().unwrap_or((250, 33));
@@ -294,6 +298,9 @@ impl Shell {
         }
         let (tap, _) = k.trackpad();
         crate::input::request_touchpad(tap);
+        crate::input::request_three_finger_drag(k.three_finger_drag_on());
+        let (mouse, pad) = k.pointer_speeds();
+        crate::input::request_pointer_speed(mouse, pad);
         crate::scrolleng::request_config(crate::fnkeys::scroll_config(k.scroll()));
         crate::inputprofile::refresh(&k); // the Apple devices the kernel lists decide Automatic
     }
@@ -311,7 +318,7 @@ impl Shell {
             return;
         }
         self.lbar.card = Some(0);
-        self.stale = true;
+        mark_stale!(self);
     }
 
     /// True when the event belonged to the power card (opening it, moving in it, choosing or closing it).
@@ -328,7 +335,7 @@ impl Shell {
         let sleepable = self.env.host.can_sleep();
         let n = if sleepable { 4 } else { 3 }; // Power off, Restart, [Sleep], Cancel
         let Event::Key(k) = ev else { return true }; // the pointer moving and the heartbeat leave it open
-        self.stale = true;
+        mark_stale!(self);
         let choice = match k {
             Key::Left | Key::Up | Key::BackTab => {
                 self.lbar.card = Some((sel + n - 1) % n);
@@ -399,7 +406,7 @@ impl Shell {
             self.devpop.refresh_in_background(&p);
         }
         if self.devpop.take_fresh() {
-            self.stale = true;
+            mark_stale!(self);
         }
     }
 

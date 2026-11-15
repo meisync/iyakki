@@ -54,6 +54,7 @@ fn rig(tag: &str) -> Rig {
         web_port: Arc::new(|| None),
         audit: Arc::new(|_, _| {}),
         now: Arc::new(|| 1_900_000_000),
+        members: None,
     };
     let mgr = Arc::new(iyakki_agent::domains::Manager::new(&dir, deps));
     let mut a = SettingsApp::new(&cx);

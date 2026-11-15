@@ -3,7 +3,8 @@
 //! person's own layout file (`iyakki_agent::layout`); the launcher reads it again when Settings is left. Moving a tile changes
 //! where it is listed, never what the app may do.
 //!
-//! Planned: a default layout an administrator sets for new accounts.
+//! An administrator can make the layout shown here the default for new accounts (`d`) or clear it (`c`); accounts that already
+//! have a layout file of their own are not touched.
 
 use super::*;
 use iyakki_agent::layout::{app_key, Layout, BUILTIN};
@@ -104,6 +105,22 @@ impl SettingsApp {
                 Self::hl_save(cx, &l);
                 self.ok(format!("{title} is back in its own group."));
             }
+            (Key::Char('d'), _) => {
+                if !cx.session.policy.manage_settings {
+                    self.fail("Only an administrator sets the default layout for new accounts.");
+                } else {
+                    self.modal = Some(Modal::Confirm(ConfirmKind::HomeDefaultSet, "Use this layout as the default for new accounts? Accounts that already have a layout keep theirs.".into()));
+                }
+            }
+            (Key::Char('c'), _) => {
+                if !cx.session.policy.manage_settings {
+                    self.fail("Only an administrator clears the default layout for new accounts.");
+                } else if !Layout::has_default(Self::svc(cx).dir()) {
+                    self.fail("No default layout is set for new accounts.");
+                } else {
+                    self.modal = Some(Modal::Confirm(ConfirmKind::HomeDefaultClear, "Clear the default layout? New accounts start with the plain layout again.".into()));
+                }
+            }
             (Key::Char('z'), _) => self.modal = Some(Modal::Confirm(ConfirmKind::HomeReset, "Put every tile back in its own group? Your own groups stay.".into())),
             _ => {}
         }
@@ -151,6 +168,19 @@ impl SettingsApp {
                 l.reset();
                 Self::hl_save(cx, &l);
                 self.ok("Every tile is back in its own group.");
+            }
+            ConfirmKind::HomeDefaultSet if cx.session.policy.manage_settings => {
+                if l.save_default(Self::svc(cx).dir()) {
+                    cx.audit.record(&cx.session.user, "layout.default.set", "");
+                    self.ok("This layout is now the default for new accounts.");
+                } else {
+                    self.fail("The default layout could not be saved.");
+                }
+            }
+            ConfirmKind::HomeDefaultClear if cx.session.policy.manage_settings => {
+                Layout::clear_default(Self::svc(cx).dir());
+                cx.audit.record(&cx.session.user, "layout.default.clear", "");
+                self.ok("New accounts start with the plain layout again.");
             }
             _ => {}
         }
@@ -204,6 +234,6 @@ impl SettingsApp {
 
     pub(super) fn homelayout_buttons(&self) -> Vec<Btn> {
         let (acc, mut_) = (ACCENT, TEXT);
-        vec![("New group", acc, 'n'), ("Rename", mut_, 'r'), ("Delete group", ERR, 'x'), ("Group earlier", mut_, '['), ("Group later", mut_, ']'), ("Move tile", acc, 'm'), ("Put tile back", mut_, 'p'), ("Reset to default", mut_, 'z')]
+        vec![("New group", acc, 'n'), ("Rename", mut_, 'r'), ("Delete group", ERR, 'x'), ("Group earlier", mut_, '['), ("Group later", mut_, ']'), ("Move tile", acc, 'm'), ("Put tile back", mut_, 'p'), ("Reset to default", mut_, 'z'), ("Default for new accounts", mut_, 'd'), ("Clear default", mut_, 'c')]
     }
 }

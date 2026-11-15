@@ -11,6 +11,7 @@
 //!   dialog, toasts, errors and notices. A password field says how many characters were typed, never which. A new focus interrupts
 //!   what is being said. The voice is the one of Settings -> Voice; without one the reader says so on screen.
 
+use crate::stale_stats::mark_stale;
 use super::*;
 use crate::access::{self, Cursor, Node, Reader, Role, SpeechSink};
 use iyakki_agent::accessibility as accfile;
@@ -42,6 +43,7 @@ pub(super) struct AccessUi {
     last_toast: Option<String>,
     last_osd: String,
     last_err: Option<String>,
+    last_dialog: Option<String>,
     stamp: Option<([Option<std::time::SystemTime>; 3], String)>,
 }
 
@@ -60,7 +62,7 @@ impl Shell {
         let cfg = if user.is_empty() { accfile::Access { screen_reader: accfile::machine_reader(&dir), ..Default::default() } } else { accfile::effective(&dir, &user) };
         self.acc.stamp = Some((accfile::stamp(&dir, &user), user.clone()));
         if !user.is_empty() {
-            crate::theme::apply(Some(crate::theme::load(&dir, &user)));
+            crate::theme::apply_for(&dir, &user);
         }
         self.access_apply(cfg);
     }
@@ -83,7 +85,7 @@ impl Shell {
             self.acc.last_widget = None;
         }
         if changed {
-            self.stale = true;
+            mark_stale!(self);
         }
     }
 
@@ -116,6 +118,17 @@ impl Shell {
     }
 
     /// The controls the walk can stand on in the last frame, in order (tests and the reachability report).
+    /// The controls of the frame whose spoken name is empty or a bare symbol (fewer than two letters or digits, and not a number): a reader would say nothing useful.
+    #[cfg(test)]
+    pub(crate) fn thin_names_for_test(&self) -> Vec<String> {
+        self.access_controls().iter().filter(|e| e.node.name.chars().filter(|c| c.is_alphanumeric()).count() < 2 && !e.node.name.chars().all(|c| c.is_ascii_digit() && !c.is_whitespace()) || e.node.name.is_empty()).map(|e| format!("{:?} {:?}", e.node.name, self.hits[e.hit].ev)).collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn unnamed_controls_for_test(&self) -> Vec<(usize, String)> {
+        access::unnamed(&self.hits, (self.size.0 as f32, self.size.1 as f32))
+    }
+
     pub(crate) fn access_controls(&self) -> Vec<access::Entry> {
         access::entries(&self.hits, (self.size.0 as f32, self.size.1 as f32))
     }
@@ -142,7 +155,7 @@ impl Shell {
                 self.acc.reader.repeat();
             }
         }
-        self.stale = true;
+        mark_stale!(self);
         true
     }
 
@@ -293,8 +306,17 @@ impl Shell {
         // typing into the field that already has the focus is not read back (the whole text again at every key); another control is
         let same = |a: &Node, b: &Node| if a.role == Role::Field && b.role == Role::Field { a.name == b.name } else { a == b };
         let changed = widget.as_ref().filter(|w| !self.acc.last_widget.as_ref().is_some_and(|l| same(l, w))).cloned();
+        let before = self.acc.last_widget.clone();
         if widget.is_some() || new_screen {
             self.acc.last_widget = widget;
+        }
+        // typing echo: the same field, its text grew or shrank at the end (never a field that hides its text)
+        if !new_screen && self.acc.cfg.typing_echo {
+            if let (Some(o), Some(n)) = (&before, &self.acc.last_widget) {
+                if let Some(t) = access::typing_echo(o, n) {
+                    self.acc.reader.say_now(&t);
+                }
+            }
         }
         match (new_screen, changed) {
             (true, Some(n)) => {
@@ -325,7 +347,7 @@ impl Shell {
             }
             self.acc.last_toast = toast;
         }
-        let osd = self.fnk.osd.as_ref().filter(|o| o.fraction.is_none()).map(|o| o.text.clone()).unwrap_or_default();
+        let osd = self.fnk.osd.as_ref().map(|o| o.spoken()).unwrap_or_default();
         if osd != self.acc.last_osd {
             if !osd.is_empty() {
                 self.acc.reader.notice(&osd);
@@ -342,6 +364,17 @@ impl Shell {
                 self.acc.reader.notice(&format!("Error. {e}"));
             }
             self.acc.last_err = err;
+        }
+        // a dialog the tile opened over itself: its title, once, when it appears (and again when another one replaces it)
+        let dialog = match &self.screen {
+            Screen::App(app, _) => app.dialog_title().or_else(|| access::generic_dialog(&self.hits, app.title())),
+            _ => None,
+        };
+        if dialog != self.acc.last_dialog {
+            if let Some(d) = &dialog {
+                self.acc.reader.notice(&format!("Dialog. {d}"));
+            }
+            self.acc.last_dialog = dialog;
         }
         if self.help {
             if !self.acc.last_screen.ends_with("|Help") {

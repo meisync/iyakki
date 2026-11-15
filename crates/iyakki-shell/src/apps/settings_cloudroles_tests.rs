@@ -379,3 +379,56 @@ fn the_page_names_an_external_provider_and_a_setting_that_cannot_be_used() {
     let t = texts(&draw(&mut a, &cx, 800, 480));
     assert!(t.contains("setting unusable") && t.contains("not externally reviewed"), "{t}");
 }
+
+#[test]
+fn the_shared_vault_provider_is_chosen_on_the_page_asks_first_and_never_takes_a_token() {
+    let cx = cx_with_admin_store("cr10");
+    seed(&cx, TenantRole::Owner);
+    let mut a = page(&cx);
+    let dir = cx.services.dir().to_path_buf();
+    // a typed external reference is checked, asked about, and saved only on yes
+    key(&mut a, &cx, Key::Char('v'));
+    typ(&mut a, &cx, "external https://kms.example.invalid iyakki/acme shared-vault-token");
+    key(&mut a, &cx, Key::Enter);
+    assert!(texts(&draw(&mut a, &cx, 1280, 720)).contains("Change the shared vault to external"), "{}", texts(&draw(&mut a, &cx, 1280, 720)));
+    assert!(!iyakki_agent::sharedvault::Setting::path(&dir).exists(), "nothing is written before the answer");
+    key(&mut a, &cx, Key::Char('n'));
+    assert!(!iyakki_agent::sharedvault::Setting::path(&dir).exists(), "any other key is a no");
+    key(&mut a, &cx, Key::Char('v'));
+    typ(&mut a, &cx, "external https://kms.example.invalid iyakki/acme shared-vault-token");
+    key(&mut a, &cx, Key::Enter);
+    key(&mut a, &cx, Key::Char('y'));
+    let s = iyakki_agent::sharedvault::Setting::load(&dir).unwrap();
+    assert_eq!(s.provider, iyakki_agent::sharedvault::Provider::External);
+    assert_eq!(s.external.unwrap().token_secret, "shared-vault-token");
+    assert!(trail(&cx).contains("shared vault: provider set to external"), "{}", trail(&cx));
+    assert!(texts(&draw(&mut a, &cx, 1280, 720)).contains("Shared vault: external system"));
+    // back to built-in
+    key(&mut a, &cx, Key::Char('v'));
+    typ(&mut a, &cx, "builtin");
+    key(&mut a, &cx, Key::Enter);
+    key(&mut a, &cx, Key::Char('y'));
+    assert_eq!(iyakki_agent::sharedvault::Setting::load(&dir).unwrap().provider, iyakki_agent::sharedvault::Provider::Builtin);
+    // a token, a bad address and a half answer change nothing
+    for bad in ["external https://kms.example.invalid iyakki/acme hvs.abcdef", "external http://plain.example.invalid iyakki/acme tok", "external https://kms.example.invalid", "magic"] {
+        key(&mut a, &cx, Key::Char('v'));
+        typ(&mut a, &cx, bad);
+        key(&mut a, &cx, Key::Enter);
+        key(&mut a, &cx, Key::Char('y'));
+        assert_eq!(iyakki_agent::sharedvault::Setting::load(&dir).unwrap().provider, iyakki_agent::sharedvault::Provider::Builtin, "{bad}");
+        assert!(!status(&a).contains("hvs."), "the token is never echoed: {}", status(&a));
+        key(&mut a, &cx, Key::Esc);
+    }
+}
+
+#[test]
+fn the_typed_shared_vault_setting_is_read_strictly() {
+    use iyakki_agent::sharedvault::Provider;
+    assert_eq!(SettingsApp::vault_setting_from("builtin").unwrap().provider, Provider::Builtin);
+    let s = SettingsApp::vault_setting_from("external https://a.example.invalid p/q tok mnt ns1").unwrap().external.unwrap();
+    assert_eq!((s.mount.as_str(), s.namespace.as_deref(), s.path.as_str()), ("mnt", Some("ns1"), "p/q"));
+    assert_eq!(SettingsApp::vault_setting_from("external https://a.example.invalid p t").unwrap().external.unwrap().mount, "secret");
+    assert!(SettingsApp::vault_setting_from("external https://a.example.invalid p s.abc").is_err());
+    assert!(SettingsApp::vault_setting_from("external a b c d e f").is_err());
+    assert!(SettingsApp::vault_setting_from("builtin extra").is_err());
+}

@@ -803,7 +803,7 @@ pub fn add_to_models(svc: &crate::services::Services, n: &NewHost, report: &Test
     let hosts = Hosts::new(svc.dir());
     let existing = hosts.get(&id);
     {
-        let st = svc.settings.lock().unwrap();
+        let st = svc.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if st.get().provider(&id).is_some() && existing.is_none() {
             return Err(format!("A provider named {id} already exists in Models and is not a model host; pick another nickname."));
         }
@@ -814,7 +814,7 @@ pub fn add_to_models(svc: &crate::services::Services, n: &NewHost, report: &Test
     cfg.default_model = n.model.clone().or_else(|| report.default_model.clone());
     if !n.key.is_empty() {
         cfg.key_ref = Some(format!("vault:{id}-key"));
-    } else if let Some(old) = svc.settings.lock().unwrap().get().provider(&id) {
+    } else if let Some(old) = svc.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().provider(&id) {
         cfg.key_ref = old.key_ref.clone(); // saving again without typing the key keeps the stored one
     }
     cfg.validate()?;
@@ -824,7 +824,7 @@ pub fn add_to_models(svc: &crate::services::Services, n: &NewHost, report: &Test
             other => other.to_string(),
         })?;
     }
-    svc.settings.lock().unwrap().upsert_provider(cfg).map_err(|e| e.to_string())?;
+    svc.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).upsert_provider(cfg).map_err(|e| e.to_string())?;
     let host = Host { id: id.clone(), nickname: n.nickname.trim().to_string(), preset: n.preset, address: target.host.clone(), port: target.port, in_cluster: existing.as_ref().is_some_and(|h| h.in_cluster), public_ok: n.confirm_public() };
     hosts.upsert(host.clone())?;
     Ok(host)
@@ -836,7 +836,7 @@ pub fn remove_from_models(svc: &crate::services::Services, id: &str) -> Result<(
     if hosts.get(id).is_none() {
         return Err(format!("{id} is not a model host."));
     }
-    let _ = svc.settings.lock().unwrap().remove_provider(id);
+    let _ = svc.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove_provider(id);
     hosts.remove(id)
 }
 
@@ -926,7 +926,7 @@ pub fn scan(targets: &[IpAddr], opts: &ScanOpts, cancel: &AtomicBool) -> Vec<Fou
                         break;
                     }
                     if let Some(f) = probe(*ip, *port, opts) {
-                        found.lock().unwrap().push(f);
+                        found.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(f);
                     }
                 }
             });

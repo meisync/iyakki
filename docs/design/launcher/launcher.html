@@ -1,0 +1,299 @@
+<!doctype html><html><head><meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Source+Serif+4:ital,opsz,wght@0,8..60,600;1,8..60,600&display=swap" rel="stylesheet">
+<style>
+@font-face{font-family:"IYM";src:url("../../../crates/iyakki-shell/assets/DejaVuSansMono.ttf")format("truetype")}
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--pg:#DCE3EC;--sh:rgba(255,255,255,.72);--ink:#1D1D1F;--ink2:#53535C;--ink3:#86868B;
+--rule:rgba(0,0,0,.09);--heavy:rgba(0,0,0,.14);--blue:#0A5BD3;--bluew:#E3EDFD;--red:#C11B17;--redw:#FDEAE8;
+--och:#9A6200;--ochw:#FDF2DE;--grn:#17733F;--grnw:#E5F4EB;--lockw:#ECECF0}
+body{width:1920px;height:1080px;overflow:hidden;background:#C9D4E8;color:var(--ink);
+font:400 13px/1.45 Inter,sans-serif;-webkit-font-smoothing:antialiased;position:relative}
+
+/* ===== wallpaper behind frosted glass ===== */
+.wall{position:fixed;inset:0;z-index:0;background:url("wall.svg") center/cover no-repeat;
+transform:scale(1.06);transition:transform 1.2s cubic-bezier(.2,.8,.3,1)}
+.frost{position:fixed;inset:0;z-index:1;pointer-events:none;
+backdrop-filter:saturate(118%) brightness(1.04);background:rgba(255,255,255,.10)}
+/* ===== the frosted island the icons live on ===== */
+.island{flex:1;margin:22px 104px 112px;border-radius:40px;position:relative;overflow:hidden;
+padding:24px 40px 0;display:flex;flex-direction:column;
+background:linear-gradient(168deg,rgba(255,255,255,.60),rgba(255,255,255,.42) 46%,rgba(255,255,255,.52));
+backdrop-filter:blur(46px) saturate(190%) brightness(1.06);
+border:1px solid rgba(255,255,255,.78);
+box-shadow:0 44px 110px rgba(18,34,72,.30),0 6px 18px rgba(18,34,72,.13),
+inset 0 1px 0 rgba(255,255,255,.98),inset 0 -30px 60px rgba(255,255,255,.22);
+animation:pop .62s cubic-bezier(.18,.9,.3,1.06) backwards}
+.island::after{content:'';position:absolute;left:1px;right:1px;top:1px;height:42%;border-radius:39px 39px 0 0;
+background:linear-gradient(rgba(255,255,255,.46),rgba(255,255,255,.10) 58%,rgba(255,255,255,0));pointer-events:none}
+@keyframes pop{from{opacity:0;transform:scale(.975) translateY(14px)}to{opacity:1;transform:none}}
+/* icons pop in, staggered */
+.cell{animation:icpop .5s cubic-bezier(.2,.9,.28,1.5) backwards}
+@keyframes icpop{from{opacity:0;transform:scale(.72)}60%{opacity:1;transform:scale(1.05)}to{transform:scale(1)}}
+.noise{position:fixed;inset:0;z-index:2;opacity:.22;mix-blend-mode:multiply;pointer-events:none;
+background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)' opacity='.42'/%3E%3C/svg%3E")}
+body.desktop .frost,body.desktop .noise{opacity:0}
+body.desktop .wall{transform:scale(1)}
+body.desktop .vp,body.desktop .dots,body.desktop .dotlab,body.desktop .chev{opacity:0}
+.mono{font-family:"IYM",monospace;font-variant-numeric:tabular-nums}
+.ser{font-family:Inter,sans-serif}
+
+.mb{height:28px;background:rgba(255,255,255,.62);backdrop-filter:saturate(180%) blur(26px);border-bottom:.5px solid rgba(0,0,0,.12);box-shadow:0 1px 3px rgba(0,0,0,.05);display:flex;align-items:center;
+gap:19px;padding:0 14px;font-size:12.5px;position:relative;z-index:9}
+.mb b{font-weight:700}.mbr{margin-left:auto;display:flex;gap:17px;color:var(--ink2);font-size:12px}
+
+/* ---------- the paging viewport ---------- */
+.vp{position:absolute;z-index:5;top:28px;left:0;right:0;bottom:0;overflow:hidden}
+.track{position:absolute;top:0;left:0;height:100%;display:flex;transition:transform .42s cubic-bezier(.22,.61,.36,1)}
+.chev{cursor:pointer;user-select:none}.dot{cursor:pointer}
+.page{width:1920px;height:100%;flex:none;padding:0;display:flex;flex-direction:column}
+
+/* page header */
+.ph{display:flex;align-items:flex-end;gap:18px;padding-bottom:13px;border-bottom:.5px solid rgba(0,0,0,.13)}
+.ph h1{font-size:33px;font-weight:700;letter-spacing:-.9px;line-height:1}
+.ph .cnt{font-size:12px;font-weight:700;letter-spacing:.7px;color:var(--ink3);padding-bottom:4px}
+.ph .sum{margin-left:auto;display:flex;gap:9px;align-items:center;padding-bottom:3px}
+.tag{font-size:10.5px;font-weight:700;letter-spacing:.4px;padding:3px 9px;border-radius:3px}
+
+/* app grid */
+.grid{flex:1;display:grid;grid-template-columns:repeat(5,1fr);gap:30px 26px;align-content:center;justify-items:center;padding:4px 20px 0}
+.cell{width:100%;display:flex;flex-direction:column;align-items:center;text-align:center;gap:9px}
+.ic{width:108px;height:108px;border-radius:24%;display:grid;place-items:center;position:relative;
+box-shadow:0 10px 20px rgba(16,24,40,.22),0 2px 5px rgba(16,24,40,.16),inset 0 1.5px 0 rgba(255,255,255,.55),inset 0 -2px 6px rgba(0,0,0,.10)}
+.ic::after{content:'';position:absolute;inset:1px 1px 48% 1px;border-radius:23% 23% 50% 50%/30% 30% 100% 100%;background:linear-gradient(rgba(255,255,255,.34),rgba(255,255,255,.03))}
+.ic .badge{position:absolute;z-index:2;top:-4px;right:-4px;min-width:21px;height:21px;border-radius:11px;
+display:grid;place-items:center;font-size:11px;font-weight:700;color:#fff;border:2px solid var(--pg);padding:0 5px}
+.cell .nm{font-size:16.5px;font-weight:700;letter-spacing:-.2px}
+.cell .dt{font-size:12.5px;color:var(--ink2);margin-top:-4px}
+.cell .ch{font-size:10px;font-weight:700;letter-spacing:.4px;padding:2px 8px;border-radius:3px}
+
+/* ---------- status page ---------- */
+.figs{display:flex;gap:30px;margin-left:auto;align-items:flex-end;padding-bottom:1px}
+.fig{text-align:right}.fig .n{font-size:40px;font-weight:700;letter-spacing:-1.5px;line-height:.9}
+.fig .l{font-size:10px;font-weight:700;letter-spacing:.8px;color:var(--ink3);margin-top:3px}
+.band{margin-top:16px;background:rgba(255,255,255,.62);backdrop-filter:blur(20px);border:.5px solid rgba(255,255,255,.8);border-radius:14px;padding:13px 16px;box-shadow:0 6px 18px rgba(16,24,40,.08)}
+.bh{display:flex;align-items:baseline;gap:12px;margin-bottom:9px}
+.bh .t{font-size:14.5px;font-weight:700;letter-spacing:-.2px}
+.bh .s{font-size:11.5px;color:var(--ink2)}.bh .r{margin-left:auto;font-size:11px;color:var(--ink3);font-weight:600}
+.grp{display:flex}.gseg{padding:0 14px;border-left:1px solid rgba(0,0,0,.08)}.gseg:first-child{border-left:0;padding-left:0}
+.gl{font-size:9.5px;font-weight:700;letter-spacing:.7px;color:var(--ink3);margin-bottom:6px}
+.nts{display:flex;gap:10px}.nt{display:flex;flex-direction:column;align-items:center;gap:4px;width:36px}
+.nt .lb{font-size:8.5px;font-weight:600;color:var(--ink2);text-align:center;line-height:1.1}
+.cols{flex:1;display:flex;gap:22px;margin-top:18px;min-height:0}
+.lcol{flex:1;display:flex;flex-direction:column;gap:12px}
+.box{background:rgba(255,255,255,.80);backdrop-filter:saturate(170%) blur(22px);border:.5px solid rgba(255,255,255,.85);border-radius:14px;padding:16px 18px;box-shadow:0 8px 24px rgba(16,24,40,.10),inset 0 1px 0 rgba(255,255,255,.9)}
+.box.q{background:rgba(255,255,255,.66)}
+.box h3{font-size:10px;font-weight:700;letter-spacing:.8px;color:var(--ink3);margin-bottom:10px}
+.box .big{font-size:17px;font-weight:700;display:flex;align-items:center;gap:9px;letter-spacing:-.2px}
+.box p{font-size:12.5px;color:var(--ink2);margin-top:6px;line-height:1.45}
+.acts{margin-top:12px;display:flex;gap:8px}
+.ab{font-size:12.5px;font-weight:500;border:.5px solid rgba(0,0,0,.16);border-radius:7px;padding:5px 13px;background:linear-gradient(#fff,#F3F3F6);box-shadow:0 1px 2px rgba(16,24,40,.10)}
+.ab.p{background:linear-gradient(#3C8DF5,#0A5BD3);border-color:#0A5BD3;color:#fff;box-shadow:0 1px 3px rgba(10,91,211,.45),inset 0 1px 0 rgba(255,255,255,.35)}
+.rcol{width:420px;flex:none;display:flex;flex-direction:column;gap:12px}
+.kv{display:flex;justify-content:space-between;align-items:baseline;padding:8px 0;border-top:1px solid #E7E1D2}
+.kv:first-of-type{border-top:0}.kv .k{font-size:12.5px;color:var(--ink2)}
+.kv .val{font-size:19px;font-weight:700;letter-spacing:-.3px}
+.spark{display:flex;align-items:flex-end;gap:3px;height:38px;margin-top:4px}
+.spark i{flex:1;background:var(--blue);opacity:.75;border-radius:1px}
+
+
+.wgrid{flex:1;display:grid;grid-template-columns:repeat(6,1fr);grid-auto-rows:minmax(116px,auto);gap:14px;
+align-content:start;padding:14px 0 26px;overflow:hidden}
+.w{background:rgba(255,255,255,.72);backdrop-filter:saturate(180%) blur(24px);border:.5px solid rgba(255,255,255,.9);
+border-radius:16px;padding:14px 16px;box-shadow:0 8px 24px rgba(30,45,80,.12),inset 0 1px 0 rgba(255,255,255,.95);
+position:relative;transition:transform .2s}
+.w h3{font-size:10px;font-weight:800;letter-spacing:.9px;color:var(--ink3);margin-bottom:9px;display:flex;align-items:center;gap:7px}
+.w .grip{margin-left:auto;color:#B9BCC4;letter-spacing:-2px;display:none}
+.s2{grid-column:span 2}.s3{grid-column:span 3}.s4{grid-column:span 4}.s6{grid-column:span 6}
+.r2{grid-row:span 2}
+body.edit .w{animation:jig 2.4s ease-in-out infinite;cursor:grab}
+body.edit .w:nth-child(even){animation-delay:-1.2s}
+@keyframes jig{0%,100%{transform:rotate(-.25deg)}50%{transform:rotate(.25deg)}}
+body.edit .w .grip{display:block}
+body.edit .w::after{content:'\2212';position:absolute;top:-9px;left:-9px;width:22px;height:22px;border-radius:50%;
+background:#E0414A;color:#fff;font-size:15px;font-weight:800;display:grid;place-items:center;
+box-shadow:0 2px 6px rgba(0,0,0,.26);border:2px solid rgba(255,255,255,.95)}
+.wadd{border:1.5px dashed rgba(60,75,110,.32);background:rgba(255,255,255,.34);border-radius:16px;
+display:none;flex-direction:column;align-items:center;justify-content:center;gap:7px}
+body.edit .wadd{display:flex}
+.wadd b{font-size:13.5px;font-weight:650;color:#43506B}.wadd span{font-size:11.5px;color:#73809B}
+.ebar{display:flex;align-items:center;gap:9px}
+.ebtn{font-size:12.5px;font-weight:650;padding:6px 14px;border-radius:9px;border:.5px solid rgba(0,0,0,.14);
+background:linear-gradient(#fff,#F2F3F6);box-shadow:0 1px 2px rgba(16,24,40,.1)}
+.ebtn.p{background:linear-gradient(#3C8DF5,#0A5BD3);border-color:#0A5BD3;color:#fff}
+.sz{display:inline-flex;gap:3px;margin-left:auto}
+.sz i{width:13px;height:13px;border-radius:3px;border:1.2px solid #AEB4C2;display:none}
+body.edit .sz i{display:block}
+body.edit .sz i.on{background:#0A5BD3;border-color:#0A5BD3}
+
+/* attention widget */
+.chips{display:flex;gap:10px}
+.chip{flex:1;min-width:0;display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:13px;
+background:rgba(255,255,255,.74);border:1px solid rgba(255,255,255,.92);box-shadow:0 2px 6px rgba(18,34,72,.08)}
+.chip .cn{font-size:13px;font-weight:750;letter-spacing:-.2px;white-space:nowrap}
+.chip .cs{font-size:11.5px;color:#5B6168;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chip .tg{margin-left:auto;font-size:9.5px;font-weight:800;letter-spacing:.4px;padding:3px 7px;border-radius:5px;white-space:nowrap}
+.chip.more{flex:0 0 108px;justify-content:center;background:rgba(255,255,255,.5);border-style:dashed;
+border-color:rgba(60,75,110,.3);font-size:12.5px;font-weight:650;color:#43506B}
+.rest{display:flex;align-items:center;gap:9px;margin-top:13px;padding-top:11px;border-top:1px solid rgba(0,0,0,.08)}
+.rest .okl{font-size:12.5px;font-weight:650;color:#17733F;display:flex;align-items:center;gap:6px}
+.gp{display:flex;align-items:center;gap:6px;font-size:11.5px;font-weight:600;color:#4B5058;
+background:rgba(255,255,255,.66);border:1px solid rgba(255,255,255,.9);border-radius:999px;padding:3px 11px}
+.gp i{width:6px;height:6px;border-radius:50%}
+/* ---------- paging chrome ---------- */
+.chev{position:absolute;top:50%;transform:translateY(-50%);width:44px;height:44px;border-radius:50%;
+background:rgba(255,255,255,.66);backdrop-filter:blur(22px);border:.5px solid rgba(255,255,255,.8);box-shadow:0 4px 14px rgba(16,24,40,.16);display:grid;place-items:center;z-index:8}
+.chev.l{left:14px}.chev.r{right:14px}
+.dots{position:fixed;left:50%;transform:translateX(-50%);bottom:94px;display:flex;align-items:center;gap:11px;z-index:8}
+.dot{width:9px;height:9px;border-radius:50%;background:rgba(0,0,0,.26)}
+.dot.on{background:rgba(0,0,0,.62);width:11px;height:11px}
+.dotlab{position:fixed;left:50%;transform:translateX(-50%);bottom:76px;font-size:10.5px;font-weight:600;
+letter-spacing:.5px;color:var(--ink3);white-space:nowrap;z-index:8}
+.strip{margin-bottom:26px;padding-top:16px;display:flex;gap:18px}
+.scard{flex:1;background:rgba(255,255,255,.70);backdrop-filter:saturate(170%) blur(20px);border:.5px solid rgba(255,255,255,.85);border-radius:14px;padding:13px 16px;box-shadow:0 6px 18px rgba(16,24,40,.09),inset 0 1px 0 rgba(255,255,255,.9)}
+.scard h4{font-size:9.5px;font-weight:700;letter-spacing:.8px;color:var(--ink3);margin-bottom:8px}
+.srow{display:flex;justify-content:space-between;align-items:baseline;padding:5px 0;border-top:1px solid #E7E1D2;font-size:12.5px}
+.srow:first-of-type{border-top:0}.srow .m{color:var(--ink2)}
+.dock{position:absolute;left:50%;transform:translateX(-50%);bottom:10px;height:74px;background:rgba(255,255,255,.44);
+backdrop-filter:saturate(180%) blur(30px);border:.5px solid rgba(255,255,255,.7);border-radius:22px;
+box-shadow:0 14px 34px rgba(16,24,40,.22),inset 0 1px 0 rgba(255,255,255,.85);display:flex;align-items:center;gap:9px;padding:0 11px;z-index:8}
+.sq{border-radius:24%;display:grid;place-items:center}
+</style></head><body>
+<div class="wall"></div><div class="frost"></div><div class="noise"></div>
+<div class="mb"><b>IYAKKI</b><span>Home</span><span>Apps</span><span>Agent</span><span>Devices</span><span>Window</span><span>Help</span>
+ <div class="mbr"><span>qwen3:8b</span><span>k3s ready</span><span class="mono">14:22</span><span style="font-weight:700;color:#0D1014">admin</span></div></div>
+<div class="vp"><div class="track" id="track"></div></div>
+<div class="chev l"><svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="#2A2E33" stroke-width="2" stroke-linecap="round"><path d="M10 3 5 8l5 5"/></svg></div>
+<div class="chev r"><svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="#2A2E33" stroke-width="2" stroke-linecap="round"><path d="M6 3l5 5-5 5"/></svg></div>
+<div class="dots" id="dots"></div><div class="dotlab" id="dotlab"></div>
+<div class="dock" id="dock"></div>
+<script>
+const G={chat:'<path d="M2.5 4.5a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H6l-3.5 2.5V4.5Z"/>',doc:'<path d="M4 2h5l3 3v9H4V2Z"/><path d="M9 2v3h3"/>',term:'<rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M5 7l2 1.5L5 10M8.5 10H11"/>',cube:'<path d="M8 2l5 2.8v6.4L8 14l-5-2.8V4.8L8 2Z"/><path d="M3 4.8 8 7.6l5-2.8M8 7.6V14"/>',db:'<ellipse cx="8" cy="4" rx="5" ry="2"/><path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4"/>',chart:'<path d="M2.5 13h11"/><path d="M4.5 10.5v-3M7.5 10.5v-6M10.5 10.5v-4"/>',globe:'<circle cx="8" cy="8" r="5.5"/><path d="M2.5 8h11M8 2.5c3 3.5 3 7.5 0 11-3-3.5-3-7.5 0-11Z"/>',music:'<path d="M6 11.5V4l7-1.5v7"/><circle cx="4.5" cy="11.5" r="1.8"/><circle cx="11.5" cy="9.5" r="1.8"/>',cam:'<rect x="2" y="4.5" width="9" height="7.5" rx="1.5"/><path d="M11 8.2l3-1.8v5l-3-1.8Z"/>',disk:'<rect x="2" y="3" width="12" height="4" rx="1.2"/><rect x="2" y="9" width="12" height="4" rx="1.2"/><path d="M4.5 5h.01M4.5 11h.01"/>',users:'<circle cx="6" cy="6" r="2.4"/><path d="M2.5 13c0-2 1.6-3.4 3.5-3.4S9.5 11 9.5 13"/><path d="M10.5 5.2a2.2 2.2 0 0 1 0 4.2M11.5 13c0-1.3-.4-2.3-1-3"/>',store:'<path d="M3 6.5V13h10V6.5"/><path d="M2 6.5 3.5 3h9L14 6.5a2 2 0 0 1-4 0 2 2 0 0 1-4 0 2 2 0 0 1-4 0Z"/>',flow:'<rect x="2" y="2.5" width="4.5" height="3.5" rx="1"/><rect x="9.5" y="10" width="4.5" height="3.5" rx="1"/><path d="M4.2 6v3.5a2 2 0 0 0 2 2h3.3"/>',git:'<circle cx="4.5" cy="4" r="1.8"/><circle cx="4.5" cy="12" r="1.8"/><circle cx="11.5" cy="8" r="1.8"/><path d="M4.5 5.8v4.4M6.2 4.6c3 .4 3.6 1.6 3.8 2.6"/>',cpu:'<rect x="4" y="4" width="8" height="8" rx="1.5"/><path d="M6.5 2v2M9.5 2v2M6.5 12v2M9.5 12v2M2 6.5h2M2 9.5h2M12 6.5h2M12 9.5h2"/>',mic:'<rect x="6.2" y="2" width="3.6" height="7" rx="1.8"/><path d="M4 7.5a4 4 0 0 0 8 0M8 11.5V14"/>',cal:'<rect x="2.5" y="3.5" width="11" height="10" rx="1.5"/><path d="M2.5 6.5h11M5.5 2v3M10.5 2v3"/>',book:'<path d="M3 3h4a2 2 0 0 1 2 2v8a1.6 1.6 0 0 0-1.6-1.6H3V3Z"/><path d="M9 5a2 2 0 0 1 2-2h2v8.4h-3.4A1.6 1.6 0 0 0 8 13"/>',scan:'<path d="M2.5 5.5V3.5a1 1 0 0 1 1-1h2M10.5 2.5h2a1 1 0 0 1 1 1v2M13.5 10.5v2a1 1 0 0 1-1 1h-2M5.5 13.5h-2a1 1 0 0 1-1-1v-2"/><path d="M2.5 8h11"/>',wrench:'<path d="M10.8 2.2a3.5 3.5 0 0 0-4.3 4.6L2.4 11l2.1 2.1 4.2-4.1a3.5 3.5 0 0 0 4.6-4.3l-2 2-1.6-1.6 2-2Z"/>',sliders:'<path d="M3 4.5h10M3 8h10M3 11.5h10"/><circle cx="6" cy="4.5" r="1.6"/><circle cx="10" cy="8" r="1.6"/><circle cx="5" cy="11.5" r="1.6"/>',key:'<circle cx="5.5" cy="8" r="3"/><path d="M8.5 8H14M12 8v2.5"/>',pdf:'<path d="M4 2h5l3 3v9H4V2Z"/><path d="M9 2v3h3"/><path d="M6 11.5h4"/>'};
+const HUE={chat:'#0A84FF',doc:'#2BB3C0',term:'#1FA89C',cube:'#5E5CE6',db:'#3FA9F5',chart:'#30B14A',
+globe:'#0A84FF',music:'#FF375F',cam:'#E8A400',disk:'#E0578C',users:'#2FB457',store:'#FF8A1E',
+flow:'#F0883E',git:'#E8743B',cpu:'#4FB6E0',mic:'#B057E0',cal:'#E8453C',book:'#FF9F0A',
+scan:'#4AB6E8',wrench:'#A855D6',sliders:'#FF6B22',key:'#E0B000',pdf:'#E8453C'};
+function lite(h,a){return 'linear-gradient(170deg, color-mix(in srgb,'+h+' 72%, #fff) 0%, '+h+' 52%, color-mix(in srgb,'+h+' 86%, #000) 100%)'}
+const T={ok:['#E2EDE7','#1F5C40'],run:['#DFE7F2','#15417A'],deg:['#F2E9D4','#7A5410'],cr:['#F6E6E4','#9E2A22'],lock:['#EAE5D9','#7D8189']};
+const L={ok:'READY',run:'RUNNING',deg:'NEEDS SETUP',cr:'ATTENTION',lock:'LOCKED'};
+function icon(g,k,sz,st){return`<span class="sq" style="width:${sz}px;height:${sz}px;background:${lite(HUE[g]||'#5E5CE6')};
+box-shadow:0 5px 11px rgba(16,24,40,.26),inset 0 1.5px 0 rgba(255,255,255,.5),inset 0 -2px 5px rgba(0,0,0,.12);position:relative">
+<svg width="${Math.round(sz*.5)}" height="${Math.round(sz*.5)}" viewBox="0 0 16 16" fill="none" stroke="#fff" stroke-width="${st||1.6}" stroke-linecap="round" stroke-linejoin="round" style="filter:drop-shadow(0 1px 1px rgba(0,0,0,.25))">${G[g]}</svg>
+<span style="position:absolute;inset:1px 1px 50% 1px;border-radius:23% 23% 50% 50%/30% 30% 100% 100%;background:linear-gradient(rgba(255,255,255,.32),rgba(255,255,255,.02))"></span></span>`}
+function mk(k){const c={ok:'#1F5C40',run:'#15417A',deg:'#7A5410',cr:'#9E2A22',lock:'#7D8189'}[k];
+ if(k==='run')return`<svg width="15" height="15"><ellipse cx="7.5" cy="7.5" rx="5.6" ry="4.4" fill="${c}" transform="rotate(-20 7.5 7.5)"/></svg>`;
+ if(k==='ok')return`<svg width="15" height="15"><ellipse cx="7.5" cy="7.5" rx="5.2" ry="4" fill="none" stroke="${c}" stroke-width="1.9" transform="rotate(-20 7.5 7.5)"/></svg>`;
+ if(k==='deg')return`<svg width="15" height="15" stroke="${c}" stroke-width="2.2" stroke-linecap="round"><path d="M3 3 12 12M12 3 3 12"/></svg>`;
+ if(k==='cr')return`<svg width="15" height="15"><rect x="1.5" y="4" width="12" height="7" fill="${c}"/></svg>`;
+ return`<svg width="15" height="15" stroke="${c}" stroke-width="1.8"><path d="M2.5 7.5h10"/></svg>`}
+const A=[["Ask & Create","the assistant and what it makes",[["CHAT","chat","run","qwen3:8b · 12 sessions",""],["RAG","doc","ok","148 documents",""],["SKILLS","book","ok","9 installed · 3 shared",""],["CALENDAR","cal","ok","next 15:30",""],["TALES","book","ok","2 stories",""],["VOICE","mic","ok","piper · mic default",""],["LAB","chart","deg","no model set",""]]],
+["Build","workspaces, clusters and code",[["AI IDE","cube","run","3 workspaces","2"],["CLI","term","ok","11 tools",""],["EDIT","doc","ok","2 files open",""],["RUNS","flow","ok","23 today · 1 failed","1"],["FLOWS","flow","run","6 flows · 2 scheduled",""],["K8S","cube","ok","iyakki-dev · 12 pods",""],["GIT","git","ok","7 repos",""],["MCP","sliders","deg","2 of 3 servers up",""],["DEV TOOLS","wrench","ok","12 tools",""]]],
+["Media","the web, sound and pictures",[["BROWSER","globe","run","3 tabs · 812 blocked",""],["MEDIA","music","ok","2 314 items",""],["RADIO","music","ok","18 saved",""],["CAMERA","cam","ok","1 device",""],["CAMERAS","cam","deg","RTSP unset",""],["PDF","pdf","ok","6 recent",""]]],
+["Data","tables, boards and spend",[["DATA","db","ok","5 tables · 1.2 M rows",""],["DASH","chart","ok","4 boards · 3 sources",""],["USAGE","chart","ok","1.24 M · $3.40",""]]],
+["Devices & System","the machine itself",[["DISKS","disk","cr","IYAKKI-DATA 91 % full","!"],["SYSTEM","cpu","ok","load 0.42 · mem 38 %",""],["STORE","store","deg","2 updates waiting","2"],["USERS","users","ok","3 accounts",""],["NET SCAN","scan","ok","12 hosts · 1 new",""],["DOCTOR","wrench","deg","2 findings","2"],["AUTH","key","ok","6 codes",""],["MESH","scan","ok","registered",""],["LINUX WINDOW","term","ok","sandbox ready",""],["REMOTE FILES","doc","lock","admin only",""],["CHECK-UP","cpu","ok","last pass 12 Nov",""],["PDF ARCHIVE","pdf","ok","4 snapshots",""]]]];
+const CTX={
+"Ask & Create":[["Last answer","CHAT · 2 min ago"],["Documents indexed","148 · RAG 14:02"],["Skills the agent may use","9 of 12"],["Alarms today","1 · 15:30 standup"]],
+"Build":[["Waiting for approval","deploy alpha.3/ui to k3s"],["Failed run","Index /home/admin/docs · 13:04"],["Cluster","iyakki-dev · 12 pods ready"],["Open workspaces","3 · branch alpha.3/ui"]],
+"Media":[["Playing now","nothing"],["Library","2 314 items · 38 GB"],["Blocked today","812 trackers"],["Camera recordings","12 GB from October"]],
+"Data":[["Largest table","events.csv · 1.2 M rows"],["Boards","4 over 3 sources"],["Spend today","$3.40 · 1.24 M tokens"],["Slowest query","11.4 s · DASH"]],
+"Devices & System":[["Critical","IYAKKI-DATA 91 % full"],["Updates waiting","2 · kubectl, voice pack"],["New on the network","1 host since 09:00"],["Last hardware check","12 Nov · all passed"]]};
+const ALL=A.flatMap(([g,s,r])=>r);
+function appPage(i){const[g,sub,rows]=A[i];
+ const c={ok:0,run:0,deg:0,cr:0,lock:0};rows.forEach(r=>c[r[2]]++);
+ const tags=[['run','RUNNING'],['deg','NEEDS SETUP'],['cr','ATTENTION'],['lock','LOCKED'],['ok','READY']]
+  .filter(([k])=>c[k]).map(([k,t])=>`<span class="tag" style="background:${T[k][0]};color:${T[k][1]}">${c[k]} ${t}</span>`).join('');
+ return `<div class="page"><div class="island"><div class="ph"><h1>${g}</h1><span class="cnt">${rows.length} APPS · ${sub.toUpperCase()}</span><span class="sum">${tags}</span></div>
+ <div class="grid">${rows.map(([n,ic,k,d,b],i)=>`<div class="cell" style="animation-delay:${i*42}ms">
+  <span class="ic" style="background:${lite(HUE[ic]||'#5E5CE6')}">
+   <svg width="56" height="56" viewBox="0 0 16 16" fill="none" stroke="#fff" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" style="filter:drop-shadow(0 1px 1px rgba(0,0,0,.22))">${G[ic]}</svg>
+   ${b?`<span class="badge" style="background:${k==='cr'?'#9E2A22':k==='deg'?'#7A5410':'#15417A'}">${b}</span>`:''}</span>
+  <div><div class="nm">${n}</div><div class="dt">${d}</div></div>
+  ${k!=='ok'?`<span class="ch" style="background:${T[k][0]};color:${T[k][1]}">${L[k]}</span>`:''}</div>`).join('')}</div>
+ <div class="strip">${[0,1].map(col=>`<div class="scard"><h4>${col?'THIS GROUP, RIGHT NOW':'NEEDS A PERSON'}</h4>
+  ${(CTX[g]||[]).slice(col*2,col*2+2).map(([k,v])=>`<div class="srow"><span>${k}</span><span class="m mono">${v}</span></div>`).join('')}</div>`).join('')}
+ </div></div></div>`}
+function statusPage(){return `<div class="page"><div class="island">
+ <div class="ph"><h1>The machine</h1><span class="cnt">SATURDAY 14 NOVEMBER · 14:22</span>
+  <div class="figs">
+   <div class="fig"><div class="n mono">37</div><div class="l">APPS</div></div>
+   <div class="fig"><div class="n mono" style="color:#0A5BD3">3</div><div class="l">RUNNING</div></div>
+   <div class="fig"><div class="n mono" style="color:#9A6200">3</div><div class="l">NEEDS SETUP</div></div>
+   <div class="fig"><div class="n mono" style="color:#C11B17">1</div><div class="l">CRITICAL</div></div></div>
+  <span class="ebar" style="margin-left:22px;padding-bottom:4px">
+   <span class="ebtn" id="editbtn" onclick="document.body.classList.toggle('edit');
+     editbtn.textContent=document.body.classList.contains('edit')?'Done':'Edit widgets';
+     editbtn.classList.toggle('p')">Edit widgets</span></span></div>
+ <div class="wgrid">
+
+  <div class="w s6"><h3>EVERY APP · <b style="color:#C11B17">6 NEED YOU</b> · 1 LOCKED · 30 READY<span class="sz"><i></i><i></i><i class="on"></i></span><span class="grip">⠿</span></h3>
+   <div class="chips">${[["DISKS","disk","IYAKKI-DATA 91 % full","cr"],["MCP","sliders","2 of 3 servers up","deg"],["STORE","store","2 updates waiting","deg"],["DOCTOR","wrench","2 findings","deg"],["CAMERAS","cam","RTSP not configured","deg"]]
+    .map(([n,ic,st,k])=>`<div class="chip">
+      <span class="sq" style="width:32px;height:32px;background:${lite(HUE[ic])};box-shadow:0 3px 7px rgba(16,24,40,.22),inset 0 1px 0 rgba(255,255,255,.5)">
+       <svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${G[ic]}</svg></span>
+      <span style="min-width:0"><span class="cn">${n}</span><div class="cs">${st}</div></span>
+      <span class="tg" style="background:${k==='cr'?'#FBEAE8':'#FDF2DE'};color:${k==='cr'?'#C11B17':'#9A6200'}">${k==='cr'?'ATTENTION':'NEEDS SETUP'}</span></div>`).join('')}
+    <div class="chip more">+2 more</div></div>
+   <div class="rest"><span class="okl">✓ 30 apps ready · 3 running</span>
+    ${[["Ask & Create",7,'#9A6200'],["Build",9,'#9A6200'],["Media",6,'#9A6200'],["Data",3,'#17733F'],["Devices & System",12,'#C11B17']]
+     .map(([g,n,c])=>`<span class="gp"><i style="background:${c}"></i>${g} <b class="mono" style="font-weight:700">${n}</b></span>`).join('')}</div></div>
+
+  <div class="w s2 r2"><h3>NEEDS YOU<span class="sz"><i></i><i class="on"></i><i></i></span><span class="grip">⠿</span></h3>
+   <div class="big" style="font-size:16px;font-weight:700;display:flex;gap:8px;align-items:center"><span style="width:9px;height:9px;background:#C11B17;display:inline-block;border-radius:2px"></span>IYAKKI-DATA is 91 % full</div>
+   <p style="font-size:12.5px;color:var(--ink2);margin-top:7px;line-height:1.45">4.1 GB free of 48 GB. Agent runs that write files will start failing. Oldest removable: 12 GB of camera recordings from October.</p>
+   <div class="acts" style="margin-top:11px"><span class="ab p">Open DISKS</span><span class="ab">Later</span></div></div>
+
+  <div class="w s2"><h3>WAITING FOR APPROVAL<span class="sz"><i></i><i class="on"></i><i></i></span><span class="grip">⠿</span></h3>
+   <div style="font-size:14px;font-weight:700">Deploy <span class="mono">alpha.3/ui</span> to k3s</div>
+   <p style="font-size:12px;color:var(--ink2);margin-top:5px">AI IDE · 14:19 · namespace iyakki-dev</p>
+   <div class="acts" style="margin-top:10px"><span class="ab p">Approve</span><span class="ab">Deny</span></div></div>
+
+  <div class="w s2 r2"><h3>THIS MACHINE<span class="sz"><i></i><i class="on"></i><i></i></span><span class="grip">⠿</span></h3>
+   <div class="kv"><span class="k">Processor load</span><span class="val mono">0.42</span></div>
+   <div class="kv"><span class="k">Memory</span><span class="val mono">12.1 / 32 GB</span></div>
+   <div class="kv"><span class="k">IYAKKI-DATA</span><span class="val mono" style="color:#C11B17">91 %</span></div>
+   <div class="kv"><span class="k">Uptime</span><span class="val mono">2 d 17 h</span></div>
+   <div class="kv"><span class="k">Cluster</span><span class="val mono" style="font-size:14px">k3s · 12 pods</span></div></div>
+
+  <div class="w s2"><h3>RECENT AGENT RUNS<span class="sz"><i></i><i class="on"></i><i></i></span><span class="grip">⠿</span></h3>
+   <div class="kv" style="padding:4px 0"><span class="k" style="font-size:12px">Rewrite the launcher grid</span><span class="val mono" style="font-size:12px;color:#17733F">14:19</span></div>
+   <div class="kv" style="padding:4px 0"><span class="k" style="font-size:12px">Summarise k3s events</span><span class="val mono" style="font-size:12px;color:#17733F">13:52</span></div>
+   <div class="kv" style="padding:4px 0"><span class="k" style="font-size:12px">Index /home/admin/docs</span><span class="val mono" style="font-size:12px;color:#C11B17">failed</span></div></div>
+
+  <div class="w s2"><h3>TOKENS, LAST 14 DAYS<span class="sz"><i></i><i class="on"></i><i></i></span><span class="grip">⠿</span></h3>
+   <div style="display:flex;align-items:baseline;justify-content:space-between"><span class="k" style="font-size:12px;color:var(--ink2)">Today</span><span class="val mono" style="font-size:17px;font-weight:700">1.24 M · $3.40</span></div>
+   <div class="spark" style="margin-top:8px">${[38,52,31,64,48,72,55,83,61,44,69,58,91,76].map(h=>`<i style="height:${h}%"></i>`).join('')}</div></div>
+
+  <div class="w s2"><h3>NETWORK<span class="sz"><i class="on"></i><i></i><i></i></span><span class="grip">⠿</span></h3>
+   <div class="kv"><span class="k">Ethernet</span><span class="val mono" style="font-size:13.5px">192.168.1.20</span></div>
+   <div class="kv"><span class="k">Model host</span><span class="val mono" style="font-size:13.5px">qwen3:8b · local</span></div></div>
+
+  <div class="wadd s2"><b>＋  Add widget</b><span>Calendar · Weather · Flows · Disks · Camera · Usage</span></div>
+ </div></div></div>`}
+const PAGES=['The machine','Ask & Create','Build','Media','Data','Devices & System'];
+const q=new URLSearchParams(location.search), p=+(q.get('p')||0), off=+(q.get('off')||0);
+if(q.has('desktop'))document.body.classList.add('desktop');
+if(q.has('edit'))document.body.classList.add('edit');
+document.getElementById('track').innerHTML=statusPage()+A.map((_,i)=>appPage(i)).join('');
+{const t=document.getElementById('track');t.style.transition='none';t.style.transform=`translateX(${-(p*1920)-off}px)`;void t.offsetHeight;t.style.transition='';}
+document.getElementById('dots').innerHTML=PAGES.map((_,i)=>`<span class="dot ${i===p?'on':''}"></span>`).join('');
+document.getElementById('dotlab').textContent=PAGES[p].toUpperCase()+'  ·  '+(p+1)+' OF 6  ·  SWIPE OR ← →';
+const DK=[["chat","run"],["cube","run"],["term","ok"],["globe","run"],["db","ok"],["chart","ok"],["git","ok"],["flow","run"],["music","ok"],["cpu","ok"],["store","deg"],["disk","cr"]];
+document.getElementById('dock').innerHTML=DK.map(([g,k])=>icon(g,k,46,1.7)).join('');
+/* ---- live paging ---- */
+let cur=p, track=document.getElementById('track');
+function go(n){cur=Math.max(0,Math.min(PAGES.length-1,n));
+  track.style.transform='translateX('+(-cur*1920)+'px)';
+  document.querySelectorAll('.dot').forEach((d,i)=>d.classList.toggle('on',i===cur));
+  document.getElementById('dotlab').textContent=PAGES[cur].toUpperCase()+'  ·  '+(cur+1)+' OF '+PAGES.length+'  ·  SWIPE OR \u2190 \u2192';}
+addEventListener('keydown',e=>{if(e.key==='ArrowRight')go(cur+1);else if(e.key==='ArrowLeft')go(cur-1);
+  else if(e.key>='1'&&e.key<='6')go(+e.key-1);});
+document.querySelector('.chev.l').onclick=()=>go(cur-1);
+document.querySelector('.chev.r').onclick=()=>go(cur+1);
+document.querySelectorAll('.dot').forEach((d,i)=>d.onclick=()=>go(i));
+let acc=0,lock=false;
+addEventListener('wheel',e=>{if(Math.abs(e.deltaX)<Math.abs(e.deltaY))return;e.preventDefault();
+  if(lock)return;acc+=e.deltaX;
+  if(Math.abs(acc)>90){go(cur+(acc>0?1:-1));acc=0;lock=true;setTimeout(()=>lock=false,430);}},{passive:false});
+/* fit the 1920x1080 canvas into whatever window you open it in */
+function fit(){document.body.style.zoom=Math.min(1,innerWidth/1920,innerHeight/1080);}
+fit();addEventListener('resize',fit);
+</script></body></html>

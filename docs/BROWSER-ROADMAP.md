@@ -33,3 +33,4 @@ Optional package (40), developer tools (41).
 ## How progress is measured
 `probe_many` (an ignored test) loads a list of real sites and reports script errors; the commands are in the project memory
 note "Browser compat harness". Each release should rerun it and note the result here.
+2026-11-12: method, the 32-site list and the ranked table of missing APIs (93 of 385 names missing, 17 after the work) are in [`development/BROWSER-COMPAT.md`](development/BROWSER-COMPAT.md); `probe_apis` ranks the APIs, `probe_many` the script errors.

@@ -17,6 +17,7 @@ pub mod sftp_fs;
 pub mod sftp_proto;
 pub mod sftp_session;
 pub mod ssh_server;
+pub mod sshalg;
 pub mod sshkey;
 
 #[cfg(any(test, feature = "testing"))]
@@ -27,3 +28,9 @@ pub mod testworld;
 mod sftp_tests;
 #[cfg(test)]
 mod rf_tests;
+#[cfg(test)]
+mod ssh_interop_tests;
+#[cfg(test)]
+mod real_sshd_tests;
+#[cfg(test)]
+mod real_vsftpd_tests;

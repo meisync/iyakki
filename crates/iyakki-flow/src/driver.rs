@@ -673,6 +673,8 @@ impl Driver {
         inner.host.browser_end(&self.id);
         // the run's camera pictures are deleted with it (a node that asked to keep its picture keeps it)
         inner.host.cam_end(&self.id);
+        // and so is the run's token: nothing it presents after this is accepted
+        inner.host.end_run_token(&self.id);
         // the failure notice goes out BEFORE the run reads as finished: whoever waits for the end (a caller, a test) then sees the notice already posted
         if status == RunStatus::Failed {
             if let Some(r) = self.run() {
@@ -792,7 +794,7 @@ impl Driver {
         }
         let pol = run.flow.heal_of(&node);
         let ctx = self.red().text(&heal::failure_context(&run, node_id, &clis));
-        let req = HealRequest { run_id: self.id.clone(), flow_id: run.flow_id.clone(), node_id: node_id.to_string(), context: format!("{}\n\n{ctx}", heal::HEAL_INSTRUCTIONS), agent: String::new(), max_cents: pol.cost_cap_cents.saturating_sub(run.heal_cents) };
+        let req = HealRequest { run_id: self.id.clone(), flow_id: run.flow_id.clone(), node_id: node_id.to_string(), context: format!("{}\n\n{ctx}", heal::HEAL_INSTRUCTIONS), agent: String::new(), model: String::new(), timeout_secs: 0, max_cents: pol.cost_cap_cents.saturating_sub(run.heal_cents) };
         self.healing.insert(node_id.to_string());
         let (tx, host, cancel, node_s, card_s) = (self.tx.clone(), inner.host.clone(), inner.cancel_of(&self.id), node_id.to_string(), card.to_string());
         let h = std::thread::Builder::new().name(format!("flow-heal-{}", self.id)).spawn(move || {

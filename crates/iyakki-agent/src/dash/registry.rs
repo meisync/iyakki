@@ -7,7 +7,7 @@ use super::connector::*;
 
 /// Every kind this build offers, in the order the form shows them.
 pub fn kinds() -> Vec<KindInfo> {
-    vec![super::prom::info(), super::es::info(), super::clickhouse::info(), super::duckdb::info(), super::neo4j::info(), super::kube::info()]
+    vec![super::prom::info(), super::es::info(), super::clickhouse::info(), super::duckdb::info(), super::neo4j::info(), super::s3::info(), super::kube::info()]
 }
 
 pub fn kind(name: &str) -> Option<KindInfo> {
@@ -27,6 +27,7 @@ pub fn build(cfg: &SourceConfig, d: &Deps) -> Result<Box<dyn DataSource>, DashEr
         "clickhouse" => Box::new(super::clickhouse::ClickHouse::new(cfg, d)?),
         "duckdb" => Box::new(super::duckdb::DuckDb::new(cfg, d)?),
         "neo4j" => Box::new(super::neo4j::Neo4j::new(cfg, d)?),
+        "s3" => Box::new(super::s3::S3::new(cfg, d)?),
         "kube" => Box::new(super::kube::Kube::new(cfg, d)?),
         other => return Err(DashError::config(format!("the kind `{other}` has no connector in this build"))),
     })

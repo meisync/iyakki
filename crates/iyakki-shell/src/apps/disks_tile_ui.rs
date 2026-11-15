@@ -74,7 +74,7 @@ pub(super) fn drive_icon(g: &mut Gfx, t: Transport, cx: f32, cy: f32, size: f32,
 }
 
 fn human(b: u64) -> String {
-    iyakki_storage::human(b)
+    iyakki_agent::sysinfo::human_bytes(b)
 }
 
 /// A line of the status of a partition, for the table.

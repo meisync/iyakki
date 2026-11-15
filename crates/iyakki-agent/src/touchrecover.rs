@@ -138,7 +138,15 @@ impl Env for RealEnv {
         *STATUS.lock().unwrap_or_else(|e| e.into_inner()) = line.trim_start_matches("touch-recover: ").to_string();
     }
     fn set_report_protocol(&self, node: &Path, vendor: u16, product: u16, ifaces: &[u8]) -> Result<Vec<String>, String> {
-        iyakki_drivers::usbfs::hid_set_report_protocol(node, vendor, product, ifaces).map_err(|e| format!("{e:?}"))
+        #[cfg(target_os = "linux")]
+        {
+            iyakki_drivers::usbfs::hid_set_report_protocol(node, vendor, product, ifaces).map_err(|e| format!("{e:?}"))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (node, vendor, product, ifaces);
+            Err(format!("the USB report protocol is {}", crate::oscompat::UNAVAILABLE))
+        }
     }
 }
 

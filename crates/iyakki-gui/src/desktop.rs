@@ -2,8 +2,11 @@
 //! window, for trying it out without booting a VM. It is the same state machine the bare-metal
 //! framebuffer backend drives; here egui just supplies the window, keyboard and mouse.
 //!
-//! State lives in `~/.local/share/iyakki-dev` (users, audit log, documents), never in /var/lib.
-//! Optional config: `~/.local/share/iyakki-dev/ai.conf` (chat model, see /etc/iyakki/ai.conf docs).
+//! State lives in `~/.local/share/iyakki-dev` (on a Mac: `~/Library/Application Support/iyakki-dev`; users, audit log,
+//! documents), never in /var/lib. `IYAKKI_DEV_DIR` picks another folder.
+//! Optional config: `ai.conf` in that folder (chat model, see /etc/iyakki/ai.conf docs).
+//! `IYAKKI_WINDOW_SHOT=/path/shot.png` writes one picture of the shell about 8 seconds after the start (a check that works
+//! without screen-recording rights, e.g. over SSH), and `IYAKKI_WINDOW_QUIT_AFTER=<seconds>` closes the window by itself.
 
 use std::sync::Arc;
 
@@ -26,6 +29,8 @@ struct App {
     other_window: Option<iyakki_agent::instance::Instance>,
     /// The window title last set (it carries "Host access: n folders" while host folders are shared).
     title: String,
+    /// `IYAKKI_WINDOW_SHOT` is written once.
+    shot_done: bool,
 }
 
 impl Drop for App {
@@ -70,6 +75,42 @@ impl App {
             .chain(std::iter::once(format!("[{t:>6.3}] iyakki: this window skips the real boot; the log of a real boot appears here"))).collect();
         iyakki_shell::splash::draw(&mut self.gfx, &iyakki_shell::splash::View { t, fraction: (t / (SPLASH_STEPS.len() as f32 * SPLASH_TICK)).min(1.0), stage: "", log: self.splash_log.then_some(&lines[..]), steps: &steps });
     }
+}
+
+/// The Linux key code of the keys that make a layout chord with Ctrl+Alt (digits, Tab, M, arrows, Page Up/Down): the same table
+/// the framebuffer shell uses (`panes::chord_from_evdev`), so the window and the screen answer the same keys the same way.
+fn chord_code(k: egui::Key) -> Option<u16> {
+    use eframe::egui::Key as K;
+    Some(match k {
+        K::Num1 => 2,
+        K::Num2 => 3,
+        K::Num3 => 4,
+        K::Num4 => 5,
+        K::Num5 => 6,
+        K::Num6 => 7,
+        K::Num7 => 8,
+        K::Num8 => 9,
+        K::Num9 => 10,
+        K::Num0 => 11,
+        K::Tab => 15,
+        K::M => 50,
+        K::ArrowUp => 103,
+        K::PageUp => 104,
+        K::ArrowLeft => 105,
+        K::ArrowRight => 106,
+        K::ArrowDown => 108,
+        K::PageDown => 109,
+        _ => return None,
+    })
+}
+
+/// Ctrl+Alt with one of those keys is a layout chord: the shell takes it and no app sees the key. Alt or Ctrl alone are unchanged;
+/// a browser or desktop that keeps Ctrl+Alt+arrows for itself never delivers them (nothing here can change that).
+fn layout_chord(k: egui::Key, ctrl: bool, alt: bool, shift: bool) -> Option<Event> {
+    if !(ctrl && alt) {
+        return None;
+    }
+    iyakki_shell::panes::chord_from_evdev(chord_code(k)?, shift).map(Event::Layout)
 }
 
 fn map_key(k: egui::Key, shift: bool) -> Option<Key> {
@@ -131,6 +172,28 @@ impl eframe::App for App {
 }
 
 impl App {
+    /// The two environment-driven checks named at the top of this file (`IYAKKI_WINDOW_SHOT`, `IYAKKI_WINDOW_QUIT_AFTER`).
+    fn dev_aids(&mut self, ctx: &egui::Context, w: u32, h: u32) {
+        let up = self.started.elapsed().as_secs_f32();
+        if let Ok(path) = std::env::var("IYAKKI_WINDOW_SHOT") {
+            if up > 8.0 && !self.shot_done {
+                self.shot_done = true;
+                match iyakki_shell::camera::pixels::png_with_dpi(w, h, self.gfx.rgba(), 96.0) {
+                    Ok(png) => match std::fs::write(&path, png) {
+                        Ok(()) => eprintln!("iyakki-desktop: picture of the shell written to {path}"),
+                        Err(e) => eprintln!("iyakki-desktop: could not write {path}: {e}"),
+                    },
+                    Err(e) => eprintln!("iyakki-desktop: could not make the picture: {e}"),
+                }
+            }
+        }
+        if let Some(n) = std::env::var("IYAKKI_WINDOW_QUIT_AFTER").ok().and_then(|v| v.parse::<f32>().ok()) {
+            if up > n {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+    }
+
     fn ui_inner(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         if let Some(o) = self.other_window.clone() {
@@ -186,7 +249,9 @@ impl App {
                 egui::Event::Copy => self.shell.handle(&Event::Key(Key::Ctrl('c'))),
                 egui::Event::Cut => self.shell.handle(&Event::Key(Key::Ctrl('x'))),
                 egui::Event::Key { key, pressed: true, modifiers, .. } => {
-                    if modifiers.command && modifiers.shift && key == egui::Key::V {
+                    if let Some(chord) = layout_chord(key, modifiers.ctrl, modifiers.alt, modifiers.shift) {
+                        self.shell.handle(&chord);
+                    } else if modifiers.command && modifiers.shift && key == egui::Key::V {
                         self.shell.handle(&Event::Key(Key::Ctrl('V')));
                     } else if modifiers.command && key == egui::Key::A {
                         self.shell.handle(&Event::Key(Key::Ctrl('a')));
@@ -275,6 +340,7 @@ impl App {
             });
         }
 
+        self.dev_aids(&ctx, w, h);
         // tiny-skia pixels are premultiplied RGBA; the shell paints opaque backgrounds, so alpha is 255
         let img = egui::ColorImage::from_rgba_premultiplied([w as usize, h as usize], self.gfx.rgba());
         match &mut self.tex {
@@ -363,10 +429,22 @@ fn start_speech_probe(voice: Arc<iyakki_agent::hostvoice::HostVoice>, dir: &std:
     }
 }
 
+/// Where the window keeps its state when `IYAKKI_DEV_DIR` is not set: the platform's own place for application data.
+fn default_data_dir(home: &str) -> std::path::PathBuf {
+    let home = std::path::PathBuf::from(home);
+    if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/iyakki-dev")
+    } else {
+        home.join(".local/share/iyakki-dev")
+    }
+}
+
 fn main() -> eframe::Result {
     // a window on a development machine's desktop: the browser's full engine is the WebKitGTK helper of this checkout
     // (dist/webview/host-helper.py, drawn inside the browser's page area), or $IYAKKI_WEBVIEW_HELPER
     iyakki_agent::webengine::set_host_mode(true);
+    // the window is never cloud mode, whatever this computer's facts say (Settings, Cloud mode shows the fixed line)
+    iyakki_agent::cloudmode::set_window_mode(true);
     // speech engines already on this computer are found in the background and used for reading aloud (docs/VOICE.md)
     iyakki_agent::hostengines::enable_by_default();
     // window mode runs on a normal computer: host files (drop to import, share a folder read-only) may be offered, confined to
@@ -388,9 +466,7 @@ fn main() -> eframe::Result {
     if std::env::args().nth(1).as_deref() == Some("--mcp-tools") {
         std::process::exit(iyakki_agent::extagent::bridge::relay_stdio(&std::env::args().nth(2).unwrap_or_default()));
     }
-    let dir = std::env::var("IYAKKI_DEV_DIR").map(std::path::PathBuf::from).unwrap_or_else(|_| {
-        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".local/share/iyakki-dev")
-    });
+    let dir = std::env::var("IYAKKI_DEV_DIR").map(std::path::PathBuf::from).unwrap_or_else(|_| default_data_dir(&std::env::var("HOME").unwrap_or_else(|_| ".".into())));
     let _ = std::fs::create_dir_all(dir.join("docs/shared"));
     // every panic (this thread or any other: runs, helpers, loaders) is logged with its backtrace to <data>/crash.log
     {
@@ -426,6 +502,7 @@ fn main() -> eframe::Result {
         ai_conf: dir.join("ai.conf").display().to_string(),
         data: dir.display().to_string(),
         hwcheck: std::env::args().any(|a| a == "--hwcheck"),
+        headless: false,
     };
     // Point RAG at the dev folder unless ai.conf says otherwise.
     if !dir.join("ai.conf").exists() {
@@ -452,6 +529,46 @@ fn main() -> eframe::Result {
     let app_dir = dir.clone();
     eframe::run_native("IYAKKI", opts, Box::new(move |_| {
         iyakki_agent::hostvoice::HostVoice::current().connect(iyakki_agent::hostvoice::Front::Window);
-        Ok(Box::new(App { shell: Shell::new(env), gfx: Gfx::new(1280, 720), tex: None, started: std::time::Instant::now(), splash_done: false, splash_log: false, dir: app_dir, other_window, title: String::new() }))
+        Ok(Box::new(App { shell: Shell::new(env), gfx: Gfx::new(1280, 720), tex: None, started: std::time::Instant::now(), splash_done: false, splash_log: false, dir: app_dir, other_window, title: String::new(), shot_done: false }))
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use iyakki_shell::panes::{LayoutKey, Side};
+    use iyakki_shell::ui::Event;
+
+    #[test]
+    fn ctrl_alt_chords_become_layout_events_and_plain_keys_do_not() {
+        use eframe::egui::Key as K;
+        assert_eq!(super::layout_chord(K::ArrowLeft, true, true, false), Some(Event::Layout(LayoutKey::Snap(Side::Left))));
+        assert_eq!(super::layout_chord(K::Num2, true, true, false), Some(Event::Layout(LayoutKey::Apply(2))));
+        assert_eq!(super::layout_chord(K::Num0, true, true, false), Some(Event::Layout(LayoutKey::Picker)));
+        assert_eq!(super::layout_chord(K::Tab, true, true, false), Some(Event::Layout(LayoutKey::Cycle { back: false })));
+        assert_eq!(super::layout_chord(K::Tab, true, true, true), Some(Event::Layout(LayoutKey::Cycle { back: true })));
+        assert_eq!(super::layout_chord(K::M, true, true, false), Some(Event::Layout(LayoutKey::NextDisplay)));
+        assert!(super::layout_chord(K::ArrowLeft, true, false, false).is_none(), "Ctrl alone is unchanged");
+        assert!(super::layout_chord(K::ArrowLeft, false, true, false).is_none(), "Alt alone is unchanged");
+        assert!(super::layout_chord(K::A, true, true, false).is_none(), "letters other than M are not chords");
+    }
+
+    #[test]
+    fn every_chord_key_the_framebuffer_shell_knows_is_known_to_the_window() {
+        use eframe::egui::Key as K;
+        let keys = [K::Num1, K::Num2, K::Num3, K::Num4, K::Num5, K::Num6, K::Num7, K::Num8, K::Num9, K::Num0, K::Tab, K::M, K::ArrowUp, K::PageUp, K::ArrowLeft, K::ArrowRight, K::ArrowDown, K::PageDown];
+        for k in keys {
+            let code = super::chord_code(k).unwrap_or_else(|| panic!("{k:?}"));
+            assert!(iyakki_shell::panes::chord_from_evdev(code, false).is_some(), "{k:?} -> {code}");
+        }
+    }
+
+    #[test]
+    fn the_data_folder_follows_the_platform() {
+        let d = super::default_data_dir("/home/x");
+        if cfg!(target_os = "macos") {
+            assert_eq!(d, std::path::PathBuf::from("/home/x/Library/Application Support/iyakki-dev"));
+        } else {
+            assert_eq!(d, std::path::PathBuf::from("/home/x/.local/share/iyakki-dev"));
+        }
+    }
 }

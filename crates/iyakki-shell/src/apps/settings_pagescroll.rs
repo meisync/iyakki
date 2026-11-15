@@ -11,6 +11,7 @@ impl SettingsApp {
         match self.tab() {
             Tab::Network => self.share.open,
             Tab::Remote | Tab::Voice | Tab::SessionLog => true,
+            Tab::Browser => !self.bh.open,
             _ => false,
         }
     }
@@ -22,6 +23,7 @@ impl SettingsApp {
             Tab::Network if self.share.open => self.share.scroll = (self.share.scroll + px * s).clamp_safe(0.0, self.share.max),
             Tab::Remote => self.remote_scroll_by(px * s),
             Tab::Voice => self.vo_scroll = (self.vo_scroll + px * s).clamp_safe(0.0, self.vo_max),
+            Tab::Browser if !self.bh.open => self.bh.scroll = (self.bh.scroll + px * s).clamp_safe(0.0, self.bh.max),
             Tab::SessionLog => {
                 // lines, not pixels: a notch is three lines
                 let lines = (px / crate::scrolleng::SCREEN_NOTCH_PX * 3.0).round() as i64;
@@ -40,6 +42,7 @@ impl SettingsApp {
             Tab::Network => self.share.scroll,
             Tab::Remote => self.remote.scroll,
             Tab::Voice => self.vo_scroll,
+            Tab::Browser => self.bh.scroll,
             Tab::SessionLog => self.crash.scroll as f32,
             _ => 0.0,
         }
@@ -62,6 +65,7 @@ mod tests {
         a.share.max = 2000.0;
         a.remote.max = 2000.0;
         a.vo_max = 2000.0;
+        a.bh.max = 2000.0;
         a.crash.lines = (0..200).map(|i| format!("line {i}")).collect();
         let mut seen = 0;
         for i in 0..a.tabs().len() {
@@ -79,6 +83,6 @@ mod tests {
             a.handle(&Event::Scroll(10), &cx); // wheel up, past the top
             assert!(a.page_scroll_pos() < p1, "{t:?}: wheel up did not scroll back");
         }
-        assert_eq!(seen, 4, "Share internet, Remote access, Voice and the Session log scroll by position");
+        assert_eq!(seen, 5, "Share internet, Remote access, Voice, Browser and the Session log scroll by position");
     }
 }

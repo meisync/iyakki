@@ -13,6 +13,7 @@
 //!   slider for the keyboard (Up/Down or +/- change it by 5 %, `m`, Space or Enter mute, Esc closes). Hovering shows the percent.
 //!   Every change shows the same on-screen bar as the volume keys, and a missing output says "No sound output" instead.
 
+use crate::stale_stats::mark_stale;
 use crate::safeclamp::SafeClamp;
 use super::*;
 use crate::fnkeys::{self, VolOp};
@@ -26,6 +27,7 @@ const HOLD_TICKS: u64 = 10;
 /// Clicks of the Home and Settings icons (`Event::Tab`).
 pub(super) const HOME_TAB: usize = 0x4D10;
 pub(super) const GEAR_TAB: usize = 0x4D11;
+pub(super) const MIC_TAB: usize = 0x4D15;
 /// The three buttons in the speaker's dropdown (`Event::Tab`): louder, quieter, mute or unmute.
 const BTN_UP: usize = 0x4D12;
 const BTN_DOWN: usize = 0x4D13;
@@ -45,6 +47,8 @@ const STRIP: f32 = 56.0;
 /// first: Home is kept longest, then the speaker, then Settings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Extra {
+    /// The permanent microphone glyph: only while My IYAKKI's microphone is open or it is muted (F-VOICE-39).
+    Mic,
     Settings,
     Speaker,
     Home,
@@ -111,6 +115,7 @@ impl Speaker {
 /// Where the icons sit in the top bar: indexes for `header_button`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct BarSlots {
+    pub mic: Option<usize>,
     pub speaker: Option<usize>,
     pub settings: Option<usize>,
     /// How many icons the bar has in all.
@@ -159,18 +164,46 @@ pub(super) struct VolUi {
     pub sources: Vec<(String, u32)>,
 }
 
+thread_local! {
+    /// Tests: what the top bar shows instead of the process-wide answer (each test thread has its own, so tests do not disturb each other).
+    #[cfg(test)]
+    pub(super) static GLYPH_OVERRIDE: std::cell::Cell<Option<iyakki_agent::voiceassist::MicGlyph>> = const { std::cell::Cell::new(None) };
+}
+
+/// The glyph the bar shows now: the strongest answer of the running assistants.
+fn glyph_now() -> iyakki_agent::voiceassist::MicGlyph {
+    #[cfg(test)]
+    if let Some(g) = GLYPH_OVERRIDE.with(|c| c.get()) {
+        return g;
+    }
+    iyakki_agent::voiceassist::mic_glyph()
+}
+
+/// The colour and the words of the microphone glyph: red and "Microphone open" while it listens, amber while muted.
+pub(super) fn mic_ink_tip() -> ([u8; 4], &'static str) {
+    match glyph_now() {
+        iyakki_agent::voiceassist::MicGlyph::Listening => (rgb(255, 82, 92), "Microphone open: My IYAKKI is listening (click for the Voice tile)"),
+        _ => (rgb(255, 196, 94), "My IYAKKI is muted: the microphone stays closed (click for the Voice tile)"),
+    }
+}
+
 impl Shell {
     pub(super) fn bar_slots(&self) -> BarSlots {
-        let Some(sess) = self.session.as_ref().filter(|_| !self.panes.compact) else { return BarSlots { speaker: None, settings: None, count: 0 } };
+        self.bar_slots_with(glyph_now())
+    }
+
+    pub(super) fn bar_slots_with(&self, glyph: iyakki_agent::voiceassist::MicGlyph) -> BarSlots {
+        let Some(sess) = self.session.as_ref().filter(|_| !self.panes.compact) else { return BarSlots { mic: None, speaker: None, settings: None, count: 0 } };
         let base = 4 + usize::from(self.may_power()) + usize::from(sess.policy.allows_app(PApp::Inbox)) + usize::from(self.panes_button());
         let mut n = base;
         let mut next = |on: bool| on.then(|| {
             n += 1;
             n - 1
         });
+        let mic = next(glyph != iyakki_agent::voiceassist::MicGlyph::Off);
         let speaker = next(!self.cloud.fn_keys_off);
         let settings = next(!self.cloud.hides_app(PApp::Settings));
-        BarSlots { speaker, settings, count: n }
+        BarSlots { mic, speaker, settings, count: n }
     }
 
     fn bar_icon_rect(&self, slot: Option<usize>) -> Option<R> {
@@ -189,6 +222,7 @@ impl Shell {
         }
         let slots = self.bar_slots();
         let slot = match e {
+            Extra::Mic => slots.mic,
             Extra::Speaker => slots.speaker,
             Extra::Settings => slots.settings,
             Extra::Home => None,
@@ -213,10 +247,17 @@ impl Shell {
     /// The icons a bar shows now, left to right: Settings unless cloud mode hides it, the speaker unless cloud mode switches the
     /// sound keys off, and Home when the screen is not the tiles already (`home_applies`).
     pub(super) fn wanted_extras(&self, home_applies: bool) -> Vec<Extra> {
+        self.wanted_extras_with(glyph_now(), home_applies)
+    }
+
+    pub(super) fn wanted_extras_with(&self, glyph: iyakki_agent::voiceassist::MicGlyph, home_applies: bool) -> Vec<Extra> {
         if self.session.is_none() {
             return Vec::new();
         }
         let mut v = Vec::new();
+        if glyph != iyakki_agent::voiceassist::MicGlyph::Off {
+            v.push(Extra::Mic);
+        }
         if !self.cloud.hides_app(PApp::Settings) {
             v.push(Extra::Settings);
         }
@@ -263,6 +304,12 @@ impl Shell {
                 g.icon(Icon::Home, r.x + r.w / 2.0, r.y + r.h / 2.0, icon_px, MUTED);
                 g.hit(r, Event::Tab(HOME_TAB), "home");
             }
+            Extra::Mic => {
+                let (ink, tip) = mic_ink_tip();
+                crate::fx::chrome_button(g, r, s, hot, accent);
+                g.icon(Icon::Mic, r.x + r.w / 2.0, r.y + r.h / 2.0, icon_px, ink);
+                g.hit(r, Event::Tab(MIC_TAB), tip);
+            }
             Extra::Settings => {
                 let allowed = self.session.as_ref().is_some_and(|x| x.policy.allows_app(PApp::Settings));
                 let here = matches!(self.screen, Screen::App(_, PApp::Settings));
@@ -304,7 +351,7 @@ impl Shell {
         if let Some(f) = self.panes_focus_index() {
             self.ws_mark_dirty(f);
         }
-        self.stale = true;
+        mark_stale!(self);
     }
 
     fn has_sound_output(&self) -> bool {
@@ -323,7 +370,7 @@ impl Shell {
 
     fn vol_close(&mut self) {
         if self.vol.open || self.vol.press.is_some() {
-            self.stale = true;
+            mark_stale!(self);
         }
         self.vol = VolUi::default();
     }
@@ -338,7 +385,7 @@ impl Shell {
         now.truncate(SRC_MAX);
         if now != self.vol.sources {
             self.vol.sources = now;
-            self.stale = true;
+            mark_stale!(self);
         }
     }
 
@@ -402,7 +449,20 @@ impl Shell {
         if !matches!(self.screen, Screen::App(_, PApp::Settings)) {
             self.leave_app(); // refused: the app comes back
         }
-        self.stale = true;
+        mark_stale!(self);
+    }
+
+    /// A press at (x, y) on a clickable region closes the speaker's dropdown unless it lands on the icon or the dropdown itself
+    /// (`click` hands a press that hits a tile or a button straight to that region, so `vol_event` never sees the press).
+    pub(super) fn vol_press_outside(&mut self, x: i32, y: i32) {
+        if !self.vol.open || self.session.is_none() || self.panes.compact {
+            return;
+        }
+        let Some((icon, (w, h))) = self.extra_entry(Extra::Speaker) else { return };
+        let (panel, _) = pop_rects(icon, w, scale_for(w, h), self.vol.sources.len());
+        if !panel.contains(x, y) && !icon.contains(x, y) {
+            self.vol_close();
+        }
     }
 
     /// Pointer and key events for the speaker; true when taken.
@@ -446,7 +506,7 @@ impl Shell {
                         }
                     }
                 }
-                self.stale = true;
+                mark_stale!(self);
                 true
             }
             // a press or drag on the slider itself
@@ -454,28 +514,28 @@ impl Shell {
                 if *dx <= STRIP * s {
                     self.vol_to_y(panel.y + dy);
                 }
-                self.stale = true;
+                mark_stale!(self);
                 true
             }
             // the dropdown's buttons
             Event::Tab(t) if self.vol.open && (BTN_SRC..BTN_SRC + 2 * SRC_MAX).contains(t) => {
                 self.vol_source_step((*t - BTN_SRC) / 2, (*t - BTN_SRC) % 2 == 1);
-                self.stale = true;
+                mark_stale!(self);
                 true
             }
             Event::Tab(BTN_UP) if self.vol.open => {
                 self.fn_volume(VolOp::Up);
-                self.stale = true;
+                mark_stale!(self);
                 true
             }
             Event::Tab(BTN_DOWN) if self.vol.open => {
                 self.fn_volume(VolOp::Down);
-                self.stale = true;
+                mark_stale!(self);
                 true
             }
             Event::Tab(BTN_MUTE) if self.vol.open => {
                 self.vol_toggle_mute();
-                self.stale = true;
+                mark_stale!(self);
                 true
             }
             Event::MouseUp(..) => {
@@ -494,7 +554,7 @@ impl Shell {
                 if !self.vol.kb {
                     self.vol.open = false;
                 }
-                self.stale = true;
+                mark_stale!(self);
                 true
             }
             Event::Tick => {
@@ -504,7 +564,7 @@ impl Shell {
                 if let Some((t, _, false)) = self.vol.press {
                     if !self.vol.open && self.tick.saturating_sub(t) >= HOLD_TICKS && self.has_sound_output() {
                         self.vol.open = true; // held: show the slider
-                        self.stale = true;
+                        mark_stale!(self);
                     }
                 }
                 false
@@ -532,7 +592,7 @@ impl Shell {
                     Key::Esc | Key::Char('v') | Key::Tab | Key::BackTab => self.vol_close(),
                     _ => {}
                 }
-                self.stale = true;
+                mark_stale!(self);
                 true
             }
             // the keyboard's way to the speaker
@@ -540,7 +600,7 @@ impl Shell {
                 if self.has_sound_output() {
                     self.vol.open = true;
                     self.vol.kb = true;
-                    self.stale = true;
+                    mark_stale!(self);
                 } else {
                     self.fn_notice(fnkeys_impl::NO_SOUND);
                 }
@@ -556,6 +616,14 @@ impl Shell {
         let (w, _) = self.size;
         let allowed = self.session.as_ref().is_some_and(|x| x.policy.allows_app(PApp::Settings));
         let size = (g.width(), g.height());
+        if let Some(i) = slots.mic {
+            let r = header_button(w, s, i);
+            self.vol.rects.push(Placed { disp: self.panes_drawing_display(), extra: Extra::Mic, rect: r, size });
+            let (ink, tip) = mic_ink_tip();
+            crate::fx::chrome_button(g, r, s * 2.5, g.hovered(r), crate::fx::CYAN);
+            g.icon(Icon::Mic, r.x + r.w / 2.0, r.y + r.h / 2.0, 22.0 * s, ink);
+            g.hit(r, Event::Tab(MIC_TAB), tip);
+        }
         if let Some(i) = slots.settings {
             let r = header_button(w, s, i);
             self.vol.rects.push(Placed { disp: self.panes_drawing_display(), extra: Extra::Settings, rect: r, size });
@@ -652,6 +720,12 @@ impl Shell {
                             vec![("Settings".to_string(), false), ("Models, network, sound, display and more (s on the home screen)".to_string(), false)]
                         };
                         draw_clock_tip(g, w, h, s, icon, &lines);
+                    }
+                }
+                Extra::Mic => {
+                    if g.hovered(icon) {
+                        let (_, tip) = mic_ink_tip();
+                        draw_clock_tip(g, w, h, s, icon, &[("My IYAKKI".to_string(), false), (tip.to_string(), false)]);
                     }
                 }
                 Extra::Home => {

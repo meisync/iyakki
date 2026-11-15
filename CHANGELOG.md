@@ -12,6 +12,19 @@ listed in [KNOWN-ISSUES.md](KNOWN-ISSUES.md); an item below is not a promise tha
 
 Nothing yet.
 
+## [0.1.0-alpha.3] - 2026-11-16
+
+Prepared on 2026-11-12 from the commits since the alpha.2 release commit; the version in `Cargo.toml` and the date are set when the release is cut. The full account, with
+where each item was tried (real machines, a real model, a real browser, or only fakes), is [RELEASE-NOTES-0.1.0-alpha.3.md](RELEASE-NOTES-0.1.0-alpha.3.md). Rows and tests: [FEATURES.md](FEATURES.md).
+
+- **Updates and the image.** Layered root and update pack format 2 (keep, delta or full per layer; old devices refuse it before staging; QEMU only), `--lean-image` release, legacy-BIOS write for a shared disk.
+- **Screen and idle machine.** Mac profile chords (Ctrl+Cmd+Q signs out after a confirm card, Ctrl+Cmd+L locks), own cameras closed on leaving the tile, idle Home redraws every 500 ms, screen saver Stars and Photos and a start-now chord, desktop views, experimental compressed memory and boot-order prefetch.
+- **Network, files and developer mode.** Broadcom BCM4360 Macs: plain "no driver" message, no `b43` probe; resumable downloads; Bluetooth tether reconnect; firewall counters and nf_tables sets; SSH server ciphers and key types, interactive SSH in the CLI tile; UPnP/DLNA media server and zip download for shared folders; `iyakki dev shell --tty`; web service `api:*` scopes; outbound-only network for Linux sandboxes; `iyakki backup` and `iyakki doctor`.
+- **Browser and PDF.** Bookmark folders, history search, text-only zoom, start page pictures, streamed downloads and uploads, a uBlock-filters button, script engine layout/observer/canvas-stub work found by a live-site probe; PDF text selection, compressed PDF writing, `pdf_create`, TALES and LEARN PDF export.
+- **Assistant and apps.** More Settings pages reachable by chat, SDK 1.2 (bridge v2), live-model checks on a Lemonade server, flow assist kill switch, last-session log copy, a real-browser harness (`dist/browsertest`).
+- **Security.** Home folders 0700 and diagnostics/downloads/screenshots 0600 (KI-095), netrc entries caught by the chat input guard.
+- **Experimental, off by default.** Connect a client (browser page and `iyakki-connect window`), core access model, custom request headers in the full engine (not compiled against the real headers), wake phrase.
+
 ## [0.1.0-alpha.2] - 2026-11-10
 
 **Highlights since alpha.1 (2026-10-29 to 2026-11-10).** Each line says where it was tried. "Tried on the Mac mini" means a person or the

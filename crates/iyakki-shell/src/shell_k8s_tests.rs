@@ -15,6 +15,7 @@ fn the_k8s_tile_is_registered_once_in_the_build_group_for_the_roles_that_have_th
     assert_eq!(Group::of(PApp::K8s), Some(Group::Work));
     assert_eq!(PApp::K8s.id(), "k8s");
     assert_eq!(PApp::K8s.label(), "K8S");
+    assert!(matches!(cloudmode::app_class(PApp::K8s), Class::Remote), "the K8S tile needs no local hardware, so it stays in Cloud mode");
     for r in [Role::Admin, Role::Operator, Role::User] {
         assert!(r.template().apps.contains(&PApp::K8s), "{r:?}: the IDE's cluster tab is for them, so the K8S tile is too");
         assert!(r.template().apps.contains(&PApp::Ide), "{r:?}");

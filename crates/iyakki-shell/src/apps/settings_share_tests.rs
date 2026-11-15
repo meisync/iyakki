@@ -488,3 +488,17 @@ fn the_hotspot_name_and_password_are_changed_from_the_page_checked_audited_witho
     assert!(u.hotspot_wifi_submit(&user, &form("Evil", "evil password")).is_err());
     assert_eq!(mem.hotspot().unwrap().0, "Cafe");
 }
+
+#[test]
+fn the_wifi_line_says_why_there_is_no_hotspot_in_the_radios_own_words() {
+    let cx = admin("share-why");
+    let (mut a, b) = page(&cx, machine());
+    b.set_wifi_why(Some("This Wi-Fi card cannot work as an access point (its driver does not offer that mode)."));
+    let t = draw(&mut a, &cx, 1280, 960);
+    assert!(t.contains("Wi-Fi hotspot: not available. This Wi-Fi card cannot work as an access point"), "{t}");
+    assert!(!t.contains("not available on this build"), "{t}");
+    // a backend that cannot say keeps the old short line
+    b.set_wifi_why(None);
+    let t = draw(&mut a, &cx, 1280, 960);
+    assert!(t.contains("Wi-Fi hotspot: not available on this build"), "{t}");
+}

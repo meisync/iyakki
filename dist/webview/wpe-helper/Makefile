@@ -16,7 +16,7 @@ media-probe.h: media-probe.js
 dev-probe.h: dev-probe.js
 	sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' dev-probe.js > $@
 
-webview-helper: helper.c proto.h micscan.h media-probe.h dev-probe.h
+webview-helper: helper.c proto.h extsnap.h micscan.h media-probe.h dev-probe.h
 	$(CC) $(CFLAGS) $(LDFLAGS) -Wl,--strip-debug -o $@ helper.c $(LDLIBS)
 
 # The shared camera: a GStreamer plugin the web process loads (camshare.c). The engine opens one source per getUserMedia call and a
@@ -49,12 +49,26 @@ WEBSINKLIBS = $(shell $(PKG_CONFIG) --libs $(WEBSINKPKGS))
 libgstiyakkiwebsink.so: websink.c
 	$(CC) $(CFLAGS) $(WEBSINKCFLAGS) $(LDFLAGS) -shared -fPIC -Wl,--strip-debug -o $@ websink.c $(WEBSINKLIBS)
 
+# The web process extension (webext.c, parsing and matching in extsnap.h): custom request headers and later browser extensions, loaded
+# into every WPE web process from /usr/lib/iyakki/webext. The extension API package is named wpe-web-extension-2.0 in new WPE
+# WebKit and wpe-web-process-extension-2.0 in older ones; the first that exists is used. Not yet built against a real WPE.
+WEBEXTPKG = $(shell $(PKG_CONFIG) --exists wpe-web-extension-2.0 && echo wpe-web-extension-2.0 || echo wpe-web-process-extension-2.0)
+WEBEXTPKGS = $(WEBEXTPKG) wpe-webkit-2.0 libsoup-3.0 glib-2.0 gmodule-2.0
+WEBEXTCFLAGS = $(shell $(PKG_CONFIG) --cflags $(WEBEXTPKGS))
+WEBEXTLIBS = $(shell $(PKG_CONFIG) --libs $(WEBEXTPKGS))
+libiyakkiwebext.so: webext.c extsnap.h
+	$(CC) $(CFLAGS) $(WEBEXTCFLAGS) $(LDFLAGS) -shared -fPIC -Wl,--strip-debug -o $@ webext.c $(WEBEXTLIBS)
+
 mic-check: mic-check.c micshare.c micscan.h devlist.h
 	$(CC) $(CFLAGS) $(MICCFLAGS) $(LDFLAGS) -o $@ mic-check.c $(MICLIBS)
 
 # `make check`: the mode choice and the sharing, against a test camera made of videotestsrc (needs GStreamer, no camera)
 camshare-check: camshare-check.c camshare.c devlist.h
 	$(CC) $(CFLAGS) $(GSTCFLAGS) $(LDFLAGS) -o $@ camshare-check.c $(GSTLIBS) -lm
+# ext-check: extsnap.h against a snapshot and cases written by the Rust side (run by cargo test -p iyakki-agent, browserext)
+ext-check: ext-check.c extsnap.h
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ ext-check.c
+
 check: camshare-check mic-check
 	./camshare-check
 	./mic-check
@@ -71,10 +85,13 @@ install-websink: libgstiyakkiwebsink.so
 install-mp3: libgstiyakkimp3.so
 	install -D -m 0755 libgstiyakkimp3.so $(DESTDIR)/usr/lib/gstreamer-1.0/libgstiyakkimp3.so
 
+install-webext: libiyakkiwebext.so
+	install -D -m 0755 libiyakkiwebext.so $(DESTDIR)/usr/lib/iyakki/webext/libiyakkiwebext.so
+
 install-mic: libgstiyakkimic.so
 	install -D -m 0755 libgstiyakkimic.so $(DESTDIR)/usr/lib/gstreamer-1.0/libgstiyakkimic.so
 
 clean:
-	rm -f webview-helper media-probe.h dev-probe.h libgstiyakkicamshare.so camshare-check libgstiyakkimic.so mic-check libgstiyakkimp3.so libgstiyakkiwebsink.so
+	rm -f libiyakkiwebext.so ext-check webview-helper media-probe.h dev-probe.h libgstiyakkicamshare.so camshare-check libgstiyakkimic.so mic-check libgstiyakkimp3.so libgstiyakkiwebsink.so
 
-.PHONY: install install-camshare install-mic install-mp3 install-websink check clean
+.PHONY: install-webext install install-camshare install-mic install-mp3 install-websink check clean

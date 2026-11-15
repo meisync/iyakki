@@ -22,6 +22,10 @@ pub struct Up {
     pub bssid: String,
 }
 
+fn settings_country_ok(c: &str) -> bool {
+    iyakki_hotspot::rsn::valid_country(c)
+}
+
 fn sysfs(path: &str) -> Option<String> {
     std::fs::read_to_string(path).ok().map(|s| s.trim().to_string())
 }
@@ -51,18 +55,27 @@ pub fn handshake_mode() -> HandshakeMode {
     }
 }
 
-/// The beacon pieces for a 2.4 GHz network: head with the name and channel, tail with the rates and the WPA2 element.
+/// The beacon pieces for a network on the channel `freq` (2.4 or 5 GHz, the band follows from the frequency): head with the name
+/// and channel, tail with the rates and the WPA2 element.
 pub fn params(ifindex: u32, bssid: [u8; 6], ssid: &str, channel: u32, freq: u32, pmk: [u8; 32]) -> ApParams {
+    params_with_security(ifindex, bssid, ssid, channel, freq, pmk, iyakki_hotspot::rsn::SecurityMode::Wpa2)
+}
+
+/// The same with the security the beacon announces (WPA2, WPA2/WPA3 or WPA3, see [`iyakki_hotspot::rsn`]). Only the description in
+/// the beacon changes: whoever starts a WPA3 network must also run the SAE exchange (a card that does it itself).
+pub fn params_with_security(ifindex: u32, bssid: [u8; 6], ssid: &str, channel: u32, freq: u32, pmk: [u8; 32], mode: iyakki_hotspot::rsn::SecurityMode) -> ApParams {
     let ch = channel as u8;
+    let band = mgmt::band_for_freq(freq);
+    let rsn = iyakki_hotspot::rsn::rsn_ie(mode);
     ApParams {
         ifindex,
         ssid: ssid.as_bytes().to_vec(),
         freq_mhz: freq,
         beacon_interval_tu: 100,
         dtim_period: 2,
-        beacon_head: mgmt::beacon_head(bssid, ssid.as_bytes(), 100, mgmt::Band::G24, ch),
-        beacon_tail: mgmt::beacon_tail(mgmt::Band::G24),
-        probe_resp: mgmt::probe_response(bssid, ssid.as_bytes(), 100, mgmt::Band::G24, ch),
+        beacon_head: mgmt::beacon_head(bssid, ssid.as_bytes(), 100, band, ch),
+        beacon_tail: mgmt::beacon_tail_with(band, &rsn),
+        probe_resp: mgmt::probe_response_with(bssid, ssid.as_bytes(), 100, band, ch, &rsn),
         inactivity_secs: 0,
         pmk: Some(pmk),
     }
@@ -96,7 +109,24 @@ fn choose_plan(c: &caps::PhyCaps, band_pref: &str, sta_freq: Option<u32>, countr
 /// How long the access point waits for the Wi-Fi client to join its network (one channel for both).
 const STA_WAIT_SECS: u32 = 15;
 
-pub fn start(client: &str, ssid: &str, passphrase: &str, band_pref: &str, client_paused: bool, log: &mut dyn FnMut(String)) -> Result<Up, String> {
+/// The security the beacon announces: what the person asked for, but only when this computer does not run the handshake itself. The
+/// host handshake is the WPA2 one (the SAE exchange is not written), so announcing WPA3 there would make every phone fail to join.
+pub fn effective_security(wanted: &str, c: &caps::PhyCaps, host_handshake: bool) -> (iyakki_hotspot::rsn::SecurityMode, Option<String>) {
+    use iyakki_hotspot::rsn::{choose_security, SecurityMode};
+    let want = match wanted {
+        "transition" => SecurityMode::Transition,
+        "wpa3" => SecurityMode::Wpa3,
+        _ => return (SecurityMode::Wpa2, None),
+    };
+    if host_handshake {
+        return (SecurityMode::Wpa2, Some("this version runs the handshake on the computer and cannot do the WPA3 exchange there, so the hotspot uses WPA2".into()));
+    }
+    let (m, why) = choose_security(c, want);
+    (m, why.map(String::from))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn start(client: &str, ssid: &str, passphrase: &str, band_pref: &str, country: &str, security: &str, client_paused: bool, log: &mut dyn FnMut(String)) -> Result<Up, String> {
     settings::validate_ssid(ssid).map_err(|e| format!("the network name: {e:?}"))?;
     settings::validate_passphrase(passphrase).map_err(|e| format!("the password: {e:?}"))?;
     let phy_name = sysfs(&format!("/sys/class/net/{client}/phy80211/name")).ok_or_else(|| format!("{client} is not a Wi-Fi interface"))?;
@@ -108,7 +138,18 @@ pub fn start(client: &str, ssid: &str, passphrase: &str, band_pref: &str, client
         let ext = nl.0.borrow().last_ext_ack().map(|t| format!(" ({t})")).unwrap_or_default();
         format!("{what}: {e}{ext}")
     };
-    let pr = probe(&mut nl.0.borrow_mut()).map_err(|e| e.to_string())?;
+    let mut pr = probe(&mut nl.0.borrow_mut()).map_err(|e| e.to_string())?;
+    if settings_country_ok(country) && pr.country != country {
+        match crate::nl80211_os::set_country(&mut nl.0.borrow_mut(), country) {
+            Ok(()) => {
+                log(format!("hotspot: asked the radio to use the rules of {country}"));
+                if let Ok(p2) = probe(&mut nl.0.borrow_mut()) {
+                    pr = p2;
+                }
+            }
+            Err(e) => log(format!("hotspot: the country {country} was not accepted: {e}")),
+        }
+    }
     let c = pr.phys.iter().find(|p| p.name == phy_name).ok_or("the kernel lists no radio for this interface")?;
     // at start-up the access point may come before the client has joined the router: give it a few seconds, so both end on one channel
     let mut sta_freq = None;
@@ -152,8 +193,13 @@ pub fn start(client: &str, ssid: &str, passphrase: &str, band_pref: &str, client
     }
     let pmk = kdf::pmk_from_passphrase(passphrase, ssid.as_bytes());
     // host mode: no PMK in the start, so the driver expects us to install keys; the runner follows every (re)start of the access point
+    let (sec, sec_why) = effective_security(security, c, hs == HandshakeMode::Host);
+    if let Some(w) = sec_why {
+        log(format!("hotspot: {w}"));
+    }
+    log(format!("hotspot: security announced: {}", sec.label()));
     let mk = |ch: u32, f: u32| {
-        let mut p = params(ifindex, bssid, ssid, ch, f, pmk);
+        let mut p = params_with_security(ifindex, bssid, ssid, ch, f, pmk, sec);
         if hs == HandshakeMode::Host {
             p.pmk = None;
         }
@@ -269,6 +315,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn wpa3_is_announced_only_when_the_card_runs_the_exchange_and_the_computer_does_not_run_the_handshake() {
+        use iyakki_hotspot::rsn::SecurityMode::*;
+        let mut sae = caps::PhyCaps::default();
+        sae.ext_features = vec![0xff; 16];
+        let plain = caps::PhyCaps::default();
+        assert_eq!(effective_security("wpa2", &sae, false), (Wpa2, None));
+        assert_eq!(effective_security("anything", &sae, false), (Wpa2, None));
+        assert_eq!(effective_security("wpa3", &sae, false), (Wpa3, None));
+        assert_eq!(effective_security("transition", &sae, false), (Transition, None));
+        assert_eq!(effective_security("wpa3", &plain, false).0, Wpa2);
+        assert!(effective_security("wpa3", &plain, false).1.unwrap().contains("WPA2"));
+        let (m, why) = effective_security("transition", &sae, true);
+        assert_eq!(m, Wpa2);
+        assert!(why.unwrap().contains("handshake"));
+    }
+
+    #[test]
     fn the_start_carries_the_key_the_name_and_the_wpa2_element() {
         let pmk = kdf::pmk_from_passphrase("correct horse", b"IYAKKI-1A2B");
         let p = params(9, [2, 0, 0, 0, 0, 1], "IYAKKI-1A2B", 6, 2437, pmk);
@@ -279,6 +342,23 @@ mod tests {
     }
 
     #[test]
+    fn a_five_ghz_channel_gets_the_five_ghz_beacon_and_wpa3_changes_only_the_announced_element() {
+        let pmk = [7u8; 32];
+        let p24 = params(9, [2, 0, 0, 0, 0, 1], "IYAKKI-1A2B", 6, 2437, pmk);
+        let p5 = params(9, [2, 0, 0, 0, 0, 1], "IYAKKI-1A2B", 36, 5180, pmk);
+        assert_ne!(p24.beacon_head, p5.beacon_head);
+        let ids = |b: &[u8], at: usize| mgmt::elements(&b[at..]).unwrap_or_default().iter().map(|(i, _)| *i).collect::<Vec<u8>>();
+        assert!(ids(&p24.beacon_head, 36).contains(&3), "2.4 GHz names its channel (DS parameter set)");
+        assert!(!ids(&p5.beacon_head, 36).contains(&3), "5 GHz has no DS parameter set");
+        assert!(!ids(&p5.beacon_tail, 0).contains(&42) && !ids(&p5.beacon_tail, 0).contains(&50), "no ERP and no extended rates on 5 GHz");
+        assert_eq!(p5.freq_mhz, 5180);
+        let p3 = params_with_security(9, [2, 0, 0, 0, 0, 1], "IYAKKI-1A2B", 36, 5180, pmk, iyakki_hotspot::rsn::SecurityMode::Wpa3);
+        let rsn3 = iyakki_hotspot::rsn::rsn_ie(iyakki_hotspot::rsn::SecurityMode::Wpa3);
+        assert!(p3.beacon_tail.ends_with(&rsn3) && p3.probe_resp.ends_with(&rsn3));
+        assert_eq!(p3.beacon_head, p5.beacon_head);
+    }
+
+    #[test]
     fn the_host_handshake_is_the_default() {
         assert_eq!(handshake_mode(), HandshakeMode::Host);
     }
@@ -286,9 +366,9 @@ mod tests {
     #[test]
     fn a_bad_name_or_password_is_refused_before_anything_is_touched() {
         let mut l = |_: String| {};
-        assert!(start("wlan0", "", "longenough1", "auto", false, &mut l).is_err());
-        assert!(start("wlan0", "ok", "short", "auto", false, &mut l).is_err());
-        assert!(start("not-a-wifi-interface-xyz", "ok", "longenough1", "auto", false, &mut l).unwrap_err().contains("not a Wi-Fi interface"));
+        assert!(start("wlan0", "", "longenough1", "auto", "", "wpa2", false, &mut l).is_err());
+        assert!(start("wlan0", "ok", "short", "auto", "", "wpa2", false, &mut l).is_err());
+        assert!(start("not-a-wifi-interface-xyz", "ok", "longenough1", "auto", "", "wpa2", false, &mut l).unwrap_err().contains("not a Wi-Fi interface"));
     }
 
     use caps::{Band, Channel, IfComb, IfLimit, PhyCaps};

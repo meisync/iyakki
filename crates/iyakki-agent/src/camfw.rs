@@ -249,6 +249,7 @@ pub fn fetch_range(st: &dyn iyakki_proxy::Streamer, policy: &crate::macrecovery:
         if have < want {
             match fetch_once(st, policy, url, source_bytes, part, dest, have, say, cancel) {
                 Ok(()) => {}
+                Err(Retry::Again(e)) if iyakki_proxy::guard::is_no_network(&e) => return Err(e),
                 Err(Retry::Again(e)) => {
                     last_err = e;
                     continue;

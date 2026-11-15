@@ -146,12 +146,14 @@ fn an_administrator_chooses_an_output_it_is_saved_audited_and_automatic_comes_ba
     a.apply_pick(&cx, PickKind::SoundOutput, item);
     a.modal = None;
     assert_eq!(cx.services.sound_settings().output, "PCH:7");
-    assert!(status(&a).contains("Sound output: HDMI 2"), "{}", status(&a));
+    // a port with no monitor is the person's choice, kept in the settings, but nothing plays into a dead pin while the monitor's
+    // port can: the sound stays on the monitor until a monitor is on the chosen port
+    assert!(status(&a).contains("Sound output: HDMI: PDM-15T"), "{}", status(&a));
     assert!(cx.audit.recent(10).iter().any(|l| l.contains("settings.sound.output") && l.contains("PCH:7")));
     let r = rows(&mut a, &cx);
-    assert_eq!(r[0].title, "Sound output · chosen");
-    assert_eq!(r[0].chips[0].0, "CHOSEN");
-    assert_eq!(r.iter().find(|x| x.title.starts_with("HDMI 2")).unwrap().chips[0].0, "IN USE");
+    assert_eq!(r[0].chips[0].0, "AUTO", "the chosen port has no monitor: the next choice plays");
+    assert!(r[0].sub.contains("no monitor connected now"), "{}", r[0].sub);
+    assert_eq!(r.iter().find(|x| x.title == "HDMI: PDM-15T").unwrap().chips[0].0, "IN USE");
     // Enter on an output row uses it; Automatic from the list goes back to following what is connected
     select(&mut a, &cx, |x| x.title == "HDMI: PDM-15T");
     key(&mut a, &cx, Key::Enter);
@@ -348,6 +350,7 @@ fn the_advanced_sound_rows_toggle_with_a_and_the_boost_and_the_hardware_answer_a
 }
 
 #[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "the mixer switch follows the Linux sound system, which a Mac does not have")]
 fn the_mixer_switch_is_a_row_with_its_explanation_saved_by_enter_the_button_or_m_and_only_for_administrators() {
     let _route = iyakki_agent::mixer::exclusive_route(); // asserts what the process-wide switch is
     let cx = admin("snd-mix");
@@ -399,6 +402,7 @@ fn the_mixer_switch_is_a_row_with_its_explanation_saved_by_enter_the_button_or_m
 }
 
 #[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "the mixer switch follows the Linux sound system, which a Mac does not have")]
 fn the_mixer_setting_survives_a_save_and_a_load_and_old_files_have_it_off() {
     let _route = iyakki_agent::mixer::exclusive_route(); // asserts what the process-wide switch is
     let cx = admin("snd-mixrt");
@@ -466,8 +470,12 @@ fn the_browser_route_switch_is_off_by_default_says_what_is_true_needs_the_mixer_
     let _ = std::fs::remove_dir_all(d);
 }
 
+/// The offset is also a process-wide value in the agent, so the tests that set it take turns.
+static HIGHLIGHT_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn the_highlight_timing_offset_is_an_advanced_row_stepped_by_plus_and_minus_set_to_zero_by_enter_and_kept_within_500_ms() {
+    let _turn = HIGHLIGHT_TURN.lock().unwrap_or_else(|e| e.into_inner());
     let cx = admin("snd-hl");
     let (env, d) = mac_mini("snd-hl", true);
     let mut a = SettingsApp::new(&cx).with_hardware(env);
@@ -496,4 +504,66 @@ fn the_highlight_timing_offset_is_an_advanced_row_stepped_by_plus_and_minus_set_
     assert_eq!(old.highlight_offset_ms, 0);
     assert!(iyakki_agent::audioout::SoundSettings { highlight_offset_ms: 900, ..Default::default() }.validate().is_err());
     let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
+fn the_highlight_timing_offset_has_a_slider_is_audited_is_refused_to_others_and_survives_a_restart() {
+    let _turn = HIGHLIGHT_TURN.lock().unwrap_or_else(|e| e.into_inner());
+    let cx = admin("snd-hl2");
+    let (env, d) = mac_mini("snd-hl2", true);
+    let mut a = SettingsApp::new(&cx).with_hardware(env.clone());
+    goto(&mut a, &cx, Tab::Sound);
+    key(&mut a, &cx, Key::Char('A'));
+    let row = rows(&mut a, &cx).iter().position(|r| matches!(r.target, Target::SoundHighlightOffset)).expect("the row");
+    // the slider track takes clicks (drawn on a tall page so the row is on it): the ends are the limits, every click lands on a 25 ms step
+    select(&mut a, &cx, |r| matches!(r.target, Target::SoundHighlightOffset));
+    let g = draw(&mut a, &cx, 1280, 1800);
+    assert!(g.hits.iter().any(|h| h.ev == Event::Area(SLIDER_HW + row)), "the offset track takes clicks");
+    let w = a.slider_w.iter().find(|(i, _)| *i == SLIDER_HW + row).unwrap().1;
+    a.handle(&Event::AreaAt(SLIDER_HW + row, w * 0.75, 5.0), &cx);
+    assert_eq!(cx.services.sound_settings().highlight_offset_ms, 250, "three quarters along is +250 ms");
+    a.handle(&Event::AreaAt(SLIDER_HW + row, w * 0.01, 5.0), &cx);
+    assert_eq!(cx.services.sound_settings().highlight_offset_ms, -500);
+    a.handle(&Event::AreaAt(SLIDER_HW + row, w * 0.99, 5.0), &cx);
+    assert_eq!(cx.services.sound_settings().highlight_offset_ms, 500);
+    a.handle(&Event::AreaAt(SLIDER_HW + row, w * 0.5 + 3.0, 5.0), &cx);
+    assert_eq!(cx.services.sound_settings().highlight_offset_ms % 25, 0, "a click lands on a step");
+    // each change is one audit line with the value
+    key(&mut a, &cx, Key::Char('+'));
+    let audit = cx.audit.recent(20);
+    let n = audit.iter().filter(|l| l.contains("settings.sound.highlight_offset")).count();
+    assert!(n >= 5, "every change is audited: {audit:?}");
+    assert!(audit.iter().any(|l| l.contains("settings.sound.highlight_offset") && l.contains("500")), "{audit:?}");
+    // a person who is not an administrator changes nothing, from the keys or from the slider, and it says why
+    let before = cx.services.sound_settings().highlight_offset_ms;
+    let mut ucx = admin("snd-hl2u");
+    ucx.services = cx.services.clone();
+    ucx.session.user = "bob".into();
+    ucx.session.role = iyakki_sec::policy::Role::User;
+    ucx.session.policy = iyakki_sec::policy::Role::User.template();
+    let mut b = SettingsApp::new(&ucx).with_hardware(env);
+    b.tabs.push(Tab::Sound);
+    b.tab = b.tabs.len() - 1;
+    b.sound_set_highlight_offset(&ucx, -100);
+    assert_eq!(cx.services.sound_settings().highlight_offset_ms, before);
+    assert!(status(&b).contains("Only administrators can change the highlight timing offset"), "{}", status(&b));
+    assert!(!cx.audit.recent(40).iter().any(|l| l.contains("bob") && l.contains("highlight_offset")), "a refused change leaves no audit line of a change");
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
+fn the_highlight_timing_offset_is_kept_in_the_machines_settings_file_and_read_again_after_a_restart() {
+    let _turn = HIGHLIGHT_TURN.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = temp_dir("snd-hl3-svc");
+    let first = services_in(&dir, Arc::new(Offline));
+    first.on_login("root", "rootpass12", true);
+    assert_eq!(first.sound_settings().highlight_offset_ms, 0);
+    first.update_sound(|s| s.highlight_offset_ms = -125).unwrap();
+    drop(first);
+    let again = services_in(&dir, Arc::new(Offline));
+    again.on_login("root", "rootpass12", true);
+    assert_eq!(again.sound_settings().highlight_offset_ms, -125, "the value is read back from the settings file");
+    // a machine setting: another person signing in on the same machine sees the same value
+    again.on_login("bob", "bobpass1234", false);
+    assert_eq!(again.sound_settings().highlight_offset_ms, -125);
 }

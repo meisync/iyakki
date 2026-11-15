@@ -17,9 +17,11 @@ use std::sync::Arc;
 
 use iyakki_sec::policy::Policy;
 
+pub mod approvals;
 pub mod author;
 pub mod authtools;
 pub mod builtin;
+pub mod bundle;
 pub mod catalog;
 pub mod compcli;
 pub mod compmanifest;
@@ -43,6 +45,12 @@ pub mod publish;
 pub mod revocation;
 pub mod tile;
 pub mod tilehub;
+pub mod sdkv2;
+pub mod sdkv2_backends;
+pub mod sdkv2_engines;
+pub mod wizardhook;
+pub mod sdkv2_media;
+pub mod sdkv2_money;
 pub mod tilesdk;
 pub mod server;
 pub mod server_http;
@@ -83,12 +91,14 @@ pub struct Store {
     clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     /// How long an updated MCP server has to start and answer (tests make it short).
     pub(crate) check_timeout_ms: u64,
+    /// The folder that holds every person's home for flows that arrive in a bundle (`<home>/Flows`); `None` is the real home folder of the person (tests give a temporary one).
+    pub(crate) flows_home: Option<PathBuf>,
 }
 
 impl Store {
     /// The store of the system whose data folder is `data_dir` (files go in `<data_dir>/store`).
     pub fn open(data_dir: &Path) -> Store {
-        Store { dir: data_dir.join("store"), roots: Roots::pinned(), clock: Arc::new(crate::clock::now_unix), check_timeout_ms: lifecycle::MCP_CHECK_SECS * 1000 }
+        Store { dir: data_dir.join("store"), roots: Roots::pinned(), clock: Arc::new(crate::clock::now_unix), check_timeout_ms: lifecycle::MCP_CHECK_SECS * 1000, flows_home: None }
     }
 
     pub fn for_services(svc: &Services) -> Store {
@@ -102,6 +112,11 @@ impl Store {
 
     pub fn with_check_timeout(mut self, ms: u64) -> Store {
         self.check_timeout_ms = ms;
+        self
+    }
+
+    pub fn with_flows_home(mut self, home: PathBuf) -> Store {
+        self.flows_home = Some(home);
         self
     }
 
@@ -697,6 +712,9 @@ mod tile_tests;
 mod tilesdk_tests;
 
 #[cfg(test)]
+mod sdkv2_tests;
+
+#[cfg(test)]
 mod publish_tests;
 
 #[cfg(test)]
@@ -714,3 +732,6 @@ mod private_tests;
 
 #[cfg(test)]
 mod lifecycle_tests;
+
+#[cfg(test)]
+mod bundle_tests;

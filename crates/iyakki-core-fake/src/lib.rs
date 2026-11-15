@@ -2,8 +2,16 @@
 //! Implements [`Sysinfo`] and [`HostApi`] today; each slice of docs/development/UI-OS-SPLIT-PLAN.md adds its trait here.
 
 pub mod contract;
+mod crashlog;
+mod netscan;
+mod hardware;
+mod memory;
+pub use crashlog::FakeCrashLog;
+pub use netscan::FakeNetScan;
+pub use hardware::FakeHardware;
+pub use memory::FakeMemory;
 
-use iyakki_core_api::{ApiError, ApiResult, Capabilities, HostApi, Identity, LoadAvg, MemInfo, Sysinfo, Uptime};
+use iyakki_core_api::{Audio, PlaybackVolume, SoundCard, BlockDev, Disks, Mount, Net, NetCounters, ApiError, ApiResult, Capabilities, HostApi, Identity, LoadAvg, MemInfo, Sysinfo, Uptime};
 use iyakki_sec::policy::Policy;
 use std::sync::Mutex;
 
@@ -16,6 +24,16 @@ pub struct Canned {
     pub loadavg: Option<LoadAvg>,
     pub product_name: Option<String>,
     pub cpu_count: Option<u32>,
+    pub block_devices: Option<Vec<BlockDev>>,
+    pub mounts: Option<Vec<Mount>>,
+    pub interfaces: Option<Vec<NetCounters>>,
+    pub space: Option<(u64, u64)>,
+    /// The data drive is gone: every failure message is reworded to this text (`None`: unchanged, a healthy drive).
+    pub drive_gone: Option<String>,
+    pub ipv4: Option<Vec<(String, String)>>,
+    pub sound_cards: Option<Vec<SoundCard>>,
+    /// The playback volume every card has in the fake (`set_volume` and `change_volume` move it).
+    pub volume: Option<PlaybackVolume>,
     pub env: String,
     pub net: String,
     pub wasm_result: Result<String, String>,
@@ -33,6 +51,14 @@ impl Default for Canned {
             loadavg: Some(LoadAvg { one: 0.25, five: 0.2, fifteen: 0.1 }),
             product_name: Some("Test Machine".into()),
             cpu_count: Some(4),
+            block_devices: Some(vec![BlockDev { name: "sda".into(), size_bytes: 64_000_000_000, major: 8, minor: 0 }]),
+            mounts: Some(vec![Mount { source: "/dev/sda1".into(), target: "/".into(), fstype: "ext4".into(), read_only: false }]),
+            interfaces: Some(vec![NetCounters { name: "eth0".into(), ..Default::default() }]),
+            space: Some((50_000_000_000, 100_000_000_000)),
+            drive_gone: None,
+            ipv4: Some(vec![("lo".into(), "127.0.0.1".into()), ("eth0".into(), "192.168.1.20".into())]),
+            sound_cards: Some(vec![SoundCard { index: 0, name: "PCH".into(), long_name: "HDA Intel PCH".into() }]),
+            volume: Some(PlaybackVolume { control: "Master".into(), percent: 40, muted: false }),
             env: "baremetal".into(),
             net: "eth0 Ethernet".into(),
             wasm_result: Ok("ok".into()),
@@ -47,6 +73,10 @@ impl Default for Canned {
 pub struct FakeOs {
     canned: Mutex<Canned>,
     calls: Mutex<Vec<String>>,
+    memory: std::sync::Arc<FakeMemory>,
+    hardware: std::sync::Arc<FakeHardware>,
+    crashlog: std::sync::Arc<FakeCrashLog>,
+    netscan: std::sync::Arc<FakeNetScan>,
 }
 
 impl FakeOs {
@@ -54,7 +84,7 @@ impl FakeOs {
         FakeOs::default()
     }
     pub fn with(canned: Canned) -> FakeOs {
-        FakeOs { canned: Mutex::new(canned), calls: Mutex::new(vec![]) }
+        FakeOs { canned: Mutex::new(canned), calls: Mutex::new(vec![]), memory: Default::default(), hardware: Default::default(), crashlog: Default::default(), netscan: Default::default() }
     }
     /// Change the canned answers while a test runs.
     pub fn set(&self, f: impl FnOnce(&mut Canned)) {
@@ -63,6 +93,22 @@ impl FakeOs {
     /// Every call so far, in order, as `method` or `method(argument)`.
     pub fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().clone()
+    }
+    /// The memory part of this fake, to set figures and read what the page did.
+    pub fn memory_fake(&self) -> std::sync::Arc<FakeMemory> {
+        self.memory.clone()
+    }
+    /// The network-scan part of this fake (subnets, the hosts it finds, the calls).
+    pub fn netscan_fake(&self) -> std::sync::Arc<FakeNetScan> {
+        self.netscan.clone()
+    }
+    /// The kept-logs part of this fake (a note, files with lines, the calls).
+    pub fn crashlog_fake(&self) -> std::sync::Arc<FakeCrashLog> {
+        self.crashlog.clone()
+    }
+    /// The hardware part of this fake (links, radios, brightness, cards, Bluetooth).
+    pub fn hardware_fake(&self) -> std::sync::Arc<FakeHardware> {
+        self.hardware.clone()
     }
     pub fn clear_calls(&self) {
         self.calls.lock().unwrap().clear();
@@ -79,6 +125,61 @@ impl FakeOs {
     fn answer<T: Clone>(&self, name: &str, pick: impl FnOnce(&Canned) -> Option<T>) -> ApiResult<T> {
         self.rec(name);
         pick(&self.canned.lock().unwrap()).ok_or_else(|| ApiError::Unsupported(format!("{name} is not available on this fake")))
+    }
+}
+
+impl iyakki_core_api::Os for FakeOs {
+    fn sysinfo(&self) -> &dyn Sysinfo {
+        self
+    }
+    fn audio(&self) -> &dyn Audio {
+        self
+    }
+    fn disks(&self) -> &dyn Disks {
+        self
+    }
+    fn net(&self) -> &dyn Net {
+        self
+    }
+    fn memory(&self) -> std::sync::Arc<dyn iyakki_core_api::memory::Memory> {
+        self.memory.clone()
+    }
+    fn hardware(&self) -> std::sync::Arc<dyn iyakki_core_api::hardware::Hardware> {
+        self.hardware.clone()
+    }
+    fn crashlog(&self) -> std::sync::Arc<dyn iyakki_core_api::crashlog::CrashLog> {
+        self.crashlog.clone()
+    }
+    fn netscan(&self) -> std::sync::Arc<dyn iyakki_core_api::netscan::NetScan> {
+        self.netscan.clone()
+    }
+}
+
+impl Audio for FakeOs {
+    fn sound_cards(&self) -> ApiResult<Vec<SoundCard>> {
+        self.answer("sound_cards", |c| c.sound_cards.clone())
+    }
+    fn volume(&self, card: u32) -> ApiResult<PlaybackVolume> {
+        self.rec(format!("volume({card})"));
+        self.canned.lock().unwrap().volume.clone().ok_or_else(|| ApiError::Unsupported("this card has no volume control".into()))
+    }
+    fn set_volume(&self, card: u32, percent: u32) -> ApiResult<PlaybackVolume> {
+        self.rec(format!("set_volume({card},{percent})"));
+        let mut c = self.canned.lock().unwrap();
+        let v = c.volume.as_mut().ok_or_else(|| ApiError::Unsupported("this card has no volume control".into()))?;
+        v.percent = percent.min(100);
+        v.muted = false;
+        Ok(v.clone())
+    }
+    fn change_volume(&self, card: u32, delta: Option<i32>) -> ApiResult<PlaybackVolume> {
+        self.rec(format!("change_volume({card},{delta:?})"));
+        let mut c = self.canned.lock().unwrap();
+        let v = c.volume.as_mut().ok_or_else(|| ApiError::Unsupported("this card has no volume control".into()))?;
+        match delta {
+            Some(d) => v.percent = (v.percent as i32 + d).clamp(0, 100) as u32,
+            None => v.muted = !v.muted,
+        }
+        Ok(v.clone())
     }
 }
 
@@ -100,6 +201,32 @@ impl Sysinfo for FakeOs {
     }
     fn cpu_count(&self) -> ApiResult<u32> {
         self.answer("cpu_count", |c| c.cpu_count)
+    }
+}
+
+impl Disks for FakeOs {
+    fn space(&self, path: &str) -> ApiResult<(u64, u64)> {
+        self.rec(format!("space({path})"));
+        self.canned.lock().unwrap().space.ok_or_else(|| ApiError::Unsupported("space is not available on this fake".into()))
+    }
+    fn block_devices(&self) -> ApiResult<Vec<BlockDev>> {
+        self.answer("block_devices", |c| c.block_devices.clone())
+    }
+    fn mounts(&self) -> ApiResult<Vec<Mount>> {
+        self.answer("mounts", |c| c.mounts.clone())
+    }
+    fn reword_failure(&self, msg: &str) -> String {
+        self.rec("reword_failure".to_string());
+        self.canned.lock().unwrap().drive_gone.clone().unwrap_or_else(|| msg.to_string())
+    }
+}
+
+impl Net for FakeOs {
+    fn ipv4_addresses(&self) -> ApiResult<Vec<(String, String)>> {
+        self.answer("ipv4_addresses", |c| c.ipv4.clone())
+    }
+    fn interfaces(&self) -> ApiResult<Vec<NetCounters>> {
+        self.answer("interfaces", |c| c.interfaces.clone())
     }
 }
 
@@ -173,6 +300,17 @@ impl iyakki_core_api::AuditSink for FakeAccounts {
 mod tests {
     use super::*;
     use iyakki_sec::policy::Role;
+
+    #[test]
+    fn disks_and_net_answer_from_the_canned_data_record_calls_and_can_be_unsupported() {
+        let os = FakeOs::new();
+        assert_eq!(os.block_devices().unwrap()[0].name, "sda");
+        assert_eq!(os.mounts().unwrap()[0].target, "/");
+        assert_eq!(os.interfaces().unwrap()[0].name, "eth0");
+        assert_eq!(os.calls(), ["block_devices", "mounts", "interfaces"]);
+        os.set(|c| c.interfaces = None);
+        assert_eq!(os.interfaces().unwrap_err().code(), "unsupported");
+    }
 
     #[test]
     fn sysinfo_answers_from_the_canned_data_and_records_each_call() {

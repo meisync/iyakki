@@ -50,6 +50,7 @@ Advanced and not applied yet are shown in the simple view too, with Apply and Di
   * **ping** (echo request) from the local network only, by default. Switchable to "not answered" or "from anywhere";
   * the **Remote desktop / web mode** preset (TCP 8443, or the port given with `iyakki.web=`), on by default, from the local network.
     On a cloud machine (`iyakki.mode=cloud` or a cloud image) it is open to everyone, because a browser is the only way in; the page says so.
+* **Networks of a connected VPN** (Settings, Firewall, Presets; off by default; F-FW-13): when switched on, the network of a WireGuard tunnel that is up (a private range only: `10/8`, `172.16/12`, `192.168/16`, `100.64/10`, `fc00::/7`, never wider than /8) counts as the local network for the presets, ping and remote diagnostics, and stops counting when the tunnel goes down.
 * **"The local network"** means the private and link-local ranges: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`,
   `169.254.0.0/16`, and for IPv6 `fe80::/10` and `fc00::/7`. A network that uses public addresses internally needs explicit rules.
 * **Outgoing**: not filtered in this version (planned).

@@ -256,6 +256,20 @@ pub fn unattended_secret(data: &Path, vault: &dyn SecretStore, registry: &Regist
     }
 }
 
+/// [`unattended_secret`] for a run that must present its run token: an unattended run whose token was not issued for this very run, has
+/// expired or was revoked is refused with `needs secret` before any lookup; an attended run is not decided here, as before. The token
+/// is issued by the service when it starts the run ([`RunTokens::issue`]) and handed to the engine, which presents it with each request.
+#[allow(clippy::too_many_arguments)]
+pub fn unattended_secret_presented(tokens: &RunTokens, presented: Option<&str>, now: u64, data: &Path, vault: &dyn SecretStore, registry: &Registry, user: &str, run: &iyakki_flow::host::RunSecretCx, name: &str) -> Option<Result<String, String>> {
+    if run.attended() {
+        return None;
+    }
+    if !presented.is_some_and(|t| tokens.verify(t, &run.run_id, now)) {
+        return Some(Err(format!("needs secret: `{name}`: this run did not present a valid run token (it is issued for one run and expires), so it cannot use a secret")));
+    }
+    unattended_secret(data, vault, registry, user, run, name)
+}
+
 /// Problems that stop a schedule from being saved: personal subscription logins and unmarked secrets.
 pub fn unattended_problems(flow: &Flow, data: &Path, vault: &dyn SecretStore, team: &str) -> Vec<String> {
     let mut v = personal_logins(flow);

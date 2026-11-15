@@ -131,6 +131,33 @@ impl Rig {
         let i = self.a.dc.rows.iter().position(|r| r.id == id.display().to_string()).expect("row");
         self.a.handle(&Event::Row(i), &self.cx);
     }
+    /// Choose the vault row with this id and be sure it is the chosen one. The list is rebuilt by the page's ticks (a choice or a hide re-sorts it)
+    /// and the choice is by position, so the position is looked up again on every try; the key pressed right after finds the row still
+    /// chosen, as nothing runs between the choice and the key.
+    fn choose(&mut self, id: &str) {
+        for _ in 0..3000 {
+            self.a.handle(&Event::Tick, &self.cx);
+            // a key press prepares the rows first (`handle_devcluster`), which can re-sort them: prepare, choose, prepare, look again
+            self.a.dc_prepare(&self.cx);
+            // the list is built from what a background scan found, and a scan that ends later builds it again (maybe in another order):
+            // choose only when no scan runs or waits and the list is built from the latest one
+            let settled = !self.a.dc.scanning.load(std::sync::atomic::Ordering::SeqCst) && !self.a.dc.pending.load(std::sync::atomic::Ordering::SeqCst) && self.a.dc.rows_scans == self.a.dc.scans.load(std::sync::atomic::Ordering::SeqCst);
+            if !settled {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            // the id can be on two rows (a cluster file row once it is the default, and the vault row): this helper is for the vault one
+            if let Some(i) = self.a.dc.rows.iter().position(|r| r.id == id && matches!(r.kind, RowKind::Vault(_))) {
+                self.a.handle(&Event::Row(i), &self.cx);
+                self.a.dc_prepare(&self.cx);
+                if self.a.dc_row().is_some_and(|r| r.id == id && matches!(r.kind, RowKind::Vault(_))) {
+                    return;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("row {id} never became the chosen one; status: {}", status(&self.a));
+    }
     fn workspace(&self, name: &str) -> PathBuf {
         let root = temp_dir(&format!("{}-ws-{name}", self.dir.file_name().unwrap().to_string_lossy()));
         ProjectConfig::ensure(&root, name).unwrap();
@@ -321,19 +348,22 @@ fn a_vault_held_kubeconfig_is_added_with_a_checked_entry_tested_through_the_runn
     let v = r.a.dc.rows.iter().find(|x| matches!(x.kind, RowKind::Vault(_))).cloned().expect("the vault row");
     assert!(chips(&v).contains(&"vault") && v.sub.contains("0600 temp file"), "{:?} {}", chips(&v), v.sub);
     // test through the runner (which swaps the reference for a temp file in real life)
-    let i = r.a.dc.rows.iter().position(|x| x.id == "uvault:staging-kc").unwrap();
-    r.a.handle(&Event::Row(i), &r.cx);
+    r.choose("uvault:staging-kc");
     press(&mut r.a, &r.cx, 't');
     settle(&mut r.a, &r.cx);
     assert!(status(&r.a).contains("https://198.51.100.7:6443") && status(&r.a).contains("node stg-1"), "{}", status(&r.a));
     assert!(r.run.calls().iter().any(|c| c.line().contains("uvault:staging-kc")), "kubectl is given the reference; the runner resolves it");
     // a vault profile is chosen like any other, and removed with V (the vault entry itself stays)
+    r.choose("uvault:staging-kc");
     press(&mut r.a, &r.cx, 'd');
     assert_eq!(Choice::load(&dir, "root").unwrap().kubeconfig, "uvault:staging-kc");
+    r.choose("uvault:staging-kc");
     press(&mut r.a, &r.cx, 'h');
     assert!(status(&r.a).contains("removed with V") || status(&r.a).contains("default"), "{}", status(&r.a));
+    // the list is re-sorted after a choice; V acts on the chosen row, so choose the vault row again
+    r.choose("uvault:staging-kc");
     press(&mut r.a, &r.cx, 'V');
-    assert!(r.a.has_modal());
+    assert!(r.a.has_modal(), "{}", status(&r.a));
     press(&mut r.a, &r.cx, 'y');
     assert!(kubeprofiles::vault_load(&dir, "root").is_empty());
     assert!(r.cx.services.user_names("root").unwrap().contains(&"staging-kc".to_string()));
@@ -562,7 +592,7 @@ fn a_download_that_fails_its_checksum_installs_nothing_and_says_so() {
     assert!(r.a.dc_has_overlay());
     // the server now serves other bytes than the checksum file was made for
     for (u, v) in n.0.lock().unwrap().iter_mut() {
-        if u.ends_with("/k3s") && u.contains("download/") {
+        if (u.ends_with("/k3s") || u.ends_with("/k3s-arm64")) && u.contains("download/") {
             v.2 = b"#!/bin/sh\necho tampered\n".to_vec();
         }
     }

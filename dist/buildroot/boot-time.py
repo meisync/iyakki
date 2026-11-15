@@ -72,3 +72,7 @@ if done:
     k = [r["login"][1] for r in done if r["login"][1] is not None]
     if k:
         print(f"median kernel clock at login     : {statistics.median(k):5.2f} s (the system's own time since the kernel started)")
+    out_json = os.environ.get("BOOT_TIME_JSON")
+    if out_json:
+        import json
+        json.dump({"timings": {"login_wall_s": round(statistics.median([r["login"][0] for r in done]), 2)}, "runs": len(done)}, open(out_json, "w"))

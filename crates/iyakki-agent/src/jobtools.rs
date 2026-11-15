@@ -127,6 +127,12 @@ fn spec(name: &str, desc: &str, schema: Value, risk: Risk, untrusted: bool) -> T
 }
 
 impl Tools for JobTools {
+
+    fn inner_tools(&self) -> Option<&dyn Tools> {
+
+        Some(&*self.inner)
+
+    }
     fn defs(&self) -> Vec<ToolDef> {
         let mut v = self.inner.defs();
         v.retain(|d| !is_job_tool(&d.spec.name));

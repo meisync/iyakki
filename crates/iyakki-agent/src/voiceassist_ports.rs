@@ -23,12 +23,41 @@ pub struct RecorderAudio {
     pub recorders: Arc<dyn Recorders>,
     pub svc: Arc<Services>,
     cap: Option<Box<dyn Capture>>,
+    /// When the capture was opened, on the echo clock (see [`echo_ms`]).
+    opened_ms: u64,
 }
 
 impl RecorderAudio {
     pub fn new(recorders: Arc<dyn Recorders>, svc: Arc<Services>) -> RecorderAudio {
-        RecorderAudio { recorders, svc, cap: None }
+        RecorderAudio { recorders, svc, cap: None, opened_ms: 0 }
     }
+}
+
+/// The clock the echo reference and the captures share (milliseconds since the first use).
+pub fn echo_ms() -> u64 {
+    static T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    T0.get_or_init(Instant::now).elapsed().as_millis() as u64 + 1
+}
+
+/// What the assistant played lately (its own voice), for taking its echo out of a capture (Settings -> Voice, echo cancellation).
+static ECHO_REF: std::sync::OnceLock<Mutex<crate::echocancel::Reference>> = std::sync::OnceLock::new();
+
+fn echo_ref() -> std::sync::MutexGuard<'static, crate::echocancel::Reference> {
+    ECHO_REF.get_or_init(|| Mutex::new(crate::echocancel::Reference::default())).lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// How long after the capture was opened its first sample is taken to be: the recorder program needs a moment to start, and the
+/// filter only looks backwards, so the reference is not allowed to be later than the sound it belongs to.
+pub const CAPTURE_START_MARGIN_MS: u64 = 80;
+
+/// The capture with the assistant's own voice taken out, when the person switched that on and something was playing during it.
+pub fn clean_for(svc: &Services, pcm: Vec<i16>, opened_ms: u64) -> Vec<i16> {
+    if !svc.voice_settings().echo_cancel {
+        return pcm;
+    }
+    let r = echo_ref();
+    let c = crate::echocancel::clean_capture(&pcm, opened_ms + CAPTURE_START_MARGIN_MS, &r);
+    if c.touched { c.pcm } else { pcm }
 }
 
 /// Open the microphone the way the Voice tile does (the saved microphone choice, the record command, the named-format PCM of
@@ -50,6 +79,7 @@ impl AudioIn for RecorderAudio {
             return Ok(());
         }
         self.cap = Some(open_capture(self.recorders.as_ref(), &self.svc, (MAX_LISTEN_MS / 1000 + 10) as usize)?);
+        self.opened_ms = echo_ms();
         Ok(())
     }
     fn is_open(&self) -> bool {
@@ -63,7 +93,7 @@ impl AudioIn for RecorderAudio {
     }
     fn take(&mut self) -> Result<Vec<i16>, String> {
         match self.cap.take() {
-            Some(c) => c.stop(),
+            Some(c) => c.stop().map(|pcm| clean_for(&self.svc, pcm, self.opened_ms)),
             None => Err("The microphone is not open.".into()),
         }
     }
@@ -88,15 +118,31 @@ pub struct ServicesStt {
     pub svc: Arc<Services>,
 }
 
-impl Stt for ServicesStt {
-    fn hear(&mut self, pcm: &[i16]) -> Result<Heard, String> {
-        let engine = vd::stt_engine(&self.svc).ok_or_else(|| "No speech-to-text is set up (Settings -> Voice, or download a Whisper model in Settings -> Models).".to_string())?;
-        if vd::consent_text(&self.svc, &engine, true).is_some() {
+impl ServicesStt {
+    /// Hear `pcm` with the backend of `reg` that `voice.stt` selects (`voicebackend::Registry::selected`): the consent check and the
+    /// call sit here in one place, the same place the `voice_backends` tool reads from.
+    pub fn hear_with(&self, reg: &crate::voicebackend::Registry, pcm: &[i16]) -> Result<Heard, String> {
+        let backend = reg
+            .selected(self.svc.voice_settings().stt.as_ref())
+            .filter(|b| b.configured())
+            .ok_or_else(|| "No speech-to-text is set up (Settings -> Voice, or download a Whisper model in Settings -> Models).".to_string())?;
+        let on_other_machine = match backend.engine() {
+            Some(e) => vd::consent_text(&self.svc, e, true).is_some(),
+            None => backend.needs_consent(),
+        };
+        if on_other_machine {
             return Err("The speech-to-text engine is on another machine you have not agreed to send your voice to yet: open the Voice tile and say yes there first.".into());
         }
-        let text = vd::transcribe(&self.svc, &engine, pcm)?;
+        let text = vd::transcribe_backend(backend.as_ref(), pcm)?;
         // the engines used here do not report a confidence; the machine's short-transcript rule is the safety net
         Ok(Heard { text, confidence: None })
+    }
+}
+
+impl Stt for ServicesStt {
+    fn hear(&mut self, pcm: &[i16]) -> Result<Heard, String> {
+        let reg = crate::voicebackend::Registry::from_services(&self.svc);
+        self.hear_with(&reg, pcm)
     }
 }
 
@@ -148,6 +194,7 @@ impl Speaker for SystemSpeaker {
         }
         self.job = Some(Job { busy: busy.clone(), stop: stop.clone() });
         let text = text.to_string();
+        let echo = self.svc.voice_settings().echo_cancel;
         std::thread::spawn(move || {
             let done = || busy.store(false, Ordering::SeqCst);
             let Ok(wav) = synth.synth(&text) else { return done() };
@@ -155,9 +202,17 @@ impl Speaker for SystemSpeaker {
                 return done();
             }
             let Ok(mut playing) = sink.play(&wav) else { return done() };
+            // what is being played is the reference for taking its echo out of the next capture (only when the person switched that on)
+            if echo {
+                if let Ok(w) = crate::voice::parse_wav(&wav) {
+                    let pcm: Vec<f32> = crate::voice::to_mono_16k(&w).iter().map(|s| f32::from(*s) / 32768.0).collect();
+                    echo_ref().add(echo_ms(), pcm);
+                }
+            }
             while playing.is_playing() {
                 if stop.load(Ordering::SeqCst) {
                     playing.stop();
+                    echo_ref().stop_all(echo_ms());
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(30));
@@ -172,6 +227,7 @@ impl Speaker for SystemSpeaker {
     fn stop(&mut self) {
         if let Some(j) = &self.job {
             j.stop.store(true, Ordering::SeqCst);
+            echo_ref().stop_all(echo_ms());
         }
     }
     fn level(&self) -> f32 {
@@ -280,7 +336,7 @@ impl TurnLog for SessionLog {
         }
         let Some(s) = self.session.as_mut() else { return };
         s.messages.push(match who {
-            Who::Person => Message::user(text),
+            Who::Person => Message::user(crate::voiceassist::spoken_turn(text)),
             Who::Assistant => Message::assistant(text),
         });
         let _ = self.svc.sessions.save(s);
@@ -297,6 +353,8 @@ pub enum Cmd {
     Approve(String, bool),
     /// A tap or a key on "did you say ...".
     Confirm(bool),
+    /// The waker's text for a piece of work that ended: asked of the agent and answered aloud when the assistant is free.
+    Wake(String),
     Quit,
 }
 
@@ -306,6 +364,7 @@ pub struct Live {
     pub muted: bool,
     pub follow_ms: u64,
     pub pause_ms: u64,
+    pub spoken_approvals: bool,
 }
 
 /// The machine running on its own thread. Dropping the handle stops it and closes the microphone.
@@ -322,6 +381,10 @@ impl Worker {
     pub fn status(&self) -> Status {
         self.status.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
+    /// Offer the text of finished work (see [`Cmd::Wake`]).
+    pub fn wake(&self, text: &str) {
+        let _ = self.tx.send(Cmd::Wake(text.to_string()));
+    }
 }
 
 impl Drop for Worker {
@@ -337,17 +400,21 @@ impl Drop for Worker {
 pub fn spawn(ports: Ports, cfg: Config, live: Box<dyn Fn() -> Live + Send>, tick_ms: u64) -> Worker {
     let (tx, rx): (Sender<Cmd>, Receiver<Cmd>) = channel();
     let l0 = live();
-    let mut a = Assistant::new(ports, Config { pause_ms: l0.pause_ms, follow_ms: l0.follow_ms, ..cfg }, l0.muted);
+    let mut a = Assistant::new(ports, Config { pause_ms: l0.pause_ms, follow_ms: l0.follow_ms, spoken_approvals: l0.spoken_approvals, ..cfg }, l0.muted);
     let status = Arc::new(Mutex::new(a.status()));
     let st = status.clone();
+    let wid = crate::voiceassist::new_worker_id();
     let join = std::thread::spawn(move || {
         let t0 = Instant::now();
         let mut last_live = 0u64;
+        // finished work waits here until the assistant is free; a newer text replaces an older one (the waker's text names everything)
+        let mut waiting: Option<String> = None;
         loop {
             let now = t0.elapsed().as_millis() as u64 + 1;
             match rx.recv_timeout(Duration::from_millis(tick_ms)) {
                 Ok(Cmd::Quit) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     a.stop();
+                    crate::voiceassist::set_worker_glyph(wid, crate::voiceassist::MicGlyph::Off);
                     return;
                 }
                 Ok(Cmd::Tap) => a.tap(now),
@@ -358,6 +425,7 @@ pub fn spawn(ports: Ports, cfg: Config, live: Box<dyn Fn() -> Live + Send>, tick
                 Ok(Cmd::Confirm(yes)) => {
                     a.confirm(yes);
                 }
+                Ok(Cmd::Wake(t)) => waiting = Some(t),
                 Err(_) => {}
             }
             if now.saturating_sub(last_live) >= 250 {
@@ -369,10 +437,22 @@ pub fn spawn(ports: Ports, cfg: Config, live: Box<dyn Fn() -> Live + Send>, tick
                 let c = a.config_mut();
                 c.follow_ms = l.follow_ms;
                 c.pause_ms = l.pause_ms;
+                c.spoken_approvals = l.spoken_approvals;
             }
             a.tick(now);
-            *st.lock().unwrap_or_else(|e| e.into_inner()) = a.status();
+            if let Some(t) = waiting.take() {
+                if !a.wake_turn(now, &t) {
+                    waiting = Some(t);
+                }
+            }
+            let now_status = a.status();
+            crate::voiceassist::set_worker_glyph(wid, crate::voiceassist::glyph_of(&now_status));
+            *st.lock().unwrap_or_else(|e| e.into_inner()) = now_status;
         }
     });
     Worker { tx, status, join: Some(join) }
 }
+
+#[cfg(test)]
+#[path = "voiceassist_ports_tests.rs"]
+mod tests;

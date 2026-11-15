@@ -575,6 +575,66 @@ fn the_layout_of_a_whole_flow_gpt_add_format_rename_delete() {
     assert!(f.calls().iter().any(|c| c.starts_with("mke2fs /dev/sdc1 data ")));
 }
 
+/// The partition tables and FAT32 volumes our own writers make, checked by the programs everybody else uses (ignored by default: needs `sfdisk`, `fsck.fat`, `mdir`,
+/// `blkid`, run through `dist/linux-host/real-tools-tests.sh`). The ext4 side is `mke2fs`'s own and is not made here (the fake runner only records the call).
+#[test]
+#[ignore]
+fn real_sfdisk_fsck_fat_and_mtools_accept_the_tables_and_fat32_volumes_the_partition_manager_writes() {
+    use std::process::Command;
+    let have = |t: &str| Command::new("sh").args(["-c", &format!("command -v {t} >/dev/null || [ -x /usr/sbin/{t} ]")]).status().is_ok_and(|s| s.success());
+    for t in ["sfdisk", "fsck.fat", "mdir", "blkid"] {
+        if !have(t) {
+            eprintln!("skipped: needs {t}");
+            return;
+        }
+    }
+    let run = |cmd: &str| -> (bool, String) {
+        let o = Command::new("sh").args(["-c", &format!("export PATH=$PATH:/usr/sbin:/sbin; {cmd}")]).output().unwrap();
+        (o.status.success(), format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)))
+    };
+    let dir = std::env::temp_dir().join(format!("iyakki-realtools-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (table, name) in [(Table::Gpt, "gpt"), (Table::Mbr, "mbr")] {
+        let f = machine();
+        blank_stick(&f);
+        let d = f.disks();
+        let a = admin();
+        let c = confirm("sdc");
+        let go = |op: PartOp| d.apply_partition(&a, "sdc", &op, &c, &|_, _| {});
+        go(PartOp::NewTable(table)).unwrap();
+        go(PartOp::Add { size_bytes: Some(40 << 20), fs: Some(FormatFs::Fat32), label: "first".into() }).unwrap();
+        go(PartOp::Add { size_bytes: None, fs: Some(FormatFs::Fat32), label: "second".into() }).unwrap();
+        go(PartOp::Rename { number: 2, label: "photos".into() }).unwrap();
+        let raw = f.dev_bytes("sdc");
+        let img = dir.join(format!("{name}.img"));
+        std::fs::write(&img, &raw).unwrap();
+        // the table: both GPT copies, the protective MBR, no overlap, 1 MiB alignment: sfdisk says so and lists two partitions
+        let (ok, out) = run(&format!("sfdisk --verify {}", img.display()));
+        assert!(ok && out.contains("No errors"), "{name}: sfdisk --verify: {out}");
+        let (_, listing) = run(&format!("sfdisk -d {}", img.display()));
+        assert_eq!(listing.lines().filter(|l| l.contains("start=")).count(), 2, "{name}: {listing}");
+        assert!(listing.contains(if name == "gpt" { "label: gpt" } else { "label: dos" }), "{name}: {listing}");
+        assert!(listing.contains("start=        2048"), "{name}: the first partition starts at 1 MiB: {listing}");
+        // each FAT32 volume: cut out, then the real checkers read it
+        let s = d.scan();
+        for (i, (part, label)) in s.disk("sdc").unwrap().parts.iter().zip(["FIRST", "PHOTOS"]).enumerate() {
+            let vol = dir.join(format!("{name}-{}.fat", i + 1));
+            let (ok, out) = run(&format!("dd if={} of={} bs=512 skip={} count={} status=none", img.display(), vol.display(), part.start_bytes / 512, part.size_bytes / 512));
+            assert!(ok, "{out}");
+            let (ok, out) = run(&format!("fsck.fat -n -v {}", vol.display()));
+            assert!(ok && !out.contains("differ") && !out.contains("corrupt") && out.contains("32 bit entries"), "{name} partition {}: fsck.fat: {out}", i + 1);
+            let (ok, out) = run(&format!("blkid -p -o export {}", vol.display()));
+            assert!(ok && out.contains("TYPE=vfat") && out.contains(&format!("LABEL={label}")) && out.contains("VERSION=FAT32"), "{name} partition {}: blkid: {out}", i + 1);
+            let (ok, out) = run(&format!("mdir -i {} ::", vol.display()));
+            assert!(ok && out.contains(label), "{name} partition {}: mdir: {out}", i + 1);
+            // a file written by mtools into our volume, read back, and the volume still checks clean
+            let (ok, out) = run(&format!("echo hello-from-mtools > {d}/h.txt && mcopy -i {v} {d}/h.txt ::h.txt && mtype -i {v} ::h.txt && fsck.fat -n {v}", d = dir.display(), v = vol.display()));
+            assert!(ok && out.contains("hello-from-mtools"), "{name} partition {}: mtools write/read: {out}", i + 1);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn an_mbr_drive_gets_partitions_with_the_right_type_bytes() {
     let f = machine();

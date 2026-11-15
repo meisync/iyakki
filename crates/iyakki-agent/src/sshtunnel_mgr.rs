@@ -196,13 +196,13 @@ impl Manager {
     }
 
     pub fn shared(svc: &Arc<crate::services::Services>, user: &str, audit: AuditFn) -> Arc<Manager> {
-        Self::registry().lock().unwrap().entry(format!("{}|{user}", svc.dir().display())).or_insert_with(|| Arc::new(Manager::for_services(svc, user, audit))).clone()
+        Self::registry().lock().unwrap_or_else(std::sync::PoisonError::into_inner).entry(format!("{}|{user}", svc.dir().display())).or_insert_with(|| Arc::new(Manager::for_services(svc, user, audit))).clone()
     }
 
     /// Starts the supervisor thread of a signed-in person's manager (once). Tests' managers (from [`Manager::new`]) never start one.
     pub fn ensure_supervised(self: &Arc<Manager>) {
         if self.auto {
-            let mut sup = self.sup.lock().unwrap();
+            let mut sup = self.sup.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if sup.is_none() {
                 *sup = Some(self.supervise());
             }
@@ -211,7 +211,7 @@ impl Manager {
 
     /// Stops the supervisor thread and every client (this person signs out).
     pub fn end_supervision(&self) {
-        let sup = self.sup.lock().unwrap().take();
+        let sup = self.sup.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
         drop(sup);
         self.stop_all();
     }
@@ -239,16 +239,16 @@ impl Manager {
     }
 
     pub fn rows(&self) -> Vec<Row> {
-        let st = self.state.lock().unwrap();
+        let st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         self.store.list().into_iter().map(|t| Row { status: st.get(&t.id).map(|r| r.status.clone()).unwrap_or_default(), tunnel: t }).collect()
     }
 
     pub fn status(&self, id: &str) -> Status {
-        self.state.lock().unwrap().get(id).map(|r| r.status.clone()).unwrap_or_default()
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(id).map(|r| r.status.clone()).unwrap_or_default()
     }
 
     fn is_live(&self, id: &str) -> bool {
-        self.state.lock().unwrap().get(id).is_some_and(|r| r.proc.is_some())
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(id).is_some_and(|r| r.proc.is_some())
     }
 
     fn stop_locked(rt: &mut Rt) {
@@ -259,7 +259,7 @@ impl Manager {
     }
 
     fn stop(&self, id: &str) {
-        if let Some(rt) = self.state.lock().unwrap().get_mut(id) {
+        if let Some(rt) = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get_mut(id) {
             Self::stop_locked(rt);
         }
     }
@@ -328,7 +328,7 @@ impl Manager {
         if let Some(o) = old {
             if o != saved {
                 self.stop(&saved.id);
-                self.state.lock().unwrap().remove(&saved.id);
+                self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&saved.id);
             }
             if o.own_key && o.key != saved.key {
                 let _ = self.keys.delete_key(&o.key);
@@ -343,7 +343,7 @@ impl Manager {
         let mut t = self.store.get(id).ok_or("that tunnel is gone")?;
         t.enabled = on;
         let t = self.store.put(t)?;
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let rt = st.entry(id.to_string()).or_insert_with(Rt::new);
         Self::stop_locked(rt);
         rt.status = Status::default();
@@ -354,7 +354,7 @@ impl Manager {
 
     /// Clears a failure so the next tick tries again.
     pub fn retry(&self, id: &str) {
-        if let Some(rt) = self.state.lock().unwrap().get_mut(id) {
+        if let Some(rt) = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get_mut(id) {
             Self::stop_locked(rt);
             rt.status = Status::default();
         }
@@ -365,7 +365,7 @@ impl Manager {
     pub fn remove(&self, id: &str) -> Result<Vec<String>, String> {
         self.stop(id);
         let t = self.store.remove(id)?;
-        self.state.lock().unwrap().remove(id);
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(id);
         let mut done = vec![format!("the tunnel {}", t.name)];
         if t.own_key && self.keys.delete_key(&t.key).is_ok() {
             done.push(format!("its key {} from your vault", t.key));
@@ -442,7 +442,7 @@ impl Manager {
     /// One step of the supervisor: starts what should run, notices what ended, stops what is disabled. `now` is Unix seconds.
     pub fn tick(&self, now: u64) {
         let all = self.store.list();
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         st.retain(|id, rt| {
             let keep = all.iter().any(|t| &t.id == id);
             if !keep {
@@ -508,7 +508,7 @@ impl Manager {
 
     /// Stops every client (the device is shutting down, or the person signed out).
     pub fn stop_all(&self) {
-        for rt in self.state.lock().unwrap().values_mut() {
+        for rt in self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).values_mut() {
             Self::stop_locked(rt);
         }
     }
@@ -632,7 +632,7 @@ pub fn start_for_login(svc: &Arc<crate::services::Services>, user: &str, audit: 
 
 /// **Sign-out hook.** Stops this person's tunnels (the vault closes with the session, so the keys go too).
 pub fn on_logout(svc: &Arc<crate::services::Services>, user: &str) {
-    let m = Manager::registry().lock().unwrap().get(&format!("{}|{user}", svc.dir().display())).cloned();
+    let m = Manager::registry().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&format!("{}|{user}", svc.dir().display())).cloned();
     if let Some(m) = m {
         m.end_supervision();
     }
@@ -662,8 +662,8 @@ struct RealProc {
 
 impl Proc for RealProc {
     fn poll(&mut self) -> ProcState {
-        match self.child.try_wait() {
-            Ok(None) => {
+        match iyakki_core_api::child_status(&mut self.child) {
+            iyakki_core_api::ChildState::Running => {
                 // the port is ours when binding it fails (nothing else could have taken it: it was free when the run began)
                 self.up = self.up || !self.ports.is_free(self.port);
                 ProcState::Running { listening: self.up }
@@ -672,7 +672,7 @@ impl Proc for RealProc {
                 if let Some(h) = self.reader.take() {
                     let _ = h.join();
                 }
-                ProcState::Exited { stderr: self.err.lock().unwrap().clone() }
+                ProcState::Exited { stderr: self.err.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone() }
             }
         }
     }
@@ -727,7 +727,7 @@ impl Runner for OpenSshRunner {
                 if n == 0 {
                     break;
                 }
-                let mut s = e2.lock().unwrap();
+                let mut s = e2.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 if s.len() < 4096 {
                     s.push_str(&String::from_utf8_lossy(&buf[..n]));
                 }
@@ -766,7 +766,7 @@ pub struct FakeProc(pub Arc<Mutex<FakeShared>>);
 
 impl Proc for FakeProc {
     fn poll(&mut self) -> ProcState {
-        let mut s = self.0.lock().unwrap();
+        let mut s = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         s.polls += 1;
         if let Some(e) = &s.exit {
             return ProcState::Exited { stderr: e.clone() };
@@ -779,7 +779,7 @@ impl Proc for FakeProc {
         }
     }
     fn kill(&mut self) {
-        self.0.lock().unwrap().killed = true;
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).killed = true;
     }
 }
 
@@ -794,19 +794,19 @@ pub struct FakeRunner {
 
 impl FakeRunner {
     pub fn plan(&self, p: Plan) {
-        self.plans.lock().unwrap().push_back(p);
+        self.plans.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push_back(p);
     }
     /// The processes still running (not killed, not ended).
     pub fn alive(&self) -> usize {
-        self.procs.lock().unwrap().iter().filter(|p| {
-            let s = p.lock().unwrap();
+        self.procs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().filter(|p| {
+            let s = p.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             !s.killed && s.exit.is_none() && !matches!(s.plan, Plan::Fail(_))
         }).count()
     }
     /// Every running client ends with this error text (the network dropped).
     pub fn drop_all(&self, stderr: &str) {
-        for p in self.procs.lock().unwrap().iter() {
-            let mut s = p.lock().unwrap();
+        for p in self.procs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter() {
+            let mut s = p.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if !s.killed {
                 s.exit = Some(stderr.into());
             }
@@ -816,13 +816,13 @@ impl FakeRunner {
 
 impl Runner for FakeRunner {
     fn start(&self, l: &Launch) -> Result<Box<dyn Proc>, String> {
-        let plan = self.plans.lock().unwrap().pop_front().unwrap_or(Plan::Connect);
+        let plan = self.plans.lock().unwrap_or_else(std::sync::PoisonError::into_inner).pop_front().unwrap_or(Plan::Connect);
         if let Plan::SpawnError(e) = &plan {
             return Err(e.clone());
         }
-        self.launches.lock().unwrap().push((l.id.clone(), l.args.clone(), l.local_port, l.key_name.clone()));
+        self.launches.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((l.id.clone(), l.args.clone(), l.local_port, l.key_name.clone()));
         let sh = Arc::new(Mutex::new(FakeShared { plan, polls: 0, killed: false, exit: None }));
-        self.procs.lock().unwrap().push(sh.clone());
+        self.procs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(sh.clone());
         Ok(Box::new(FakeProc(sh)))
     }
 }
@@ -836,10 +836,10 @@ pub struct FakePorts {
 
 impl Ports for FakePorts {
     fn is_free(&self, port: u16) -> bool {
-        !self.taken.lock().unwrap().contains(&port)
+        !self.taken.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains(&port)
     }
     fn pick(&self) -> Result<u16, String> {
-        let mut n = self.next.lock().unwrap();
+        let mut n = self.next.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         loop {
             *n = if *n < 40000 { 40000 } else { *n + 1 };
             if self.is_free(*n) {

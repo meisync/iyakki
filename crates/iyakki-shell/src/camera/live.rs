@@ -167,21 +167,21 @@ fn capture_loop(mut cap: Box<dyn Capture>, sh: Arc<Shared>, cmds: Receiver<Cmd>)
                     // the JPEG is made before taking the lock, so the screen never waits on an encode
                     match f.to_jpeg() {
                         Ok(j) => {
-                            if let Some(r) = sh.rec.lock().unwrap().as_mut() {
+                            if let Some(r) = sh.rec.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_mut() {
                                 r.add(&j, cap.mode());
                             }
                         }
                         Err(e) => log::warn!("camera frame not recorded: {e}"),
                     }
                 }
-                let mut g = sh.raw.lock().unwrap();
+                let mut g = sh.raw.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 g.0 += 1;
                 g.1 = Some(Arc::new(f));
                 sh.fresh.notify_all();
             }
             Ok(None) => {}
             Err(e) => {
-                *sh.error.lock().unwrap() = Some(e);
+                *sh.error.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(e);
                 sh.stop.store(true, Ordering::Relaxed);
                 sh.fresh.notify_all();
                 break;
@@ -194,7 +194,7 @@ fn decode_loop(sh: Arc<Shared>) {
     let mut seen = 0u64;
     loop {
         let frame = {
-            let mut g = sh.raw.lock().unwrap();
+            let mut g = sh.raw.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             while g.0 == seen && !sh.stop.load(Ordering::Relaxed) {
                 g = sh.fresh.wait_timeout(g, std::time::Duration::from_millis(250)).unwrap().0;
             }
@@ -207,7 +207,7 @@ fn decode_loop(sh: Arc<Shared>) {
         if let Some(f) = frame {
             match preview_of(&f) {
                 Ok(p) => {
-                    let mut g = sh.preview.lock().unwrap();
+                    let mut g = sh.preview.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     *g = (seen, Some(Arc::new(p)));
                 }
                 Err(e) => log::warn!("camera frame not shown: {e}"),
@@ -239,23 +239,23 @@ impl Live {
 
     /// The newest picture to draw, with its number (a bigger number is a newer picture).
     pub fn preview(&self) -> Option<(u64, Arc<Preview>)> {
-        let g = self.shared.preview.lock().unwrap();
+        let g = self.shared.preview.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         g.1.clone().map(|p| (g.0, p))
     }
 
     /// The newest frame as the camera sent it (for photos: full size, no shrinking).
     pub fn latest(&self) -> Option<Arc<RawFrame>> {
-        self.shared.raw.lock().unwrap().1.clone()
+        self.shared.raw.lock().unwrap_or_else(std::sync::PoisonError::into_inner).1.clone()
     }
 
     /// How many frames have arrived so far.
     pub fn frames(&self) -> u64 {
-        self.shared.raw.lock().unwrap().0
+        self.shared.raw.lock().unwrap_or_else(std::sync::PoisonError::into_inner).0
     }
 
     /// Why the camera stopped, if it did.
     pub fn error(&self) -> Option<String> {
-        self.shared.error.lock().unwrap().clone()
+        self.shared.error.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 
     pub fn fps(&self) -> f32 {
@@ -268,7 +268,7 @@ impl Live {
 
     /// Start recording into `path` (an `.avi` that must not exist yet).
     pub fn start_recording(&self, path: &Path) -> Result<(), String> {
-        let mut g = self.shared.rec.lock().unwrap();
+        let mut g = self.shared.rec.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if g.is_some() {
             return Err("already recording".into());
         }
@@ -284,14 +284,14 @@ impl Live {
     }
 
     pub fn rec_status(&self) -> Option<RecStatus> {
-        let g = self.shared.rec.lock().unwrap();
+        let g = self.shared.rec.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         g.as_ref().map(|r| RecStatus { secs: r.started.elapsed().as_secs_f64(), bytes: r.bytes(), frames: r.frames, path: r.files.last().cloned().unwrap_or_default(), error: r.error.clone() })
     }
 
     /// Stop recording: the files written (several when it went past 1 GB), or why it failed. `None` when not recording.
     pub fn stop_recording(&self) -> Option<Result<(Vec<PathBuf>, u64), String>> {
         self.shared.recording.store(false, Ordering::Relaxed);
-        let mut r = self.shared.rec.lock().unwrap().take()?;
+        let mut r = self.shared.rec.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()?;
         r.finish_part();
         Some(match r.error {
             Some(e) => Err(e),

@@ -1,0 +1,24 @@
+# The IYAKKI cloud container image, HEADLESS variant (build-cloud.sh docker --headless): the web service without the desktop. Built by dist/cloud/build-cloud.sh from a small prepared context (never from the repository):
+#   iyakki                       the static musl program (built outside, with the repository's release profile)
+#   etc/ssl/certs/ca-certificates.crt   the CA bundle (HTTPS to model providers, registries, git hosts)
+#   licenses/                    LICENSE, NOTICE, THIRD_PARTY_LICENSES.txt, the notices index and the CycloneDX SBOM
+#   etc/iyakki/*.example.json    examples (service profile, tenant configuration)
+#   var/lib/iyakki, tmp          empty folders
+# FROM scratch: no shell, no package manager, nothing to patch but the program. Non-root, read-only-rootfs friendly (the only writable
+# places are the volume /var/lib/iyakki and /tmp). No base image is pulled.
+FROM scratch
+COPY iyakki /iyakki
+COPY etc/ /etc/
+COPY licenses/ /licenses/
+COPY --chown=65532:65532 var/ /var/
+COPY --chown=65532:65532 tmp/ /tmp/
+ENV IYAKKI_LOG=info
+VOLUME /var/lib/iyakki
+EXPOSE 8444
+USER 65532:65532
+ENTRYPOINT ["/iyakki"]
+# default: the cloud profile of the headless web service over HTTPS (no desktop, no pairing page: the first account comes from
+#   user add NAME --role admin --password-stdin   run once against the volume). Other profiles: --profile flows-runner | data-api | agent-api.
+CMD ["serve", "--profile", "cloud", "--config", "/etc/iyakki/service.cloud.example.json"]
+# the probe is the program itself: GET /healthz on the local listener (set IYAKKI_HEALTH_URL for another port)
+HEALTHCHECK --interval=30s --timeout=6s --start-period=20s --retries=3 CMD ["/iyakki", "healthcheck"]

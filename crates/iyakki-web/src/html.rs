@@ -24,6 +24,12 @@ pub struct Tree {
     pub nodes: Vec<Node>,
     /// The page was bigger than the limits and has been cut.
     pub truncated: bool,
+    /// Numbers of nodes that were released (see [`Tree::release_subtree`]) and are handed out again before the tree grows.
+    pub free: Vec<usize>,
+    /// The numbers on `free`, for a constant-time answer to "was this released already?" (so a second release is a no-op).
+    pub free_set: std::collections::HashSet<usize>,
+    /// Released numbers that were handed out again since the owner last looked (it may keep an index by node).
+    pub reused: Vec<usize>,
 }
 
 impl Tree {
@@ -79,7 +85,7 @@ pub fn parse(input: &str) -> Tree {
     // a page with no doctype is laid out the old, forgiving way ("quirks"): the root carries the mark
     let head: String = input.chars().take(1024).collect::<String>().to_ascii_lowercase();
     let root_attrs = if head.contains("<!doctype") { vec![] } else { vec![("data-iyakki-quirks".to_string(), "1".to_string())] };
-    let mut t = Tree { nodes: vec![Node { kind: NodeKind::Element { tag: "#root".into(), attrs: root_attrs }, children: vec![], parent: NONE }], truncated: false };
+    let mut t = Tree { nodes: vec![Node { kind: NodeKind::Element { tag: "#root".into(), attrs: root_attrs }, children: vec![], parent: NONE }], truncated: false, free: Vec::new(), free_set: std::collections::HashSet::new(), reused: Vec::new() };
     let b = input.as_bytes();
     let mut stack: Vec<usize> = vec![0];
     let mut i = 0;
@@ -105,14 +111,35 @@ pub fn parse(input: &str) -> Tree {
         } else if next == b'!' || next == b'?' {
             i = input[i..].find('>').map_or(b.len(), |e| i + e + 1);
         } else if next == b'/' {
-            let end = input[i..].find('>').map_or(b.len(), |e| i + e + 1);
-            let name: String = input[i + 2..end.saturating_sub(1).max(i + 2)].trim().split(|c: char| c.is_whitespace() || c == '/').next().unwrap_or("").to_ascii_lowercase();
+            let found = input[i..].find('>');
+            let end = found.map_or(b.len(), |e| i + e + 1);
+            // with no `>` the name runs to the end of the input (`end - 1` can fall inside a multi-byte character: found by the fuzz test)
+            let name_end = found.map_or(b.len(), |e| i + e).max(i + 2);
+            let name: String = input[i + 2..name_end].trim().split(|c: char| c.is_whitespace() || c == '/').next().unwrap_or("").to_ascii_lowercase();
+            // an end tag for a paragraph that is not open makes an empty one
+            if name == "p" && !stack.iter().any(|&n| t.tag(n) == Some("p")) {
+                open(&mut t, &mut stack, "p", Vec::new(), false);
+            }
             close(&t, &mut stack, &name);
             i = end;
         } else {
             let (name, attrs, self_closing, end) = read_start_tag(input, i);
+            let complete = input[i..end].ends_with('>');
             i = end;
+            // a tag that the input ends in the middle of is not a tag
+            if !complete {
+                text_start = i;
+                continue;
+            }
             open(&mut t, &mut stack, &name, attrs, self_closing);
+            // the newline right after <pre> or <textarea> is not part of it
+            if matches!(name.as_str(), "pre" | "textarea" | "listing") {
+                if input[i..].starts_with("\r\n") {
+                    i += 2;
+                } else if input[i..].starts_with('\n') {
+                    i += 1;
+                }
+            }
             // elements whose content is not markup
             if matches!(name.as_str(), "script" | "style") {
                 // the text is kept as it is written (no entities), so a script can be run later
@@ -241,7 +268,31 @@ fn nearest(t: &Tree, stack: &[usize], tags: &[&str], stop_at: &[&str]) -> Option
     None
 }
 
-fn open(t: &mut Tree, stack: &mut Vec<usize>, name: &str, attrs: Vec<(String, String)>, self_closing: bool) {
+fn open(t: &mut Tree, stack: &mut Vec<usize>, name: &str, mut attrs: Vec<(String, String)>, self_closing: bool) {
+    // an attribute written twice keeps its first value
+    let mut seen: Vec<String> = Vec::new();
+    attrs.retain(|(k, _)| if seen.contains(k) { false } else { seen.push(k.clone()); true });
+    let top = stack.last().and_then(|&n| t.tag(n)).unwrap_or("").to_string();
+    // a row, or a cell, straight in a table sits in a body (and a cell in a row) that the parser makes
+    if matches!(name, "tr" | "td" | "th") && top == "table" {
+        open(t, stack, "tbody", Vec::new(), false);
+    }
+    if matches!(name, "td" | "th") && matches!(stack.last().and_then(|&n| t.tag(n)), Some("tbody" | "thead" | "tfoot")) {
+        open(t, stack, "tr", Vec::new(), false);
+    }
+    // a link in a link, a heading in a heading, a button in a button, a form in a form
+    match name {
+        "a" | "button" => {
+            if let Some(p) = nearest(t, stack, &[name], &[]) {
+                stack.truncate(p);
+            }
+        }
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" if matches!(top.as_str(), "h1" | "h2" | "h3" | "h4" | "h5" | "h6") => {
+            stack.pop();
+        }
+        "form" if nearest(t, stack, &["form"], &[]).is_some() => return,
+        _ => {}
+    }
     // implied end tags
     if BLOCKS_CLOSING_P.contains(&name) {
         if let Some(p) = nearest(t, stack, &["p"], &["td", "th", "li", "div", "body", "blockquote", "table"]) {
@@ -443,7 +494,7 @@ mod tests {
     fn implied_end_tags_for_paragraphs_lists_and_tables() {
         assert_eq!(s("<p>one<p>two<div>three</div>"), "#root(p(\"one\") p(\"two\") div(\"three\"))");
         assert_eq!(s("<ul><li>a<li>b<ul><li>c</ul><li>d</ul>"), "#root(ul(li(\"a\") li(\"b\" ul(li(\"c\"))) li(\"d\")))");
-        assert_eq!(s("<table><tr><td>1<td>2<tr><td>3</table>"), "#root(table(tr(td(\"1\") td(\"2\")) tr(td(\"3\"))))");
+        assert_eq!(s("<table><tr><td>1<td>2<tr><td>3</table>"), "#root(table(tbody(tr(td(\"1\") td(\"2\")) tr(td(\"3\")))))");
         assert_eq!(s("<dl><dt>a<dd>b<dt>c<dd>d</dl>"), "#root(dl(dt(\"a\") dd(\"b\") dt(\"c\") dd(\"d\")))");
     }
 
@@ -457,7 +508,8 @@ mod tests {
     #[test]
     fn stray_and_unclosed_markup_never_fails() {
         assert_eq!(s("a < b and c > d"), "#root(\"a < b and c > d\")");
-        assert_eq!(s("</div>x</p></span>y"), "#root(\"xy\")");
+        // an end tag for a paragraph that is not open makes an empty one, as in a browser
+        assert_eq!(s("</div>x</p></span>y"), "#root(\"x\" p \"y\")");
         assert_eq!(s("<b><i>x</b>y</i>"), "#root(b(i(\"x\")) \"y\")");
         let _ = parse("<div class=\"unterminated");
         let _ = parse("<");

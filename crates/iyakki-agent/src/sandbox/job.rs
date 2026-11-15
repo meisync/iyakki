@@ -137,7 +137,8 @@ pub fn job_for(adm: &Admitted, policy: &SandboxPolicy, ns: &str) -> Value {
     let command: Vec<String> = if browser {
         ["iyakki", "browser-test", "/inputs/spec.json", "--out", "/workspace/out", "--json", "--profile", "/profile"].iter().map(|s| s.to_string()).collect()
     } else {
-        spec.argv.clone()
+        // files the request named are printed on the log by a wrapper, because the pod is gone when the Job has ended (`frames`)
+        super::frames::wrap(&spec.argv, &spec.artifacts).unwrap_or_else(|| spec.argv.clone())
     };
 
     let mut env: Vec<Value> = spec.env.iter().map(|e| json!({"name": e.name, "value": e.value})).collect();

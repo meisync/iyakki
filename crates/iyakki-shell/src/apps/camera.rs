@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use tiny_skia::{FilterQuality, Pixmap, PixmapPaint, Transform};
 
+use super::camera_port::{CameraPort, CxPort};
 use super::{App, AppCx, Flow};
 use crate::camera::live::Live;
 use crate::camera::passport::{self, Paper, Spec, SPECS};
@@ -98,6 +99,8 @@ pub(crate) fn preferred(cams: &[CamDevice], saved: &str) -> usize {
 }
 
 pub struct CameraApp {
+    /// What the port last gave the tile to reword a failure when the drive is gone (the core decides, not the tile).
+    reword: Option<Arc<dyn Fn(&str) -> String>>,
     presence: Presence,
     opener: Arc<dyn Opener>,
     cams: Vec<CamDevice>,
@@ -224,13 +227,9 @@ pub fn scan_gallery(pictures: &Path, videos: &Path, max: usize) -> Vec<Thumb> {
 }
 
 impl CameraApp {
-    pub fn new(cx: &AppCx) -> CameraApp {
-        let home = PathBuf::from(format!("/home/{}", cx.session.user));
-        // the camera in use is chosen here and nowhere else: the browser's in a browser session, the machine's otherwise
-        let (presence, opener): (Presence, Arc<dyn Opener>) = match iyakki_agent::browsersource::browser_camera_for(&cx.session.user) {
-            Some(m) => (Presence::browser(), Arc::new(crate::camera::browsercam::BrowserOpener::new(m))),
-            None => (Presence::system(), Arc::new(v4l2::V4l2Opener)),
-        };
+    pub fn new(port: &dyn CameraPort) -> CameraApp {
+        let home = PathBuf::from(format!("/home/{}", port.user()));
+        let (presence, opener) = port.camera_source();
         CameraApp::with_parts(presence, opener, home.join("Pictures"), home.join("Videos"))
     }
 
@@ -246,6 +245,7 @@ impl CameraApp {
             let _ = tx.send(scan_gallery(&p2, &v2, 12));
         });
         let mut a = CameraApp {
+            reword: None,
             presence,
             opener,
             cams,
@@ -335,13 +335,13 @@ impl CameraApp {
 
     fn say(&mut self, t: impl Into<String>, ok: bool) {
         let t: String = t.into();
-        // a photo that cannot be saved because the boot drive is gone says that (iyakki_storage::loss)
-        self.status = Some((if ok { t } else { iyakki_storage::loss::reword(&t) }, ok));
+        // a photo that cannot be saved because the boot drive is gone says that (the port asks the core)
+        self.status = Some((if ok { t } else { self.reword.as_ref().map(|f| f(&t)).unwrap_or(t) }, ok));
     }
 
     /// A folder the account may write to, made when missing.
-    fn ready_dir(&mut self, dir: &Path, cx: &AppCx) -> bool {
-        if !cx.session.policy.allows_write(&cx.session.user, &dir.display().to_string()) {
+    fn ready_dir(&mut self, dir: &Path, port: &dyn CameraPort) -> bool {
+        if !port.allows_write(&dir.display().to_string()) {
             self.say(format!("Your account may not save in {}.", dir.display()), false);
             return false;
         }
@@ -364,7 +364,7 @@ impl CameraApp {
     }
 
     /// Press the shutter: start the countdown when a timer is set, else act now. While recording it stops at once.
-    fn shutter(&mut self, cx: &AppCx) {
+    fn shutter(&mut self, port: &dyn CameraPort) {
         if self.is_recording() {
             self.stop_recording();
             return;
@@ -381,25 +381,25 @@ impl CameraApp {
         if self.timer > 0 {
             self.countdown = Some(self.timer as u64 * TICKS_PER_SEC);
         } else {
-            self.fire(cx);
+            self.fire(port);
         }
     }
 
-    fn fire(&mut self, cx: &AppCx) {
+    fn fire(&mut self, port: &dyn CameraPort) {
         match self.shot {
-            Shot::Photo => self.take_photo(cx),
-            Shot::Video => self.start_recording(cx),
-            Shot::Passport => self.take_passport(cx),
+            Shot::Photo => self.take_photo(port),
+            Shot::Video => self.start_recording(port),
+            Shot::Passport => self.take_passport(port),
         }
     }
 
-    pub fn take_photo(&mut self, cx: &AppCx) {
+    pub fn take_photo(&mut self, port: &dyn CameraPort) {
         let Some(frame) = self.live().and_then(|l| l.latest()) else {
             self.say("No picture from the camera yet.", false);
             return;
         };
         let dir = self.pictures.clone();
-        if !self.ready_dir(&dir, cx) {
+        if !self.ready_dir(&dir, port) {
             return;
         }
         let jpeg = match frame.to_jpeg() {
@@ -411,7 +411,7 @@ impl CameraApp {
         give_to_account(&path);
         match written {
             Ok(()) => {
-                cx.audit.record(&cx.session.user, "camera.photo", &path.display().to_string());
+                port.audit("camera.photo", &path.display().to_string());
                 self.flash = 8;
                 let pm = self.current_preview_pm();
                 self.add_thumb(path.clone(), pm, false);
@@ -421,9 +421,9 @@ impl CameraApp {
         }
     }
 
-    pub fn start_recording(&mut self, cx: &AppCx) {
+    pub fn start_recording(&mut self, port: &dyn CameraPort) {
         let dir = self.videos.clone();
-        if self.live().is_none() || !self.ready_dir(&dir, cx) {
+        if self.live().is_none() || !self.ready_dir(&dir, port) {
             return;
         }
         let path = unique(&dir, &format!("video-{}", now_stamp()), "avi");
@@ -431,7 +431,7 @@ impl CameraApp {
         give_to_account(&path);
         match r {
             Some(Ok(())) => {
-                cx.audit.record(&cx.session.user, "camera.record", &path.display().to_string());
+                port.audit("camera.record", &path.display().to_string());
                 self.say(format!("Recording {} (picture only, no sound).", name_of(&path)), true);
             }
             Some(Err(e)) => self.say(format!("Could not start recording: {e}"), false),
@@ -487,7 +487,7 @@ impl CameraApp {
         }
     }
 
-    pub fn take_passport(&mut self, cx: &AppCx) {
+    pub fn take_passport(&mut self, port: &dyn CameraPort) {
         let Some(frame) = self.live().and_then(|l| l.latest()) else {
             self.say("No picture from the camera yet.", false);
             return;
@@ -497,7 +497,7 @@ impl CameraApp {
             Err(e) => return self.say(format!("Could not read the picture: {e}"), false),
         };
         let dir = self.pictures.clone();
-        if !self.ready_dir(&dir, cx) {
+        if !self.ready_dir(&dir, port) {
             return;
         }
         let s = self.cur();
@@ -509,7 +509,7 @@ impl CameraApp {
         for f in [Some(&saved.photo), saved.digital.as_ref()].into_iter().flatten() {
             give_to_account(f);
         }
-        cx.audit.record(&cx.session.user, "camera.passport", &saved.photo.display().to_string());
+        port.audit("camera.passport", &saved.photo.display().to_string());
         let pm = pixels::pixmap(saved.w, saved.h, saved.rgba.clone());
         self.add_thumb(saved.photo.clone(), pm.clone(), false);
         self.flash = 8;
@@ -521,9 +521,9 @@ impl CameraApp {
     }
 
     /// Lay the last passport photo out on a sheet and save it as PNG and PDF; the paths written.
-    pub fn export_sheet(&mut self, paper: Paper, cx: &AppCx) -> Option<(PathBuf, PathBuf)> {
+    pub fn export_sheet(&mut self, paper: Paper, port: &dyn CameraPort) -> Option<(PathBuf, PathBuf)> {
         let dir = self.pictures.clone();
-        if !self.ready_dir(&dir, cx) {
+        if !self.ready_dir(&dir, port) {
             return None;
         }
         let p = self.passport_photo.as_ref()?;
@@ -531,7 +531,7 @@ impl CameraApp {
             Ok((png_path, pdf_path, copies)) => {
                 give_to_account(&png_path);
                 give_to_account(&pdf_path);
-                cx.audit.record(&cx.session.user, "camera.sheet", &png_path.display().to_string());
+                port.audit("camera.sheet", &png_path.display().to_string());
                 self.say(format!("Saved a {} sheet with {copies} copies: {} and {} in Pictures. Print at 100% (no scaling).", paper.name(), name_of(&png_path), name_of(&pdf_path)), true);
                 Some((png_path, pdf_path))
             }
@@ -692,7 +692,7 @@ impl CameraApp {
         self.overlay = Overlay::None;
     }
 
-    fn on_tick(&mut self, cx: &AppCx) {
+    fn on_tick(&mut self, port: &dyn CameraPort) {
         self.ticks += 1;
         if let Some(rx) = &self.gallery_rx {
             if let Ok(found) = rx.try_recv() {
@@ -738,7 +738,7 @@ impl CameraApp {
         if let Some(n) = self.countdown {
             if n <= 1 {
                 self.countdown = None;
-                self.fire(cx);
+                self.fire(port);
             } else {
                 self.countdown = Some(n - 1);
             }
@@ -840,7 +840,8 @@ impl CameraApp {
 
     fn draw_strip(&self, g: &mut Gfx, r: R, s: f32) {
         if self.gallery.is_empty() {
-            g.text(r.x + 4.0 * s, r.y + r.h / 2.0 - 8.0 * s, 13.0 * s, DIM, "Photos and videos you take appear here (Pictures and Videos folders).", Face::Sans);
+            let note = g.fit(13.0 * s, "Photos and videos you take appear here (Pictures and Videos folders).", Face::Sans, (r.w - 8.0 * s).max(40.0 * s));
+            g.text(r.x + 4.0 * s, r.y + r.h / 2.0 - 8.0 * s, 13.0 * s, DIM, &note, Face::Sans);
             return;
         }
         let th = r.h;
@@ -907,6 +908,8 @@ impl CameraApp {
             label(g, y, "Size");
             let m = self.live_mode().map(|m| format!("{}×{}", m.width, m.height)).unwrap_or_else(|| "—".into());
             let bw = g.button(value_x, y, 13.0 * s, &m, fx::CYAN, Event::Key(Key::Char('r')));
+            // the label is the size itself, or a dash while no picture mode is known: say what the button does
+            crate::access::describe(&m, &Event::Key(Key::Char('r')), crate::access::Meta::new(crate::access::Role::Button, Default::default()).named(&format!("Picture size {}", if m == "—" { "unknown" } else { m.as_str() })));
             if let Some(mm) = self.live_mode() {
                 g.text(value_x + bw + 8.0 * s, y + 7.0 * s, 12.0 * s, DIM, mm.pix.name(), Face::Sans);
             }
@@ -1135,7 +1138,7 @@ impl CameraApp {
         }
     }
 
-    fn overlay_key(&mut self, k: &Key, cx: &AppCx) {
+    fn overlay_key(&mut self, k: &Key, port: &dyn CameraPort) {
         let n = match &self.overlay {
             Overlay::Cameras => self.cams.len(),
             Overlay::Sizes => self.size_choices().len(),
@@ -1190,10 +1193,10 @@ impl CameraApp {
                 self.open_viewer(j);
             }
             (Overlay::PassportResult, Key::Char('4')) => {
-                self.export_sheet(Paper::Photo4x6, cx);
+                self.export_sheet(Paper::Photo4x6, port);
             }
             (Overlay::PassportResult, Key::Char('a')) => {
-                self.export_sheet(Paper::A4, cx);
+                self.export_sheet(Paper::A4, port);
             }
             (Overlay::PassportResult, Key::Char('r')) => self.overlay = Overlay::None,
             (Overlay::Cameras, Key::Char('r')) => self.refresh_cameras(),
@@ -1210,67 +1213,19 @@ impl CameraApp {
             _ => {}
         }
     }
-}
 
-fn name_of(p: &Path) -> String {
-    p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
-}
-
-impl Drop for CameraApp {
-    fn drop(&mut self) {
-        // leaving the app finishes a recording properly (Live's own drop does it too, this keeps the thumbnail logic out)
-        if let Conn::Live(l) = &self.conn {
-            let _ = l.stop_recording();
-        }
-    }
-}
-
-impl App for CameraApp {
-    fn title(&self) -> &'static str {
-        "Camera"
-    }
-    fn icon(&self) -> Icon {
-        Icon::Camera
-    }
-    fn accent(&self) -> [u8; 4] {
-        ACCENT
-    }
-    fn hint(&self) -> String {
-        "Space shoot · 1 2 3 photo/video/passport · t timer · m mirror · c camera · r size · Esc back".into()
-    }
-    fn help(&self) -> Vec<String> {
-        [
-            "Space or Enter · take a photo, start or stop recording, or take the passport photo (after the timer when one is set)",
-            "1 · Photo (JPEG in Pictures)    2 · Video (MJPEG AVI in Videos, picture only)    3 · Passport",
-            "t · timer off, 3 s or 10 s      m · mirror the live picture (saved pictures are never mirrored)",
-            "c · choose the camera           r · choose the picture size",
-            "[ and ] · brightness            ; and ' · contrast (when the camera has them)",
-            "Passport: p · choose the country (type to search; Custom size for any other) · - and = · zoom the frame · arrows · move it",
-            "After a passport photo: 4 · print sheet on 4×6 in paper · a · on A4 (PNG and PDF in Pictures) · r · retake",
-            "Click a picture in the strip to look at it; ← → move through them",
-            "Esc · cancel the timer, close a window, or go back to the apps (a recording is finished and kept)",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
-    }
-
-    fn wants_redraw(&mut self) -> bool {
-        let newer = self.live().and_then(|l| l.preview()).is_some_and(|(n, _)| n != self.shown);
-        newer || self.countdown.is_some() || self.flash > 0 || matches!(self.conn, Conn::Opening(_)) || (self.is_recording() && self.ticks % 10 == 0)
-    }
-
-    fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
+    fn handle_with(&mut self, ev: &Event, port: &dyn CameraPort) -> Flow {
+        self.reword = Some(port.failure_reworder());
         if matches!(ev, Event::Tick) {
-            self.on_tick(cx);
+            self.on_tick(port);
             return Flow::Stay;
         }
         if !matches!(self.overlay, Overlay::None) {
             match ev {
-                Event::Key(k) => self.overlay_key(k, cx),
+                Event::Key(k) => self.overlay_key(k, port),
                 Event::Paste(t) => {
                     for c in t.chars() {
-                        self.overlay_key(&Key::Char(c), cx);
+                        self.overlay_key(&Key::Char(c), port);
                     }
                 }
                 Event::Tab(n) if *n >= PICK_BASE && *n < PICK_BASE + 500 => {
@@ -1295,7 +1250,7 @@ impl App for CameraApp {
                     return Flow::Back;
                 }
             }
-            Event::Key(Key::Char(' ') | Key::Enter) => self.shutter(cx),
+            Event::Key(Key::Char(' ') | Key::Enter) => self.shutter(port),
             Event::Key(Key::Char('1')) => self.set_shot(Shot::Photo),
             Event::Key(Key::Char('2')) => self.set_shot(Shot::Video),
             Event::Key(Key::Char('3')) => self.set_shot(Shot::Passport),
@@ -1354,6 +1309,59 @@ impl App for CameraApp {
         }
         Flow::Stay
     }
+}
+
+fn name_of(p: &Path) -> String {
+    p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+impl Drop for CameraApp {
+    fn drop(&mut self) {
+        // leaving the app finishes a recording properly (Live's own drop does it too, this keeps the thumbnail logic out)
+        if let Conn::Live(l) = &self.conn {
+            let _ = l.stop_recording();
+        }
+    }
+}
+
+impl App for CameraApp {
+    fn title(&self) -> &'static str {
+        "Camera"
+    }
+    fn icon(&self) -> Icon {
+        Icon::Camera
+    }
+    fn accent(&self) -> [u8; 4] {
+        ACCENT
+    }
+    fn hint(&self) -> String {
+        "Space shoot · 1 2 3 photo/video/passport · t timer · m mirror · c camera · r size · Esc back".into()
+    }
+    fn help(&self) -> Vec<String> {
+        [
+            "Space or Enter · take a photo, start or stop recording, or take the passport photo (after the timer when one is set)",
+            "1 · Photo (JPEG in Pictures)    2 · Video (MJPEG AVI in Videos, picture only)    3 · Passport",
+            "t · timer off, 3 s or 10 s      m · mirror the live picture (saved pictures are never mirrored)",
+            "c · choose the camera           r · choose the picture size",
+            "[ and ] · brightness            ; and ' · contrast (when the camera has them)",
+            "Passport: p · choose the country (type to search; Custom size for any other) · - and = · zoom the frame · arrows · move it",
+            "After a passport photo: 4 · print sheet on 4×6 in paper · a · on A4 (PNG and PDF in Pictures) · r · retake",
+            "Click a picture in the strip to look at it; ← → move through them",
+            "Esc · cancel the timer, close a window, or go back to the apps (a recording is finished and kept)",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+    }
+
+    fn wants_redraw(&mut self) -> bool {
+        let newer = self.live().and_then(|l| l.preview()).is_some_and(|(n, _)| n != self.shown);
+        newer || self.countdown.is_some() || self.flash > 0 || matches!(self.conn, Conn::Opening(_)) || (self.is_recording() && self.ticks % 10 == 0)
+    }
+
+    fn handle(&mut self, ev: &Event, cx: &AppCx) -> Flow {
+        self.handle_with(ev, &CxPort(cx))
+    }
 
     fn render(&mut self, g: &mut Gfx, area: R, s: f32, _cx: &AppCx, _tick: u64) {
         let pad = 14.0 * s;
@@ -1383,5 +1391,7 @@ impl App for CameraApp {
     }
 }
 
+#[cfg(test)]
+mod fake_tests;
 #[cfg(test)]
 mod tests;

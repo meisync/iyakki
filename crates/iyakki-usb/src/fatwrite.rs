@@ -110,6 +110,11 @@ impl<'a> Fat32Rw<'a> {
         self.bps * self.spc
     }
 
+    /// The first cluster of the root folder.
+    pub fn root_cluster(&self) -> u32 {
+        self.root
+    }
+
     /// Free bytes counted from the FAT itself (not from FSInfo).
     pub fn free_bytes(&self) -> u64 {
         self.fat.iter().skip(2).take(self.clusters as usize).filter(|e| **e & 0x0FFF_FFFF == 0).count() as u64 * self.cluster_bytes()
@@ -216,12 +221,17 @@ impl<'a> Fat32Rw<'a> {
 
     /// Look up `name` in the directory starting at cluster `dir`: (first cluster, is a directory).
     pub fn find(&self, dir: u32, name: &str) -> Result<Option<(u32, bool)>, String> {
+        Ok(self.locate(dir, name)?.map(|(_, e)| (((le16(&e, 20) << 16) | le16(&e, 26)) as u32, e[11] & 0x10 != 0)))
+    }
+
+    /// The same lookup, returning where the short entry lives on the volume (absolute byte offset) and its 32 bytes.
+    fn locate(&self, dir: u32, name: &str) -> Result<Option<(u64, [u8; 32])>, String> {
         let want = name.to_ascii_uppercase();
         let mut lfn: Vec<u16> = Vec::new();
         for c in self.chain(dir)? {
             let mut buf = vec![0u8; self.cluster_bytes() as usize];
             self.f.read_exact_at(&mut buf, self.offset(c)).map_err(|e| e.to_string())?;
-            for e in buf.chunks_exact(32) {
+            for (slot, e) in buf.chunks_exact(32).enumerate() {
                 if e[0] == 0 {
                     return Ok(None);
                 }
@@ -251,8 +261,7 @@ impl<'a> Fat32Rw<'a> {
                 let long: String = String::from_utf16_lossy(&lfn.iter().copied().take_while(|u| *u != 0 && *u != 0xFFFF).collect::<Vec<_>>());
                 lfn.clear();
                 if sfn.to_ascii_uppercase() == want || (!long.is_empty() && long.to_ascii_uppercase() == want) {
-                    let first = ((le16(e, 20) << 16) | le16(e, 26)) as u32;
-                    return Ok(Some((first, e[11] & 0x10 != 0)));
+                    return Ok(Some((self.offset(c) + 32 * slot as u64, e.try_into().map_err(|_| "short directory entry".to_string())?)));
                 }
             }
         }
@@ -330,17 +339,21 @@ impl<'a> Fat32Rw<'a> {
         Ok((dir, all_existed))
     }
 
-    /// Create the file `name` (8.3, upper case) in `dir` with `size` bytes read from `src`. Refuses an existing name.
-    pub fn create_file(&mut self, dir: u32, name: &str, size: u64, src: &mut dyn Read, progress: &mut dyn FnMut(u64)) -> Result<(), String> {
-        if self.find(dir, name)?.is_some() {
-            return Err(format!("{name} already exists in that folder of the EFI System Partition; it is not overwritten"));
+    /// Claim clusters for `size` bytes, write them from `src` (the last cluster padded with zeros) and return the first cluster (0 for an
+    /// empty file). The FAT is not flushed here.
+    fn write_payload(&mut self, size: u64, src: &mut dyn Read, progress: &mut dyn FnMut(u64)) -> Result<u32, String> {
+        // a failed read gives the claimed clusters back (in memory: nothing was flushed, and the data written there is unreferenced)
+        let (fat, allocated, next_free) = (self.fat.clone(), self.allocated, self.next_free);
+        let r = self.write_payload_inner(size, src, progress);
+        if r.is_err() {
+            (self.fat, self.allocated, self.next_free) = (fat, allocated, next_free);
         }
-        let sfn = short_name(name)?;
-        if size > u32::MAX as u64 {
-            return Err("a file over 4 GiB does not fit FAT32".into());
-        }
+        r
+    }
+
+    fn write_payload_inner(&mut self, size: u64, src: &mut dyn Read, progress: &mut dyn FnMut(u64)) -> Result<u32, String> {
         let cb = self.cluster_bytes();
-        let first = if size == 0 {
+        Ok(if size == 0 {
             0
         } else {
             let chain = self.alloc(size.div_ceil(cb))?;
@@ -362,11 +375,63 @@ impl<'a> Fat32Rw<'a> {
                 i = j;
             }
             chain[0]
-        };
+        })
+    }
+
+    /// Create the file `name` (8.3, upper case) in `dir` with `size` bytes read from `src`. Refuses an existing name.
+    pub fn create_file(&mut self, dir: u32, name: &str, size: u64, src: &mut dyn Read, progress: &mut dyn FnMut(u64)) -> Result<(), String> {
+        if self.find(dir, name)?.is_some() {
+            return Err(format!("{name} already exists in that folder of the EFI System Partition; it is not overwritten"));
+        }
+        let sfn = short_name(name)?;
+        if size > u32::MAX as u64 {
+            return Err("a file over 4 GiB does not fit FAT32".into());
+        }
+        let first = self.write_payload(size, src, progress)?;
         self.f.sync_data().map_err(|e| e.to_string())?;
         self.flush()?;
         self.add_entry(dir, &Self::make_entry(&sfn, 0x20, first, size as u32))?;
         self.f.sync_data().map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    /// Replace the contents of the existing plain file `name` in `dir` with `size` bytes from `src` (the update of an IYAKKI stick).
+    /// The order keeps the old file whole until the new one is complete: new clusters are claimed and written first, the FAT is flushed,
+    /// then the one directory entry is rewritten in place (first cluster, size, time) and, last, the old clusters are freed. A power
+    /// cut at any point leaves either the old file or the new one, and at worst unreferenced clusters a file system check reclaims.
+    /// Folders, volume labels and read-only files are refused; nothing else in the volume is touched.
+    pub fn replace_file(&mut self, dir: u32, name: &str, size: u64, src: &mut dyn Read, progress: &mut dyn FnMut(u64)) -> Result<(), String> {
+        let (at, old) = self.locate(dir, name)?.ok_or_else(|| format!("{name} is not in that folder of the EFI System Partition; there is nothing to replace"))?;
+        if old[11] & 0x1A != 0 {
+            return Err(format!("{name} is a folder or a volume label and is not replaced"));
+        }
+        if old[11] & 0x01 != 0 {
+            return Err(format!("{name} is marked read-only and is not replaced"));
+        }
+        if size > u32::MAX as u64 {
+            return Err("a file over 4 GiB does not fit FAT32".into());
+        }
+        let old_first = ((le16(&old, 20) << 16) | le16(&old, 26)) as u32;
+        let old_chain = if old_first >= 2 { self.chain(old_first)? } else { Vec::new() };
+        let first = self.write_payload(size, src, progress)?;
+        self.f.sync_data().map_err(|e| e.to_string())?;
+        self.flush()?;
+        let (date, time) = fat_now();
+        let mut e = old;
+        e[20..22].copy_from_slice(&((first >> 16) as u16).to_le_bytes());
+        e[26..28].copy_from_slice(&(first as u16).to_le_bytes());
+        e[28..32].copy_from_slice(&(size as u32).to_le_bytes());
+        e[22..24].copy_from_slice(&time.to_le_bytes());
+        e[24..26].copy_from_slice(&date.to_le_bytes());
+        e[18..20].copy_from_slice(&date.to_le_bytes());
+        e[11] |= 0x20;
+        self.f.write_all_at(&e, at).map_err(|e| format!("writing the directory: {e}"))?;
+        self.f.sync_data().map_err(|e| e.to_string())?;
+        for c in &old_chain {
+            self.set_entry(*c, 0);
+        }
+        self.allocated = self.allocated.saturating_sub(old_chain.len() as u64);
+        self.next_free = old_chain.iter().copied().min().map_or(self.next_free, |m| m.min(self.next_free));
+        self.flush()
     }
 }

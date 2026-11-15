@@ -138,14 +138,14 @@ answers are not kept although a single-person browser cache could (conservative 
   a shared network process or cache directory between tabs (each tab runs its own helper with its own network session), and whether the
   profile cache survives on a live USB session without a data volume (it does not: the profile is in RAM there). None of these was
   changed or measured here because the engine cannot run on the development PC.
-* HTTP/2: the reader's HTTP client (ureq) speaks HTTP/1.1 only; every site above speaks HTTP/2. An in-house HTTP/2 client (HPACK, flow
+* HTTP/2: connected on 2026-11-13 (`iyakki-proxy::h2client`, F-BROX-10, KI-712): ALPN `h2`, one connection per host shared by many requests, fallback to HTTP/1.1. Checked against our own server and by hand against real sites; not yet timed.
   control, stream scheduling) is a large piece of security-sensitive code; with 6 connections per host and the preload scanner the
   network wait on script pages is already close to the slowest single file, so it was judged not the dominant cost and not started.
   Revisit if timelines on a slow link show requests queued behind the 6 connection limit.
-* Happy Eyeballs (parallel IPv4 and IPv6 connects) and TLS session resumption are not implemented (the HTTP client connects to
-  addresses one after the other).
+* Happy Eyeballs is built (2026-11-13, `iyakki-proxy::happy`, F-BROX-11): the resolver races the addresses of a new host and puts the one that
+  connects first in front. TLS session resumption is not implemented.
 * Resource scheduling not done: lazy loading of pictures below the fold (the reader fetches up to 60 pictures in document order),
-  `async` and `defer` scripts still run in order at the point the script loop reaches them, `preconnect` and `dns-prefetch` hints,
+  `async` and `defer` scripts now run after the blocking ones, in the standard's order, and all external scripts are fetched together (2026-11-13, F-BROX-12); a decoded-picture cache (F-BROX-13) and a parsed-style cache (F-BROX-14) are built too, `preconnect` and `dns-prefetch` hints,
   fonts named inside style sheets, scripts that scripts insert later (these are fetched when asked, as before), and cancelling a request
   already on the wire (queued early fetches are cancelled on navigation; running ones finish and are dropped).
 * Parse and style off the main path, decoding in the browser thread pool and compile on a worker: pictures were already decoded in
@@ -247,7 +247,12 @@ experiments can be run over SSH. **What the experiments showed: see "Interactive
 | Brotli | `BR2_PACKAGE_BROTLI=y` | libsoup then builds with Brotli (`-Dbrotli=enabled`), WebKit sends `br`, and Google and YouTube answers shrink. |
 | WOFF2 | `BR2_PACKAGE_WOFF2=y` (needs the brotli package) | WebKit decodes WOFF2 fonts, so pages show the fonts they ask for. |
 
-A WPE rebuild is hours (it was not started); Brotli and WOFF2 together would be one rebuild of WPE and libsoup.
+A WPE rebuild is hours; Brotli and WOFF2 together are one rebuild of WPE and libsoup.
+
+**Default since 2026-11-14:** Brotli and WOFF2 (`iyakki_web_speed.fragment`) are now part of every `web` and `macweb` build (`WEB_SPEED=0` leaves them out); iris, media and VA-API stay opt-in. The next web image build carries them; no build was made for this change and no page-load speed gain from them has been measured.
+
+**Built once, 2026-11-13 (consolidated rebuild, option A):** `WEB_IRIS=1 WEB_SPEED=1 WEB_MEDIA=1 WEB_VAAPI=1 dist/buildroot/build.sh web OUT` (`WEB_SPEED` = `iyakki_web_speed.fragment`: Brotli + WOFF2; `WEB_VAAPI` = `iyakki_web_vaapi.fragment`: GStreamer `va` plugin, libva, the i965 driver for Intel gen9.5 and older; never in a release image).
+On a 16-thread Linux build host with a cold tree (no ccache for WPE): about 90 minutes for the second attempt (the first stopped after 82 minutes in host Mesa because host LLVM carries RTTI once iris selects it; `external.mk` now passes `-Dcpp_rtti=true` to host Mesa then). The result: libsoup links libbrotlidec, WPE links libwoff2dec, `libWPEWebKit-2.0.so.1.6.10` is 119.6 MB, `libgallium-26.0.1.so` (iris, llvmpipe) 35.5 MB, `i965_drv_video.so` 8.1 MB, the whole root 796 MB, the initrd 220 MB zst. The image boots in QEMU and shows the local test page, google.com and youtube.com in the full engine (`qemu-web-test.py`; no GPU there, so iris, VA-API and WebRTC devices are not exercised: that needs the Mac, `macweb` with the same switches).
 
 ### What the WebKit disk cache and the memory gate can do
 
@@ -468,3 +473,36 @@ evidence; the card id is the machine's cards together, so changing an external c
 image (the helper's own environment); on a desktop window nothing changes.
 
 Verify on the Lenovo: `docs/project/test-plans/pc-uefi-amd.md`, step EXTRA-FREEZE-SAFE.
+
+## Style and layout speed report (F-BROX-15)
+
+`sh dist/scripts/browser-speed-report.sh [OUT_FILE]` measures the reader's own parse, style, layout and paint on the machine it runs on,
+with the same three synthetic pages every time (100, 1000 and 4000 blocks with a style sheet), and prints one table headed by the
+machine. It needs only cargo; close other programs first (the numbers are wall clock, median of 5 runs, `IYAKKI_SPEED_RUNS` changes it).
+Run it on each machine and add a row to the table.
+
+A drawing in use is a *warm* one: the shell keeps one frame buffer (with its glyph cache) per pane for as long as the pane lives. The
+first drawing on a new buffer is *cold*: it also rasterises every glyph it has not drawn before.
+
+| Machine | Page | Parse | Style | Cold first drawing | Warm drawing | Warm page down and draw |
+|---|---|---|---|---|---|---|
+| Mac16,11, Apple M4 Pro, 14 cores, 64 GB (2026-11-13, commit 1c1635e plus the font change below) | small, 100 blocks | 0.2 ms | 1.4 ms | 1.6 ms | 0.9 ms | 0.9 ms |
+| | medium, 1000 | 0.7 ms | 4.6 ms | 4.9 ms | 0.9 ms | 1.0 ms |
+| | large, 4000 | 2.8 ms | 19.9 ms | 16.4 ms | 1.1 ms | 1.1 ms |
+| | the browser's own bars, no page | | | 1.12 ms | 0.85 ms | |
+| EliteMini Series, AMD Ryzen 9 8945HS, 16 cores (2026-11-14, commit 096120d4, release build, `profile: fast`; the machine was shared with other builds, load average about 10, so these are slower than a quiet run) | small, 100 blocks | 0.1 ms | 0.7 ms | 4.0 ms | 1.4 ms | 1.5 ms |
+| | medium, 1000 | 1.0 ms | 10.8 ms | 10.9 ms | 1.4 ms | 1.5 ms |
+| | large, 4000 | 4.0 ms | 46.9 ms | 36.3 ms | 1.8 ms | 1.8 ms |
+| | the browser's own bars, no page | | | 1.57 ms | 1.31 ms | |
+| | a new frame buffer | | | 0.11 ms | | |
+| MacBookPro14,1 | | not run yet | | | | |
+
+**Finding and fix (2026-11-13, F-BROX-15).** The first version of this report seemed to say that every drawing cost about 29 ms whatever the
+page. That was one cost in the way the numbers were taken and a real one in the program: `Gfx::new` parsed the three bundled fonts
+(DejaVu Sans, Bold, Mono; about 27 ms in a release build) every time a frame buffer was made, and the first report made a new buffer for
+every drawing. The shell makes a buffer when a pane is made and when a pane changes size (a window being dragged to a new size made one
+for every size it passed through, and each one started with an empty glyph cache), so the cost was real there. Now the faces (and the
+script fonts used for Devanagari, Arabic, Hebrew and the others, a couple of MB, loaded on first use) are parsed once for the whole
+program and shared: **making a frame buffer went from 27.3 ms to 0.06 ms** on the M4 Pro. A drawing of a page that is already laid out
+costs about 1 ms, so layout and paint are not what makes a slow machine feel slow; parse and style grow with the page and are the cost to
+look at on the MacBookPro14,1 (style 20 ms for 4000 blocks here).

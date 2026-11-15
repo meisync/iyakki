@@ -1,6 +1,7 @@
 //! Real-time tests of the service with a fake card that blocks like one and records the gaps in what it was given.
 
 use super::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
@@ -121,6 +122,7 @@ fn done(m: &Mixer) {
 
 #[test]
 fn four_jittery_sources_within_their_budgets_give_the_card_no_gap() {
+    let _rt = crate::mixer::rt_serial();
     let card = CardSink::new(500);
     let m = Mixer::start(rt_cfg(15), Box::new(card.clone()));
     let mut hs = vec![];
@@ -144,6 +146,7 @@ fn four_jittery_sources_within_their_budgets_give_the_card_no_gap() {
 
 #[test]
 fn a_source_past_its_budget_goes_silent_and_does_not_hurt_the_others_or_the_card() {
+    let _rt = crate::mixer::rt_serial();
     let card = CardSink::new(500);
     let m = Mixer::start(rt_cfg(15), Box::new(card.clone()));
     let media = m.open_source(SourceKind::Media, 48_000, 2).unwrap();
@@ -217,6 +220,7 @@ fn the_same_stall_with_the_old_two_period_lead_does_underrun() {
 
 #[test]
 fn the_card_is_prerolled_with_the_whole_lead_at_open() {
+    let _rt = crate::mixer::rt_serial();
     let sink = FakeSink::new();
     let m = Mixer::start(MixerCfg { idle_ms: 5000, raise_priority: false, ..MixerCfg::default() }, Box::new(sink.clone()));
     let w = m.open_source(SourceKind::Media, 48_000, 2).unwrap();
@@ -229,6 +233,7 @@ fn the_card_is_prerolled_with_the_whole_lead_at_open() {
 
 #[test]
 fn a_source_still_filling_its_buffer_is_silent_and_does_not_open_the_card() {
+    let _rt = crate::mixer::rt_serial();
     let sink = FakeSink::new();
     let m = Mixer::start(MixerCfg { raise_priority: false, ..MixerCfg::default() }, Box::new(sink.clone()));
     let w = m.open_source(SourceKind::Radio, 48_000, 2).unwrap();
@@ -245,6 +250,7 @@ fn a_source_still_filling_its_buffer_is_silent_and_does_not_open_the_card() {
 /// while a voice-like source starts and stops again and again.
 #[test]
 fn a_radio_stays_one_unbroken_waveform_while_voice_bursts_come_and_go() {
+    let _rt = crate::mixer::rt_serial();
     let card = CardSink::new(500);
     let m = Mixer::start(rt_cfg(15), Box::new(card.clone()));
     let (rate, f) = (44_100u32, 440.0f64);
@@ -277,6 +283,7 @@ fn a_radio_stays_one_unbroken_waveform_while_voice_bursts_come_and_go() {
 
 #[test]
 fn the_heard_position_trails_the_mixed_audio_by_the_lead_and_stands_still_when_the_source_is_starved() {
+    let _rt = crate::mixer::rt_serial();
     let card = CardSink::new(500);
     let m = Mixer::start(rt_cfg(15), Box::new(card.clone()));
     let w = m.open_source(SourceKind::Speech, 24_000, 1).unwrap();
@@ -299,19 +306,33 @@ fn the_heard_position_trails_the_mixed_audio_by_the_lead_and_stands_still_when_t
 /// heard position (what the word highlight follows) holds it back by that much.
 #[test]
 fn the_heard_position_is_held_back_by_what_the_card_holds_beyond_the_lead() {
-    let at = |lat: u32| {
-        let m = Mixer::start(rt_cfg(15), Box::new(CardSink::new(500).with_latency(lat)));
-        let w = m.open_source(SourceKind::Speech, 24_000, 1).unwrap();
-        w.write_i16_wait(&vec![3000; 24_000 * 2], Duration::from_secs(5)).unwrap();
-        std::thread::sleep(Duration::from_millis(1000));
-        let p = w.played_ms();
+    let _rt = crate::mixer::rt_serial();
+    // The three cards run side by side from the same moment and are read one after the other at the same moment: a loaded machine moves
+    // the sample point of a sleeping test by tens of milliseconds, and it moves all three the same, so what is compared (what the cards
+    // hold beyond the lead) does not depend on it. After the stream ended the position meets the written length whatever the card holds,
+    // so the comparison is made while it plays.
+    let lats = [0u32, 500, 200];
+    let mixers: Vec<(Mixer, crate::mixer::SourceWriter)> = lats
+        .iter()
+        .map(|lat| {
+            let m = Mixer::start(rt_cfg(15), Box::new(CardSink::new(500).with_latency(*lat)));
+            let w = m.open_source(SourceKind::Speech, 24_000, 1).unwrap();
+            w.write_i16_wait(&vec![3000; 24_000 * 2], Duration::from_secs(10)).unwrap();
+            (m, w)
+        })
+        .collect();
+    // wait until the first one has been heard for a good while (a condition, not a fixed sleep), then read all three together
+    let end = std::time::Instant::now() + Duration::from_secs(30);
+    while mixers[0].1.played_ms() < 700 && std::time::Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let heard: Vec<u64> = mixers.iter().map(|(_, w)| w.played_ms()).collect();
+    for (m, _) in &mixers {
         m.shutdown();
-        p
-    };
-    let (plain, held) = (at(0), at(500));
+    }
+    let (plain, held, small) = (heard[0], heard[1], heard[2]);
     assert!((140..=260).contains(&(plain.saturating_sub(held))), "no latency told: heard {plain} ms; 500 ms told: {held} ms");
     // a card that holds less than the lead adds nothing
-    let small = at(200);
     assert!(small.abs_diff(plain) <= 40, "{small} vs {plain}");
 }
 
@@ -319,6 +340,7 @@ fn the_heard_position_is_held_back_by_what_the_card_holds_beyond_the_lead() {
 /// closed or starved between them (one sink open, no gap).
 #[test]
 fn sentence_hand_off_keeps_the_card_open_and_gapless() {
+    let _rt = crate::mixer::rt_serial();
     let card = CardSink::new(500);
     let m = Mixer::start(rt_cfg(15), Box::new(card.clone()));
     let wav = |ms: usize, v: i16| {
@@ -351,6 +373,7 @@ fn sentence_hand_off_keeps_the_card_open_and_gapless() {
 /// word highlight that follows it is not pushed by jumps of the position itself.
 #[test]
 fn the_heard_position_advances_smoothly_between_polls() {
+    let _rt = crate::mixer::rt_serial();
     let card = CardSink::new(500);
     let m = Mixer::start(rt_cfg(15), Box::new(card.clone()));
     let w = m.open_source(SourceKind::Speech, 24_000, 1).unwrap();
@@ -359,6 +382,22 @@ fn the_heard_position_advances_smoothly_between_polls() {
         std::thread::spawn(move || {
             w2.write_i16_wait(&vec![3000; 24_000 * 3], Duration::from_secs(10)).unwrap();
             w2.finish();
+        })
+    };
+    // How late this machine runs a thread that wants the CPU right now: a probe thread sleeps 2 ms over and over and keeps the
+    // longest overshoot. The poll below and the mixer thread are late by about that much on a loaded machine, and the position then
+    // jumps by it: the allowed step grows with what was measured (it is the scheduler, not the position).
+    let stop_probe = Arc::new(AtomicBool::new(false));
+    let probe = {
+        let stop = stop_probe.clone();
+        std::thread::spawn(move || {
+            let mut worst = 0.0f64;
+            while !stop.load(Ordering::Relaxed) {
+                let t = Instant::now();
+                std::thread::sleep(Duration::from_millis(2));
+                worst = worst.max(t.elapsed().as_secs_f64() * 1000.0 - 2.0);
+            }
+            worst
         })
     };
     let t0 = Instant::now();
@@ -385,7 +424,10 @@ fn the_heard_position_advances_smoothly_between_polls() {
     }
     feeder.join().unwrap();
     m.shutdown();
+    stop_probe.store(true, Ordering::Relaxed);
+    let late = probe.join().unwrap();
     assert!(started);
-    assert!(first <= 40, "the heard position starts at {first} ms instead of near 0: the first sound would be lit late");
-    assert!(worst_fwd < 45.0 && worst_back > -45.0, "the heard position stepped {worst_fwd:.0} ms ahead and {worst_back:.0} ms back of the wall clock between polls");
+    assert!(first <= 40.max(late as u64 + 40), "the heard position starts at {first} ms instead of near 0 (scheduling delay seen {late:.0} ms): the first sound would be lit late");
+    let allowed = 45.0 + 2.0 * late;
+    assert!(worst_fwd < allowed && worst_back > -allowed, "the heard position stepped {worst_fwd:.0} ms ahead and {worst_back:.0} ms back of the wall clock between polls (allowed {allowed:.0} ms: 45 plus twice the {late:.0} ms this machine kept a thread waiting)");
 }

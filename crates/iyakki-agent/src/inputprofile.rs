@@ -221,7 +221,8 @@ pub fn map_chord(profile: Resolved, h: Held, base: Base) -> Mapped {
     }
     if h.command {
         return match base {
-            // Control+Command+Q would lock the screen on a Mac; IYAKKI has no lock shortcut, so it is dropped like Command+Q
+            // Command+Q is dropped. Control+Command+Q is the sign-out chord, but the shell takes it (as a sign-out card) before this table is asked, so
+            // this arm only ever sees Command+Q alone or a Control+Command+Q the shell did not take
             Base::Letter('q') => Mapped::Ignore,
             Base::Letter(c) if c.is_ascii_alphabetic() => {
                 // Command+Shift+Z is redo, as Ctrl+Shift+Z is
@@ -317,7 +318,7 @@ pub struct PointerDefaults {
     pub trackpad_natural: bool,
     pub wheel_natural: bool,
     pub speed_pct: u32,
-    /// Three-finger drag is not built; the profile says it stays off.
+    /// Three-finger drag is built (Settings, Keyboard, key J) and is off in both profiles until the person turns it on.
     pub three_finger_drag: bool,
 }
 
@@ -336,8 +337,11 @@ impl KeyboardSettings {
         let d = pointer_defaults(profile);
         self.trackpad_tap = Some(d.trackpad_tap);
         self.trackpad_natural = Some(d.trackpad_natural);
+        self.three_finger_drag = Some(d.three_finger_drag);
         self.wheel_natural = Some(d.wheel_natural);
         self.scroll_speed_pct = 0; // "not chosen" is 100
+        self.pointer_speed_pct = 0;
+        self.touchpad_speed_pct = 0;
         self.scroll_smooth = None;
         self.scroll_momentum = None;
         self.wheel_lines = 0;
@@ -442,7 +446,7 @@ mod tests {
         assert_eq!(mac(true, false, true, Base::Letter('v')), ctrl('V'));
         assert_eq!(mac(true, false, false, Base::Letter('C')), ctrl('c'), "caps lock does not matter");
         assert_eq!(mac(true, false, false, Base::Letter('q')), Mapped::Ignore, "Command+Q does not quit");
-        assert_eq!(map_chord(Resolved::Mac, Held { command: true, control: true, ..Default::default() }, Base::Letter('q')), Mapped::Ignore, "Control+Command+Q: there is no lock shortcut");
+        assert_eq!(map_chord(Resolved::Mac, Held { command: true, control: true, ..Default::default() }, Base::Letter('q')), Mapped::Ignore, "Control+Command+Q: the shell asks to sign out before this table is asked; if it ever got here nothing must quit");
     }
 
     #[test]

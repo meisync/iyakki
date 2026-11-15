@@ -865,3 +865,328 @@ fn a_lesson_that_was_deleted_with_its_plan_leaves_the_page_without_a_crash() {
     f.reload();
     assert_eq!(f.app.page(), "plans");
 }
+
+// ---------------------------------------------------------------------------------------------------- PDF export (F-STUDY-07)
+
+/// A tile whose account may write only inside its own data folder, so an export lands in `<data>/downloads/root` and nowhere else.
+fn pdf_fx(tag: &str, w: u32, h: u32, s: f32) -> (Fx, Arc<Teacher>, std::path::PathBuf) {
+    let t = Teacher::new();
+    let mut cx = cx_with_admin_store(&format!("learn-pdf-{tag}"));
+    cx.chat = Arc::new(Shared(t.clone()));
+    let dir = std::fs::canonicalize(cx.services.dir()).unwrap();
+    cx.session.policy.fs_read = vec![dir.display().to_string()];
+    cx.session.policy.fs_write = vec![dir.display().to_string()];
+    let out = dir.join("downloads").join(USER);
+    (Fx::on(cx, w, h, s), t, out)
+}
+
+fn pdf_text(path: &std::path::Path) -> (usize, String) {
+    let d = iyakki_pdf::Document::open(std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))).unwrap();
+    (d.page_count(), (0..d.page_count()).map(|i| d.page_text(i).unwrap()).collect::<Vec<_>>().join("\n"))
+}
+
+fn said(f: &Fx) -> String {
+    f.app.msg.as_ref().map(|m| m.0.clone()).unwrap_or_default()
+}
+
+#[test]
+fn a_plan_a_quiz_and_a_lesson_are_exported_as_pdf_by_button_and_by_key() {
+    let (mut f, _t, out) = pdf_fx("all", 1366, 768, 1.0);
+    // a plan: from the open plan by the button, then from the list by the key; the second file gets a free name
+    make_plan(&f, 3);
+    f.reload();
+    f.key(Key::Enter);
+    assert!(f.has_hit(&Event::Tab(T_PDF)), "the plan page has Export PDF");
+    f.ev(Event::Tab(T_PDF));
+    assert!(said(&f).starts_with("Saved ") && said(&f).contains("Study plan Programming basics.pdf"), "{}", said(&f));
+    let (pages, text) = pdf_text(&out.join("Study plan Programming basics.pdf"));
+    assert_eq!(pages, 1);
+    assert!(text.contains("Syllabus") && text.contains("Day 2 concept") && text.contains("2030-05-08"), "{text}");
+    f.chr('p');
+    assert!(said(&f).contains("Study plan Programming basics (1).pdf") && out.join("Study plan Programming basics (1).pdf").is_file(), "{}", said(&f));
+    f.key(Key::Esc);
+    assert!(f.has_hit(&Event::Tab(T_PDF)), "the list has it too");
+    f.chr('p');
+    assert!(out.join("Study plan Programming basics (2).pdf").is_file());
+    // a lesson: the button appears once it is written, and the file has its sections and pictures
+    f.key(Key::Enter);
+    f.ev(Event::Row(0));
+    settle(&mut f);
+    assert!(f.has_hit(&Event::Tab(T_PDF)), "the lesson page has Export PDF");
+    f.ev(Event::Tab(T_PDF));
+    assert!(said(&f).contains("Programming basics day 1.pdf"), "{}", said(&f));
+    let (_, text) = pdf_text(&out.join("Programming basics day 1.pdf"));
+    assert!(text.contains("Day 1: Day 1 concept") && text.contains("A loop repeats the same work") && text.contains("A loop of arrows"), "{text}");
+    f.chr('p');
+    assert!(out.join("Programming basics day 1 (1).pdf").is_file(), "the key works on the lesson page");
+    // a quiz: the answer key is off, switches on with the button or k, and is then a page of its own
+    f.key(Key::Esc);
+    f.key(Key::Esc);
+    make_quiz(&f);
+    to_quizzes(&mut f);
+    assert!(f.has_hit(&Event::Tab(T_PDF)) && f.has_hit(&Event::Tab(T_PDF_KEY)) && f.text().contains("Answer key: off"), "{}", f.text());
+    f.ev(Event::Tab(T_PDF));
+    let (pages, text) = pdf_text(&out.join("Quiz Solar system.pdf"));
+    assert!(pages == 1 && text.contains("1. Which planet is closest to the Sun?") && !text.contains("Answer key") && !text.contains("Mercury orbits"), "{pages} {text}");
+    f.ev(Event::Tab(T_PDF_KEY));
+    assert!(f.text().contains("Answer key: on") && said(&f).contains("answer key"));
+    f.chr('p');
+    let (pages, text) = pdf_text(&out.join("Quiz Solar system (1).pdf"));
+    assert_eq!(pages, 2, "the key is on its own page");
+    assert!(text.contains("Answer key: Solar system") && text.contains("1. A) Mercury") && text.contains("3. D) One"), "{text}");
+    f.chr('k');
+    assert!(f.text().contains("Answer key: off"), "k switches it back");
+    f.chr('p');
+    assert_eq!(pdf_text(&out.join("Quiz Solar system (2).pdf")).0, 1);
+    // while a quiz is being taken there is no export (the key must not leave the page)
+    f.key(Key::Enter);
+    assert_eq!(f.app.page(), "quiz");
+    assert!(!f.has_hit(&Event::Tab(T_PDF)));
+    f.chr('p');
+    assert!(!out.join("Quiz Solar system (3).pdf").exists());
+}
+
+#[test]
+fn the_tile_does_not_replace_a_file_and_the_chat_tool_asks_first() {
+    let (mut f, _t, out) = pdf_fx("chat", 800, 480, 1.0);
+    let plan = make_plan(&f, 2);
+    let quiz = make_quiz(&f);
+    let defs = study_tools::defs(true);
+    assert_eq!(defs.iter().find(|d| d.spec.name == "study_export_pdf").unwrap().risk, iyakki_agent::agent::Risk::Ask);
+    // the tool itself (the agent adds the approval and the file rules; its own path is covered in the agent tests)
+    f.reload();
+    f.key(Key::Enter);
+    f.chr('p');
+    let first = std::fs::read(out.join("Study plan Programming basics.pdf")).unwrap();
+    f.chr('p');
+    assert_eq!(std::fs::read(out.join("Study plan Programming basics.pdf")).unwrap(), first, "the first file is untouched");
+    let _ = (plan, quiz);
+}
+
+#[test]
+fn other_scripts_and_a_missing_lesson_are_said_in_words_and_nothing_is_written() {
+    let (mut f, t, out) = pdf_fx("refuse", 800, 480, 1.0);
+    f.chat("study_plan_create", json!({"topic": "\u{0ba4}\u{0bae}\u{0bbf}\u{0bb4}\u{0bcd}", "unit": "days", "count": 1, "start": "2030-05-06", "sessions": [{"title": "\u{0baa}\u{0bbe}\u{0b9f}\u{0bae}\u{0bcd}"}]})).unwrap();
+    f.reload();
+    f.key(Key::Enter);
+    f.ev(Event::Tab(T_PDF));
+    assert!(said(&f).contains("cannot be written in a PDF yet") && said(&f).contains("Nothing was saved"), "{}", said(&f));
+    assert!(!out.exists() || std::fs::read_dir(&out).unwrap().next().is_none());
+    assert!(f.app.msg.as_ref().is_some_and(|m| !m.1), "shown as a problem, not as success");
+    // a lesson that is not written yet has no export button
+    let (_tx, rx) = std::sync::mpsc::channel();
+    *t.gate.lock().unwrap() = Some(rx);
+    f.key(Key::Enter);
+    f.ev(Event::Row(0));
+    assert_eq!(f.app.page(), "lesson-writing");
+    assert!(!f.has_hit(&Event::Tab(T_PDF)));
+    f.chr('p');
+    assert!(said(&f).contains("nothing to put in a PDF") || !said(&f).starts_with("Saved"), "{}", said(&f));
+}
+
+#[test]
+fn the_export_buttons_fit_every_size() {
+    for (w, h) in [(360u32, 740u32), (800, 480), (1366, 768), (2560, 1600)] {
+        for s in [1.0f32, 1.5] {
+            let (mut f, _t, out) = pdf_fx(&format!("fit-{w}-{}", (s * 10.0) as u32), w, h, s);
+            make_plan(&f, 3);
+            make_quiz(&f);
+            f.reload();
+            check_fits(&mut f, &format!("plans {w}x{h} s{s}"));
+            assert!(f.has_hit(&Event::Tab(T_PDF)), "plans list {w}x{h} s{s}");
+            f.key(Key::Enter);
+            check_fits(&mut f, &format!("plan {w}x{h} s{s}"));
+            assert!(f.has_hit(&Event::Tab(T_PDF)), "plan {w}x{h} s{s}");
+            f.ev(Event::Row(0));
+            settle(&mut f);
+            check_fits(&mut f, &format!("lesson {w}x{h} s{s}"));
+            assert!(f.has_hit(&Event::Tab(T_PDF)), "lesson {w}x{h} s{s}");
+            f.ev(Event::Tab(T_PDF));
+            assert!(said(&f).starts_with("Saved "), "{w}x{h}: {}", said(&f));
+            f.key(Key::Esc);
+            f.key(Key::Esc);
+            f.ev(Event::Tab(T_QUIZZES));
+            check_fits(&mut f, &format!("quizzes {w}x{h} s{s}"));
+            assert!(f.has_hit(&Event::Tab(T_PDF)) && f.has_hit(&Event::Tab(T_PDF_KEY)), "quizzes {w}x{h} s{s}");
+            f.ev(Event::Tab(T_PDF));
+            assert!(out.join("Quiz Solar system.pdf").is_file(), "{w}x{h}");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------- live (qwen3-8b): LEARN PDFs
+// Ignored tests against a Lemonade server on the LAN (see story_live_tests.rs for how to run them): the plan and the quiz are made by
+// the real model through the real tools, the lesson is written by the real model in the tile, and the PDFs are made by the tile's buttons.
+
+struct LiveStudy(std::sync::Arc<iyakki_agent::services::Services>);
+
+impl iyakki_agent::agent::Tools for LiveStudy {
+    fn defs(&self) -> Vec<iyakki_agent::agent::ToolDef> {
+        study_tools::defs(false)
+    }
+    fn call(&self, name: &str, args: &Value) -> Result<String, String> {
+        study_tools::call(&self.0, USER, name, args)
+    }
+    fn describe(&self, name: &str, args: &Value) -> String {
+        study_tools::describe(name, args).unwrap_or_else(|| name.to_string())
+    }
+}
+
+fn live_env() -> (String, String) {
+    (std::env::var("IYAKKI_LIVE_LEMONADE_URL").expect("set IYAKKI_LIVE_LEMONADE_URL"), std::env::var("IYAKKI_LIVE_LEMONADE_KEY_FILE").expect("set IYAKKI_LIVE_LEMONADE_KEY_FILE"))
+}
+
+fn live_note(row: &str, name: &str, text: &str) {
+    let (url, key_file) = live_env();
+    let key = std::fs::read_to_string(&key_file).unwrap_or_default().trim().to_string();
+    let mut t = text.to_string();
+    for h in [key, iyakki_agent::lemonade::origin(&url).unwrap_or_default(), url.trim_end_matches('/').to_string()] {
+        if !h.is_empty() {
+            t = t.replace(h.as_str(), "<redacted>");
+        }
+    }
+    eprintln!("[{row}] {name}: {}", t.lines().next().unwrap_or(""));
+    if let Ok(d) = std::env::var("IYAKKI_LIVE_EVIDENCE") {
+        let d = std::path::Path::new(&d).join(row);
+        let _ = std::fs::create_dir_all(&d);
+        let _ = std::fs::write(d.join(format!("{name}.txt")), t);
+    }
+}
+
+fn live_keep(row: &str, name: &str, bytes: &[u8]) {
+    if let Ok(d) = std::env::var("IYAKKI_LIVE_EVIDENCE") {
+        let d = std::path::Path::new(&d).join(row);
+        let _ = std::fs::create_dir_all(&d);
+        let _ = std::fs::write(d.join(name), bytes);
+    }
+}
+
+#[test]
+#[ignore = "live service"]
+fn live_learn_a_plan_and_a_quiz_made_by_qwen3_and_a_lesson_it_wrote_become_pdfs_with_an_answer_key() {
+    use crate::apps::pdf_live_check::{check, found_back};
+    use iyakki_agent::agent::{start, RunEvent, RunLimits, Verdict};
+    let (url, key_file) = live_env();
+    // the real server for the model; the tile's own store for the plans
+    let up: std::sync::Arc<dyn iyakki_agent::iyakki_proxy::Upstream> = std::sync::Arc::new(iyakki_agent::iyakki_proxy::https::UreqUpstream::with_timeout(std::time::Duration::from_secs(300)));
+    let real = iyakki_agent::services::Services::open(&std::env::temp_dir().join(format!("iyakki-live-learn-{}", std::process::id())), up.clone(), up).unwrap();
+    let mut p = iyakki_agent::providers::ProviderCfg::new("lemon", iyakki_agent::providers::Kind::Lemonade);
+    p.base_url = Some(url);
+    p.key_ref = Some(format!("file:{key_file}"));
+    real.settings.lock().unwrap().upsert_provider(p).unwrap();
+    real.refresh_lemonade("lemon").unwrap();
+    let chat = std::sync::Arc::new(iyakki_agent::providers::ProviderChat { client: real.client_for("lemon", false).unwrap(), model: "qwen3-8b".into(), streamer: None });
+
+    let mut cx = cx_with_admin_store("learn-live-pdf");
+    cx.chat = chat.clone();
+    let dir = std::fs::canonicalize(cx.services.dir()).unwrap();
+    cx.session.policy.fs_read = vec![dir.display().to_string()];
+    cx.session.policy.fs_write = vec![dir.display().to_string()];
+    let out = dir.join("downloads").join(USER);
+    let mut f = Fx::on(cx, 1366, 768, 1.0);
+    let mut lines = Vec::new();
+
+    let ask = |what: &str, prompt: &str| -> Vec<RunEvent> {
+        let h = start(chat.clone(), std::sync::Arc::new(LiveStudy(f.cx.services.clone())), vec![iyakki_agent::chat::Message::system("You are IYAKKI's study helper. Use the tools to do what is asked, then say in one sentence what you made."), iyakki_agent::chat::Message::user(prompt)], RunLimits::default());
+        let mut ev = Vec::new();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        while std::time::Instant::now() < end {
+            if let Ok(e) = h.events.recv_timeout(std::time::Duration::from_millis(100)) {
+                if let RunEvent::Approval { id, .. } = &e {
+                    h.decide(id, Verdict::Approve);
+                }
+                let done = matches!(e, RunEvent::Final { .. } | RunEvent::Failed { .. } | RunEvent::Stopped { .. });
+                ev.push(e);
+                if done {
+                    break;
+                }
+            }
+        }
+        eprintln!("{what}: {} events", ev.len());
+        ev
+    };
+    let made = |ev: &[RunEvent], tool: &str| ev.iter().any(|e| matches!(e, RunEvent::ToolResult { name, ok: true, .. } if name == tool));
+
+    // the plan: three tries for the model to call the tool with a good list
+    let mut plan_ok = false;
+    for attempt in 1..=3 {
+        let ev = ask("plan", "Make a 3-day study plan for learning basic fractions, starting 2030-05-06, with a title and a note for each day, using the study_plan_create tool.");
+        if made(&ev, "study_plan_create") {
+            lines.push(format!("plan: made by the model on attempt {attempt}"));
+            plan_ok = true;
+            break;
+        }
+        lines.push(format!("plan attempt {attempt}: {:?}", ev.iter().filter_map(|e| if let RunEvent::ToolResult { text, .. } = e { Some(text.chars().take(120).collect::<String>()) } else { None }).collect::<Vec<_>>()));
+    }
+    assert!(plan_ok, "{}", lines.join("\n"));
+    let mut quiz_ok = false;
+    for attempt in 1..=3 {
+        let ev = ask("quiz", "Make a 4-question multiple-choice quiz about basic fractions using the quiz_create tool (four options each, one right answer, an explanation each).");
+        if made(&ev, "quiz_create") {
+            lines.push(format!("quiz: made by the model on attempt {attempt}"));
+            quiz_ok = true;
+            break;
+        }
+        lines.push(format!("quiz attempt {attempt}: {:?}", ev.iter().filter_map(|e| if let RunEvent::ToolResult { text, .. } = e { Some(text.chars().take(120).collect::<String>()) } else { None }).collect::<Vec<_>>()));
+    }
+    assert!(quiz_ok, "{}", lines.join("\n"));
+
+    // the plan in the tile, exported by the button
+    f.reload();
+    f.key(Key::Enter);
+    assert!(f.has_hit(&Event::Tab(T_PDF)), "the plan page has Export PDF: {}", f.text());
+    f.ev(Event::Tab(T_PDF));
+    let plan_said = said(&f);
+    let plan_pdf = std::fs::read_dir(&out).unwrap().filter_map(|e| e.ok().map(|e| e.path())).find(|p| p.file_name().unwrap().to_string_lossy().starts_with("Study plan")).expect("a plan PDF");
+    let bytes = std::fs::read(&plan_pdf).unwrap();
+    let pdf = check(&bytes).unwrap_or_else(|e| panic!("plan structure: {e}"));
+    live_keep("F-STUDY-07", "plan.pdf", &bytes);
+    lines.push(format!("plan PDF: {plan_said} | {} bytes, {} pages; text starts {:?}", pdf.bytes, pdf.pages, pdf.text.chars().take(120).collect::<String>().replace('\n', " / ")));
+    assert!(pdf.text.contains("Syllabus") && pdf.text.contains("2030-05-06"), "{}", pdf.text);
+
+    // a lesson written by the model in the tile (day 1), exported by the button
+    f.ev(Event::Row(0));
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(400);
+    while std::time::Instant::now() < end {
+        f.draw();
+        if !f.app.lesson_state().is_some_and(|l| l.generating()) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(f.has_hit(&Event::Tab(T_PDF)), "the lesson page has Export PDF once written: {}", f.text());
+    let screen = f.text();
+    f.ev(Event::Tab(T_PDF));
+    let lesson_said = said(&f);
+    let lesson_pdf = std::fs::read_dir(&out).unwrap().filter_map(|e| e.ok().map(|e| e.path())).find(|p| p.file_name().unwrap().to_string_lossy().contains(" day 1")).unwrap_or_else(|| panic!("a lesson PDF; the tile said {lesson_said:?}"));
+    let bytes = std::fs::read(&lesson_pdf).unwrap();
+    let pdf = check(&bytes).unwrap_or_else(|e| panic!("lesson structure: {e}"));
+    let (hit, all) = found_back(&screen, &pdf.text);
+    live_keep("F-STUDY-07", "lesson.pdf", &bytes);
+    let leaks: Vec<&str> = ["<think", "</think", "```", "##", "**", "!["].into_iter().filter(|n| pdf.text.contains(n)).collect();
+    live_keep("F-STUDY-07", "lesson-pdf-text.txt", pdf.text.as_bytes());
+    lines.push(format!("lesson PDF: {lesson_said} | {} bytes, {} pages, {} picture(s), words of the lesson page back {hit}/{all}, leaks {leaks:?}", pdf.bytes, pdf.pages, pdf.images));
+    assert!(leaks.is_empty(), "{leaks:?}");
+    f.key(Key::Esc);
+    f.key(Key::Esc);
+
+    // the quiz: without the key, then with the key on its own page
+    f.reload();
+    f.key(Key::Right);
+    assert!(f.has_hit(&Event::Tab(T_PDF)) && f.has_hit(&Event::Tab(T_PDF_KEY)), "{}", f.text());
+    f.ev(Event::Tab(T_PDF));
+    let plain = std::fs::read_dir(&out).unwrap().filter_map(|e| e.ok().map(|e| e.path())).find(|p| p.file_name().unwrap().to_string_lossy().starts_with("Quiz")).expect("a quiz PDF");
+    let qb = std::fs::read(&plain).unwrap();
+    let qp = check(&qb).unwrap_or_else(|e| panic!("quiz structure: {e}"));
+    assert!(!qp.text.contains("Answer key"), "no key unless asked");
+    f.ev(Event::Tab(T_PDF_KEY));
+    f.chr('p');
+    let keyed = std::fs::read_dir(&out).unwrap().filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("Quiz")).find(|p| p != &plain).expect("a quiz PDF with the key");
+    let kb = std::fs::read(&keyed).unwrap();
+    let kp = check(&kb).unwrap_or_else(|e| panic!("quiz-key structure: {e}"));
+    live_keep("F-STUDY-07", "quiz.pdf", &qb);
+    live_keep("F-STUDY-07", "quiz-with-key.pdf", &kb);
+    lines.push(format!("quiz PDF: {} pages without the key ({} bytes); with the key {} pages, key page present: {}", qp.pages, qp.bytes, kp.pages, kp.text.contains("Answer key")));
+    assert!(kp.text.contains("Answer key") && kp.pages == qp.pages + 1, "the key is a page of its own: {} vs {}", kp.pages, qp.pages);
+    live_note("F-STUDY-07", "learn-pdfs-qwen3", &lines.join("\n"));
+}

@@ -838,4 +838,25 @@ mod tests {
         let t = w.q.describe();
         assert!(t.contains("#1 Succeeded") && t.contains("m.mp3") && t.contains("Music"), "{t}");
     }
+
+    #[test]
+    fn retry_of_a_broken_download_continues_where_it_stopped() {
+        let w = world("resume");
+        let body = [mediadl::tests::tiny_mp3(), (0..120_000u32).map(|i| (i % 241) as u8).collect::<Vec<u8>>()].concat();
+        let (base, seen) = mediadl::tests::serve_ranged(body.clone(), 50_000, mediadl::tests::RangeMode::Honour);
+        let id = w.q.enqueue(w.ctx.clone(), req(format!("{base}/long.mp3"))).unwrap();
+        wait_until(&w.q, "first try ends", |q| q.view(id).unwrap().status.finished());
+        let v = w.q.view(id).unwrap();
+        assert_eq!(v.status, Status::Failed, "{}", v.error);
+        assert!(v.error.starts_with("Network error"), "{}", v.error);
+        w.q.retry(id).unwrap();
+        wait_until(&w.q, "retry done", |q| q.view(id).unwrap().status.finished());
+        let v = w.q.view(id).unwrap();
+        assert_eq!(v.status, Status::Succeeded, "{}", v.error);
+        assert_eq!(std::fs::read(w.home.join("Music/long.mp3")).unwrap(), body);
+        let ranges = seen.lock().unwrap().clone();
+        assert!(ranges.len() == 2 && ranges[1].starts_with("bytes="), "{ranges:?}");
+        let leftovers: Vec<String> = std::fs::read_dir(w.home.join("Music")).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(leftovers, vec!["long.mp3".to_string()]);
+    }
 }

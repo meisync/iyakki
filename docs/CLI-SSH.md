@@ -67,13 +67,38 @@ up to two minutes, and stream into the log; the screen does not wait. (In a pipe
 `-i uvault:ssh.<name>`; there is no separate skill (the built-in skill list is shared with the store and left alone).
 Long work: `run_command` allows up to 300 s; beyond that the person starts a job.
 
-## Not built: an interactive session
+## Interactive sessions (F-CLI-08)
 
-The tile has no pseudo-terminal today (the IDE terminal is a command runner too). A real `ssh host` login, `top` or `vi` needs
-`openpty`/`forkpty` with `setsid` and `TIOCSCTTY`, `TIOCSWINSZ` for the size and resizing, a VT100/ANSI emulator (cursor movement,
-colours, alternate screen, scrolling regions, UTF-8 and wide characters) with scrollback, drawing it in the tile, and raw key
-forwarding (arrows, Ctrl, function keys, paste). Estimated 1,800 to 2,500 lines plus tests, mostly the emulator, and BOUNDARY.md rows
-for `openpty`, `setsid` and `ioctl`. It is listed as F-CLI-08 in `FEATURES.md` and under class C in `ALPHA-SCOPE.md`.
+On the Connections tab, **L** (or the button **Log in (l)**) opens a real login in the tile: the SSH client runs on a pseudo-terminal and
+its screen is drawn in the tile. It needs what Connect needs (a full terminal, a host the account may reach) and a host key that is
+already trusted (press T first; the question about a new key is never asked in the middle of a login). The same rules apply as for every
+other SSH call (allowed options, host key check, keys from the vault by `-i uvault:ssh.<name>`, written to a private folder that is
+removed when the session ends). **Keys only**: `BatchMode=yes` stays on, so the client never asks for a password; a server that needs one
+is not reachable this way yet. Every key goes to the other computer (Esc and Tab too); **F10** (or the Close button) hangs up; Ctrl+V
+pastes (escape characters removed); the wheel and Shift+PgUp/PgDn scroll back, typing or new output returns to the live screen. When the
+program ends the screen stays with its exit code until Enter or F10. The audit log has `ssh.login` and `ssh.logout` with the connection
+name only. Linux and macOS (a pseudo-terminal; on other systems the tile says so and Connect still runs a command without a terminal). A login
+asks the client for a terminal (`-t`, so a saved default command gets one too) and runs only that default command; it does **not** end in
+`true` as Connect's quick check does (`Connection::login_args` against `Connection::args`).
+
+**For the assistant.** `ssh_connections` lists the saved hosts (name, `user@host:port`, key name, whether the host key is trusted) and needs no
+card. `ssh_login` (argument `connection`) asks to open one as a session in the tile: it is on the hard-ask list, so it asks every time (Auto
+mode too), a session grant never covers it, and the card names the connection and says that the person types in the session. The tool
+refuses before asking what the tile would refuse (no full terminal, a host the account may not reach, a host key that is not trusted yet,
+no client); it can never trust a key. After the approval it queues the request (`sshsessiontools::request_login`); the shell brings the CLI
+tile up and the tile runs the same checks as the L key again and opens the session. The assistant cannot type in, read or see the session
+(commands whose output it needs go through `run_command`, which asks and redacts). The audit log has `ssh.login.request` with the
+connection name. Code: `crates/iyakki-agent/src/sshsessiontools.rs`, tests `sshsessiontools_tests.rs`, `apps/cli_term_tests.rs`.
+
+`crates/iyakki-vt` is the engine, in plain Rust with no dependency but `libc`: an escape-sequence parser (VT100 / ECMA-48 and the xterm
+parts `top`, `vi`, `less`, `htop` and `tmux` use: cursor movement, erase, insert and delete, scroll regions, tab stops, SGR with 16, 256
+and true colours, the alternate screen, line drawing, bracketed paste, answers to status requests, UTF-8 with wide characters), a screen
+with scrollback, the key encoding, a `Terminal` over any byte `Link` and, on Linux and macOS, the pseudo-terminal (`posix_openpt`, `setsid`,
+`TIOCSCTTY`, `TIOCSWINSZ`). Not done: mouse reporting, pictures (sixel), right-to-left text, combining marks (dropped), selecting and
+copying text out of the session screen, a password prompt. The parser is fed random bytes in a test and always leaves a valid screen.
+Tests: the engine with real shells on a pseudo-terminal (Linux and macOS), the tile's keyboard path, drawing at four sizes and the end of a
+program with a fake link (everywhere), and one login through the tile, and one the assistant asked for, with a stand-in `ssh` program on a real pseudo-terminal (Linux, macOS).
+Not tried: a real `ssh` to a real server, `vi`, `top` or `tmux` through it, a password-less login with a vault key.
 
 ## Checked and not checked
 

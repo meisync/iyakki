@@ -10,8 +10,8 @@
 //! * `postrouting` (nat, priority 100): masquerade for the shared network going out of the uplink.
 
 use super::plan::Plan;
-use super::TABLE;
-use iyakki_fw::nl::tablegen::{ChainKind, ChainSpec, Expr, Hook, IfName, TableSpec, CT_ESTABLISHED_RELATED};
+use super::{BRIDGE_TABLE, TABLE};
+use iyakki_fw::nl::tablegen::{ChainKind, ChainSpec, Expr, Family, Hook, IfName, TableSpec, CT_ESTABLISHED_RELATED};
 use std::net::IpAddr;
 
 /// The ranges that mean "a local network behind the uplink".
@@ -51,6 +51,23 @@ pub fn table_spec(p: &Plan) -> TableSpec {
     }
 }
 
+/// The bridge-family table for a downstream that is a bridge of several ports (a Bluetooth access point: one port per phone), when
+/// devices must not reach each other: every frame that comes in on a member port and is forwarded to another port of the bridge is
+/// dropped, so the phones cannot see each other at layer 2 either (the `inet` table only sees what is routed). Traffic to this computer
+/// and out to the uplink goes through the bridge's own address (input and routing), not the bridge forward hook, so it is untouched.
+/// `None` when the downstream is a single port or isolation is off.
+pub fn bridge_table_spec(p: &Plan) -> Option<TableSpec> {
+    if !p.isolate || p.members.is_empty() {
+        return None;
+    }
+    let rules = p.members.iter().map(|m| vec![Expr::IifIs(IfName::Exact(m.clone())), Expr::Drop]).collect();
+    Some(TableSpec {
+        name: BRIDGE_TABLE.into(),
+        sets: vec![],
+        chains: vec![ChainSpec { name: "forward".into(), kind: ChainKind::Filter, hook: Hook::Forward, priority: -200, policy_accept: true, rules }],
+    })
+}
+
 fn name(n: &IfName) -> String {
     match n {
         IfName::Exact(s) => s.clone(),
@@ -84,7 +101,12 @@ fn word(e: &Expr) -> String {
 
 /// The table as text, one rule per line (what `nft list table` would show, for the golden test and for support).
 pub fn describe(t: &TableSpec) -> String {
-    let mut s = format!("table inet {}\n", t.name);
+    describe_in(Family::Inet, t)
+}
+
+/// [`describe`] for a table of the given family.
+pub fn describe_in(family: Family, t: &TableSpec) -> String {
+    let mut s = format!("table {} {}\n", family.word(), t.name);
     for c in &t.chains {
         let hook = match c.hook {
             Hook::Input => "input",

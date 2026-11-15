@@ -39,7 +39,7 @@ pub struct St {
 pub struct FakeEnv(pub Mutex<St>);
 
 pub fn me() -> Beacon {
-    Beacon { host: "dev-pc".into(), version: "0.1.0-test".into(), role: "host".into(), dev_on: false, pairing_open: false, mac: String::new(), id: "00112233445566778899aabbccddeeff".into(), port: super::DEV_PORT }
+    Beacon { host: "dev-pc".into(), version: "0.1.0-test".into(), role: "host".into(), dev_on: false, pairing_open: false, mac: String::new(), id: "00112233445566778899aabbccddeeff".into(), port: super::DEV_PORT, ip6: None }
 }
 
 impl FakeEnv {

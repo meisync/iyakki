@@ -54,6 +54,9 @@ pub struct FakeServices {
     st: Mutex<State>,
     scratch: PathBuf,
     config: Config,
+    /// The manifest's capabilities (for `sdk.has` and `sdk.capabilities`).
+    caps: Vec<String>,
+    v2: Mutex<crate::services_v2::V2>,
 }
 
 /// Keys whose values never reach the call log.
@@ -109,7 +112,29 @@ pub fn iso(ms: u64) -> String {
 
 impl FakeServices {
     pub fn new(scratch: PathBuf, config: Config) -> FakeServices {
-        FakeServices { st: Mutex::new(State { now_ms: CLOCK_START_MS, ..State::default() }), scratch, config }
+        FakeServices { st: Mutex::new(State { now_ms: CLOCK_START_MS, ..State::default() }), scratch, config, caps: Vec::new(), v2: Mutex::new(Default::default()) }
+    }
+
+    /// The tile's manifest capabilities, so discovery answers what the app holds.
+    pub fn with_caps(mut self, caps: Vec<String>) -> FakeServices {
+        self.caps = caps;
+        self
+    }
+
+    pub(crate) fn config(&self) -> &Config {
+        &self.config
+    }
+
+    pub(crate) fn manifest_caps(&self) -> &[String] {
+        &self.caps
+    }
+
+    pub(crate) fn now_ms(&self) -> u64 {
+        self.st().now_ms
+    }
+
+    pub(crate) fn v2_state(&self) -> std::sync::MutexGuard<'_, crate::services_v2::V2> {
+        self.v2.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn st(&self) -> std::sync::MutexGuard<'_, State> {
@@ -160,6 +185,9 @@ impl FakeServices {
 
     fn dispatch(&self, domain: &str, method: &str, a: &Value) -> Result<Value, String> {
         let s = |k: &str| a.get(k).and_then(Value::as_str).ok_or_else(|| format!("{domain}.{method} needs a string \"{k}\""));
+        if let Some(r) = self.dispatch_v2(domain, method, a) {
+            return r;
+        }
         match (domain, method) {
             ("clock", "now") => {
                 let ms = self.st().now_ms;

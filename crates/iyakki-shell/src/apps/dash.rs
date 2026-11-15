@@ -322,6 +322,8 @@ pub struct DashApp {
     /// What could be done about each source that points at localhost: (its address when asked, when, the plan).
     plans: HashMap<String, (String, std::time::Instant, RepairPlan)>,
     plans_busy: bool,
+    /// The cluster lookup for the address of an open Add source form that was late (filled in by the tick).
+    late_lookup: std::cell::RefCell<Option<iyakki_agent::dash::cluster::Lookup>>,
     /// Another tile the shell should open next (Store -> Setup on an item).
     request: Option<(String, String)>,
     list: Vec<iyakki_agent::dash::store::Entry>,
@@ -411,6 +413,7 @@ impl DashApp {
             src_status: HashMap::new(),
             plans: HashMap::new(),
             plans_busy: false,
+            late_lookup: std::cell::RefCell::new(None),
             request: None,
             list: vec![],
             list_sel: 0,
@@ -1258,9 +1261,19 @@ impl DashApp {
                 }
                 _ if f.key == "url" && existing.is_none() && !advanced => {
                     // never a guess: a Service of the cluster, a process really listening here, or empty with the reason
-                    let (v, help) = match iyakki_agent::dash::cluster::suggest(self.env.deps.cluster.as_ref(), kind) {
-                        Some(s) => (s.url, s.note),
+                    *self.late_lookup.borrow_mut() = None;
+                    let (v, help) = match iyakki_agent::dash::cluster::Lookup::start(&self.env.deps.cluster, kind) {
                         None => (f.default.clone(), f.help.clone()),
+                        Some(mut l) => match l.wait(std::time::Duration::from_millis(400)) {
+                            Some(Some(s)) => (s.url, s.note),
+                            Some(None) => (f.default.clone(), f.help.clone()),
+                            None => {
+                                // late: the form opens with a note and the tick fills the address in when the answer comes
+                                let s = l.late_note();
+                                *self.late_lookup.borrow_mut() = Some(l);
+                                (s.url, s.note)
+                            }
+                        },
                     };
                     form = form.text(&f.label, &v, &help);
                 }
@@ -1269,6 +1282,29 @@ impl DashApp {
             keys.push((i, f.key.clone()));
         }
         Some((form, keys))
+    }
+
+    /// A late cluster answer lands in the open Add source form: into the address field if the person has not typed anything there, and
+    /// in its note either way. A form that was closed drops the lookup.
+    fn fill_late_address(&mut self) {
+        let mut slot = self.late_lookup.borrow_mut();
+        let Some(l) = slot.as_mut() else { return };
+        let Some(Modal::Source { form, secret_keys, editing: None, .. }) = self.modal.as_mut() else {
+            if self.modal.is_none() {
+                *slot = None;
+            }
+            return;
+        };
+        let Some(i) = secret_keys.iter().find(|(_, k)| k == "url").map(|(i, _)| *i) else { return };
+        let Some(answer) = l.poll() else { return };
+        *slot = None;
+        if let Some(s) = answer {
+            if form.fields[i].tf.value.is_empty() {
+                form.set_value(i, &s.url);
+            }
+            form.fields[i].hint = s.note;
+            self.redraw = true;
+        }
     }
 
     /// Read a submitted source form back into a config (what the form did not ask for stays as it was).
@@ -1338,6 +1374,7 @@ impl DashApp {
     fn on_tick(&mut self, cx: &AppCx) -> Flow {
         self.tick += 1;
         self.poll();
+        self.fill_late_address();
         self.sync();
         let _ = self.chat.handle(&Event::Tick, cx);
         if self.chat_open && (self.chat.is_running() || self.chat.pending_approval().is_some()) && self.tick % 3 == 0 {
@@ -3220,13 +3257,16 @@ impl DashApp {
                 g.text(r.x + 14.0 * s, r.y + 24.0 * s, 11.5 * s, DIM, &sub, Face::Sans);
             } else {
                 let t = &tpl[i - n];
-                let title = g.fit(14.0 * s, t.title, Face::Bold, w - 160.0 * s);
-                g.text(r.x + 14.0 * s, r.y + 5.0 * s, 14.0 * s, TEXT, &title, Face::Bold);
-                let about = g.fit(11.5 * s, t.about, Face::Sans, w - 160.0 * s);
-                g.text(r.x + 14.0 * s, r.y + 24.0 * s, 11.5 * s, DIM, &about, Face::Sans);
                 let have = self.sources.iter().any(|sx| sx.kind == t.kind);
                 let chip = if have { format!("{}", registry::kind(t.kind).map_or(t.kind.to_string(), |k| k.label)) } else { format!("needs {}", registry::kind(t.kind).map_or(t.kind.to_string(), |k| k.label)) };
+                // the chip keeps its words (up to half the row); the title and the line under it keep to what is left
+                let chip = g.fit(11.0 * s, &chip, Face::Bold, (w * 0.5 - 16.0 * s).max(40.0 * s));
                 let cw = g.text_width(11.0 * s, &chip, Face::Bold) + 16.0 * s;
+                let room = (w - cw - 40.0 * s).max(40.0 * s);
+                let title = g.fit(14.0 * s, t.title, Face::Bold, room);
+                g.text(r.x + 14.0 * s, r.y + 5.0 * s, 14.0 * s, TEXT, &title, Face::Bold);
+                let about = g.fit(11.5 * s, t.about, Face::Sans, room);
+                g.text(r.x + 14.0 * s, r.y + 24.0 * s, 11.5 * s, DIM, &about, Face::Sans);
                 g.rrect(r.x + r.w - cw - 10.0 * s, r.y + 12.0 * s, cw, 18.0 * s, 9.0 * s, with_alpha(if have { OK } else { ERR }, 30));
                 g.text(r.x + r.w - cw - 2.0 * s, r.y + 14.0 * s, 11.0 * s, if have { OK } else { ERR }, &chip, Face::Bold);
             }
@@ -3609,6 +3649,16 @@ impl DashApp {
 // ---------------------------------------------------------------------------------------------------------- the App
 
 impl App for DashApp {
+    /// A picker, a form or a question drawn over the dashboards, in the words it shows (F-A11Y-02): the screen reader says it once when it opens.
+    fn dialog_title(&self) -> Option<String> {
+        Some(match self.modal.as_ref()? {
+            Modal::Kind(p) => p.title.clone(),
+            Modal::Source { form, .. } | Modal::Name(form, _) | Modal::NewSecret { form, .. } => form.title.clone(),
+            Modal::Confirm(text, _) => text.clone(),
+            Modal::Template(p, ..) => p.title.clone(),
+        })
+    }
+
     fn title(&self) -> &'static str {
         "Dashboards"
     }
@@ -3714,6 +3764,14 @@ impl App for DashApp {
 
 #[cfg(test)]
 impl DashApp {
+    /// Open one of the questions over the dashboards (tests of the screen reader's words).
+    pub fn ask_for_test(&mut self, which: &str) {
+        match which {
+            "kind" => self.tab_source_add(),
+            "leave" => self.modal = Some(Modal::Confirm("This dashboard has unsaved changes. Leave and lose them?".into(), Confirmed::Leave)),
+            _ => self.modal = None,
+        }
+    }
     pub fn open_dashboard_for_test(&mut self, d: Dashboard) {
         self.open_dashboard(d);
     }
@@ -3799,6 +3857,13 @@ impl DashApp {
         match &self.modal {
             Some(Modal::Source { form, .. }) => form.fields.iter().map(|f| f.label.clone()).collect(),
             _ => vec![],
+        }
+    }
+    /// (text, note under it) of the field whose label starts with `label` in the open Add source form.
+    pub fn source_form_field_for_test(&self, label: &str) -> Option<(String, String)> {
+        match &self.modal {
+            Some(Modal::Source { form, .. }) => form.fields.iter().find(|f| f.label.starts_with(label)).map(|f| (f.tf.value.clone(), f.hint.clone())),
+            _ => None,
         }
     }
     pub fn source_form_choices_for_test(&self) -> Vec<Vec<String>> {

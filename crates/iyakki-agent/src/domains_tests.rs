@@ -109,6 +109,7 @@ pub(crate) fn rig(tag: &str) -> Rig {
         web_port: Arc::new(|| Some(9999)),
         audit: Arc::new(move |a, d| a2.lock().unwrap().push(format!("{a} {d}"))),
         now: Arc::new(move || c2.load(Ordering::SeqCst)),
+        members: None,
     };
     Rig { mgr: Arc::new(Manager::new(&dir, deps)), dir, gate, names, notes, audit, store, clock, kube }
 }
@@ -308,7 +309,8 @@ fn the_firewall_opening_is_its_own_step_with_local_scope_an_end_time_and_goes_wi
     assert_eq!(r.gate.lock().unwrap().made, [(GateReach::LocalNetwork, NOW + 7200)], "local-network scope and the end time reach the firewall");
     assert_eq!(r.gate.lock().unwrap().open, [http], "only the port that has a route is opened");
     assert_eq!(st.firewall_ports, [http]);
-    assert!(get(http, "store.local").contains("200 OK"), "it still serves after the restart");
+    let seen = get(http, "store.local");
+    assert!(seen.contains("200 OK"), "it still serves after the restart: {seen:?}");
     // the end time passes: the listener is off, the opening is removed, and the inbox is told
     r.clock.store(NOW + 7201, Ordering::SeqCst);
     let done = r.mgr.tick();
@@ -325,7 +327,7 @@ fn the_firewall_opening_is_its_own_step_with_local_scope_an_end_time_and_goes_wi
     // disabling by hand removes the opening too
     r.mgr.set_listener(ListenerChange { firewall: Some(true), ..Default::default() }).unwrap();
     let mid = r.mgr.status();
-    assert!(mid.running && mid.firewall, "the second opening did not start: {mid:?} (ports {http}/{https})");
+    assert!(mid.running && mid.firewall, "the second opening did not start: {mid:?} (ports {http}/{https}); {} / {}", crate::testdir::describe_port(http), crate::testdir::describe_port(https));
     let closed_before = r.gate.lock().unwrap().closed.len();
     r.mgr.set_listener(ListenerChange { enabled: Some(false), ..Default::default() }).unwrap();
     {
@@ -388,7 +390,8 @@ fn resume_starts_a_listener_left_on_and_suspend_stops_it() {
     r.mgr.suspend();
     assert!(!r.mgr.status().running && r.mgr.settings().enabled, "signing out stops it but keeps the choice");
     r.mgr.resume();
-    assert!(get(http, "store.local").contains("200 OK"));
+    let seen = get(http, "store.local");
+    assert!(seen.contains("200 OK"), "after resume: {seen:?}, status {:?}", r.mgr.status());
     r.mgr.suspend();
 }
 

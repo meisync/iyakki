@@ -133,6 +133,20 @@ pub fn publish_capture(bits: u8) {
 }
 
 /// What the sign shows: what is capturing now, or what was a moment ago.
+/// What is capturing right now without the two seconds of hold (tests).
+#[cfg(test)]
+pub(crate) fn capture_raw() -> u8 {
+    CAPTURE_NOW.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Let the two seconds of hold run out at once (tests).
+#[cfg(test)]
+pub(crate) fn expire_hold() {
+    if let Ok(mut l) = LAST_ON.lock() {
+        l.1 = Some(std::time::Instant::now() - SIGN_HOLD - std::time::Duration::from_millis(10));
+    }
+}
+
 pub fn capture_now() -> u8 {
     let now = CAPTURE_NOW.load(std::sync::atomic::Ordering::Relaxed);
     if now != 0 {
@@ -279,6 +293,18 @@ impl MediaPerms {
         if e.0.is_empty() && e.1.is_empty() {
             self.devices.remove(&h);
         }
+    }
+
+    /// The devices this site was given with "Always allow", in words for the Settings list and the chat ("camera: USB Cam: x; microphone: plughw:1,0"), or "".
+    pub fn device_note(&self, host: &str) -> String {
+        let mut v = Vec::new();
+        for (kind, word) in [(CAMERA, "camera"), (MICROPHONE, "microphone")] {
+            let d = self.site_device(host, kind);
+            if !d.is_empty() {
+                v.push(format!("{word}: {d}"));
+            }
+        }
+        v.join("; ")
     }
 
     /// The remembered sites for the Settings list: host and a sentence ("camera allowed", "microphone blocked").

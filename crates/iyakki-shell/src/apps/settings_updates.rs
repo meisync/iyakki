@@ -26,6 +26,8 @@ pub(super) type CompReview = (iyakki_agent::store::components::PinnedStore, Stri
 
 #[derive(Default)]
 pub(super) struct UpdPanel {
+    /// A fake machine for the setup wizards (tests); `None`: this machine's store.
+    pub(super) wiz_be: Option<Arc<dyn iyakki_agent::wizardtools::Backend>>,
     pub(super) centre: Option<Arc<uc::Centre>>,
     /// Folders to look in instead of the usual mount points (tests), and the folder the person typed.
     pub(super) roots: Option<Vec<std::path::PathBuf>>,
@@ -90,6 +92,8 @@ impl SettingsApp {
         }
         self.upd.versions = Some(c.versions());
         let mut roots = self.upd.roots.clone().unwrap_or_else(mount_dirs);
+        // signed update files opened by the person or the assistant are unpacked here (F-UPD-01)
+        roots.push(iyakki_agent::sysupdate::staged_root(c.data()));
         if !self.upd.folder.is_empty() {
             roots.insert(0, std::path::PathBuf::from(&self.upd.folder));
         }
@@ -127,6 +131,45 @@ impl SettingsApp {
         Ok(format!("{} update(s) found.", self.upd.found.len()))
     }
 
+    /// A signed update file (`.tgz` with its `.sig` next to it) is checked, unpacked where this page lists updates and selected.
+    pub(super) fn upd_bundle_submit(&mut self, form: &Form, cx: &AppCx) -> Result<String, String> {
+        if !cx.session.policy.manage_settings {
+            return Err("only an administrator can open a system update file".into());
+        }
+        let p = form.value(0).trim().to_string();
+        if p.is_empty() {
+            return Err("give the path of the update file".into());
+        }
+        let c = self.upd_centre();
+        let v = c.versions();
+        let staged = iyakki_agent::sysupdate::open_for_centre(c.data(), std::path::Path::new(&p), c.key(), &v.running, &v.variant)?;
+        cx.audit.record(&cx.session.user, "system.update.bundle", &format!("opened {}", staged.release.version));
+        self.upd_load();
+        if let Some(i) = self.upd.found.iter().position(|f| f.dir == staged.dir) {
+            self.upd.sel = i;
+            self.upd.ask = UpdAsk::None;
+            self.upd_preview();
+        }
+        Ok(format!("The signature is good. IYAKKI {} ({}) is listed below; press i to install it (nothing is installed yet).", staged.release.version, staged.release.variant))
+    }
+
+    /// One line per setup wizard that an install or update of the person's apps queued, with what it asks and runs when the app is installed.
+    pub(super) fn upd_wizard_lines(&self, cx: &AppCx) -> Vec<String> {
+        let user = cx.session.user.as_str();
+        let pending = iyakki_agent::store::wizardhook::pending(cx.services.dir(), user);
+        if pending.is_empty() {
+            return vec![];
+        }
+        let specs = iyakki_agent::store::wizardhook::installed(&iyakki_agent::store::Store::for_services(&cx.services), user);
+        pending
+            .iter()
+            .map(|p| {
+                let what = specs.iter().find(|(a, _, w)| *a == p.app && w.id == p.wizard).map(|(_, _, w)| format!(": {}", iyakki_agent::store::wizardhook::outline(w))).unwrap_or_default();
+                format!("{} - {} ({}){what}", p.app, if p.title.is_empty() { &p.wizard } else { &p.title }, p.trigger)
+            })
+            .collect()
+    }
+
     pub(super) fn handle_updates(&mut self, k: &Key, cx: &AppCx) {
         if !self.upd.loaded {
             self.upd_load();
@@ -145,6 +188,12 @@ impl SettingsApp {
                     self.upd_preview();
                 }
             }
+            Key::Char('w') if self.wiz_available(cx) => {
+                self.wiz_start(cx);
+            }
+            Key::Char('a') if !self.upd_wizard_lines(cx).is_empty() => {
+                self.hw.ask_open_item("chat", "");
+            }
             Key::Char('s') => {
                 self.upd_load();
                 self.ok(format!("Looked again: {} update(s) found.", self.upd.found.len()));
@@ -155,6 +204,13 @@ impl SettingsApp {
                 }
                 let f = Form::new("Folder with an update").path("Folder (a USB stick shows up under /media or /run/media)", &self.upd.folder, "the folder that holds update.json, or a folder with such folders in it", crate::filepicker::PathKind::Folder, &[]);
                 self.open_form(FormKind::UpdateFolder, f);
+            }
+            Key::Char('b') => {
+                if !self.admin(cx) {
+                    return;
+                }
+                let f = Form::new("Open a signed update file").path("Update file (.tgz; its .sig file must be next to it)", "", "a system update file from a USB stick or a folder; the signature is checked before anything is unpacked", crate::filepicker::PathKind::File, &["tgz"]);
+                self.open_form(FormKind::UpdateBundle, f);
             }
             Key::Char('c') | Key::Char('m') | Key::Char('u') | Key::Char('t') => self.upd_check_key(k, cx),
             Key::Char('g') => {
@@ -245,7 +301,7 @@ impl SettingsApp {
     }
 
     pub(super) fn updates_buttons(&self) -> Vec<Btn> {
-        let mut v = vec![("Install", ACCENT, 'i'), ("Roll back", TEXT, 'r'), ("Choose folder", TEXT, 'f'), ("Look again", TEXT, 's'), ("Check for updates", TEXT, 'c'), ("How often", TEXT, 'm'), ("Update list address", TEXT, 'u'), ("Use a store", TEXT, 't'), ("Review and apply", TEXT, 'v'), ("Channel", TEXT, 'g')];
+        let mut v = vec![("Install", ACCENT, 'i'), ("Roll back", TEXT, 'r'), ("Choose folder", TEXT, 'f'), ("Open update file", TEXT, 'b'), ("Look again", TEXT, 's'), ("Check for updates", TEXT, 'c'), ("How often", TEXT, 'm'), ("Update list address", TEXT, 'u'), ("Use a store", TEXT, 't'), ("Review and apply", TEXT, 'v'), ("Channel", TEXT, 'g')];
         if self.upd.ask != UpdAsk::None {
             v.insert(0, ("Yes, do it", ERR, 'y'));
             v.insert(1, ("No", TEXT, 'n'));
@@ -293,6 +349,21 @@ impl SettingsApp {
             line(g, &mut y, 13.0, col, face, &text);
         }
         y += 6.0 * s;
+        // the compat report in short (F-CORE-19): which versions meet here; the full lines are in `iyakki dev info` and the support bundle
+        for text in self.upd_compat_lines(_cx) {
+            line(g, &mut y, 12.0, DIM, Face::Sans, &text);
+        }
+        y += 6.0 * s;
+        // setup steps that an installed or updated app brought (F-CORE-24): a plain list; the assistant runs them with the person
+        let waiting = self.upd_wizard_lines(_cx);
+        if !waiting.is_empty() {
+            line(g, &mut y, 14.0, TEXT, Face::Bold, "Setup steps waiting");
+            for text in &waiting {
+                line(g, &mut y, 13.0, MUTED, Face::Sans, text);
+            }
+            line(g, &mut y, 13.0, DIM, Face::Sans, "Press w to answer the questions here (a secret is typed here, never in the chat); the steps that check or move data show what they do and wait for y. Press a to do it with the assistant instead.");
+            y += 6.0 * s;
+        }
         if self.upd.found.is_empty() {
             line(g, &mut y, 14.0, MUTED, Face::Sans, "No update found. Put the update folder or USB stick in, then press Look again, or Choose folder.");
         } else {
@@ -322,6 +393,18 @@ impl SettingsApp {
                 None => {}
             }
         }
+    }
+}
+
+impl SettingsApp {
+    /// Two lines of the compat report: the versions, and the peers and deprecated names (administrators see the peers by name in `dev info`).
+    pub(super) fn upd_compat_lines(&self, cx: &AppCx) -> Vec<String> {
+        let l = crate::apps::doctor_facts::compat_lines(cx);
+        let mut v = vec![format!("Compatibility: {}", l.first().cloned().unwrap_or_default())];
+        let peers = l.iter().filter(|x| x.starts_with("peer ")).count();
+        let dep = l.iter().find(|x| x.starts_with("deprecated names:")).cloned().unwrap_or_else(|| format!("{} deprecated name(s) announced", l.iter().filter(|x| x.starts_with("deprecated ")).count()));
+        v.push(format!("{peers} paired computer(s) shown · {dep}"));
+        v
     }
 }
 

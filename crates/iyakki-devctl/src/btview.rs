@@ -178,6 +178,9 @@ pub fn headline(c: &Controller, chip: Option<&str>, firmware_file: bool) -> Stri
     };
     if firmware_file {
         format!("Controller {}: {who}", c.hci())
+    } else if c.manufacturer == BROADCOM && c.configured && c.addr_state().valid() {
+        // Up with its own address: it works (some Mac chips, such as the MacBook Pro 14,1's, need no patch file for tethering and audio)
+        format!("Controller {}: {who} (working; optional firmware file not found)", c.hci())
     } else if chip.is_some() {
         format!("Controller {}: {who} (ROM state, no firmware file)", c.hci())
     } else if c.manufacturer == BROADCOM {
@@ -412,6 +415,20 @@ mod tests {
         assert_eq!(headline(&c[0], Some("BCM4364"), true), "Controller hci0: BCM4364");
         assert_eq!(headline(&c[0], None, false), "Controller hci0: Broadcom (no firmware file found)");
         assert!(short(&c[0], Some("BCM4364"), false).ends_with("no valid address · powered off"));
+    }
+
+    #[test]
+    fn a_working_controller_with_a_valid_address_is_not_called_firmware_missing() {
+        let up = ctl(BROADCOM, "A4:83:E7:11:22:33", true);
+        let h = headline(&up, Some("BCM4350"), false);
+        assert_eq!(h, "Controller hci0: BCM4350 (working; optional firmware file not found)");
+        assert!(!h.contains("ROM state") && !h.contains("missing"), "{h}");
+        assert!(!needs_firmware(&up, false));
+        assert_eq!(headline(&up, None, false), "Controller hci0: Broadcom (working; optional firmware file not found)");
+        // really unusable: no address, no file
+        let dead = ctl(BROADCOM, "00:00:00:00:00:00", true);
+        assert!(headline(&dead, Some("BCM4364"), false).contains("ROM state, no firmware file"));
+        assert!(needs_firmware(&dead, false));
     }
 
     #[test]

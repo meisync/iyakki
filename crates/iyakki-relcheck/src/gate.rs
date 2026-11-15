@@ -189,6 +189,12 @@ pub fn run(o: &Opts) -> Outcome {
     d.review.iter().for_each(|f| detail.push_str(&format!("REVIEW downloads: {f}\n")));
     t.add("3 Quick install / catalogue inventory (legal/downloads.txt)", if !d.failures.is_empty() { "FAIL" } else if !d.review.is_empty() { "REVIEW" } else { "PASS" }, format!("{} rows, {}, {} to review; the cross-check with the code is `cargo test -p iyakki-agent --test licence_gate`", d.rows, plural(d.failures.len(), "failure"), d.review.len()));
 
+    // 3a. the signed downloads manifest against the rows (the signature itself is `iyakki dlmanifest verify` and the agent tests)
+    let m = crate::manifest::check(&read(root, "legal/downloads-manifest.json"), &drows, &read(root, "legal/downloads-manifest.pub"));
+    m.failures.iter().for_each(|f| detail.push_str(&format!("FAIL {f}\n")));
+    m.review.iter().for_each(|f| detail.push_str(&format!("REVIEW {f}\n")));
+    t.add("3a downloads manifest against the inventory (legal/downloads-manifest.json)", if !m.failures.is_empty() { "FAIL" } else if !m.review.is_empty() { "REVIEW" } else { "PASS" }, format!("{} items, sequence {}, {}, {} to review; every REVIEW row of the inventory has its entry and the entry's kind and pin agree", m.items, m.sequence, plural(m.failures.len(), "failure"), m.review.len()));
+
     // 3b. known gaps in what the screens show (tied to the code by the agent test)
     let gaps = crate::table::parse(&read(root, "legal/catalogue-gaps.txt"));
     t.add("3b catalogue / Quick install screens that miss a licence or a 'not shipped' statement (legal/catalogue-gaps.txt)", if gaps.is_empty() { "PASS" } else { "REVIEW" }, format!("{} known gap(s), each dated; a new one fails `cargo test -p iyakki-agent --test licence_gate`", gaps.len()));

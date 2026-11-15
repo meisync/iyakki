@@ -228,10 +228,23 @@
 
     draw();
     await refresh();
-    poll(refresh, POLL_MS);
+    // The service allows a person 60 requests a minute and a refresh makes two or three, so polling every 2 s used up the whole allowance
+    // (found by the real-browser run: 60 a minute on an idle page). Busy (a run going, an approval waiting): the followed run every 4 s,
+    // the lists every 8 s. Idle: the lists every 16 s.
+    let tick = 0;
+    // The event stream tells a change at once (`run`, `flowrun`, `approval`, `changed`): a push refreshes everything now, and while the
+    // stream is up the timer is only a safety net that refreshes the same way. Without the stream the counting below is the fallback.
+    poll(async (why, live) => {
+      if (why === "push" || (why === "timer" && live)) { await refresh(); return; }
+      tick++;
+      const busy = starting || (sel && !sel.done) || approvals.length > 0 || runs.some((r) => isActive(r.status));
+      if (!busy) { if (tick % 8 === 0) await refresh(); return; }
+      if (tick % 4 === 0) await refresh();
+      else if (tick % 2 === 0 && sel && !sel.done && !busyPoll) { busyPoll = true; try { await follow(); } finally { busyPoll = false; } draw(); }
+    }, POLL_MS, { push: true });
   }
 
   const exported = { page, isActive, statusClass, checkPrompt, eventLine, applyEvents, verdictBody, approvalPath, riskClass, POLL_MS, PROMPT_MAX };
   if (typeof module !== "undefined" && module.exports) module.exports = exported;
-  else C.registerPage(root, page());
+  else { root.IyakkiRuns = exported; C.registerPage(root, page()); }
 })(typeof window !== "undefined" ? window : globalThis);

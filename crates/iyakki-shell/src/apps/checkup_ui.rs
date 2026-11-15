@@ -35,6 +35,8 @@ fn blurb(id: StepId) -> &'static str {
         StepId::Wifi => "Looks for the Wi-Fi adapter and whether it is switched on.",
         StepId::Bluetooth => "Looks for the Bluetooth adapter and whether it is switched on.",
         StepId::Power => "Reads the battery (charge, charger, how worn it is) or says there is none.",
+        StepId::Gpu => "Looks for a graphics card a local model could use and, when the dev cluster runs, asks it whether it sees the card.",
+        StepId::Usb => "Lists the USB devices that are plugged in and whether the system has a driver for each.",
     }
 }
 

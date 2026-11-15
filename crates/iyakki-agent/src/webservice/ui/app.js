@@ -12,6 +12,20 @@
 (function (root) {
   const TOKEN_KEY = "iyakki.token";
   const POLL_MS = 5000;
+  // while the event stream (bell.js) is up the timer is only a safety net, and a pushed event refreshes the page at once
+  const LIVE_POLL_MS = 30000;
+  const EVENT_GAP_MS = 400;
+  const PUSH_KINDS = ["notification", "count", "approval", "changed", "run", "flowrun"];
+
+  // is it time for the timer to refresh? (pure; the page tests call it)
+  function timerDue(live, sinceLastMs, baseMs) {
+    return sinceLastMs >= (live ? LIVE_POLL_MS : baseMs) - 50;
+  }
+
+  // does this message of the stream refresh a page now? (pure)
+  function pushDue(msg, sinceLastMs) {
+    return !!msg && PUSH_KINDS.indexOf(msg.type) >= 0 && sinceLastMs >= EVENT_GAP_MS;
+  }
 
   // ---- small helpers (text is always set as text, never parsed as markup)
   function make(doc) {
@@ -145,12 +159,27 @@
       s.className = kind || "";
     }
 
-    // TODO(web-ui): the API has no events WebSocket yet for these pages. Until it has, a page polls with this helper (every few
-    // seconds, only while the tab is visible, stopped when the page changes). Replace the callers with the event stream when
-    // the one WebSocket of docs/development/WEB-UI-PLAN.md section 3.2 exists; do not add a second protocol here.
-    function poll(fn, ms) {
-      const t = env.setInterval(() => { if (!doc.hidden) fn(); }, ms || POLL_MS);
-      const stop = () => env.clearInterval(t);
+    // A page polls every few seconds while the tab is visible, stopped when the page changes. A page that passes `{push: true}`
+    // (its refresh may run at any time) is also refreshed when the event stream (one WebSocket for the tab, bell.js) says something
+    // changed, and its timer slows to 30 seconds while the stream is up: the timer is then only a safety net. Pages that count
+    // their own ticks (Runs) keep the plain timer. There is one protocol (docs/development/WEB-UI-PLAN.md section 3.2).
+    function poll(fn, ms, opts) {
+      const base = ms || POLL_MS;
+      if (!opts || !opts.push) {
+        const t = env.setInterval(() => { if (!doc.hidden) fn(); }, base);
+        const stop = () => env.clearInterval(t);
+        stoppers.push(stop);
+        return stop;
+      }
+      const now = () => (env.now ? env.now() : Date.now());
+      const bell = env.bell;
+      const live = () => !!(bell && bell.live && bell.live());
+      let last = now();
+      // `fn(why, live)`: why is "timer" or "push", live says whether the event stream is up (the timer is then only a safety net)
+      const run = (why) => { last = now(); fn(why, live()); };
+      const t = env.setInterval(() => { if (!doc.hidden && timerDue(live(), now() - last, base)) run("timer"); }, base);
+      const off = bell && bell.subscribe ? bell.subscribe((msg) => { if (!doc.hidden && pushDue(msg, now() - last)) run("push"); }) : null;
+      const stop = () => { env.clearInterval(t); if (off) off(); };
       stoppers.push(stop);
       return stop;
     }
@@ -239,13 +268,17 @@
       else say(r.message, "err");
     });
     $("signout").addEventListener("click", async () => { await api.logout(); signedOut(); say("Signed out.", "ok"); });
-    env.window.addEventListener("hashchange", () => { if (me) show(); });
+    // Only a page address (`#/name`) or an empty hash changes the page. The skip link points at `#main`: it moves the focus there and
+    // leaves the person on the page they are on (it used to fall back to the first page).
+    env.window.addEventListener("hashchange", () => { const h = env.location.hash || ""; if (me && (h === "" || h === "#" || h.startsWith("#/"))) show(); });
+    const skip = doc.querySelector ? doc.querySelector(".skip") : null;
+    if (skip) skip.addEventListener("click", (ev) => { ev.preventDefault(); $("main").focus(); });
     // a token of this tab first; else the desktop's own sign-in if this browser has one; else the form
     if (api.hasToken()) enter(); else api.trySession().then((yes) => (yes ? enter() : signedOut()));
     return { api, show: () => current };
   }
 
-  const exported = { make, messageFor, pageFromHash, createApi, start, TOKEN_KEY, POLL_MS };
+  const exported = { make, messageFor, pageFromHash, createApi, start, TOKEN_KEY, POLL_MS, LIVE_POLL_MS, EVENT_GAP_MS, timerDue, pushDue };
   if (typeof module !== "undefined" && module.exports) module.exports = exported;
   else {
     root.IyakkiUI = exported;

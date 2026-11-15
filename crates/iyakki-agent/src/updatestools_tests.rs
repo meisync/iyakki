@@ -15,6 +15,7 @@ struct Fake {
     fresh: Report,
     metered: Option<bool>,
     checks: Mutex<u32>,
+    opened: Mutex<Vec<String>>,
 }
 
 impl Backend for Fake {
@@ -45,6 +46,13 @@ impl Backend for Fake {
         self.cfg.lock().unwrap().mode = mode;
         Ok(())
     }
+    fn open_bundle(&self, path: &str) -> Result<String, String> {
+        self.opened.lock().unwrap().push(path.to_string());
+        if path.contains("bad") { Err("the signature does not match".into()) } else { Ok("The signature is good. IYAKKI 0.10.0 (desktop) is unpacked and listed.".into()) }
+    }
+    fn compat_lines(&self) -> Vec<String> {
+        vec!["core 0.9.0 · contract 0.1 (serves from 0.1) · client protocol 1 to 1".into(), "deprecated names: none".into()]
+    }
 }
 
 fn upd(id: &str, perms: &[&str]) -> Update {
@@ -59,6 +67,7 @@ fn rig(admin: bool) -> (UpdatesTools, Arc<Fake>) {
         fresh: Report { checked_at: 9_900, updates: vec![upd("skill:notes", &["read your files"]), upd("tool:calc", &[])], errors: vec![("Mirror".into(), "no answer".into())], asked: vec![] },
         metered: Some(true),
         checks: Mutex::new(0),
+        opened: Mutex::new(vec![]),
     });
     (UpdatesTools::new(Arc::new(crate::assign::tests_support::NoTools), f.clone()), f)
 }
@@ -132,4 +141,53 @@ fn the_schedule_can_be_read_free_and_changed_only_by_an_administrator_after_a_ca
     assert!(t2.call(SETTINGS_WRITE_TOOL, &json!({"how_often": "off"})).is_err());
     assert_eq!(f2.cfg.lock().unwrap().mode, Mode::Daily, "an ordinary user changed nothing");
     assert_eq!(*f.checks.lock().unwrap(), 0, "no contact");
+}
+
+#[test]
+fn the_status_tool_also_shows_the_compat_report_and_reads_nothing_else_for_it() {
+    let (t, _f) = rig(true);
+    let s = t.call("updates_status", &json!({})).unwrap();
+    assert!(s.contains("Compatibility:\n  core 0.9.0 · contract 0.1 (serves from 0.1) · client protocol 1 to 1\n  deprecated names: none"), "{s}");
+    // the real backend's report comes from the committed tables, shows the contract and the client protocol, and says who may see peers
+    let r = crate::compatreport::report(vec![]).lines(true);
+    assert!(r[0].starts_with(&format!("core {}", env!("CARGO_PKG_VERSION"))) && r[0].contains("client protocol"), "{r:?}");
+}
+
+#[test]
+fn the_status_tool_marks_an_update_that_needs_a_newer_iyakki() {
+    let (t, f) = rig(true);
+    let mut r = Report { checked_at: 9_000, ..Report::default() };
+    r.updates.push(upd("skill:notes", &[]));
+    r.updates[0].note = "Needs IYAKKI 0.3.0 or newer first: update IYAKKI, then this app.".into();
+    *f.last.lock().unwrap() = Some(r);
+    let s = t.call(READ_TOOL, &json!({})).unwrap();
+    assert!(s.contains("NEEDS A NEWER IYAKKI (0.3.0 or newer): update IYAKKI first"), "{s}");
+}
+
+#[test]
+fn opening_a_system_update_file_asks_every_time_shows_what_is_checked_and_never_installs() {
+    let (t, f) = rig(true);
+    let d = t.defs().into_iter().find(|d| d.spec.name == BUNDLE_TOOL).expect("the tool is offered");
+    assert_eq!(d.risk, Risk::Ask);
+    assert!(!t.pre_approved(BUNDLE_TOOL) && !t.approved_always(BUNDLE_TOOL));
+    assert!(t.grant_blocker(BUNDLE_TOOL, &json!({})).is_some() && crate::agent::hard_ask(BUNDLE_TOOL, &json!({})).is_some(), "no standing allow");
+    let a = json!({"path": "/media/stick/iyakki-0.10.0.tgz"});
+    let card = t.preview(BUNDLE_TOOL, &a).unwrap();
+    assert!(card.contains("iyakki-0.10.0.tgz.sig") && card.contains("release key") && card.contains("Nothing is installed"), "{card}");
+    assert!(t.describe(BUNDLE_TOOL, &a).contains("iyakki-0.10.0.tgz"));
+    let said = t.call(BUNDLE_TOOL, &a).unwrap();
+    assert!(said.contains("signature is good") && said.contains("listed"), "{said}");
+    assert_eq!(*f.opened.lock().unwrap(), vec!["/media/stick/iyakki-0.10.0.tgz".to_string()]);
+    // the backend's refusal comes back plain; odd paths never reach the backend
+    assert!(t.call(BUNDLE_TOOL, &json!({"path": "/media/bad.tgz"})).unwrap_err().contains("signature"));
+    for bad in [json!({}), json!({"path": ""}), json!({"path": "/etc/passwd"}), json!({"path": "a\u{0}b.tgz"})] {
+        assert!(t.refusal(BUNDLE_TOOL, &bad).is_some(), "{bad}");
+        assert!(t.call(BUNDLE_TOOL, &bad).is_err());
+    }
+    assert_eq!(f.opened.lock().unwrap().len(), 2, "refused calls did not reach the backend");
+    // only an administrator; the same name is also what the prompt explains
+    let (t2, f2) = rig(false);
+    assert!(t2.refusal(BUNDLE_TOOL, &a).unwrap().contains("administrator"));
+    assert!(t2.call(BUNDLE_TOOL, &a).is_err() && f2.opened.lock().unwrap().is_empty());
+    assert!(PROMPT_RULE.contains(BUNDLE_TOOL));
 }

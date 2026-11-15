@@ -40,6 +40,27 @@ pub trait Sysinfo: Send + Sync {
     fn cpu_count(&self) -> ApiResult<u32>;
 }
 
+/// The machine the program runs on, as one handle (docs/development/UI-OS-SPLIT-PLAN.md step 5). Tiles ask `cx.os` instead of reading `/proc` and `/sys`;
+/// the device gives them `iyakki_core_local::LocalOs`, tests give them `iyakki_core_fake::FakeOs`. Later slices add accessors (audio, disks, net).
+pub trait Os: Send + Sync {
+    fn sysinfo(&self) -> &dyn Sysinfo;
+    fn audio(&self) -> &dyn crate::audio::Audio;
+    fn disks(&self) -> &dyn crate::devices::Disks;
+    fn net(&self) -> &dyn crate::devices::Net;
+    /// Compressed memory, swap and `system.conf` (a shared handle: the Memory page runs its changes on a thread).
+    #[cfg(feature = "native")]
+    fn memory(&self) -> std::sync::Arc<dyn crate::memory::Memory>;
+    /// Links, radios, brightness, sound cards, private addresses and Bluetooth hardware.
+    #[cfg(feature = "native")]
+    fn hardware(&self) -> std::sync::Arc<dyn crate::hardware::Hardware>;
+    /// The kept kernel logs of earlier sessions.
+    #[cfg(feature = "native")]
+    fn crashlog(&self) -> std::sync::Arc<dyn crate::crashlog::CrashLog>;
+    /// Finding the machines on the local network.
+    #[cfg(feature = "native")]
+    fn netscan(&self) -> std::sync::Arc<dyn crate::netscan::NetScan>;
+}
+
 /// Parse the text of `/proc/meminfo`. `MemTotal` is required; a missing `MemAvailable` falls back to `MemFree`.
 pub fn parse_meminfo(text: &str) -> ApiResult<MemInfo> {
     let field = |name: &str| -> Option<u64> {

@@ -591,7 +591,7 @@ fn audit_and_inbox_hooks_report_spawn_start_merge_and_the_end_of_a_task() {
     let (au, no) = (Arc::new(Mutex::new(Vec::<String>::new())), Arc::new(Mutex::new(Vec::<String>::new())));
     let (a2, n2) = (au.clone(), no.clone());
     let m = manager(&root, writer("h.txt", "h"));
-    m.set_hooks(Hooks { audit: Some(Arc::new(move |k, d| a2.lock().unwrap().push(format!("{k} {d}")))), notify: Some(Arc::new(move |t, _| n2.lock().unwrap().push(t.to_string()))), cleanup: None, record: None });
+    m.set_hooks(Hooks { audit: Some(Arc::new(move |k, d| a2.lock().unwrap().push(format!("{k} {d}")))), notify: Some(Arc::new(move |t, _| n2.lock().unwrap().push(t.to_string()))), cleanup: None, record: None, cluster: None });
     let id = m.spawn(nt("hooked")).unwrap();
     done(&m, &id);
     m.merge(&id).unwrap();
@@ -771,7 +771,7 @@ mod autopilot_in_tasks {
             assist: crate::assistrun::Assist::standard(crate::toolblock::ReminderCtx { agent_on: true, browser_policy: "off".into(), engine_installed: false, screen_available: false, loaded: None }),
             executor: None,
             history: None,
-            audit: None,
+            audit: None, cluster: None,
         }
     }
 
@@ -957,6 +957,11 @@ fn every_running_task_is_an_agent_with_a_stable_name_state_and_timeline_that_a_r
     let a = m.spawn(NewTask { rows: vec!["F-A-01".into()], agent: "claude-code".into(), model: "sonnet".into(), ..nt("first") }).unwrap();
     let b = m.spawn(NewTask { rows: vec!["F-A-02".into()], ..nt("second") }).unwrap();
     until("both to ask", || m.approvals().len() == 2);
+    // the register is written a moment after the approval shows in the list: wait for it, not for luck
+    until("the register to show both waiting", || {
+        let d = crate::assign::load(&root);
+        [&a, &b].iter().all(|i| d.get(i).is_some_and(|x| x.state == crate::assign::AState::WaitingApproval))
+    });
     let d = crate::assign::load(&root);
     assert_eq!((d.get(&a).unwrap().name.as_str(), d.get(&b).unwrap().name.as_str()), ("Agent 1", "Agent 2"));
     assert_eq!(d.get(&a).unwrap().title(), "Agent 1 · Claude Code (sonnet)");
@@ -1256,6 +1261,25 @@ mod fanout {
     }
 
     #[test]
+    fn a_plan_survives_a_restart_and_goes_on_with_the_waiting_wave() {
+        let root = repo("fanout-restart");
+        let m = manager(&root, writer("a.rs", "x\n"));
+        let (_, ids) = m.fan_out(vec![step("a", &["a.rs"], &[]), step("b", &["b.rs"], &[0])], "builtin", "").unwrap();
+        assert!(root.join(".iyakki/tasks/plan.json").exists(), "the plan is written down");
+        done(&m, &ids[0]);
+        // A restart ends the old process, and with it the old manager's worker, which after a task is done still runs `git` in the task's
+        // folder for the lead summary. Two managers in one test process would run git there at once (and fight over index.lock), so the
+        // old one is shut down, and its worker joined, before the new one opens.
+        m.shutdown();
+        drop(m);
+        // a new manager over the same folder (what a restart does) still has the plan and its waiting step
+        let m2 = manager(&root, writer("b.rs", "y\n"));
+        assert_eq!(m2.plan().expect("the plan is read back").waiting(), 1);
+        m2.merge(&ids[0]).unwrap();
+        until("wave 2 after the restart", || m2.list().iter().any(|t| t.title == "b"));
+    }
+
+    #[test]
     fn a_discarded_task_stops_the_plan_instead_of_starting_work_that_needs_it() {
         let root = repo("fanout-stop");
         let m = manager(&root, writer("a.rs", "x\n"));
@@ -1350,4 +1374,154 @@ mod fanout {
         let st = tt.call("task_status", &json!({})).unwrap();
         assert!(st.contains("task(s) finished") && st.contains("To merge, in this order"), "{st}");
     }
+}
+
+// ------------------------------------------------------------------------------------------------ live model (ignored)
+
+/// Parallel tasks with a real model: see `crate::live_tests` for the environment.
+mod live_in_tasks {
+    use super::*;
+    use crate::live_tests::{attempts, head, workspace_tools, Rec};
+
+    #[test]
+    #[ignore = "live model"]
+    fn f_ide_10_two_tasks_with_a_real_model_work_in_their_own_trees_and_merge_cleanly() {
+        attempts("F-IDE-10", "two parallel tasks run by a real model each work through Autopilot in their own git worktree with their own board; the main files are untouched until the person merges; both merge cleanly", |rec: &Arc<Rec>, note| {
+            let root = repo("live");
+            let parts = RunnerParts {
+                backend: rec.clone(),
+                tools: Arc::new(|spec: &RunSpec| {
+                    let ok: Arc<dyn Fn(&Path) -> Result<String, String> + Send + Sync> = Arc::new(|_| Ok("ok".into()));
+                    workspace_tools(&spec.tree, ok.clone(), ok) as Arc<dyn Tools>
+                }),
+                limits: crate::agent::RunLimits { max_steps: 14, max_tool_calls: 100, ..Default::default() },
+                assist: crate::assistrun::Assist::standard(crate::toolblock::ReminderCtx { agent_on: true, browser_policy: "off".into(), engine_installed: false, screen_available: false, loaded: None }),
+                executor: None,
+                history: None,
+                audit: None, cluster: None,
+            };
+            let m = Manager::open(&root, &root.join("FEATURES.md"));
+            m.set_runner(autopilot_runner(parts));
+            let main_board = std::fs::read_to_string(root.join("FEATURES.md")).unwrap();
+            let a = m.spawn(NewTask { title: "Alpha file".into(), goal: "create the file alpha.txt containing the single word alpha".into(), ..Default::default() }).map_err(|e| format!("spawn: {e}"))?;
+            let b = m.spawn(NewTask { title: "Beta file".into(), goal: "create the file beta.txt containing the single word beta".into(), ..Default::default() }).map_err(|e| format!("spawn: {e}"))?;
+            let t0 = Instant::now();
+            let mut max_running = 0;
+            loop {
+                let st: Vec<Status> = [&a, &b].iter().map(|i| status(&m, i)).collect();
+                max_running = max_running.max(st.iter().filter(|s| matches!(s, Status::Running)).count());
+                if st.iter().all(|s| !matches!(s, Status::Queued | Status::Running | Status::NeedsYou)) {
+                    break;
+                }
+                if t0.elapsed() > Duration::from_secs(420) {
+                    return Err(format!("the tasks did not finish in 7 minutes: {st:?}"));
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            note.say(format!("both finished in {} s; most running at once: {max_running}", t0.elapsed().as_secs()));
+            let (ta, tb) = (m.get(&a).unwrap(), m.get(&b).unwrap());
+            note.say(format!("A: {:?} branch {} summary: {}", ta.status, ta.branch, head(&ta.summary, 160)));
+            note.say(format!("B: {:?} branch {} summary: {}", tb.status, tb.branch, head(&tb.summary, 160)));
+            if ta.status != Status::Done || tb.status != Status::Done {
+                return Err(format!("not both done: {:?} / {:?}; errors: {} / {}", ta.status, tb.status, head(&ta.error, 150), head(&tb.error, 150)));
+            }
+            if ta.tree == tb.tree || !ta.branch.starts_with("iyakki/task-") {
+                return Err("the tasks do not have their own worktrees and branches".into());
+            }
+            let has = |t: &Task, f: &str, w: &str| std::fs::read_to_string(t.tree.join(f)).is_ok_and(|s| s.to_lowercase().contains(w));
+            if !has(&ta, "alpha.txt", "alpha") || !has(&tb, "beta.txt", "beta") {
+                return Err("a task did not write its file in its own tree".into());
+            }
+            if ta.tree.join("beta.txt").exists() || tb.tree.join("alpha.txt").exists() {
+                return Err("a file crossed over into the other task's tree".into());
+            }
+            if root.join("alpha.txt").exists() || root.join("beta.txt").exists() || g(&root, &["status", "--porcelain"]).trim().len() > 0 {
+                return Err("the main workspace changed before the merge".into());
+            }
+            if std::fs::read_to_string(root.join("FEATURES.md")).unwrap() != main_board {
+                return Err("the main board changed".into());
+            }
+            for t in [&ta, &tb] {
+                let own = root.join(".iyakki/tasks").join(&t.id);
+                if !own.join("FEATURES.md").exists() {
+                    return Err(format!("task {} has no board of its own", t.id));
+                }
+            }
+            m.merge(&a).map_err(|e| format!("merge A: {e}"))?;
+            m.merge(&b).map_err(|e| format!("merge B: {e}"))?;
+            if !root.join("alpha.txt").exists() || !root.join("beta.txt").exists() {
+                return Err("after the merges the files are not in the main workspace".into());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[test]
+fn the_assistant_can_bring_the_persons_uncommitted_files_into_a_stopped_task_after_approval() {
+    struct Nop;
+    impl Tools for Nop {
+        fn defs(&self) -> Vec<crate::agent::ToolDef> {
+            vec![]
+        }
+        fn call(&self, n: &str, _: &serde_json::Value) -> Result<String, String> {
+            Ok(n.into())
+        }
+        fn describe(&self, n: &str, _: &serde_json::Value) -> String {
+            n.into()
+        }
+    }
+    // a task that waits until it is stopped
+    let root = repo("bring");
+    let m = manager(&root, Arc::new(|_, etx, cancel, _| {
+        while !cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let _ = etx.send(RunEvent::Stopped { reason: "stopped".into() });
+    }));
+    let tt = TaskTools::new(Arc::new(Nop), m.clone(), "builtin", "");
+    let def = tt.defs().into_iter().find(|d| d.spec.name == "task_bring_changes").unwrap();
+    assert_eq!(def.risk, crate::agent::Risk::Ask);
+    assert!(!tt.approved_always("task_bring_changes") && tt.grant_blocker("task_bring_changes", &json!({})).is_some());
+    let id = m.spawn(nt("waits")).unwrap();
+    std::fs::write(root.join("scratch.txt"), "unsaved").unwrap();
+    let a = json!({"id": id});
+    assert!(tt.preview("task_bring_changes", &a).unwrap().contains("scratch.txt"));
+    assert!(tt.call("task_bring_changes", &json!({})).unwrap_err().contains("task id"));
+    assert!(tt.call("task_bring_changes", &json!({"id": "nope"})).unwrap_err().contains("no task"));
+    until("running", || status(&m, &id) == Status::Running);
+    assert!(tt.refusal("task_bring_changes", &a).unwrap().contains("not stopped"));
+    m.stop(&id).unwrap();
+    until("stopped", || !matches!(status(&m, &id), Status::Queued | Status::Running));
+    assert!(tt.refusal("task_bring_changes", &a).is_none(), "{:?}", status(&m, &id));
+    let said = tt.call("task_bring_changes", &a).unwrap();
+    assert!(said.contains("copied into the task"), "{said}");
+    assert_eq!(std::fs::read_to_string(m.get(&id).unwrap().tree.join("scratch.txt")).unwrap(), "unsaved");
+}
+
+#[test]
+fn a_tasks_conversation_reads_as_a_chat_the_request_the_agent_its_tools_and_the_end() {
+    use crate::tasks::ChatWho;
+    let root = repo("chat");
+    let script: Script = Arc::new(move |spec, etx, _, _| {
+        std::fs::write(spec.tree.join("a.txt"), "x\n").unwrap();
+        let _ = etx.send(RunEvent::Model { text: "I will write a.txt".into(), calls: vec![crate::agent::CallInfo { id: "c1".into(), name: "write_file".into(), args: serde_json::json!({"path": "a.txt"}) }] });
+        let _ = etx.send(RunEvent::ToolResult { id: "c1".into(), name: "write_file".into(), ok: true, text: "wrote 2 bytes".into() });
+        let _ = etx.send(RunEvent::Delta { text: "streaming bits are never kept".into() });
+        let _ = etx.send(RunEvent::Thinking { text: "private".into(), secs: 1 });
+        finish_with(&etx, "all done");
+    });
+    let m = manager(&root, script);
+    let id = m.spawn(nt("Chat it")).unwrap();
+    done(&m, &id);
+    let c = m.chat(&id);
+    let who: Vec<ChatWho> = c.iter().map(|l| l.who).collect();
+    assert_eq!(who[0], ChatWho::You, "{c:?}");
+    assert!(c[0].text.contains("do Chat it"), "{c:?}");
+    assert!(c.iter().any(|l| l.who == ChatWho::Agent && l.text == "I will write a.txt"), "{c:?}");
+    assert!(c.iter().any(|l| l.who == ChatWho::Tool && l.text.starts_with("write_file(")), "{c:?}");
+    assert!(c.iter().any(|l| l.who == ChatWho::Tool && l.text == "write_file ok: wrote 2 bytes"), "{c:?}");
+    assert!(c.iter().any(|l| l.who == ChatWho::Agent && l.text == "all done"), "the final answer ends the chat: {c:?}");
+    assert!(!c.iter().any(|l| l.text.contains("streaming bits") || l.text.contains("private")), "deltas and thinking are not kept: {c:?}");
+    assert!(m.chat("nope").is_empty());
 }

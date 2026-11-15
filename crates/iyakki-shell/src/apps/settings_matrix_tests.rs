@@ -189,3 +189,53 @@ fn store_opens_the_form_at_the_cluster_address_of_the_server_it_installed() {
     assert!(hs.seen.lock().unwrap().is_empty());
     assert_eq!(crate::apps::store::setup::open_target(iyakki_agent::quickinstall::Item::Matrix), Some(("settings", "matrix:add")));
 }
+
+#[test]
+fn the_m_key_switches_the_copy_of_saved_rooms_into_the_inbox_on_and_off_and_says_so_in_the_reach_line() {
+    let (cx, mut a, _hs) = page("mx-mirror");
+    key(&mut a, &cx, Key::Char('m'));
+    assert!(a.status().is_some_and(|(t, _)| t.contains("Connect a Matrix account first")), "no account yet");
+    key(&mut a, &cx, Key::Char('a'));
+    fill(&mut a, &cx, "Home", "http://192.168.1.9:8008", "alice", PASSWORD);
+    wait_status(&mut a, &cx, "Signed in as @alice:test");
+    let ms = SettingsApp::matrix_service(&cx);
+    assert!(!ms.accounts().mirror_on("home"), "off until the person says so");
+    assert!(SettingsApp::matrix_reach_line(&cx).contains("(off now)"));
+    key(&mut a, &cx, Key::Char('m'));
+    assert!(ms.accounts().mirror_on("home"));
+    let t = a.status().unwrap().0.clone();
+    assert!(t.contains("copied into the INBOX") && t.contains("Nothing is sent"), "{t}");
+    assert!(SettingsApp::matrix_reach_line(&cx).contains("are copied into the INBOX (m turns that off)"));
+    let audit = std::fs::read_to_string(cx.audit.path()).unwrap_or_default();
+    assert!(audit.contains("\"event\":\"msg.mirror.set\"") && audit.contains("\"detail\":\"account=home on=true\""), "{audit}");
+    key(&mut a, &cx, Key::Char('m'));
+    assert!(!ms.accounts().mirror_on("home"));
+    assert!(a.notifs_buttons().iter().any(|b| b.0 == "Copy messages to INBOX" && b.2 == 'm'));
+}
+
+#[test]
+fn the_r_key_leaves_one_saved_room_out_of_the_copy_and_back_in_and_the_reach_line_names_it() {
+    let (cx, mut a, _hs) = page("mx-room-choice");
+    key(&mut a, &cx, Key::Char('r'));
+    assert!(a.status().is_some_and(|(t, _)| t.contains("Connect a Matrix account first")), "no account yet");
+    key(&mut a, &cx, Key::Char('a'));
+    fill(&mut a, &cx, "Home", "http://192.168.1.9:8008", "alice", PASSWORD);
+    wait_status(&mut a, &cx, "Signed in as @alice:test");
+    let ms = SettingsApp::matrix_service(&cx);
+    ms.accounts().add_room("home", "garden", "!garden:test").unwrap();
+    assert!(SettingsApp::matrix_reach_line(&cx).contains("rooms \"test\", \"garden\"") || SettingsApp::matrix_reach_line(&cx).contains("rooms"), "{}", SettingsApp::matrix_reach_line(&cx));
+    let first = ms.accounts().rooms("home")[0].name.clone();
+    key(&mut a, &cx, Key::Char('r'));
+    let t = a.status().unwrap().0.clone();
+    assert!(t.contains(&format!("\"{first}\" is left out")) && t.contains("Press r again"), "{t}");
+    assert!(!ms.accounts().rooms("home")[0].mirror && ms.accounts().rooms("home")[1].mirror);
+    assert!(SettingsApp::matrix_reach_line(&cx).contains("(left out)"));
+    // the next press goes to the next room, the one after that comes back round
+    key(&mut a, &cx, Key::Char('r'));
+    assert!(!ms.accounts().rooms("home")[1].mirror);
+    key(&mut a, &cx, Key::Char('r'));
+    assert!(ms.accounts().rooms("home")[0].mirror, "back in");
+    let audit = std::fs::read_to_string(cx.audit.path()).unwrap_or_default();
+    assert!(audit.contains("msg.mirror.room") && audit.contains("on=false") && !audit.contains(TOKEN), "{audit}");
+    assert!(a.notifs_buttons().iter().any(|b| b.2 == 'r'));
+}

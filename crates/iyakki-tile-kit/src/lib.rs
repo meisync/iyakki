@@ -1,0 +1,249 @@
+//! The small kit the page tiles (Settings, Edit, Chat, Runs-like) share, so each tile is only its own state and drawing.
+//!
+//! * [`App`]: events in, display list out (what every tile is).
+//! * [`Source`]: the host's `call(domain, method, json)` import as a trait, so the same tile runs natively against a fake in tests and in the
+//!   wasm sandbox against the real service.
+//! * [`palette`], [`clip`], [`button`], [`call_json`]: the few drawing and parsing helpers.
+//! * `export_tile!` (wasm32 only): the six exports of the tile ABI over one [`App`].
+pub use iyakki_tile_abi as abi;
+use iyakki_tile_abi::{line_height, measure_text, Color, DisplayList, Event, Op, Rect};
+use serde_json::Value;
+
+pub trait App {
+    /// Returns true when the picture changed.
+    fn event(&mut self, e: &Event) -> bool;
+    fn frame(&self) -> DisplayList;
+}
+
+pub trait Source {
+    fn call(&mut self, domain: &str, method: &str, json: &str) -> Result<String, String>;
+}
+
+pub struct Palette {
+    pub bg: Color,
+    pub fg: Color,
+    pub mute: Color,
+    pub bar: Color,
+    pub accent: Color,
+    pub bad: Color,
+    pub good: Color,
+}
+
+pub fn palette(dark: bool) -> Palette {
+    if dark {
+        Palette { bg: Color::rgb(24, 26, 30), fg: Color::rgb(230, 232, 236), mute: Color::rgb(150, 156, 166), bar: Color::rgb(40, 44, 52), accent: Color::rgb(80, 150, 240), bad: Color::rgb(240, 100, 100), good: Color::rgb(90, 200, 130) }
+    } else {
+        Palette { bg: Color::rgb(245, 245, 245), fg: Color::rgb(30, 30, 30), mute: Color::rgb(100, 100, 100), bar: Color::rgb(225, 228, 232), accent: Color::rgb(40, 110, 220), bad: Color::rgb(200, 40, 40), good: Color::rgb(40, 150, 80) }
+    }
+}
+
+/// `text` cut to fit `width` pixels at `size`, with "..." when something was cut.
+pub fn clip(text: &str, width: i32, size: u32) -> String {
+    if measure_text(0, size, text) <= width {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    for c in text.chars() {
+        let mut t = out.clone();
+        t.push(c);
+        t.push_str("...");
+        if measure_text(0, size, &t) > width {
+            break;
+        }
+        out.push(c);
+    }
+    out.push_str("...");
+    out
+}
+
+pub fn text(x: i32, y: i32, size: u32, color: Color, t: &str) -> Op {
+    Op::Text { x, y, face: 0, size, color, text: t.into() }
+}
+
+/// A rounded button with a centred label and a hit region of this `id`.
+pub fn button(l: &mut DisplayList, id: u32, r: Rect, label: &str, p: &Palette) {
+    l.push(Op::RoundRect { r, radius: 6, color: p.accent });
+    let lw = measure_text(0, 13, label);
+    l.push(text(r.x + (r.w - lw) / 2, r.y + (r.h - line_height(13)) / 2, 13, Color::rgb(255, 255, 255), label));
+    l.push(Op::Hit { id, r });
+}
+
+/// One call, its answer read as JSON; a failed call or unreadable answer is one plain sentence.
+pub fn call_json(src: &mut dyn Source, domain: &str, method: &str, json: &str) -> Result<Value, String> {
+    let t = src.call(domain, method, json)?;
+    serde_json::from_str(&t).map_err(|_| "the answer was not readable".to_string())
+}
+
+/// What a wasm32 tile needs: the host's `call` import and the six exports over an [`App`].
+#[cfg(target_arch = "wasm32")]
+pub mod guest {
+    #![allow(unsafe_code)]
+    use super::{App, Source};
+    use iyakki_tile_abi::{DisplayList, EventBatch, ABI_VERSION};
+    use std::cell::RefCell;
+
+    #[link(wasm_import_module = "iyakki_tile")]
+    extern "C" {
+        #[link_name = "call"]
+        fn host_call(dom_p: i32, dom_l: i32, meth_p: i32, meth_l: i32, json_p: i32, json_l: i32, out_p: i32, out_cap: i32) -> i32;
+    }
+
+    /// The host's `call` as a [`Source`] (answers up to 24 KiB).
+    pub struct HostSource;
+
+    impl Source for HostSource {
+        fn call(&mut self, domain: &str, method: &str, json: &str) -> Result<String, String> {
+            let mut out = vec![0u8; 24 * 1024];
+            let n = unsafe { host_call(domain.as_ptr() as i32, domain.len() as i32, method.as_ptr() as i32, method.len() as i32, json.as_ptr() as i32, json.len() as i32, out.as_mut_ptr() as i32, out.len() as i32) };
+            if n < 0 {
+                return Err(match n {
+                    -2 => "this tile is not allowed to do that".into(),
+                    -5 => "the answer was too large".into(),
+                    _ => "the service did not answer".into(),
+                });
+            }
+            out.truncate(n as usize);
+            String::from_utf8(out).map_err(|_| "the answer was not text".to_string())
+        }
+    }
+
+    struct Guest {
+        app: Option<Box<dyn App>>,
+        input: Vec<u8>,
+        frame: Vec<u8>,
+    }
+
+    thread_local! {
+        static GUEST: RefCell<Guest> = const { RefCell::new(Guest { app: None, input: Vec::new(), frame: Vec::new() }) };
+    }
+
+    fn with<R>(f: impl FnOnce(&mut Guest) -> R) -> R {
+        GUEST.with(|g| f(&mut g.borrow_mut()))
+    }
+
+    fn batch(g: &Guest, ptr: i32, len: i32) -> Option<EventBatch> {
+        if ptr as usize != g.input.as_ptr() as usize || len < 0 || len as usize > g.input.len() {
+            return None;
+        }
+        EventBatch::decode(&g.input[..len as usize]).ok()
+    }
+
+    pub fn abi() -> i32 {
+        ABI_VERSION as i32
+    }
+
+    pub fn alloc(size: i32) -> i32 {
+        if !(0..=(iyakki_tile_abi::limits::MAX_EVENT_BYTES as i32)).contains(&size) {
+            return 0;
+        }
+        with(|g| {
+            g.input = vec![0; size as usize];
+            g.input.as_ptr() as usize as i32
+        })
+    }
+
+    pub fn init(abi: i32, ptr: i32, len: i32, make: fn(HostSource) -> Box<dyn App>) -> i32 {
+        if abi != ABI_VERSION as i32 {
+            return 1;
+        }
+        with(|g| match batch(g, ptr, len) {
+            Some(b) => {
+                let mut app = make(HostSource);
+                for e in &b.events {
+                    app.event(e);
+                }
+                g.app = Some(app);
+                g.input = Vec::new();
+                0
+            }
+            None => 2,
+        })
+    }
+
+    pub fn event(ptr: i32, len: i32) -> i32 {
+        with(|g| {
+            let Some(b) = batch(g, ptr, len) else { return -1 };
+            let mut changed = false;
+            if let Some(a) = g.app.as_mut() {
+                for e in &b.events {
+                    changed |= a.event(e);
+                }
+            }
+            g.input = Vec::new();
+            i32::from(changed)
+        })
+    }
+
+    pub fn frame() -> i32 {
+        with(|g| {
+            let list: DisplayList = g.app.as_ref().map(|a| a.frame()).unwrap_or_default();
+            let Ok(bytes) = list.encode() else { return 0 };
+            g.frame.clear();
+            g.frame.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            g.frame.extend_from_slice(&bytes);
+            g.frame.as_ptr() as usize as i32
+        })
+    }
+}
+
+/// The six exports of tile ABI 1 over the app `$make` builds from the host source: `export_tile!(|src| Box::new(MyTile::new(src)))`.
+#[macro_export]
+macro_rules! export_tile {
+    ($make:expr) => {
+        #[no_mangle]
+        pub extern "C" fn iyakki_tile_abi() -> i32 {
+            $crate::guest::abi()
+        }
+        #[no_mangle]
+        pub extern "C" fn iyakki_alloc(size: i32) -> i32 {
+            $crate::guest::alloc(size)
+        }
+        #[no_mangle]
+        pub extern "C" fn iyakki_tile_init(abi: i32, ptr: i32, len: i32) -> i32 {
+            $crate::guest::init(abi, ptr, len, $make)
+        }
+        #[no_mangle]
+        pub extern "C" fn iyakki_tile_event(ptr: i32, len: i32) -> i32 {
+            $crate::guest::event(ptr, len)
+        }
+        #[no_mangle]
+        pub extern "C" fn iyakki_tile_frame() -> i32 {
+            $crate::guest::frame()
+        }
+    };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Fake(Result<String, String>);
+    impl Source for Fake {
+        fn call(&mut self, _: &str, _: &str, _: &str) -> Result<String, String> {
+            self.0.clone()
+        }
+    }
+
+    #[test]
+    fn clipping_fits_the_width_and_says_when_it_cut() {
+        assert_eq!(clip("short", 200, 13), "short");
+        let c = clip(&"x".repeat(100), 100, 13);
+        assert!(c.ends_with("...") && measure_text(0, 13, &c) <= 100, "{c}");
+        assert_eq!(clip("anything", 1, 13), "...");
+    }
+
+    #[test]
+    fn a_json_call_is_a_value_or_one_plain_sentence() {
+        assert_eq!(call_json(&mut Fake(Ok("{\"a\":1}".into())), "d", "m", "{}").unwrap()["a"], 1);
+        assert_eq!(call_json(&mut Fake(Ok("nope".into())), "d", "m", "{}").unwrap_err(), "the answer was not readable");
+        assert_eq!(call_json(&mut Fake(Err("down".into())), "d", "m", "{}").unwrap_err(), "down");
+    }
+
+    #[test]
+    fn a_button_has_its_label_centred_and_a_hit_region() {
+        let mut l = DisplayList::new();
+        button(&mut l, 7, Rect::new(10, 10, 80, 24), "Go", &palette(false));
+        assert!(l.ops.iter().any(|o| matches!(o, Op::Hit { id: 7, .. })) && l.ops.iter().any(|o| matches!(o, Op::Text { text, .. } if text == "Go")));
+        assert_ne!(palette(true).bg, palette(false).bg);
+    }
+}

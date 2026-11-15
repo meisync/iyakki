@@ -145,6 +145,10 @@ fn wait_frame(r: &Rig, w: &Who, id: &str, big: bool) -> Frame {
 }
 
 fn wait_status(r: &Rig, w: &Who, id: &str, pred: impl Fn(&Status) -> bool) -> Status {
+    wait_status_for(r, w, id, Duration::from_secs(8), pred)
+}
+
+fn wait_status_for(r: &Rig, w: &Who, id: &str, limit: Duration, pred: impl Fn(&Status) -> bool) -> Status {
     let t = Instant::now();
     loop {
         let _ = r.hub.view(w, id, false);
@@ -153,7 +157,7 @@ fn wait_status(r: &Rig, w: &Who, id: &str, pred: impl Fn(&Status) -> bool) -> St
                 return c.status;
             }
         }
-        assert!(t.elapsed() < Duration::from_secs(8), "status never matched: {:?}", r.hub.cameras(w).iter().find(|c| c.id == id).map(|c| c.status.clone()));
+        assert!(t.elapsed() < limit, "status never matched: {:?}", r.hub.cameras(w).iter().find(|c| c.id == id).map(|c| c.status.clone()));
         std::thread::sleep(Duration::from_millis(20));
     }
 }
@@ -318,6 +322,25 @@ fn a_stream_stops_when_nobody_looks_and_the_connection_is_released() {
     }
 }
 
+/// Live: the same through the hub against a public gortsplib RTSP test stream whose address is in `IYAKKI_RTSP_LIVE_URL` (never written down;
+/// nothing here prints it). Without the variable the test says so and passes.
+#[test]
+#[ignore = "needs the internet and IYAKKI_RTSP_LIVE_URL"]
+fn a_public_h264_stream_goes_to_needs_the_addon_through_the_hub() {
+    let Ok(addr) = std::env::var("IYAKKI_RTSP_LIVE_URL") else {
+        eprintln!("skipped: set IYAKKI_RTSP_LIVE_URL to the address of an RTSP test stream to run this check");
+        return;
+    };
+    let r = rig("live-h264");
+    let amy = who(&r, "amy", false);
+    let id = r.hub.save(&amy, None, &new_cam("Live H264", &addr, "", &[]), None).unwrap_or_else(|e| panic!("save: {}", e.replace(&addr, "<hidden>")));
+    let t = Instant::now();
+    let s = wait_status_for(&r, &amy, &id, Duration::from_secs(20), |s| matches!(s, Status::NeedsAddon(_)));
+    eprintln!("status after {:?}: {}", t.elapsed(), s.detail_text().replace(&addr, "<hidden>"));
+    assert!(s.detail_text().contains("add-on"));
+    r.hub.stop_all();
+}
+
 #[test]
 fn h264_needs_the_addon_unless_a_decoder_is_plugged_in() {
     let cam = FakeCamera::rtsp(Config { h264: true, ..cfg(None, true) });
@@ -333,6 +356,21 @@ fn h264_needs_the_addon_unless_a_decoder_is_plugged_in() {
     let f = wait_frame(&r2, &amy, &id, false);
     assert_eq!((f.width, f.height), (4, 2));
     r2.hub.stop_all();
+}
+
+#[test]
+fn a_camera_that_refuses_the_same_connection_goes_live_over_udp_through_the_hub() {
+    // the camera answers 461 to the TCP request: the hub's stream asks for UDP and the pictures arrive like any other camera's
+    let cam = FakeCamera::rtsp(Config { udp_only: true, ..cfg(None, true) });
+    let r = rig("udp");
+    let amy = who(&r, "amy", false);
+    let id = r.hub.save(&amy, None, &new_cam("Garage", &format!("rtsp://127.0.0.1:{}/live", cam.port), "", &[]), None).unwrap();
+    let f = wait_frame(&r, &amy, &id, false);
+    assert_eq!((f.width, f.height), (48, 32));
+    assert_eq!(wait_status(&r, &amy, &id, |s| *s == Status::Live), Status::Live);
+    let setups = cam.requests().iter().filter(|l| l.starts_with("SETUP")).count();
+    assert!(setups >= 2, "TCP was tried, then UDP: {:?}", cam.requests());
+    r.hub.stop_all();
 }
 
 #[test]
@@ -443,4 +481,204 @@ fn shrinking_averages_whole_blocks_and_leaves_small_pictures_alone() {
     assert_eq!(out[0], ((0 + 10 + 40 + 50) / 4) as u8);
     // a picture whose data is shorter than its size says is returned as is, not read out of bounds
     let _ = shrink(100, 100, &[1, 2, 3], 10);
+}
+
+struct CountedFeed(Arc<Mutex<i32>>);
+impl Feed for CountedFeed {
+    fn next(&mut self) -> Result<Picture, FeedErr> {
+        std::thread::sleep(Duration::from_millis(20));
+        Ok(Picture::Rgba { width: 8, height: 4, data: [1, 2, 3, 255].repeat(32) })
+    }
+}
+impl Drop for CountedFeed {
+    fn drop(&mut self) {
+        *self.0.lock().unwrap() -= 1;
+    }
+}
+struct CountedUsb(Arc<Mutex<i32>>);
+impl UsbProvider for CountedUsb {
+    fn list(&self) -> Vec<UsbCam> {
+        vec![UsbCam { id: "video0".into(), name: "HD Webcam".into(), builtin: false }]
+    }
+    fn open(&self, _: &str) -> Result<Box<dyn Feed>, FeedErr> {
+        *self.0.lock().unwrap() += 1;
+        Ok(Box::new(CountedFeed(self.0.clone())))
+    }
+}
+
+#[test]
+fn leaving_the_tile_closes_the_computers_own_camera_at_once_not_after_the_idle_time() {
+    let open = Arc::new(Mutex::new(0));
+    // an idle time of a minute: only the explicit release can close the camera inside the test
+    let r = rig_with("release", Arc::new(CountedUsb(open.clone())), Arc::new(NoH264), 60_000);
+    let amy = who(&r, "amy", false);
+    screen_frame(&r, &amy, "usb:video0");
+    assert_eq!(*open.lock().unwrap(), 1);
+    r.hub.release_usb();
+    let t = Instant::now();
+    while *open.lock().unwrap() != 0 {
+        assert!(t.elapsed() < Duration::from_secs(3), "the camera stayed open after the person left");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(r.hub.running(), 0);
+    // looking again opens it again
+    screen_frame(&r, &amy, "usb:video0");
+    assert_eq!(*open.lock().unwrap(), 1);
+    r.hub.stop_all();
+}
+
+/// A look from the computer's own screen (the CAMERAS tile), until a picture arrives.
+fn screen_frame(r: &Rig, w: &Who, id: &str) {
+    let t = Instant::now();
+    while r.hub.view_on_screen(w, id, false).unwrap().is_none() {
+        assert!(t.elapsed() < Duration::from_secs(8), "no picture");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn closed_within(open: &Arc<Mutex<i32>>, want: i32) {
+    let t = Instant::now();
+    while *open.lock().unwrap() != want {
+        assert!(t.elapsed() < Duration::from_secs(3), "{} cameras open, wanted {want}", open.lock().unwrap());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Two own cameras (video0, video1) that count how many are open; `gone` makes video0 vanish from the list (unplugged).
+struct TwoUsb(Arc<Mutex<i32>>, Arc<AtomicBool>);
+impl UsbProvider for TwoUsb {
+    fn list(&self) -> Vec<UsbCam> {
+        let mut v = vec![UsbCam { id: "video1".into(), name: "Second".into(), builtin: false }];
+        if !self.1.load(Ordering::SeqCst) {
+            v.insert(0, UsbCam { id: "video0".into(), name: "HD Webcam".into(), builtin: false });
+        }
+        v
+    }
+    fn open(&self, _: &str) -> Result<Box<dyn Feed>, FeedErr> {
+        *self.0.lock().unwrap() += 1;
+        Ok(Box::new(CountedFeed(self.0.clone())))
+    }
+}
+
+fn two(tag: &str) -> (Rig, Arc<Mutex<i32>>, Arc<AtomicBool>, Who) {
+    let open = Arc::new(Mutex::new(0));
+    let gone = Arc::new(AtomicBool::new(false));
+    // an idle time of a minute: only an explicit release can close a camera inside the test
+    let r = rig_with(tag, Arc::new(TwoUsb(open.clone(), gone.clone())), Arc::new(NoH264), 60_000);
+    let amy = who(&r, "amy", false);
+    (r, open, gone, amy)
+}
+
+#[test]
+fn a_camera_another_holder_still_looks_at_stays_open_when_the_screen_lets_go() {
+    let (r, open, _, amy) = two("release-holder");
+    // the screen and a connected client (or the assistant) look at the same camera
+    screen_frame(&r, &amy, "usb:video0");
+    wait_frame(&r, &amy, "usb:video0", false);
+    assert_eq!(*open.lock().unwrap(), 1);
+    r.hub.release_usb();
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(*open.lock().unwrap(), 1, "the client still looks: the camera stays open");
+    assert_eq!(r.hub.running(), 1);
+    // a camera only the screen looked at closes
+    screen_frame(&r, &amy, "usb:video1");
+    closed_within(&open, 2);
+    r.hub.release_usb();
+    closed_within(&open, 1);
+    r.hub.stop_all();
+    closed_within(&open, 0);
+}
+
+#[test]
+fn a_page_or_layout_that_draws_fewer_cameras_closes_the_others_at_once() {
+    let (r, open, _, amy) = two("release-except");
+    screen_frame(&r, &amy, "usb:video0");
+    screen_frame(&r, &amy, "usb:video1");
+    closed_within(&open, 2);
+    r.hub.release_screen_except(&["usb:video1".to_string()]);
+    closed_within(&open, 1);
+    assert_eq!(r.hub.running(), 1);
+    // an empty page (the form, the recordings page) closes the rest
+    r.hub.release_screen_except(&[]);
+    closed_within(&open, 0);
+    assert_eq!(r.hub.running(), 0);
+}
+
+#[test]
+fn a_camera_that_is_unplugged_or_refused_closes_with_the_next_look_not_after_the_idle_time() {
+    let (r, open, gone, amy) = two("release-gone");
+    screen_frame(&r, &amy, "usb:video0");
+    screen_frame(&r, &amy, "usb:video1");
+    closed_within(&open, 2);
+    gone.store(true, Ordering::SeqCst);
+    assert!(r.hub.view_on_screen(&amy, "usb:video0", false).is_err());
+    closed_within(&open, 1);
+    // a person without the right to use this computer's cameras: the look is refused and nothing stays open
+    let mut nobody = who(&r, "bob", false);
+    nobody.usb_ok = false;
+    assert!(r.hub.view_on_screen(&nobody, "usb:video1", false).is_err());
+    closed_within(&open, 0);
+}
+
+#[test]
+fn network_streams_are_never_touched_by_the_release() {
+    let (r, open, _, amy) = two("release-net");
+    screen_frame(&r, &amy, "usb:video0");
+    let cam = FakeCamera::rtsp(cfg(None, false));
+    let id = r.hub.save(&amy, None, &new_cam("Door", &format!("rtsp://127.0.0.1:{}/live", cam.port), "", &[]), None).unwrap();
+    wait_frame(&r, &amy, &id, false);
+    r.hub.release_usb();
+    closed_within(&open, 0);
+    assert_eq!(r.hub.running(), 1, "the network camera goes on");
+    r.hub.stop_all();
+}
+
+fn flat(level: u8) -> Vec<u8> {
+    (0..64 * 48).flat_map(|_| [level, level, level, 255]).collect()
+}
+
+/// Dim noise (a dark room) around brightness 30-60, or a frame with a small lit area.
+fn dim_room() -> Vec<u8> {
+    (0..64 * 48u32).flat_map(|i| { let v = 30 + (i * 7 % 30) as u8; [v, v, v, 255] }).collect()
+}
+
+#[test]
+fn black_and_near_black_pictures_are_told_from_a_dark_room() {
+    assert!(is_black(&flat(0)));
+    assert!(is_black(&flat(6)), "a sensor's dark floor still counts as black");
+    assert!(!is_black(&flat(40)), "a dim but lit picture is not black");
+    assert!(!is_black(&dim_room()));
+    let mut lamp = flat(0);
+    for px in lamp.chunks_mut(4).take(64 * 48 / 10) {
+        px[0] = 200;
+        px[1] = 200;
+        px[2] = 200;
+    }
+    assert!(!is_black(&lamp), "a lit tenth of the picture is not black");
+    assert!(!is_black(&[]));
+}
+
+#[test]
+fn the_black_message_needs_several_seconds_of_unbroken_black() {
+    let t0 = Instant::now();
+    let mut w = DarkWatch::default();
+    assert!(!w.observe(t0, &flat(0)), "one black picture is not enough");
+    assert!(!w.observe(t0 + DARK_AFTER / 2, &flat(0)));
+    assert!(w.observe(t0 + DARK_AFTER, &flat(2)), "black for the whole time says so");
+    // one lit picture clears it, and the clock starts again
+    assert!(!w.observe(t0 + DARK_AFTER + Duration::from_secs(1), &dim_room()));
+    assert!(!w.observe(t0 + DARK_AFTER + Duration::from_secs(2), &flat(0)));
+    assert!(!w.observe(t0 + DARK_AFTER * 2, &flat(0)));
+    assert!(w.observe(t0 + DARK_AFTER * 3, &flat(0)));
+    // a dark room never raises it
+    let mut r = DarkWatch::default();
+    for s in 0..60 {
+        assert!(!r.observe(t0 + Duration::from_secs(s), &dim_room()));
+    }
+}
+
+#[test]
+fn the_black_message_is_a_question_and_does_not_hide_the_camera() {
+    assert!(DARK_MESSAGE.ends_with('?'));
+    assert!(DARK_MESSAGE.contains("shutter"));
 }

@@ -300,6 +300,30 @@ pub struct BrowserSessionInfo {
     pub engine: String,
 }
 
+/// A flow to run on another IYAKKI for a `remote_flow` node. The machine is a name in the person's saved list; the host finds its
+/// address and the vault name of its token, and refuses a name that is not saved.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RemoteFlowRequest {
+    pub run_id: String,
+    pub flow_id: String,
+    pub node_id: String,
+    pub machine: String,
+    /// The flow's id over there.
+    pub flow: String,
+    pub inputs: serde_json::Value,
+    pub wait_s: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RemoteFlowResult {
+    pub run: String,
+    pub status: String,
+    pub ended: bool,
+    pub waiting: String,
+    pub error: String,
+    pub steps: Vec<(String, String)>,
+}
+
 /// One picture from the camera for a `cam_photo` node. The engine has already checked the flow's camera permission; the host
 /// checks it again and adds its own rules (the account, a camera that is there and free).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -418,6 +442,10 @@ pub struct HealRequest {
     pub context: String,
     /// The agent to ask (empty: the built-in assistant).
     pub agent: String,
+    /// The model to ask (empty: the assistant's own), from the agent profile.
+    pub model: String,
+    /// The most seconds this try may take (0: the host's own limit).
+    pub timeout_secs: u64,
     pub max_cents: u64,
 }
 
@@ -470,6 +498,10 @@ pub trait Host: Send + Sync {
     fn cam_photo(&self, _req: &CamPhotoRequest, _cancel: &Cancel) -> Result<CamPhotoResult, NodeError> {
         na("the camera")
     }
+    /// Run a flow on one of the person's saved machines and follow it (at most `wait_s`).
+    fn remote_flow(&self, _req: &RemoteFlowRequest, _cancel: &Cancel) -> Result<RemoteFlowResult, NodeError> {
+        na("running a flow on another machine")
+    }
     /// A step stopped for want of a permission the person can give by answering a request.
     fn permission_needed(&self, _n: &PermissionNeed) {}
     /// The run is over: delete its camera pictures (those of nodes that did not ask to keep them).
@@ -502,7 +534,17 @@ pub trait Host: Send + Sync {
     fn secret_for_run(&self, _run: &RunSecretCx, name: &str) -> Result<String, String> {
         self.secret(name)
     }
+    /// A token for the run that was just created (a cloud tenant's service issues one per run, expiring, in memory); the engine keeps it
+    /// with the run and presents it with every [`Host::secret_for_run`]. The default issues none.
+    fn issue_run_token(&self, _run_id: &str) -> Option<String> {
+        None
+    }
+    /// The run ended (whatever the way: done, failed, cancelled): the token [`Host::issue_run_token`] gave it is no longer good. Called before the run reads as finished.
+    fn end_run_token(&self, _run_id: &str) {}
     fn audit(&self, _action: &str, _detail: &str) {}
+    /// Called about once a minute while the account is signed in: the host sends what it held back (quiet hours) and what
+    /// needs an escalation.
+    fn tick(&self) {}
     /// Ask the healing agent for a diagnosis and a patch.
     fn propose_patch(&self, _req: &HealRequest, _cancel: &Cancel) -> Result<HealProposal, String> {
         Err("no assistant is available to look at this".into())
@@ -536,13 +578,16 @@ pub struct RunSecretCx {
     pub flow_id: String,
     /// How the run was started: `manual`, `chat`, `test`, `contract` (a person asked), else a timer, event or hook kind.
     pub trigger: String,
+    /// The token the host issued for this run when it started ([`Host::issue_run_token`]); empty when the host issues none. A host that
+    /// issues tokens refuses a run that does not present its own.
+    pub token: String,
 }
 
 impl RunSecretCx {
     /// From the template context of a node (`ctx.run.id`, `.flow`, `.trigger`).
     pub fn from_ctx(ctx: &Value) -> RunSecretCx {
         let g = |k: &str| ctx.get("run").and_then(|r| r.get(k)).and_then(|v| v.as_str()).unwrap_or("").to_string();
-        RunSecretCx { run_id: g("id"), flow_id: g("flow"), trigger: g("trigger") }
+        RunSecretCx { run_id: g("id"), flow_id: g("flow"), trigger: g("trigger"), token: g("token") }
     }
 
     /// A person started this run just now (so it may use that person's own secrets). Anything else, and any trigger this code does not
@@ -570,6 +615,8 @@ pub struct FakeHost {
     pub browser_ended: Arc<Mutex<Vec<String>>>,
     pub cam_calls: Mutex<Vec<CamPhotoRequest>>,
     pub cam_results: Mutex<VecDeque<Result<CamPhotoResult, NodeError>>>,
+    pub remote_calls: Mutex<Vec<RemoteFlowRequest>>,
+    pub remote_results: Mutex<VecDeque<Result<RemoteFlowResult, NodeError>>>,
     pub cam_ended: Mutex<Vec<String>>,
     pub permission_needs: Mutex<Vec<PermissionNeed>>,
     pub agent_results: Mutex<VecDeque<Result<AgentResult, NodeError>>>,
@@ -585,6 +632,10 @@ pub struct FakeHost {
     pub notify_tos: Mutex<Vec<Value>>,
     pub secret_asks: Mutex<Vec<(RunSecretCx, String)>>,
     pub secret_rule: Mutex<Option<SecretRule>>,
+    /// When set, every run gets the token `<prefix><run id>` from [`Host::issue_run_token`].
+    pub token_prefix: Mutex<Option<String>>,
+    /// The runs whose token was ended ([`Host::end_run_token`]), in order.
+    pub tokens_ended: Mutex<Vec<String>>,
     pub audits: Mutex<Vec<String>>,
     pub clis: Mutex<BTreeMap<String, CliInfo>>,
     pub upgrades: Mutex<Vec<(String, String)>>,
@@ -616,6 +667,10 @@ impl FakeHost {
     }
     pub fn secret_rule(&self, f: impl Fn(&RunSecretCx, &str) -> Option<Result<String, String>> + Send + Sync + 'static) -> &Self {
         *self.secret_rule.lock().unwrap() = Some(Arc::new(f));
+        self
+    }
+    pub fn issue_tokens_as(&self, prefix: &str) -> &Self {
+        *self.token_prefix.lock().unwrap() = Some(prefix.to_string());
         self
     }
     pub fn secret_is(&self, name: &str, value: &str) -> &Self {
@@ -694,6 +749,10 @@ impl Host for FakeHost {
         self.cam_calls.lock().unwrap().push(req.clone());
         self.cam_results.lock().unwrap().pop_front().unwrap_or_else(|| Ok(CamPhotoResult { path: "/photos/one.jpg".into(), taken_at: 1_700_000_000, device: "video0".into(), log: vec![] }))
     }
+    fn remote_flow(&self, req: &RemoteFlowRequest, _c: &Cancel) -> Result<RemoteFlowResult, NodeError> {
+        self.remote_calls.lock().unwrap().push(req.clone());
+        self.remote_results.lock().unwrap().pop_front().unwrap_or_else(|| Ok(RemoteFlowResult { run: "r1".into(), status: "succeeded".into(), ended: true, steps: vec![("a".into(), "succeeded".into())], ..Default::default() }))
+    }
     fn cam_end(&self, run_id: &str) {
         self.cam_ended.lock().unwrap().push(run_id.to_string());
     }
@@ -718,6 +777,12 @@ impl Host for FakeHost {
     fn notify_channels(&self, _n: &Notice, c: &ChannelNotice) -> Result<Vec<String>, String> {
         self.channel_calls.lock().unwrap().push(c.clone());
         self.channel_result.lock().unwrap().clone().unwrap_or_else(|| Err("no messaging account is set up on this computer (Settings, Notifications, Matrix account)".into()))
+    }
+    fn issue_run_token(&self, run_id: &str) -> Option<String> {
+        self.token_prefix.lock().unwrap().as_ref().map(|p| format!("{p}{run_id}"))
+    }
+    fn end_run_token(&self, run_id: &str) {
+        self.tokens_ended.lock().unwrap().push(run_id.to_string());
     }
     fn secret_for_run(&self, run: &RunSecretCx, name: &str) -> Result<String, String> {
         self.secret_asks.lock().unwrap().push((run.clone(), name.to_string()));

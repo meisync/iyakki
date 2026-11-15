@@ -50,6 +50,9 @@ pub trait Sys: Send + Sync {
     fn remove_dns_capture(&self);
     /// Add or remove an address in the guard's learned-destination sets.
     fn guard_set(&self, ip: IpAddr, expires_in: Option<u64>, add: bool) -> Result<(), String>;
+    /// The networks of the tunnel that is up (empty when it is down), told to the firewall, which counts them as the local network only
+    /// when its setting says so. The default does nothing (stand-ins in tests).
+    fn tunnel_networks(&self, _nets: &[String]) {}
 }
 
 // ------------------------------------------------------------------------------------------------ parsing `ip` output
@@ -126,6 +129,10 @@ fn run(prog: &str, args: &[&str], stdin: Option<&str>) -> Result<String, String>
 }
 
 impl Sys for OsSys {
+    fn tunnel_networks(&self, nets: &[String]) {
+        iyakki_fw::service::set_vpn_networks(nets.to_vec());
+    }
+
     fn net_info(&self) -> Result<NetInfo, String> {
         let r4 = run("ip", &["-4", "route", "show", "default"], None).unwrap_or_default();
         let r6 = run("ip", &["-6", "route", "show", "default"], None).unwrap_or_default();
@@ -298,6 +305,13 @@ pub struct NlTransport {
 }
 
 impl NlTransport {
+    /// WireGuard configuration goes over generic netlink, which only Linux has.
+    #[cfg(not(target_os = "linux"))]
+    pub fn open() -> Result<NlTransport, VpnError> {
+        Err(VpnError::Netlink(format!("WireGuard setup is {}", crate::oscompat::UNAVAILABLE)))
+    }
+
+    #[cfg(target_os = "linux")]
     pub fn open() -> Result<NlTransport, VpnError> {
         let err = || VpnError::Netlink(errno_words(std::io::Error::last_os_error().raw_os_error().unwrap_or(0)));
         // SAFETY: plain syscalls with valid arguments; the descriptor is closed in Drop.
@@ -392,6 +406,8 @@ pub struct FakeState {
     pub handshake: Option<i64>,
     pub fail_on: Vec<String>,
     pub calls: Vec<String>,
+    /// What the manager last told the firewall about the tunnel's networks.
+    pub tunnel_nets: Vec<String>,
     /// Seen keys: the private key bytes of the last configure (for the canary test).
     pub last_private: Option<Vec<u8>>,
 }
@@ -400,7 +416,7 @@ impl FakeSys {
     pub fn new() -> FakeSys {
         let s = FakeSys::default();
         {
-            let mut st = s.st.lock().unwrap();
+            let mut st = s.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             st.net = NetInfo {
                 physical_if: "eth0".into(),
                 physical_ifs: vec!["eth0".into()],
@@ -414,29 +430,29 @@ impl FakeSys {
     }
 
     pub fn name(&self, host: &str, ips: &[&str]) {
-        self.st.lock().unwrap().names.push((host.into(), ips.iter().map(|i| i.parse().unwrap()).collect()));
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).names.push((host.into(), ips.iter().map(|i| i.parse().unwrap()).collect()));
     }
 
     pub fn fail(&self, word: &str) {
-        self.st.lock().unwrap().fail_on.push(word.into());
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).fail_on.push(word.into());
     }
 
     pub fn clear_failures(&self) {
-        self.st.lock().unwrap().fail_on.clear();
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).fail_on.clear();
     }
 
     pub fn calls(&self) -> Vec<String> {
-        self.st.lock().unwrap().calls.clone()
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).calls.clone()
     }
 
     /// True when nothing the VPN made is left: link, routes, guard, capture, resolv marker, backup.
     pub fn clean(&self) -> bool {
-        let s = self.st.lock().unwrap();
+        let s = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         s.links.is_empty() && s.routes.is_empty() && s.guard.is_none() && s.capture.is_none() && s.backup.is_none() && !s.resolv.as_deref().unwrap_or("").contains("IYAKKI-VPN-DNS") && s.guard_members.is_empty()
     }
 
     fn step(&self, what: String) -> Result<(), String> {
-        let mut s = self.st.lock().unwrap();
+        let mut s = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         s.calls.push(what.clone());
         if s.fail_on.iter().any(|w| what.contains(w.as_str())) {
             return Err(format!("fake failure: {what}"));
@@ -448,7 +464,7 @@ impl FakeSys {
 impl Sys for FakeSys {
     fn net_info(&self) -> Result<NetInfo, String> {
         self.step("net_info".into())?;
-        let s = self.st.lock().unwrap();
+        let s = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if s.no_network {
             return Err("there is no default route: connect to a network first".into());
         }
@@ -460,12 +476,12 @@ impl Sys for FakeSys {
         if let Ok(ip) = host.parse::<IpAddr>() {
             return Ok(vec![ip]);
         }
-        self.st.lock().unwrap().names.iter().find(|(h, _)| h == host).map(|(_, v)| v.clone()).ok_or_else(|| format!("could not resolve {host}"))
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).names.iter().find(|(h, _)| h == host).map(|(_, v)| v.clone()).ok_or_else(|| format!("could not resolve {host}"))
     }
 
     fn ip(&self, args: &[String]) -> Result<(), String> {
         self.step(format!("ip {}", args.join(" ")))?;
-        let mut s = self.st.lock().unwrap();
+        let mut s = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let a: Vec<&str> = args.iter().map(String::as_str).collect();
         match a.as_slice() {
             ["link", "add", "dev", n, ..] => {
@@ -495,12 +511,12 @@ impl Sys for FakeSys {
     }
 
     fn link_exists(&self, ifname: &str) -> bool {
-        self.st.lock().unwrap().links.contains(ifname)
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).links.contains(ifname)
     }
 
     fn wg_configure(&self, d: &DeviceSet) -> Result<(), String> {
         self.step(format!("wg configure {}", d.ifname))?;
-        let mut s = self.st.lock().unwrap();
+        let mut s = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         s.last_private = d.private_key.map(|k| k.expose().to_vec());
         let peers = d
             .peers
@@ -514,7 +530,7 @@ impl Sys for FakeSys {
 
     fn wg_status(&self, ifname: &str) -> Result<DeviceStatus, String> {
         self.step(format!("wg status {ifname}"))?;
-        let s = self.st.lock().unwrap();
+        let s = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if !s.links.contains(ifname) {
             return Err("no such device".into());
         }
@@ -526,66 +542,99 @@ impl Sys for FakeSys {
     }
 
     fn read_resolv(&self) -> Option<String> {
-        self.st.lock().unwrap().resolv.clone()
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).resolv.clone()
     }
 
     fn write_resolv(&self, text: &str) -> Result<(), String> {
         self.step("resolv write".into())?;
-        self.st.lock().unwrap().resolv = Some(text.to_string());
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).resolv = Some(text.to_string());
         Ok(())
     }
 
     fn read_backup(&self) -> Option<String> {
-        self.st.lock().unwrap().backup.clone()
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).backup.clone()
     }
 
     fn write_backup(&self, text: &str) -> Result<(), String> {
         self.step("resolv backup".into())?;
-        self.st.lock().unwrap().backup = Some(text.to_string());
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).backup = Some(text.to_string());
         Ok(())
     }
 
     fn drop_backup(&self) {
-        self.st.lock().unwrap().backup = None;
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).backup = None;
     }
 
     fn install_guard(&self, spec: &KillSwitchSpec) -> Result<(), String> {
         self.step("guard install".into())?;
-        self.st.lock().unwrap().guard = Some(spec.clone());
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).guard = Some(spec.clone());
         Ok(())
     }
 
     fn remove_guard(&self) {
-        let mut s = self.st.lock().unwrap();
+        let mut s = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         s.calls.push("guard remove".into());
         s.guard = None;
         s.guard_members.clear();
     }
 
     fn guard_present(&self) -> bool {
-        self.st.lock().unwrap().guard.is_some()
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).guard.is_some()
     }
 
     fn install_dns_capture(&self, spec: &DnsCaptureSpec) -> Result<(), String> {
         self.step("capture install".into())?;
-        self.st.lock().unwrap().capture = Some(spec.clone());
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).capture = Some(spec.clone());
         Ok(())
     }
 
     fn remove_dns_capture(&self) {
-        let mut s = self.st.lock().unwrap();
+        let mut s = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         s.calls.push("capture remove".into());
         s.capture = None;
     }
 
+    fn tunnel_networks(&self, nets: &[String]) {
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).tunnel_nets = nets.to_vec();
+    }
+
     fn guard_set(&self, ip: IpAddr, _expires_in: Option<u64>, add: bool) -> Result<(), String> {
         self.step(format!("guard set {} {ip}", if add { "add" } else { "del" }))?;
-        let mut s = self.st.lock().unwrap();
+        let mut s = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if add {
             s.guard_members.insert(ip.to_string());
         } else {
             s.guard_members.remove(&ip.to_string());
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod real_kernel_tests {
+    use super::*;
+
+    /// The framing of the real transport against the running kernel's own generic-netlink controller (no root needed for a
+    /// family look-up). With the WireGuard module absent the answer is the readable "family not available"; with it present the
+    /// look-up works and a device that does not exist is refused with the kernel's reason. Either way: an error in words, no hang.
+    #[test]
+    fn the_real_transport_talks_to_the_kernel_and_a_missing_device_is_a_readable_error() {
+        let t = match NlTransport::open() {
+            Ok(t) => t,
+            Err(_) => return, // no generic netlink in this sandbox
+        };
+        let mut c = WgClient::new(t);
+        let e = c.status("iyvpn-none0").expect_err("no such device can exist").to_string();
+        assert!(!e.is_empty() && !e.contains("did not answer"), "{e}");
+    }
+
+    #[test]
+    fn a_raw_family_request_gets_whole_messages_back_that_end_in_an_ack_or_an_error() {
+        let Ok(mut t) = NlTransport::open() else { return };
+        let reply = t.exchange(&iyakki_vpn::wgnl::get_family_request(7)).expect("the controller answers");
+        assert!(!reply.is_empty());
+        let last = reply.last().unwrap();
+        let ty = u16::from_ne_bytes([last[4], last[5]]);
+        assert!(ty == 2 || ty == 3 || ty == 16, "type {ty}");
     }
 }

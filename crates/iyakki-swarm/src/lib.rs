@@ -4,6 +4,9 @@
 //! mDNS, and serves [`TaskRequest`]s by running the module in a locally configured
 //! [`Sandbox`] with **no capabilities** (no files, no network) and local fuel/memory caps —
 //! peers are not trusted, so a remote task can only compute.
+// the NetworkBehaviour derive of libp2p-swarm expands to code that rustc 1.100 flags as unreachable (not our code)
+#![allow(unreachable_code)]
+
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -27,6 +30,9 @@ use tokio::sync::{mpsc, oneshot};
 
 pub use libp2p_core::Multiaddr as Addr;
 pub use libp2p_identity::PeerId as Peer;
+
+pub mod scheduler;
+pub use scheduler::{PeerStat, Policy, Scheduler};
 
 pub const MAX_WASM_BYTES: usize = 4 << 20;
 
@@ -55,6 +61,9 @@ pub enum SwarmError {
     Request(String),
     #[error("node stopped")]
     Stopped,
+    /// Peers are connected but every one is busy or on hold after failures (F-NET-04).
+    #[error("every peer is busy or resting after a failure")]
+    Unavailable,
 }
 
 #[derive(NetworkBehaviour)]
@@ -75,7 +84,19 @@ enum Cmd {
 pub struct Node {
     pub peer_id: PeerId,
     tx: mpsc::Sender<Cmd>,
+    sched: Arc<std::sync::Mutex<Scheduler<PeerId>>>,
 }
+
+/// Milliseconds since the first call in this process (the scheduler wants a plain number, not a clock).
+fn now_ms() -> u64 {
+    static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    T0.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
+}
+
+/// How many tasks one peer takes at once under the default scheduler.
+pub const DEFAULT_MAX_IN_FLIGHT: u32 = 2;
+/// How many different peers one scheduled task is tried on.
+pub const DEFAULT_ATTEMPTS: usize = 3;
 
 fn execute(sandbox: &Sandbox, req: TaskRequest) -> TaskResponse {
     let fail = |e: String| TaskResponse { ok: false, result: None, log: vec![], error: e };
@@ -181,7 +202,7 @@ impl Node {
                 }
             }
         });
-        Ok(Node { peer_id, tx })
+        Ok(Node { peer_id, tx, sched: Arc::new(std::sync::Mutex::new(Scheduler::new(Policy::default(), DEFAULT_MAX_IN_FLIGHT))) })
     }
 
     async fn ask<T>(&self, f: impl FnOnce(oneshot::Sender<T>) -> Cmd) -> Result<T, SwarmError> {
@@ -208,10 +229,43 @@ impl Node {
         self.ask(|r| Cmd::Submit(peer, req, r)).await?.map_err(SwarmError::Request)
     }
 
-    /// Run on any connected peer (first in the list; callers wanting scheduling policy can use `peers()`).
+    /// Run on any connected peer: the first in the list, with no memory of load or failures. Kept for callers that want exactly that;
+    /// [`Node::submit_scheduled`] is the one that chooses.
     pub async fn submit_any(&self, req: TaskRequest) -> Result<(PeerId, TaskResponse), SwarmError> {
         let p = *self.peers().await?.first().ok_or(SwarmError::NoPeers)?;
         Ok((p, self.submit(p, req).await?))
+    }
+}
+
+impl Node {
+    /// Change how the next tasks are spread (the policy and the per-peer limit); what is known about peers is kept.
+    pub fn set_schedule(&self, policy: Policy, max_in_flight: u32) {
+        let mut s = self.sched.lock().unwrap_or_else(|e| e.into_inner());
+        s.policy = policy;
+        s.max_in_flight = max_in_flight.max(1);
+    }
+
+    /// What the scheduler knows about each peer it has used: tasks in flight, done and failed, the smoothed answer time, the hold.
+    pub fn peer_stats(&self) -> Vec<(PeerId, PeerStat)> {
+        self.sched.lock().unwrap_or_else(|e| e.into_inner()).all()
+    }
+
+    /// Run on a peer the scheduler chooses (least loaded by default), and on a transport failure (no answer came back) on another one, up
+    /// to [`DEFAULT_ATTEMPTS`] peers. A task that ran and failed (fuel, a trap, a refused module) is returned as it is: it is not retried,
+    /// and the peer is not held for it.
+    pub async fn submit_scheduled(&self, req: TaskRequest) -> Result<(PeerId, TaskResponse), SwarmError> {
+        let peers = self.peers().await?;
+        self.sched.lock().unwrap_or_else(|e| e.into_inner()).forget_gone(&peers);
+        scheduler::run_scheduled(&self.sched, peers, DEFAULT_ATTEMPTS, now_ms, |p| {
+            let r = req.clone();
+            async move { self.submit(p, r).await }
+        })
+        .await
+        .map_err(|e| match e {
+            scheduler::RunError::NoPick(scheduler::NoPick::NoPeers) => SwarmError::NoPeers,
+            scheduler::RunError::NoPick(_) => SwarmError::Unavailable,
+            scheduler::RunError::Failed(e) => e,
+        })
     }
 }
 
@@ -238,7 +292,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn runs_task_on_remote_peer_with_remote_limits() {
-        let (a, b) = (node(1_000_000).await, node(10_000).await);
+        // the remote's fuel is small but not tiny: on macOS a module with a data segment spends 10 to 20 thousand units while it is set up
+        // (seen with fuel 10 000: "fuel exhausted" before main ran), so 100 000 keeps the test about the remote's cap and not that set-up
+        let (a, b) = (node(1_000_000).await, node(100_000).await);
         let baddr = wait_addr(&b).await;
         a.dial(baddr).await.unwrap();
         for _ in 0..100 {
@@ -297,5 +353,38 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         panic!("peers did not discover each other via mDNS");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scheduled_tasks_use_every_connected_peer_and_report_what_the_scheduler_saw() {
+        let (a, b, c) = (node(1_000_000).await, node(1_000_000).await, node(1_000_000).await);
+        a.dial(wait_addr(&b).await).await.unwrap();
+        a.dial(wait_addr(&c).await).await.unwrap();
+        for _ in 0..100 {
+            if a.peers().await.unwrap().len() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(a.peers().await.unwrap().len(), 2);
+        a.set_schedule(Policy::RoundRobin, 4);
+        let mut used = HashSet::new();
+        for _ in 0..4 {
+            let (p, r) = a.submit_scheduled(TaskRequest { wasm: WAT.into(), entry: "main".into() }).await.unwrap();
+            assert!(r.ok, "{}", r.error);
+            used.insert(p);
+        }
+        assert_eq!(used, HashSet::from([b.peer_id, c.peer_id]), "round robin reaches both peers, not only the first");
+        let stats = a.peer_stats();
+        assert_eq!(stats.len(), 2);
+        assert!(stats.iter().all(|(_, s)| s.done == 2 && s.failed == 0 && s.in_flight == 0 && s.avg_ms.is_some()), "{stats:?}");
+        // a task that ran and failed is the task's own failure: returned as it is, the peer is not held
+        let spin = r#"(module (func (export "main") (loop br 0)))"#;
+        let (p, r) = a.submit_scheduled(TaskRequest { wasm: spin.into(), entry: "main".into() }).await.unwrap();
+        assert!(!r.ok && r.error.contains("fuel"), "{r:?}");
+        assert_eq!(a.peer_stats().iter().find(|(q, _)| *q == p).unwrap().1.held_until_ms, 0);
+        // a node with nobody connected says so
+        let lone = node(1000).await;
+        assert!(matches!(lone.submit_scheduled(TaskRequest { wasm: vec![], entry: "x".into() }).await, Err(SwarmError::NoPeers)));
     }
 }

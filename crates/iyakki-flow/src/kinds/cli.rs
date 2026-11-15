@@ -1,4 +1,4 @@
-//! `cli` (one program, as an argument array), `grpc` (through the `grpcurl` program) and `thrift` (planned).
+//! `cli` (one program, as an argument array), `grpc` (through the `grpcurl` program) and `thrift` (over HTTP, JSON protocol).
 
 use std::sync::Arc;
 
@@ -378,13 +378,8 @@ fn headers_like(v: Option<&Value>) -> Vec<(String, String)> {
 
 // ------------------------------------------------------------------------------------------------ thrift
 
-/// Planned. The adapter this kind will call, so the first working path (thrift over HTTP with the JSON protocol, then a CLI client)
-/// can be added without changing the kind: given an endpoint, a service and method and the arguments as JSON, return the result as JSON
-/// or an error whose `grpc_code` carries a gRPC-style status (`UNAVAILABLE`, `DEADLINE_EXCEEDED`, ...) so the same retry table applies.
-pub trait ThriftAdapter: Send + Sync {
-    fn call(&self, endpoint: &str, service: &str, method: &str, args: &Value, deadline_ms: u64) -> Result<Value, NodeError>;
-}
-
+/// A Thrift call over HTTP with the JSON protocol (`crate::thrift`): the node names the method and gives every argument with its field
+/// number, type and value; the answer is turned into JSON without a description of the service.
 struct ThriftKind;
 impl NodeKind for ThriftKind {
     fn id(&self) -> &'static str {
@@ -394,28 +389,104 @@ impl NodeKind for ThriftKind {
         "Thrift"
     }
     fn blurb(&self) -> &'static str {
-        "Planned: a Thrift RPC call. It can be placed and configured, but cannot run yet."
+        "Calls a Thrift service over HTTP (JSON protocol): the method and its arguments, each with a field number, a type and a value."
     }
     fn category(&self) -> &'static str {
         "Call"
     }
-    fn status(&self) -> KindStatus {
-        KindStatus::Planned("the thrift adapter is not built yet")
-    }
     fn schema(&self) -> Vec<Field> {
         vec![
-            Field::new("endpoint", "Endpoint", FieldKind::Text, "host:port or an HTTP address").required(),
-            Field::new("service", "Service", FieldKind::Text, "").required(),
+            Field::new("endpoint", "Address", FieldKind::Text, "http:// or https:// address of the service").required(),
+            Field::new("service", "Service", FieldKind::Text, "only for a server that expects Service:method (multiplexed)"),
             Field::new("method", "Method", FieldKind::Text, "").required(),
-            Field::new("args", "Arguments (JSON)", FieldKind::Json, ""),
-            Field::new("protocol", "Protocol", FieldKind::Choice(&["json-http", "binary", "compact"]), "json-http is the first one planned").default(json!("json-http")),
+            Field::new("args", "Arguments", FieldKind::Json, "[{\"id\": 1, \"type\": \"string\", \"value\": \"x\"}, {\"id\": 2, \"type\": {\"list\": \"i32\"}, \"value\": [1, 2]}]; types: bool, byte, i16, i32, i64, double, string, binary, {list}, {set}, {map: [K, V]}, {struct: [fields]}"),
+            Field::new("oneway", "One way", FieldKind::Bool, "send and do not wait for an answer").default(json!(false)),
+            Field::new("headers", "Headers", FieldKind::Json, "name: value; a credential only as {{secret.NAME}}"),
+            Field::new("tls", "TLS", FieldKind::Json, "{\"ca_file\": \"/path/ca.pem\", \"insecure\": false}"),
+            Field::new("protocol", "Protocol", FieldKind::Choice(&["json-http"]), "the JSON protocol over HTTP; binary and compact are not offered").default(json!("json-http")),
         ]
     }
-    fn validate(&self, node: &Node, _f: &Flow) -> Vec<Issue> {
-        vec![Issue::error(&node.id, "Thrift calls are planned and cannot run yet (use an HTTP or gRPC node)")]
+    fn secret_fields(&self) -> &'static [&'static str] {
+        &["headers"]
     }
-    fn run(&self, _cx: &NodeCx, _n: &Node, _c: &Value) -> NodeResult {
-        Err(NodeError::config("Thrift calls are planned and cannot run yet"))
+    fn validate(&self, node: &Node, _f: &Flow) -> Vec<Issue> {
+        let c = &node.config;
+        let mut v = Vec::new();
+        let url = s(c, "endpoint");
+        if url.is_empty() {
+            v.push(Issue::error(&node.id, "give the address of the service"));
+        } else if !url.contains("{{") && !(url.starts_with("http://") || url.starts_with("https://")) {
+            v.push(Issue::error(&node.id, "the address must start with http:// or https:// (only Thrift over HTTP is available)"));
+        }
+        let m = s(c, "method");
+        if m.is_empty() {
+            v.push(Issue::error(&node.id, "give the method"));
+        } else if !m.contains("{{") && !m.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+            v.push(Issue::error(&node.id, "the method name has letters, digits and underscores only"));
+        }
+        if !s(c, "protocol").is_empty() && s(c, "protocol") != "json-http" {
+            v.push(Issue::error(&node.id, format!("protocol `{}` is not available; only json-http", s(c, "protocol"))));
+        }
+        if let Some(a) = c.get("args") {
+            if let Err(e) = crate::thrift::parse_args(a) {
+                v.push(Issue::error(&node.id, e));
+            }
+        }
+        if let Some(Value::Object(h)) = c.get("headers") {
+            for (k, val) in h {
+                let val = crate::expr::text(val);
+                if credential_header(k) && !val.is_empty() && !val.contains("{{secret.") {
+                    v.push(Issue::error(&node.id, format!("header `{k}` looks like a credential: write it as {{{{secret.NAME}}}} and keep the value in your vault")));
+                }
+            }
+        }
+        v
+    }
+    fn run(&self, cx: &NodeCx, node: &Node, cfg: &Value) -> NodeResult {
+        let url = s(cfg, "endpoint").trim().to_string();
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return Err(NodeError::config("the address must start with http:// or https://"));
+        }
+        let args = crate::thrift::parse_args(cfg.get("args").unwrap_or(&Value::Null)).map_err(NodeError::config)?;
+        let oneway = b(cfg, "oneway", false);
+        let seq = 1;
+        let body = crate::thrift::encode_call(s(cfg, "service"), s(cfg, "method"), seq, oneway, &args).map_err(NodeError::config)?;
+        let mut headers: Vec<(String, String)> = match cfg.get("headers") {
+            Some(Value::Object(o)) => o.iter().map(|(k, x)| (k.clone(), crate::expr::text(x))).collect(),
+            _ => vec![],
+        };
+        headers.push(("Content-Type".into(), "application/x-thrift".into()));
+        headers.push(("Accept".into(), "application/x-thrift".into()));
+        let tls = cfg.get("tls").map(|t| crate::host::TlsOpts { ca_file: s(t, "ca_file").to_string(), insecure: t.get("insecure").and_then(Value::as_bool).unwrap_or(false) }).unwrap_or_default();
+        let req = crate::host::HttpRequest { method: "POST".into(), url: url.clone(), headers, body: body.into_bytes(), timeout_ms: cx.timeout_ms, tls, follow_redirects: false, run_id: cx.run_id.to_string(), node_id: cx.node_id.to_string() };
+        cx.log(format!("Thrift {} on {url} (attempt {}, limit {} ms)", s(cfg, "method"), cx.attempt, cx.timeout_ms));
+        let resp = cx.host.http(&req, cx.cancel)?;
+        cx.log(format!("-> {} in {} ms, {} bytes", resp.status, resp.elapsed_ms, resp.body.len()));
+        if !(200..300).contains(&resp.status) {
+            return Err(NodeError { message: format!("HTTP {}: {}", resp.status, preview(&json!(resp.body.trim()), 200)), http_status: Some(resp.status), output: preview(&json!(resp.body), 2000), ..Default::default() });
+        }
+        let _ = node;
+        if oneway {
+            return Ok(NodeOutput::out(json!({"status": resp.status, "result": Value::Null, "fields": {}})));
+        }
+        match crate::thrift::decode_reply(&resp.body, s(cfg, "method"), seq).map_err(|e| NodeError { message: e, output: preview(&json!(resp.body), 2000), ..Default::default() })? {
+            crate::thrift::Reply::Return { result, fields } => Ok(NodeOutput::out(json!({"status": resp.status, "result": result, "fields": fields}))),
+            crate::thrift::Reply::Declared { field, value } => Err(NodeError { message: format!("the service threw its exception number {field}: {}", preview(&value, 300)), output: preview(&value, 2000), ..Default::default() }),
+            crate::thrift::Reply::Application { message, kind } => Err(NodeError { message: format!("the server failed ({}): {message}", crate::thrift::exception_name(kind)), output: message, ..Default::default() }),
+        }
+    }
+    fn classify_error(&self, e: &NodeError, _n: &Node) -> ErrClass {
+        if e.cancelled || e.config {
+            return ErrClass::Permanent;
+        }
+        match e.http_status {
+            Some(s) if crate::retry::http_status_retryable(s) => ErrClass::Retryable,
+            Some(_) => ErrClass::Permanent,
+            None => default_class(e),
+        }
+    }
+    fn describe(&self, node: &Node) -> String {
+        format!("{} on {}", s(&node.config, "method"), preview(&json!(s(&node.config, "endpoint")), 50))
     }
 }
 

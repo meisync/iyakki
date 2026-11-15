@@ -201,6 +201,40 @@ fn the_wifi_driver_pack_from_a_usb_stick_installs_only_for_a_trusted_key_and_thi
     let _ = std::fs::remove_dir_all(&f.dir);
 }
 
+/// The product refusal stays: with the kernel locked down (Secure Boot) an unsigned module is refused at the install, with the reason, and nothing
+/// is written. The sandbox's lockdown file is the test's own, so this holds on a host with or without Secure Boot.
+#[test]
+fn under_lockdown_the_install_of_an_unsigned_module_pack_is_refused_and_writes_nothing() {
+    let f = fx("drv-wl-lock");
+    let a = admin();
+    let d = sandbox(&f);
+    let release = d.machine().release;
+    if release.is_empty() {
+        let _ = std::fs::remove_dir_all(&f.dir);
+        return;
+    }
+    let owner = new_signing_key().unwrap();
+    let ko = modinfo::synthetic_module_with("wl", &format!("{release} SMP preempt mod_unload "), "MIXED/Proprietary", "cfg80211");
+    let p = Pack { v: 1, modules: vec![pack::KoFile { name: "wl".into(), kernel: release.clone(), data: b64::encode(&ko), sha256: pack::sha256_hex(&ko) }], load: vec!["wl".into()], ..Default::default() };
+    let text = signed_pack(&f, "mac-wifi-bcm4360", "1.0.0", &p, &owner);
+    f.store.trust_key(&f.svc, &a, &pkg::public_key_hex(&owner), "My Wi-Fi pack").unwrap();
+    std::fs::create_dir_all(d.fs.lockdown.parent().unwrap()).unwrap();
+    std::fs::write(&d.fs.lockdown, "none [integrity] confidentiality\n").unwrap();
+    let r = f.store.review_sideload(&f.svc, &a, text.clone(), Scope::Shared, &[]);
+    let e = match f.store.install(&f.svc, &a, &r, Confirm::all()) {
+        Err(e) => e.to_string(),
+        Ok(_) => String::new(),
+    };
+    assert!(e.contains("not signed") && e.contains("Secure Boot") && e.contains("Nothing was installed"), "{e:?} / {}", r.summary());
+    assert!(!d.fs.data.join("firmware/mac-wifi-bcm4360/modules/wl.ko").exists(), "nothing was written");
+    // and with no lockdown the same pack installs
+    std::fs::write(&d.fs.lockdown, "[none] integrity confidentiality\n").unwrap();
+    let r = f.store.review_sideload(&f.svc, &a, text, Scope::Shared, &[]);
+    f.store.install(&f.svc, &a, &r, Confirm::all()).unwrap();
+    assert!(d.fs.data.join("firmware/mac-wifi-bcm4360/modules/wl.ko").exists());
+    let _ = std::fs::remove_dir_all(&f.dir);
+}
+
 /// The real Broadcom module is about 7.5 MB: the pack and the package around it must have room for it.
 #[test]
 fn a_module_of_the_size_of_the_real_wifi_driver_fits_in_a_pack_and_a_package() {

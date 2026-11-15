@@ -14,6 +14,7 @@
 //! outside the panel closes it. The menu only says what it wants ([`Outcome`]); the shell does it (jobs, the player, jumps).
 
 use crate::safeclamp::SafeClamp;
+use crate::scrolllist::ScrollList;
 use crate::gfx::{rgb, Face, Gfx, Icon};
 use crate::ui::{Event, Key, TextField, DIM, ERR, MUTED, OK, R, TEXT};
 use iyakki_agent::quickinstall::Item;
@@ -48,11 +49,25 @@ pub const MAC_FOLDER: usize = BASE + 71;
 pub const MAC_IMAGE: usize = BASE + 72;
 pub const MAC_PROMPT: usize = BASE + 73;
 pub const MAC_PATH: usize = BASE + 74;
+/// Browse buttons of the video path, the firmware path and the Linux page's folder.
+pub const BROWSE_VIDEO: usize = 49_922;
+pub const BROWSE_MAC: usize = 49_923;
+pub const BROWSE_FOLDER: usize = 49_924;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PickFor {
+    Video,
+    Mac,
+    Folder,
+}
 /// Mac drivers page: delete the kept download and unpacked folder.
 pub const MAC_CLEAN: usize = BASE + 75;
 /// Mac drivers page: "Load the Bluetooth driver anyway".
 pub const MAC_BTLOAD: usize = BASE + 76;
 pub const SCROLL: usize = BASE + 60;
+/// The scroll bars of the About page and of the Linux apps lists (`Event::Area`, turned into `AreaAt` by the shell).
+pub const ABOUT_BAR: usize = BASE + 61;
+pub const LINUX_BAR: usize = BASE + 62;
 
 const ACCENT: [u8; 4] = crate::fx::CYAN;
 const AMBER: [u8; 4] = rgb(255, 196, 94);
@@ -205,9 +220,8 @@ pub struct BrandMenu {
     pub open: bool,
     pub page: Page,
     sel: usize,
-    scroll: usize,
-    /// Lines of the About page that fit (from the last drawing).
-    visible: usize,
+    /// The About page's scrolling (wheel, trackpad, bar, drag on the body, keys): one helper for every list (`scrolllist.rs`).
+    list: ScrollList,
     /// The About page's wrapped lines for the width they were made for.
     wrapped: Option<(u32, Vec<(String, crate::about::Style)>)>,
     about: Option<Vec<(String, crate::about::Style)>>,
@@ -216,6 +230,9 @@ pub struct BrandMenu {
     pub mac: Option<crate::devpop::Snapshot>,
     /// The Mac drivers page: the path typed for "from a folder or stick" / "from a disk image" (click the field to type).
     pub mac_path: TextField,
+    /// Browse next to the file, firmware and folder boxes: the picker, and the box it answers for.
+    pub pick: crate::pathpick::PathPick,
+    pick_for: PickFor,
     mac_focus: bool,
     /// What the last firmware run said (read from the data folder when the page opens and while it is open).
     pub mac_last: Option<iyakki_agent::macfw::Outcome>,
@@ -253,7 +270,7 @@ impl Default for BrandMenu {
 
 impl BrandMenu {
     pub fn new() -> BrandMenu {
-        BrandMenu { open: false, page: Page::Menu, sel: 0, scroll: 0, visible: 10, wrapped: None, about: None, players: Vec::new(), path: TextField::new("/path/to/a/video-or-audio-file", false), mac: None, mac_path: TextField::new("/mnt/usb/iyakki-wifi-firmware  or  /mnt/usb/macOS.dmg", false), mac_focus: false, mac_last: None, mac_busy: false, mac_leftover: 0, mac_cache: String::new(), mac_bt_held: false, mac_model: String::new(), mac_board: String::new(), note: None, anchor: (24.0, 76.0), admin: false, gpu: None, linux: LinuxPage::new(), cloud: iyakki_agent::cloudmode::CloudMode::desktop() }
+        BrandMenu { open: false, page: Page::Menu, sel: 0, list: ScrollList::default(), wrapped: None, about: None, players: Vec::new(), path: TextField::new("/path/to/a/video-or-audio-file", false), mac: None, mac_path: TextField::new("/mnt/usb/iyakki-wifi-firmware  or  /mnt/usb/macOS.dmg", false), mac_focus: false, mac_last: None, mac_busy: false, mac_leftover: 0, mac_cache: String::new(), mac_bt_held: false, mac_model: String::new(), mac_board: String::new(), note: None, anchor: (24.0, 76.0), admin: false, gpu: None, linux: LinuxPage::new(), cloud: iyakki_agent::cloudmode::CloudMode::desktop(), pick: Default::default(), pick_for: PickFor::Video }
     }
 
     pub fn toggle(&mut self) {
@@ -319,7 +336,8 @@ impl BrandMenu {
         }
         self.page = p;
         self.sel = 0;
-        self.scroll = 0;
+        self.list.to_top();
+        self.linux.list.to_top();
         self.note = None;
         if p == Page::Linux {
             self.linux_reset();
@@ -352,10 +370,20 @@ impl BrandMenu {
         }
     }
 
+    /// Scroll the About page by `d` lines (up is negative).
     fn scroll_by(&mut self, d: i32) {
-        let total = self.wrapped.as_ref().map_or(0, |w| w.1.len());
-        let max = total.saturating_sub(self.visible.max(1));
-        self.scroll = (self.scroll as i32 + d).clamp_safe(0, max as i32) as usize;
+        let row = if self.list.row > 1.0 { self.list.row } else { 19.0 };
+        self.list.by(d as f32 * row);
+    }
+
+    /// The pointer events of the page's scrolling (the bar, a drag on the body, the position the wheel is judged by). True when taken.
+    /// The shell calls this for every pointer event while the menu is open; a MouseMove is never kept from the rest of the shell.
+    pub fn pointer_event(&mut self, ev: &Event) -> bool {
+        match self.page {
+            Page::About => self.list.event(ev, ABOUT_BAR),
+            Page::Linux => self.linux.list.event(ev, LINUX_BAR),
+            _ => false,
+        }
     }
 
     // ---- Mac drivers page
@@ -422,6 +450,9 @@ impl BrandMenu {
     }
 
     pub fn handle_key(&mut self, k: &Key) -> Outcome {
+        if self.pick.is_open() {
+            return self.pick_event(&Event::Key(k.clone()));
+        }
         if matches!(k, Key::F(10)) {
             return Outcome::Close;
         }
@@ -483,21 +514,21 @@ impl BrandMenu {
                 Outcome::Nothing
             }
             Key::PageDown => {
-                self.scroll_by(self.visible.max(2) as i32 - 1);
+                self.list.key(k);
                 Outcome::Nothing
             }
             Key::PageUp => {
-                self.scroll_by(-(self.visible.max(2) as i32 - 1));
+                self.list.key(k);
                 Outcome::Nothing
             }
             Key::Home => {
                 self.sel = 0;
-                self.scroll = 0;
+                self.list.to_top();
                 Outcome::Nothing
             }
             Key::End => {
                 self.sel = n.saturating_sub(1);
-                self.scroll_by(i32::MAX / 2);
+                self.list.key(k);
                 Outcome::Nothing
             }
             Key::Enter | Key::Right => match self.page {
@@ -536,8 +567,43 @@ impl BrandMenu {
         }
     }
 
+    fn open_pick(&mut self, what: PickFor) -> Outcome {
+        self.pick_for = what;
+        let (kind, exts, title, start): (_, &[&str], _, String) = match what {
+            PickFor::Video => (crate::filepicker::PathKind::File, &[], "Choose a video or audio file", self.path.value.clone()),
+            PickFor::Mac => {
+                self.mac_focus = true;
+                (crate::filepicker::PathKind::File, &[], "Choose the firmware folder or macOS image", self.mac_path.value.clone())
+            }
+            PickFor::Folder => (crate::filepicker::PathKind::Folder, &[], "Choose a folder to share with the sandbox", self.linux.folder.value.clone()),
+        };
+        self.pick.open(kind, exts, title, &start);
+        Outcome::Nothing
+    }
+
+    fn pick_event(&mut self, ev: &Event) -> Outcome {
+        if let crate::pathpick::Picked::Chosen(p) = self.pick.event(ev) {
+            let t = p.display().to_string();
+            match self.pick_for {
+                PickFor::Video => self.path.set(&t),
+                PickFor::Mac => self.mac_path.set(&t),
+                PickFor::Folder => self.linux.folder.set(&t),
+            }
+        }
+        Outcome::Nothing
+    }
+
     /// A click on one of the panel's own regions.
     pub fn handle_hit(&mut self, ev: &Event) -> Outcome {
+        if self.pick.is_open() {
+            return self.pick_event(ev);
+        }
+        match ev {
+            Event::Tab(BROWSE_VIDEO) => return self.open_pick(PickFor::Video),
+            Event::Tab(BROWSE_MAC) => return self.open_pick(PickFor::Mac),
+            Event::Tab(BROWSE_FOLDER) => return self.open_pick(PickFor::Folder),
+            _ => {}
+        }
         if self.page == Page::Linux {
             if let Some(o) = self.linux_hit(ev) {
                 return o;
@@ -549,6 +615,11 @@ impl BrandMenu {
             Event::Tab(n) if (ENTRY..ENTRY + self.shown().len()).contains(n) => {
                 self.sel = n - ENTRY;
                 self.open_page(self.shown()[self.sel].0)
+            }
+            // a press on the About text: a drag that follows scrolls it with the finger
+            Event::Tab(SCROLL) => {
+                self.list.body_press();
+                Outcome::Nothing
             }
             Event::Tab(PLAY) => self.handle_key(&Key::Enter),
             Event::Tab(STOP) => Outcome::StopMedia,
@@ -582,7 +653,9 @@ impl BrandMenu {
             }
             Event::Scroll(d) => {
                 match self.page {
-                    Page::About => self.scroll_by(-*d * 3),
+                    Page::About => {
+                        self.list.wheel(*d);
+                    }
                     // the sandbox / image-app list follows its selection: a notch moves it by a row (up is towards the start)
                     Page::Linux => self.linux_wheel(*d),
                     _ => {}
@@ -671,6 +744,8 @@ impl BrandMenu {
         };
         let foot = g.fit(12.0 * s, &foot, Face::Sans, p.w - 36.0 * s);
         g.text(p.x + 18.0 * s, p.y + p.h - 26.0 * s, 12.0 * s, col, &foot, Face::Sans);
+        // the file picker, when a Browse button opened it, over the whole panel
+        self.pick.render(g, p, s, ACCENT, (tick / 15) % 2 == 0);
     }
 
     fn draw_menu(&mut self, g: &mut Gfx, body: R, s: f32) {
@@ -734,12 +809,15 @@ impl BrandMenu {
             self.wrapped = Some((width_key, out));
         }
         let lines = self.wrapped.as_ref().map(|w| w.1.clone()).unwrap_or_default();
-        self.visible = ((body.h / lh).floor() as usize).max(1);
-        let max = lines.len().saturating_sub(self.visible);
-        self.scroll = self.scroll.min(max);
+        self.list.layout(body, lines.len() as f32 * lh, lh, s);
         g.hit(body, Event::Tab(SCROLL), "scroll");
-        for (k, (t, st)) in lines.iter().enumerate().skip(self.scroll).take(self.visible) {
-            let y = body.y + (k - self.scroll) as f32 * lh;
+        let first = (self.list.offset / lh).floor() as usize;
+        let shown = ((body.h / lh).ceil() as usize) + 1;
+        for (k, (t, st)) in lines.iter().enumerate().skip(first).take(shown) {
+            let y = body.y + k as f32 * lh - self.list.offset;
+            if y + lh < body.y || y > body.y + body.h {
+                continue;
+            }
             match st {
                 Style::Heading => {
                     g.text(body.x, y, 15.0 * s, ACCENT, t, Face::Bold);
@@ -761,7 +839,7 @@ impl BrandMenu {
                 }
             }
         }
-        crate::fx::scrollbar(g, R::new(body.x + body.w + 6.0 * s, body.y, 4.0 * s, body.h), s, self.scroll, self.visible, lines.len(), ACCENT);
+        self.list.draw_bar(g, s, ABOUT_BAR, ACCENT);
     }
 
     fn draw_media(&mut self, g: &mut Gfx, body: R, s: f32, tick: u64) {
@@ -778,8 +856,10 @@ impl BrandMenu {
         y += 10.0 * s;
         g.text(body.x, y, 13.0 * s, MUTED, "File to play", Face::Sans);
         y += 20.0 * s;
-        let fr = R::new(body.x, y, body.w, 40.0 * s);
+        let bw = g.text_width(12.0 * s, "Browse\u{2026}", Face::Bold) + 12.0 * s * 1.7 + 8.0 * s;
+        let fr = R::new(body.x, y, (body.w - bw).max(60.0 * s), 40.0 * s);
         self.path.render(g, fr, true, s, (tick / 15) % 2 == 0, Face::Sans, PATH_FIELD);
+        crate::pathpick::PathPick::button(g, fr.x + fr.w + 8.0 * s, fr.y + 5.0 * s, s, BROWSE_VIDEO, ACCENT);
         y += 52.0 * s;
         let mut x = body.x;
         x += g.button(x, y, 14.0 * s, "Play", ACCENT, Event::Tab(PLAY)) + 10.0 * s;
@@ -887,8 +967,10 @@ impl BrandMenu {
             y += 15.0 * s;
         }
         y += 6.0 * s;
-        let fr = R::new(body.x, y, body.w, field_h);
+        let bw = g.text_width(12.0 * s, "Browse\u{2026}", Face::Bold) + 12.0 * s * 1.7 + 8.0 * s;
+        let fr = R::new(body.x, y, (body.w - bw).max(60.0 * s), field_h);
         self.mac_path.render(g, fr, self.mac_focus, s, (tick / 15) % 2 == 0, Face::Mono, MAC_PATH);
+        crate::pathpick::PathPick::button(g, fr.x + fr.w + 8.0 * s, fr.y + (field_h - 12.0 * s * 2.1).max(0.0) / 2.0, s, BROWSE_MAC, ACCENT);
         y += field_h + 8.0 * s;
         for (a, p) in actions.iter().zip(&act_pos) {
             g.button(body.x + p.0, y + p.1 * bh, size, &a.0, a.1, Event::Tab(a.2));

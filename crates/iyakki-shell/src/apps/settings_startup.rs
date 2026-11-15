@@ -84,8 +84,12 @@ impl SettingsApp {
         let admin = cx.session.policy.manage_settings;
         let sum = startup::global().summary();
         let head = if sum.all_ready() { format!("All services are ready ({} running).", sum.ready) } else { format!("{} of {} services are not ready yet.", sum.rows.len(), sum.tracked) };
-        g.text(a.x, a.y, 15.0 * s, if sum.all_ready() { OK } else { crate::fx::AMBER }, &head, Face::Bold);
-        let mut y = a.y + 28.0 * s;
+        // the head line wraps in a narrow window instead of running past the edge
+        let head_lines = g.wrap(15.0 * s, &head, Face::Bold, a.w);
+        for (i, l) in head_lines.iter().take(2).enumerate() {
+            g.text(a.x, a.y + i as f32 * 20.0 * s, 15.0 * s, if sum.all_ready() { OK } else { crate::fx::AMBER }, l, Face::Bold);
+        }
+        let mut y = a.y + 28.0 * s + (head_lines.len().clamp(1, 2) - 1) as f32 * 20.0 * s;
         let rh = ROW_H * s;
         let sel = self.sel().min(rows.len().saturating_sub(1));
         for (i, r) in rows.iter().enumerate() {
@@ -97,8 +101,10 @@ impl SettingsApp {
             crate::fx::row_at(g, a.x, y, a.w, rh - 4.0 * s, 10.0 * s, i == sel, hot, ACCENT);
             g.hit(R::new(a.x, y, a.w, rh - 4.0 * s), Event::Row(i), r.name);
             g.circle(a.x + 16.0 * s, y + (rh - 4.0 * s) / 2.0, 5.0 * s, col);
-            let word_w = 84.0 * s;
-            g.text(a.x + 32.0 * s, y + 4.0 * s, 15.0 * s, TEXT, r.name, Face::Bold);
+            // the state word keeps its own room at the right (it can be wider than the usual column at big text); the name is cut to what is left
+            let word_w = (84.0 * s).max(g.text_width(14.0 * s, word, Face::Bold) + 8.0 * s);
+            let name = g.fit(15.0 * s, r.name, Face::Bold, (a.w - 32.0 * s - word_w - 12.0 * s).max(40.0 * s));
+            g.text(a.x + 32.0 * s, y + 4.0 * s, 15.0 * s, TEXT, &name, Face::Bold);
             g.text(a.x + a.w - word_w, y + 4.0 * s, 14.0 * s, col, word, Face::Bold);
             let d = detail(r);
             let d = if admin || !r.state.failed() { d } else { "did not start".to_string() };

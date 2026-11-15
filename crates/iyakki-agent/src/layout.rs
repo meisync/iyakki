@@ -65,10 +65,41 @@ fn path(dir: &Path, user: &str) -> PathBuf {
     dir.join(format!("layout-{who}.json"))
 }
 
+/// Not `layout-<user>.json`, so no account name can ever collide with it.
+fn default_path(dir: &Path) -> PathBuf {
+    dir.join("new-account-layout.json")
+}
+
 impl Layout {
-    /// The saved layout; a missing, unreadable or older file gives the default one (nothing moved, no groups).
+    /// The saved layout. A person with no file of their own (a new account) starts from the administrator's default layout
+    /// when one was set (`save_default`); an unreadable or older file, or no default, gives the plain one (nothing moved, no groups).
     pub fn load(dir: &Path, user: &str) -> Layout {
-        std::fs::read_to_string(path(dir, user)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+        match std::fs::read_to_string(path(dir, user)) {
+            Ok(t) => serde_json::from_str(&t).unwrap_or_default(),
+            Err(_) => Layout::load_default(dir),
+        }
+    }
+
+    /// The administrator's default layout for accounts that have none of their own (plain when none was set).
+    pub fn load_default(dir: &Path) -> Layout {
+        std::fs::read_to_string(default_path(dir)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+    }
+
+    /// Make this layout the default for accounts that have not saved one. Accounts that already have a file are not touched.
+    pub fn save_default(&self, dir: &Path) -> bool {
+        let p = default_path(dir);
+        let tmp = p.with_extension("tmp");
+        std::fs::write(&tmp, serde_json::to_vec_pretty(self).unwrap_or_default()).is_ok() && std::fs::rename(&tmp, &p).is_ok()
+    }
+
+    /// Remove the default; new accounts start with the plain layout again.
+    pub fn clear_default(dir: &Path) {
+        let _ = std::fs::remove_file(default_path(dir));
+    }
+
+    /// Is an administrator default set?
+    pub fn has_default(dir: &Path) -> bool {
+        default_path(dir).is_file()
     }
 
     pub fn save(&self, dir: &Path, user: &str) {
@@ -317,6 +348,30 @@ mod tests {
         std::fs::write(d.join("layout-ed.json"), "not json").unwrap();
         assert!(Layout::load(&d, "ed").is_default());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_new_account_starts_from_the_administrators_default_and_an_old_one_keeps_its_own() {
+        let d = tmp("deflt");
+        assert!(!Layout::has_default(&d));
+        let mut def = Layout::default();
+        def.create_group("Games").unwrap();
+        assert!(def.save_default(&d));
+        assert!(Layout::has_default(&d));
+        // a new account gets it; saving makes their own copy that later default changes do not touch
+        let mut new = Layout::load(&d, "newbie");
+        assert_eq!(new, def);
+        new.create_group("Mine").unwrap();
+        new.save(&d, "newbie");
+        let mut def2 = Layout::default();
+        def2.create_group("Other").unwrap();
+        def2.save_default(&d);
+        assert_eq!(Layout::load(&d, "newbie").groups.len(), 2);
+        assert_eq!(Layout::load(&d, "other-new").groups[0].label, "Other");
+        Layout::clear_default(&d);
+        assert!(!Layout::has_default(&d));
+        assert!(Layout::load(&d, "later").is_default());
+        assert!(path(&d, "new-account").file_name() != default_path(&d).file_name());
     }
 
     #[test]

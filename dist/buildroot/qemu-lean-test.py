@@ -3,12 +3,15 @@
 USB disk, with the entry chosen by key presses (QEMU monitor `sendkey`). Nothing is ever written to the image (`snapshot=on`).
 
     python3 dist/buildroot/qemu-lean-test.py IMAGE.img [--entry N] [--ssh-key PRIVATE_KEY] [--mbps N] [--wait SECONDS] [--shot FILE.ppm]
-                                             [--serial-only] [--cmd 'sh command'] [--lean-check SCRIPT]
+                                             [--serial-only] [--cmd 'sh command'] [--lean-check SCRIPT] [--layers | --single-root]
 
   IMAGE       an image made by `lean-image.sh IMAGES OUT --root stick` (the normal boot volume plus the lean files and the lean menu entries)
   --entry N   which menu entry to press Enter on (0 = the first; the lean entries are 1 and 2; entry 2 has remote diagnostics, iyakki.ssh=1)
   --ssh-key   with entry 2 and a tree built with IYAKKI_AUTH_KEYS=KEY.pub: runs --cmd / --lean-check over SSH (port 2222 of this computer)
   --serial-only  do not wait for SSH: stop after --wait seconds and print what the serial console showed (failure messages)
+  --layers    (with --serial-only) the image was made with lean-image.sh --layers: the serial console MUST show `root layers mounted: base core ui`
+              and `switching root`, else exit code 1 and the lines that were seen
+  --single-root  (with --serial-only) the same check for the single-root image: `root boot/root.sfs mounted` and `switching root`
   --break-tree  work on a private copy of the image whose iyakki/root/current pointer is deleted (the "tree is missing" case)
 Exit code 0 when the guest answered (SSH) or, with --serial-only, always (the caller looks at the printed lines).
 """
@@ -24,6 +27,7 @@ def opt(name, default=None, flag=False):
     return False if flag else default
 entry = int(opt("--entry", "0")); key = opt("--ssh-key"); mbps = int(opt("--mbps", "0")); wait = float(opt("--wait", "90"))
 shot = opt("--shot"); cmd = opt("--cmd"); check = opt("--lean-check"); serial_only = opt("--serial-only", flag=True); brk = opt("--break-tree", flag=True)
+expect_layers = opt("--layers", flag=True); expect_single = opt("--single-root", flag=True)
 no_serial = opt("--no-serial", flag=True)   # no serial port at all, like a Mac: /dev/console is then not the serial port the command line names last
 keep = opt("--keep-writes", flag=True)      # write to a private copy of the image (not snapshot) and keep it in --keep-to
 keep_to = opt("--keep-to")
@@ -123,7 +127,11 @@ try:
         lines = [re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", l) for l in snap.splitlines()]
         print("--- serial console (the same text goes to the screen) ---")
         print("\n".join(l for l in lines if re.search(r"stage1|lean boot|Restart|restarts|panic", l)))
-        sys.exit(0)
+        want = (["root layers mounted: base core ui", "switching root"] if expect_layers else []) + (["root boot/root.sfs mounted", "switching root"] if expect_single else [])
+        missing = [w for w in want if not any(w in l for l in lines)]
+        for w in want:
+            print(("boot test saw: " if w not in missing else "boot test did NOT see: ") + w)
+        sys.exit(1 if missing else 0)
     while time.monotonic() - t0 < t_enter + wait:
         if ssh:
             r = subprocess.run(ssh + ["true"], capture_output=True, timeout=20)

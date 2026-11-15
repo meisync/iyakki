@@ -6,4 +6,9 @@ pub mod cloudclient;
 pub mod pixelcodec;
 pub mod rawlink;
 pub mod sigscheme;
+pub mod sshagent;
 pub mod wsproto;
+pub mod pinned;
+
+#[cfg(test)]
+mod fuzzkit;

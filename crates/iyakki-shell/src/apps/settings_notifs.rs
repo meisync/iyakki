@@ -8,6 +8,20 @@ use iyakki_agent::inbox::Level;
 use super::*;
 
 impl SettingsApp {
+    /// `v`: switch the one-sentence description of camera alerts (the picture then goes to the chat model); asks nothing here because the
+    /// switch is the person's own and says where the picture goes, the same as `camera_vision_set` (which asks a card in the chat).
+    pub(super) fn camera_vision_toggle(&mut self, cx: &AppCx) {
+        let user = &cx.session.user;
+        let on = !iyakki_agent::camvision::Setting::load(cx.services.dir(), user).on;
+        match (iyakki_agent::camvision::Setting { on }).save(cx.services.dir(), user) {
+            Ok(()) => {
+                cx.audit.record(user, "settings.cameras.vision", if on { "on" } else { "off" });
+                self.ok(if on { "Camera alerts are now described: the picture of each single motion event goes to your chat model." } else { "Camera alerts are no longer described; no picture goes to a model." }.to_string());
+            }
+            Err(e) => self.fail(e),
+        }
+    }
+
     fn notif_rows(cx: &AppCx) -> Vec<(String, String)> {
         Self::svc(cx).inbox.sources(&cx.session.user)
     }
@@ -17,7 +31,7 @@ impl SettingsApp {
     }
 
     pub(super) fn notifs_buttons(&self) -> Vec<Btn> {
-        vec![("Show", OK, 's'), ("Quiet (panel only)", ACCENT, 'q'), ("Off", ERR, 'o'), ("Next level", TEXT, 'e'), ("Matrix account...", ACCENT, 'a'), ("Test message", TEXT, 't'), ("Remove Matrix account", ERR, 'x')]
+        vec![("Show", OK, 's'), ("Quiet (panel only)", ACCENT, 'q'), ("Off", ERR, 'o'), ("Next level", TEXT, 'e'), ("Matrix account...", ACCENT, 'a'), ("Test message", TEXT, 't'), ("Copy messages to INBOX", TEXT, 'm'), ("Room in or out of the copy", TEXT, 'r'), ("Remove Matrix account", ERR, 'x')]
     }
 
     pub(super) fn handle_notifs(&mut self, k: &Key, cx: &AppCx) {
@@ -25,8 +39,11 @@ impl SettingsApp {
         match k {
             Key::Up => self.move_sel(-1, rows.len()),
             Key::Down => self.move_sel(1, rows.len()),
+            Key::Char('v') => self.camera_vision_toggle(cx),
             Key::Char('a') => self.matrix_open_form(""),
             Key::Char('t') => self.matrix_test_send(cx),
+            Key::Char('m') => self.matrix_mirror_toggle(cx),
+            Key::Char('r') => self.matrix_room_toggle(cx),
             Key::Char('x') => self.matrix_remove(cx),
             Key::Char('s') => self.notif_set(self.sel(), Some(Level::Show), cx),
             Key::Char('q') => self.notif_set(self.sel(), Some(Level::Quiet), cx),
@@ -71,7 +88,8 @@ impl SettingsApp {
         let reach = Self::matrix_reach_line(cx);
         let reach_lines = g.wrap(12.5 * s, &reach, Face::Sans, a.w);
         let reach_h = reach_lines.iter().take(2).count() as f32 * 16.0 * s + 8.0 * s;
-        let low = a.y + a.h - 40.0 * s - reach_h;
+        let cam_h = 80.0 * s;
+        let low = a.y + a.h - 40.0 * s - reach_h - cam_h;
         let room = (((low - a.y) / row_h) as usize).max(1);
         let start = sel.saturating_sub(room - 1);
         let narrow = a.w < 520.0 * s;
@@ -110,12 +128,30 @@ impl SettingsApp {
             g.text(r.x + 12.0 * s, r.y + 23.0 * s, 12.0 * s, DIM, &sub, Face::Sans);
             y += row_h;
         }
-        for (n, l) in reach_lines.iter().take(2).enumerate() {
-            g.text(a.x, low + 2.0 * s + n as f32 * 16.0 * s, 12.5 * s, ACCENT, l, Face::Sans);
+        // the camera alert descriptions: one switch row between the list and the lines below (F-CAM-18)
+        let cam_on = iyakki_agent::camvision::Setting::load(cx.services.dir(), &cx.session.user).on;
+        let cam_y = (a.y + rows.len().saturating_sub(start).min(room) as f32 * row_h).max(low);
+        controls::switch_row(g, R::new(a.x, cam_y, a.w, cam_h - 4.0 * s), s, "Describe camera alerts", "The picture of a single motion event goes to your chat model, which adds one sentence to the notice.", cam_on, true, Event::Key(Key::Char('v')), ACCENT);
+        // the lines under the list start below the last row, and only as many as the page has room for are drawn (a small window or a large
+        // text size leaves room for one row and little else: the rows come first, then where to reach me, then the explanation)
+        let drawn = rows.len().saturating_sub(start).min(room);
+        let mut ty = (a.y + drawn as f32 * row_h).max(low) + cam_h + 2.0 * s;
+        let (lh, bottom) = (16.0 * s, a.y + a.h);
+        for l in reach_lines.iter().take(2) {
+            if ty + lh > bottom {
+                return;
+            }
+            g.text(a.x, ty, 12.5 * s, ACCENT, l, Face::Sans);
+            ty += lh;
         }
+        ty += 4.0 * s;
         let note = "Show: counted in the bell by kind. Quiet: in the inbox only, no number, no dot, no sound. Off: not kept. Information, new devices and finished jobs never add to the bell's number.";
-        for (n, l) in g.wrap(12.5 * s, note, Face::Sans, a.w).iter().take(3).enumerate() {
-            g.text(a.x, low + reach_h + n as f32 * 16.0 * s - 2.0 * s, 12.5 * s, DIM, l, Face::Sans);
+        for l in g.wrap(12.5 * s, note, Face::Sans, a.w).iter().take(3) {
+            if ty + lh > bottom {
+                return;
+            }
+            g.text(a.x, ty, 12.5 * s, DIM, l, Face::Sans);
+            ty += lh;
         }
     }
 }

@@ -251,6 +251,24 @@ impl StoredServer {
 }
 
 /// MCP servers added from the MCP tile (the administrator's `mcp.json` is separate and is not changed from here).
+/// The servers an account may use: the administrator's `mcp.json` ones that are not shadowed by a stored one, then the stored ones, kept to what the
+/// account's policy allows. The MCP tile and the assistant's `mcp_servers` tool both ask this, so they cannot disagree.
+pub fn visible_servers(file: &[ServerSpec], stored: &[StoredServer], policy: &iyakki_sec::policy::Policy) -> Vec<ServerSpec> {
+    let mut v: Vec<ServerSpec> = file.iter().filter(|s| !stored.iter().any(|x| x.name == s.name)).cloned().collect();
+    v.extend(stored.iter().map(StoredServer::spec));
+    v.retain(|s| policy.allows_mcp(&s.name));
+    v
+}
+
+/// `sample`, `added here` or `mcp.json`.
+pub fn origin_of(stored: &[StoredServer], name: &str) -> &'static str {
+    match stored.iter().find(|s| s.name == name) {
+        Some(s) if s.sample => "sample",
+        Some(_) => "added here",
+        None => "mcp.json",
+    }
+}
+
 pub struct McpStore {
     path: std::path::PathBuf,
     lock: std::sync::Mutex<()>,

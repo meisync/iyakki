@@ -4,6 +4,7 @@
 
 use super::tests::*;
 use super::*;
+use crate::panes::LayoutKey;
 use crate::saver::Stage;
 use iyakki_agent::screensaver::{First, SaverConfig, Style};
 use std::path::{Path, PathBuf};
@@ -454,6 +455,9 @@ fn the_sign_in_screen_uses_the_machines_choices_and_a_guest_the_standard_ones() 
 #[test]
 fn the_saver_draws_black_with_the_logo_and_the_desktop_comes_back_whole() {
     let (mut sh, clock) = saver_shell("saver-draw", cfg());
+    // The desktop shows the time of day. A frozen clock makes the time in two pictures the same whenever they are drawn (a minute turning
+    // between them, which a loaded machine makes likely, would otherwise change the digits), so the pictures can be compared exactly.
+    sh.clock.fixed = Some(1_767_225_600);
     let mut g = Gfx::new(1280, 720);
     sh.render(&mut g);
     let desktop = g.rgba().to_vec();
@@ -464,12 +468,17 @@ fn the_saver_draws_black_with_the_logo_and_the_desktop_comes_back_whole() {
     assert!(g.rgba().chunks(4).any(|p| p[0] > 60 || p[1] > 60 || p[2] > 60), "the logo is there");
     sh.handle(&Event::Key(Key::Char('w')));
     sh.render(&mut g);
-    // the desktop shows the time: under load a minute can pass between the first picture and now, so the restored desktop is compared with
-    // a desktop drawn completely, from nothing, at this moment (a patch of it would differ), not with the first picture
+    // a desktop drawn completely, from nothing, now: a patch of it would differ from the restored one
     let _ = &desktop;
     let mut fresh = Gfx::new(1280, 720);
     sh.render(&mut fresh);
-    assert_eq!(g.rgba(), fresh.rgba(), "the whole desktop is back, not a patch of it");
+    let (a, b) = (g.rgba(), fresh.rgba());
+    let diff: Vec<usize> = (0..a.len() / 4).filter(|i| a[i * 4..i * 4 + 4] != b[i * 4..i * 4 + 4]).collect();
+    let bbox = diff.iter().fold((u32::MAX, u32::MAX, 0u32, 0u32), |m, i| {
+        let (x, y) = ((*i % 1280) as u32, (*i / 1280) as u32);
+        (m.0.min(x), m.1.min(y), m.2.max(x), m.3.max(y))
+    });
+    assert!(diff.is_empty(), "the whole desktop is back, not a patch of it: {} pixels differ, box {:?}", diff.len(), bbox);
 }
 
 #[test]
@@ -526,7 +535,18 @@ fn a_computer_asking_for_the_state_or_a_picture_ends_the_saver_instead_of_timing
     run(&mut sh, &clock, 250);
     sh.render(&mut g);
     assert_eq!(sh.screen_stage(), Stage::Awake, "the request ended the black screen");
-    let snap = state::fetch(&dir, 500).expect("a frame");
+    // the heartbeat of the screen is on the real clock (five seconds), which a very busy machine can outrun between two steps: draw again and ask
+    // again until the answer comes
+    let mut snap = state::fetch(&dir, 500);
+    for _ in 0..40 {
+        if snap.is_ok() {
+            break;
+        }
+        run(&mut sh, &clock, 33);
+        sh.render(&mut g);
+        snap = state::fetch(&dir, 500);
+    }
+    let snap = snap.expect("a frame");
     assert_eq!(snap.app, "Home");
     // and the same after the saver came back
     run(&mut sh, &clock, 11 * MIN);
@@ -599,4 +619,41 @@ fn while_developer_mode_is_on_the_screen_stays_on_and_when_it_is_off_the_saver_w
     assert_eq!(sh2.saver_keep_on(), None);
     run(&mut sh2, &clock2, 11 * MIN);
     assert_eq!(sh2.screen_stage(), Stage::Off);
+}
+
+#[test]
+fn the_start_now_key_chord_shows_the_saver_at_once_and_a_key_wakes_it() {
+    let (mut sh, clock) = saver_shell("saver-chord", SaverConfig { after_min: 0, ..cfg() });
+    run(&mut sh, &clock, 2_000);
+    let mut g = Gfx::new(320, 200);
+    sh.render(&mut g);
+    sh.handle(&Event::Fn(crate::fnkeys::FnKey::Saver, true));
+    run(&mut sh, &clock, 1_000);
+    assert_eq!(sh.screen_stage(), Stage::Saver, "started by the chord although the saver is set to never");
+    run(&mut sh, &clock, 60_000);
+    assert_eq!(sh.screen_stage(), Stage::Saver, "and it stays until input");
+}
+
+#[test]
+fn the_end_of_the_saver_returns_to_the_first_view_only_when_the_person_chose_that() {
+    let (mut sh, clock) = saver_shell("saver-views", cfg());
+    let second = sh.views.model.add("B", None).unwrap();
+    sh.views_save();
+    sh.handle(&Event::Layout(LayoutKey::View(2)));
+    assert_eq!(sh.view_name(), "B");
+    assert!(sh.views.model.views.iter().any(|v| v.id == second));
+    // the default: the saver ends and the person is still in the view they were in
+    run(&mut sh, &clock, 5 * MIN + 12_000);
+    assert_eq!(sh.screen_stage(), Stage::Saver);
+    sh.handle(&Event::MouseMove(10, 10));
+    assert_eq!(sh.screen_stage(), Stage::Awake);
+    assert_eq!(sh.view_name(), "B", "stays by default");
+    // the choice: back to the first view, once the saver ended (a dimmed screen is not the saver)
+    sh.views.model.reset_on_lock = true;
+    sh.views_save(); // the views are read again from the disk now and then
+    run(&mut sh, &clock, 5 * MIN + 12_000);
+    assert_eq!(sh.screen_stage(), Stage::Saver);
+    assert_eq!(sh.view_name(), "B", "still there while the saver runs");
+    sh.handle(&Event::MouseMove(12, 12));
+    assert_eq!(sh.view_name(), "Main", "the saver ended: the first view");
 }

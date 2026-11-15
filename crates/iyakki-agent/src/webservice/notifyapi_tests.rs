@@ -340,3 +340,110 @@ fn the_channel_opt_out_routes_need_a_sign_in_list_only_the_callers_channels_and_
     assert_eq!(h.call("POST", "/api/v1/notifications/channels/optout", Some(&ann), Some(json!({"channel": "/mail", "out": true}))).0, 404);
     assert_eq!(h.call("POST", "/api/v1/notifications/channels/optout", Some(&ann), Some(json!({"channel": "/mail"}))).0, 400);
 }
+
+// ------------------------------------------------------------------------------------------------ a real client over TLS
+
+/// Read messages until one of the wanted `type` arrives (or five seconds pass); the others are returned too, in order.
+fn until(ws: &mut crate::devmode::client::WsClient, kind: &str) -> Vec<Value> {
+    let mut got = Vec::new();
+    let end = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < end {
+        match ws.recv(Duration::from_millis(300)).expect("a readable stream") {
+            Some(crate::wsproto::Message::Text(t)) => {
+                let v: Value = serde_json::from_str(&t).unwrap();
+                let hit = v["type"] == kind;
+                got.push(v);
+                if hit {
+                    break;
+                }
+            }
+            Some(_) => {}
+            None => {}
+        }
+    }
+    got
+}
+
+#[test]
+fn a_real_websocket_client_signs_in_over_tls_and_hears_notifications_and_changes_of_its_volume() {
+    let (h, root, ann, bob) = cfg_cloud();
+    let (port, fp) = (h.svc.local_addr().port(), h.svc.fingerprint().to_string());
+    let open = || crate::devmode::client::websocket("127.0.0.1", port, Some(&fp), "/api/v1/events", &[], Duration::from_secs(5)).expect("the upgrade works");
+    // a wrong pin never gets as far as the upgrade
+    let wrong = "00:".repeat(31) + "00";
+    assert!(crate::devmode::client::websocket("127.0.0.1", port, Some(&wrong), "/api/v1/events", &[], Duration::from_secs(5)).is_err());
+    // the first message is the sign-in; a wrong token is told and closed
+    let mut bad = open();
+    bad.send_text(r#"{"type":"auth","token":"nope"}"#).unwrap();
+    let said = until(&mut bad, "error");
+    assert!(said.iter().any(|m| m["type"] == "error"), "{said:?}");
+    assert!(bad.recv(Duration::from_secs(2)).unwrap().is_none(), "and the connection ends");
+    // ann signs in: ready, then the approvals count
+    let mut a = open();
+    let mut b = open();
+    a.send_text(&json!({"type": "auth", "token": ann}).to_string()).unwrap();
+    b.send_text(&json!({"type": "auth", "token": bob}).to_string()).unwrap();
+    let first = until(&mut a, "approval");
+    assert_eq!(first[0]["type"], "ready");
+    assert_eq!(first[0]["user"], "ann");
+    assert_eq!(first.last().unwrap()["data"]["count"], 0);
+    assert_eq!(until(&mut b, "approval")[0]["user"], "bob");
+    // a notification for ann reaches ann's socket only
+    put(&h, &["ann"], "for ann over the wire", crate::tenantconfig::now_secs());
+    let n = until(&mut a, "notification");
+    assert!(n.last().unwrap()["data"]["title"].as_str().unwrap().contains("for ann over the wire"), "{n:?}");
+    let other = until(&mut b, "notification");
+    assert!(!other.iter().any(|m| m["type"] == "notification"), "bob does not hear ann's note: {other:?}");
+    // a change made by someone else (the administrator adds a member) is announced to every open stream of the volume as an area name
+    assert_eq!(h.call("POST", "/api/v1/tenant/members", Some(&root), Some(json!({"name": "bob", "role": "admin"}))).0, 200);
+    let c = until(&mut a, "changed");
+    let area = c.iter().find(|m| m["type"] == "changed").expect("a changed event");
+    assert_eq!(area["data"], json!({"area": "tenant"}), "an area name and nothing else");
+    assert!(until(&mut b, "changed").iter().any(|m| m["type"] == "changed"));
+    // a read-only request announces nothing
+    assert_eq!(h.call("GET", "/api/v1/notifications/count", Some(&ann), None).0, 200);
+    assert!(!until_quiet(&mut a).iter().any(|m| m["type"] == "changed"));
+    // after sign-in the client may only ping; anything else ends the stream
+    a.send_text(r#"{"type":"ping"}"#).unwrap();
+    assert!(until(&mut a, "pong").iter().any(|m| m["type"] == "pong"));
+    a.send_text(r#"{"type":"subscribe","user":"bob"}"#).unwrap();
+    assert!(until(&mut a, "error").iter().any(|m| m["type"] == "error"));
+    b.send_close();
+    for _ in 0..50 {
+        if crate::notifyhub::events::bus_for(&h.dir).open() == 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(crate::notifyhub::events::bus_for(&h.dir).open(), 0, "every subscription ended with its connection");
+}
+
+/// What arrives in the next second (used to prove that nothing was announced).
+fn until_quiet(ws: &mut crate::devmode::client::WsClient) -> Vec<Value> {
+    let mut got = Vec::new();
+    let end = std::time::Instant::now() + Duration::from_millis(900);
+    while std::time::Instant::now() < end {
+        if let Ok(Some(crate::wsproto::Message::Text(t))) = ws.recv(Duration::from_millis(200)) {
+            got.push(serde_json::from_str(&t).unwrap());
+        }
+    }
+    got
+}
+
+#[test]
+fn announce_change_names_only_the_area_and_skips_reads_failures_and_notifications() {
+    let (h, root, _ann, _bob) = cfg_cloud();
+    let bus = crate::notifyhub::events::bus_for(&h.dir);
+    let id = bus.subscribe("watcher").unwrap();
+    let drain = || bus.drain(id, Duration::ZERO).unwrap();
+    assert_eq!(h.call("POST", "/api/v1/tenant/members", Some(&root), Some(json!({"name": "bob", "role": "admin"}))).0, 200);
+    let got = drain();
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(serde_json::from_str::<Value>(&got[0]).unwrap(), json!({"type": "changed", "data": {"area": "tenant"}}));
+    // a failed change, a read and a notification action say nothing
+    let (s, _, _) = h.call("POST", "/api/v1/tenant/members", Some(&root), Some(json!({"name": "", "role": "nonsense"})));
+    assert!(s >= 400);
+    let _ = h.call("GET", "/api/v1/notifications/count", Some(&root), None);
+    assert!(drain().is_empty());
+    bus.unsubscribe(id);
+}

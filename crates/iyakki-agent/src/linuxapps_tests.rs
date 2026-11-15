@@ -21,6 +21,7 @@ use crate::wsexec::FakeRunner;
 
 fn tmp(tag: &str) -> PathBuf {
     let base = std::env::var("TMPDIR").map(PathBuf::from).unwrap_or_else(|_| std::env::temp_dir());
+    let base = std::fs::canonicalize(&base).unwrap_or(base);
     let d = base.join(format!("iyakki-linapp-{tag}-{}", std::process::id()));
     let _ = rootfs::remove_tree(&d);
     std::fs::create_dir_all(&d).unwrap();
@@ -906,6 +907,7 @@ fn a_real_sandbox_runs_busybox_cannot_see_the_host_and_respects_the_switches() {
 }
 
 /// The same checks through the way used on an initramfs root (move, chroot), forced on this PC.
+#[cfg(target_os = "linux")]
 #[test]
 #[ignore]
 fn a_real_sandbox_entered_the_initramfs_way_behaves_the_same() {
@@ -1080,4 +1082,77 @@ fn a_workspace_can_run_its_commands_in_a_sandbox_with_only_its_own_folder_mounte
     assert!(!std::fs::read_to_string(crate::workspace::ProjectConfig::path(&ws)).unwrap().contains("sandbox"), "an empty choice is not written");
     let _ = rootfs::remove_tree(&data);
     let _ = rootfs::remove_tree(&ws);
+}
+
+#[test]
+fn outbound_only_gets_its_own_namespace_a_slot_rules_and_a_resolver_and_never_the_computers_network() {
+    use crate::linuxapps_net::Mode;
+    let data = tmp("outbound");
+    let la = make_sandbox(&data, Arc::new(FakeRunner::new(&[])), vec![]);
+    let argv = |la: &LinuxApps| la.exec_argv("dev", &["true".into()], &ExecOpts::default());
+    // before any policy the old switch decides, and the policy reads from it
+    assert_eq!(la.net_policy("dev").unwrap().mode, Mode::HostShared);
+    let p = la.set_net_policy("dev", Mode::OutboundOnly, &["203.0.113.0/24".into(), "198.51.100.7:443".into()], &["9.9.9.9".into()]).unwrap();
+    assert_eq!(la.net_policy("dev").unwrap(), p);
+    assert!(la.get("dev").unwrap().network, "it has a network, so the apt gate and the pages see it as on");
+    let a = argv(&la).unwrap();
+    let at = |k: &str| a[a.iter().position(|x| x == k).unwrap() + 1].clone();
+    assert_eq!(at("--net"), "off", "never the computer's namespace");
+    assert_eq!(at("--veth"), p.slot.to_string());
+    let (spec, resolv) = (at("--net-spec"), at("--net-resolv"));
+    assert!(spec.starts_with(&data.display().to_string()) && !spec.contains("rootfs"), "the files sit beside the root, not in it: {spec}");
+    let table: iyakki_fw::nl::tablegen::TableSpec = serde_json::from_str(&std::fs::read_to_string(&spec).unwrap()).unwrap();
+    assert_eq!(table.name, crate::linuxapps_net::table_name(&crate::linuxapps_net::Veth::for_slot(p.slot)));
+    assert!(std::fs::read_to_string(&resolv).unwrap().contains("nameserver"));
+    // the command line the init program gets parses back to the same thing
+    let sp = crate::linuxapps_init::Spec::parse(&a[1..]).unwrap();
+    assert_eq!((sp.veth, sp.net), (Some(p.slot), false));
+    assert!(sp.validate().is_ok());
+    // two sandboxes never share a slot
+    let base = mini_base();
+    let st = fake(ubuntu_routes(&base, &sha(&base)));
+    la.create(&CreateReq { name: "other".into(), release: "ubuntu-24.04".into(), network: false, mounts: vec![] }, &st, &any_scope, &mut |_| {}).unwrap();
+    let q = la.set_net_policy("other", Mode::OutboundOnly, &[], &["9.9.9.9".into()]).unwrap();
+    assert_ne!(p.slot, q.slot);
+    // asking again keeps the slot; a bad entry or name server changes nothing
+    assert_eq!(la.set_net_policy("dev", Mode::OutboundOnly, &["203.0.113.0/24".into()], &["9.9.9.9".into()]).unwrap().slot, p.slot);
+    assert!(la.set_net_policy("dev", Mode::OutboundOnly, &["not an entry".into()], &[]).is_err());
+    assert!(la.set_net_policy("dev", Mode::OutboundOnly, &[], &["nope".into()]).is_err());
+    assert_eq!(la.net_policy("dev").unwrap().allow.len(), 1);
+    // no usable name server: the run does not start, and it does not fall back
+    la.set_net_policy("dev", Mode::OutboundOnly, &[], &[]).unwrap();
+    let on_host = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
+    if !on_host.lines().any(|l| l.trim().starts_with("nameserver") && !l.contains("127.") && !l.contains("::1")) {
+        let e = argv(&la).unwrap_err();
+        assert!(e.contains("could not be prepared") && e.contains("local one"), "{e}");
+    }
+    // back to shared and to off
+    la.set_net_policy("dev", Mode::HostShared, &[], &[]).unwrap();
+    assert!(!argv(&la).unwrap().contains(&"--veth".to_string()));
+    la.set_network("dev", false).unwrap();
+    assert_eq!(la.net_policy("dev").unwrap().mode, Mode::Off);
+    assert!(!la.get("dev").unwrap().network);
+    assert!(la.audit_tail(10).iter().any(|x| x.2 == "sandbox.network" && x.3.contains("outbound only")));
+    let _ = rootfs::remove_tree(&data);
+}
+
+/// The real servers (cdimage.ubuntu.com, Docker Hub): the base downloads work end to end with the in-house client. Needs the network and
+/// about 60 MB of disk, so it only runs by hand: `cargo test -p iyakki-agent --lib real_servers_serve -- --ignored --nocapture`.
+#[test]
+#[ignore = "downloads about 60 MB from cdimage.ubuntu.com and registry-1.docker.io"]
+fn real_servers_serve_the_ubuntu_and_debian_bases_and_every_checksum_matches() {
+    let st = iyakki_proxy::https::UreqStreamer::with_response_timeout(std::time::Duration::from_secs(60));
+    for id in ["ubuntu-24.04", "debian-12"] {
+        let r = dist::release(id).expect("a release of the table");
+        let dir = std::env::temp_dir().join(format!("iyakki-real-dist-{id}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut last = 0u64;
+        let (files, got) = dist::fetch(&st, r, &dir, &|_| Ok(()), &mut |done, _| last = done).unwrap_or_else(|e| panic!("{id}: {e}"));
+        let bytes: u64 = files.iter().map(|f| std::fs::metadata(f).map(|m| m.len()).unwrap_or(0)).sum();
+        crate::qeprintln!("{id}: {} file(s), {bytes} bytes, {}", files.len(), got.verified);
+        assert!(bytes > 10 << 20 && bytes < 200 << 20, "{id}: a base of a sensible size, got {bytes}");
+        assert!(got.verified.contains("SHA-256") || got.verified.contains("hashes"), "{}", got.verified);
+        assert!(got.source.starts_with("https://") || got.source.starts_with("docker.io/"), "{}", got.source);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

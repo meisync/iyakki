@@ -376,6 +376,41 @@ pub trait Tether: Send + Sync {
     fn disconnect(&self) -> Result<(), String>;
 }
 
+/// What follows a session that ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum After {
+    /// The connection is over; this is the state to show.
+    Finish(TetherState),
+    /// Try again after this long (the person asked to connect and the link was up before: a phone that walks out of range and comes back
+    /// is picked up again, like a paired keyboard).
+    Retry(Duration),
+}
+
+/// The reconnect policy, pure. `came_up`: the link was up at some point since the person pressed Connect. `stopped`: the person pressed
+/// Disconnect. `attempt` counts the tries since the link was last up (0 for the first retry). A phone that refuses (it says no, for
+/// example tethering is off) and a person who disconnects are never retried; a link that never came up is not retried either (the
+/// person gets the reason and presses Connect again); after [`crate::bthid::retry_delay`] runs out the state is a failure that says so.
+pub fn after_session(r: &Result<End, String>, came_up: bool, stopped: bool, attempt: u32) -> After {
+    if stopped || matches!(r, Ok(End::Stopped)) {
+        return After::Finish(TetherState::Idle);
+    }
+    if let Ok(End::Refused(c)) = r {
+        return After::Finish(TetherState::Failed(refusal_text(*c)));
+    }
+    if came_up {
+        return match crate::bthid::retry_delay(attempt) {
+            Some(d) => After::Retry(d),
+            None => After::Finish(TetherState::Failed("The phone went away and did not come back. Press Connect to try again.".into())),
+        };
+    }
+    After::Finish(TetherState::Failed(match r {
+        Ok(End::Lost) => "The phone went away or switched tethering off. Press Connect to try again.".into(),
+        Ok(End::NoAnswer) => NO_ANSWER.into(),
+        Err(why) => why.clone(),
+        _ => String::new(),
+    }))
+}
+
 struct Inner {
     view: TetherView,
     stop: Option<Arc<AtomicBool>>,
@@ -404,7 +439,14 @@ impl RealTether {
         }
     }
 
-    fn session(&self, address: &str, stop: &AtomicBool) -> Result<End, String> {
+    /// One session; the flag says whether the link came up.
+    fn session(&self, address: &str, stop: &AtomicBool) -> (Result<End, String>, bool) {
+        let came_up = AtomicBool::new(false);
+        let r = self.session_inner(address, stop, &came_up);
+        (r, came_up.load(Ordering::SeqCst))
+    }
+
+    fn session_inner(&self, address: &str, stop: &AtomicBool, came_up: &AtomicBool) -> Result<End, String> {
         let phone = crate::btmgmt::parse_addr(address).ok_or("That is not a Bluetooth address.")?;
         let sock = crate::bthid_sys::L2Sock::connect_mtu(phone, bnep::PSM, CONNECT_SECS, Some(bnep::MIN_MTU)).map_err(|e| match e {
             HidError::Connect(n) => connect_reason(n),
@@ -418,6 +460,7 @@ impl RealTether {
         crate::set_link(TAP_NAME, true).map_err(|e| format!("The network interface could not be switched on ({e})."))?;
         let mut link = RealLink { sock, tap };
         let mut up = || {
+            came_up.store(true, Ordering::SeqCst);
             self.set(address, TetherState::Connected);
             // the existing DHCP client, as for a cable
             let _ = crate::Control::dhcp(&crate::System, TAP_NAME);
@@ -457,14 +500,28 @@ impl Tether for RealTether {
         crate::bthid_sys::hub().ensure_started();
         let (me, addr) = (tether(), d.address.clone());
         std::thread::spawn(move || {
-            let r = me.session(&addr, &stop);
-            let s = match r {
-                Ok(End::Stopped) => TetherState::Idle,
-                Ok(End::Lost) if stop.load(Ordering::SeqCst) => TetherState::Idle,
-                Ok(End::Lost) => TetherState::Failed("The phone went away or switched tethering off. Press Connect to try again.".into()),
-                Ok(End::Refused(c)) => TetherState::Failed(refusal_text(c)),
-                Ok(End::NoAnswer) => TetherState::Failed(NO_ANSWER.into()),
-                Err(why) => TetherState::Failed(why),
+            let (mut attempt, mut ever_up) = (0u32, false);
+            let s = loop {
+                let (r, up) = me.session(&addr, &stop);
+                if up {
+                    // the phone was there: the tries start again from the short delay
+                    (attempt, ever_up) = (0, true);
+                }
+                match after_session(&r, ever_up, stop.load(Ordering::SeqCst), attempt) {
+                    After::Finish(s) => break s,
+                    After::Retry(wait) => {
+                        attempt += 1;
+                        me.set(&addr, TetherState::Connecting);
+                        // wait in small steps so that Disconnect is heard at once
+                        let end = Instant::now() + wait;
+                        while Instant::now() < end && !stop.load(Ordering::SeqCst) {
+                            std::thread::sleep(Duration::from_millis(200));
+                        }
+                        if stop.load(Ordering::SeqCst) {
+                            break TetherState::Idle;
+                        }
+                    }
+                }
             };
             me.set(&addr, s);
             let mut g = me.lock();

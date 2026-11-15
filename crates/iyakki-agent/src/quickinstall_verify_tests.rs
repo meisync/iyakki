@@ -238,3 +238,39 @@ fn a_firmware_pack_is_read_back_from_the_data_volume_before_it_counts_as_install
     // no record at all
     assert!(crate::fwpack::verify_pack_files(&fs, "other", &p).unwrap_err().contains("record"));
 }
+
+#[test]
+fn the_nodes_ready_reading_needs_one_node_and_every_node_ready() {
+    use v::nodes_ready_from;
+    assert_eq!(nodes_ready_from("True "), Ok(1));
+    assert_eq!(nodes_ready_from("True True \n"), Ok(2));
+    assert!(nodes_ready_from("").unwrap_err().contains("no node"));
+    assert!(nodes_ready_from("True False").unwrap_err().contains("1 of 2 node(s) are not Ready"));
+    assert!(nodes_ready_from("Unknown").is_err());
+}
+
+#[test]
+fn a_sandbox_is_verified_by_being_listed_and_the_registry_is_a_deployment_check() {
+    use v::{sandbox_note, target};
+    assert!(sandbox_note("debian", Ok(())).unwrap().contains("debian is listed"));
+    assert!(sandbox_note("gui", Err("no such sandbox".into())).unwrap_err().contains("gui is not there"));
+    let (ns, deploy, svc) = target(Item::Registry).unwrap();
+    assert_eq!((ns, deploy, svc), (crate::regsetup::IN_NS, crate::regsetup::IN_NAME, crate::regsetup::IN_NAME));
+}
+
+#[test]
+fn the_voice_pack_and_the_mac_firmware_are_verified_from_what_the_machine_lists_before_the_marker() {
+    use v::{mac_firmware_note, voice_pack_note};
+    let have = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    assert!(voice_pack_note(&have(&[crate::voicepack::WHISPER_MODEL, crate::voicepack::KOKORO_MODEL, "x"])).unwrap().starts_with("verified: Lemonade lists"));
+    let e = voice_pack_note(&have(&[crate::voicepack::KOKORO_MODEL])).unwrap_err();
+    assert!(e.contains(crate::voicepack::WHISPER_MODEL) && !e.contains(crate::voicepack::KOKORO_MODEL), "{e}");
+    assert!(voice_pack_note(&[]).is_err());
+    // the Mac firmware
+    assert!(mac_firmware_note(false, &[]).unwrap_err().contains("did not record"));
+    assert!(mac_firmware_note(true, &[("w", 2, Some(2), 2), ("b", 1, Some(1), 1)]).unwrap().contains("w (2 file(s)), b (1 file(s))"));
+    assert!(mac_firmware_note(true, &[("w", 0, None, 0), ("b", 0, None, 0)]).unwrap().contains("nothing"));
+    assert!(mac_firmware_note(true, &[("w", 2, None, 0)]).unwrap_err().contains("no record"));
+    assert!(mac_firmware_note(true, &[("w", 2, Some(2), 1)]).unwrap_err().contains("1 are in the firmware folder"));
+    assert!(mac_firmware_note(true, &[("w", 2, Some(0), 0)]).is_err());
+}

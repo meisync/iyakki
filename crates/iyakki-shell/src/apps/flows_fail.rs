@@ -3,7 +3,7 @@
 //! one-line key hint of every screen. The assistant is only ever started by the person's click or key; what it then changes goes
 //! through the ordinary approval card. See `docs/FLOWS.md`.
 
-use iyakki_agent::flows::failfix::{self, Failure, MAX_FIX_ATTEMPTS};
+use iyakki_agent::flows::failfix::{self, FailBook, Failure, MAX_FIX_ATTEMPTS};
 use iyakki_flow::model::*;
 
 use super::flows::*;
@@ -93,12 +93,14 @@ impl FlowsApp {
     /// Look at the open flow's last run: show the card when it failed, and (once per failed run, only when the assistant is
     /// already open) let the assistant say so in the thread.
     pub(super) fn update_fail_card(&mut self) {
+        // the chat tool `flow_failure_help` and the unattended pass write the same small file: read it again
+        self.book = FailBook::open(&self.env.data);
         let prev = self.fail.as_ref().map(|f| f.run_id.clone());
         let found = match self.cur.clone() {
             Some(id) => self.latest_failure(&id),
             None => None,
         };
-        let new = if self.book.offer() { found } else { None };
+        let new = if self.cur.as_deref().map_or_else(|| self.book.offer(), |f| self.book.offer_for(f)) { found } else { None };
         if new.as_ref().map(|f| &f.run_id) != prev.as_ref() {
             if let Some(f) = &new {
                 if self.chat_open && !self.book.announced(&f.run_id) {
@@ -251,6 +253,21 @@ impl FlowsApp {
         }
     }
 
+    /// Turn the offer on or off for one flow (the general switch stays as it is): no failure card, thread note or INBOX note for it.
+    pub(super) fn toggle_offer_flow(&mut self, flow: &str) {
+        let on = self.book.flow_is_off(flow);
+        self.book.set_offer_for(flow, on);
+        self.update_fail_card();
+        self.say(
+            if on {
+                "The assistant is offered when this flow fails."
+            } else {
+                "The assistant is not offered when this flow fails (the general switch is unchanged)."
+            },
+            true,
+        );
+    }
+
     pub(super) fn toggle_offer(&mut self) {
         let on = !self.book.offer();
         self.book.set_offer(on);
@@ -322,6 +339,7 @@ impl FlowsApp {
         };
         buttons.push(("Open log (L)".into(), id::FAIL_LOG, CYAN, true));
         buttons.push(("Dismiss (x)".into(), id::FAIL_DISMISS, MUTED, true));
+        buttons.push(("Not for this flow".into(), id::OFFER_FLOW, MUTED, true));
         Some(Banner { text, color: ERR, buttons })
     }
 
@@ -388,7 +406,7 @@ impl FlowsApp {
         match (self.tab, self.cur.is_some()) {
             (Tab::Design, true) if !self.sel.is_empty() || self.sel_edge.is_some() => format!("{fix}Enter edit settings · T test step · Del delete · r Run · Esc deselect · p Publish · Ctrl+I assistant"),
             (Tab::Design, true) => format!("{fix}r Run · Esc Close · p Publish · a Add step · h History · Ctrl+Z Undo · f Fit · Ctrl+I assistant"),
-            (Tab::Design, false) => "Enter open · n New · t Template · i Import · d Delete · o Agent help on failure · Esc leave FLOWS · Ctrl+I assistant".into(),
+            (Tab::Design, false) => "Enter open · n New · t Template · i Import · d Delete · o Agent help on failure · O for this flow · K stop all assist · Esc leave FLOWS · Ctrl+I assistant".into(),
             (Tab::Run, _) => format!("{fix}Esc Close · c Stop · a Run again · l Log · r Retry step · Left Right other runs · Ctrl+I assistant"),
             (Tab::Board, _) => "Enter open · Space select · a Run again · c Cancel · / search · f flow · Esc leave FLOWS".into(),
         }

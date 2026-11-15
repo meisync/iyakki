@@ -1,6 +1,7 @@
 //! The shell's side of the developer-mode approval (`devask.rs`): reading the waiting requests on the heartbeat, redrawing while one
 //! waits (the pulse) and the card's buttons. Only an administrator sees it, the same people who may answer in Settings.
 
+use crate::stale_stats::mark_stale;
 use super::*;
 use iyakki_agent::devmode::DevMode;
 
@@ -15,19 +16,19 @@ impl Shell {
                 _ => Vec::new(),
             };
             if self.devask.update(list) {
-                self.stale = true;
+                mark_stale!(self);
             }
         }
         // the pulse is a moving picture: a few redraws a second, and none when nothing waits
         if self.devask.pending.is_some() && self.tick % crate::devask::FRAME_EVERY == 0 {
-            self.stale = true;
+            mark_stale!(self);
         }
     }
 
     pub(super) fn devask_event(&mut self, id: usize) {
         use crate::devask as da;
         let Some(s) = self.session.clone() else { return };
-        self.stale = true;
+        mark_stale!(self);
         match id {
             da::OPEN => self.devask.open = !self.devask.open,
             da::CLOSE => self.devask.open = false,

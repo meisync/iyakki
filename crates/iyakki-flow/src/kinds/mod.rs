@@ -17,6 +17,7 @@ pub mod cli;
 pub mod control;
 pub mod http;
 pub mod other;
+pub mod remote_flow;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum FieldKind {
@@ -262,6 +263,7 @@ impl Registry {
         other::register(&mut r);
         browser_qa::register(&mut r);
         camera::register(&mut r);
+        remote_flow::register(&mut r);
         r
     }
     pub fn register(&mut self, k: Arc<dyn NodeKind>) {
@@ -272,7 +274,7 @@ impl Registry {
     }
     pub fn all(&self) -> Vec<&Arc<dyn NodeKind>> {
         let order = [
-            "start", "end", "http", "cli", "browser", "agent", "script", "grpc", "thrift", "remote", "condition", "switch", "parallel", "join", "delay", "approval", "notify", "subflow", "foreach", "cam_photo", "br_open", "br_screenshot", "br_dom", "br_assert", "br_click", "br_type", "br_fill", "br_submit", "br_key", "br_hover", "br_scroll", "br_select", "br_wait",
+            "start", "end", "http", "cli", "browser", "agent", "script", "grpc", "thrift", "remote", "condition", "switch", "parallel", "join", "delay", "approval", "notify", "subflow", "foreach", "cam_photo", "remote_flow", "br_open", "br_screenshot", "br_dom", "br_assert", "br_click", "br_type", "br_fill", "br_submit", "br_key", "br_hover", "br_scroll", "br_select", "br_wait",
             "br_extract", "br_js", "br_frame", "br_viewport", "br_storage", "br_download", "br_compare",
         ];
         let mut v: Vec<&Arc<dyn NodeKind>> = self.kinds.values().collect();
@@ -383,7 +385,7 @@ mod tests {
             assert!(ids.iter().any(|i| i == k), "{k}");
         }
         assert_eq!(ids[0], "start");
-        assert_eq!(r.get("thrift").unwrap().status(), KindStatus::Planned("the thrift adapter is not built yet"));
+        assert_eq!(r.get("thrift").unwrap().status(), KindStatus::Ready);
         assert!(r.get("nope").is_none());
     }
 

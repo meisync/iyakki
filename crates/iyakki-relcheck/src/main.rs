@@ -15,8 +15,8 @@ const USAGE: &str = "iyakki-relcheck <links|secrets|version|features|sbom|licens
                       legal/cargo-exceptions.txt, the asset inventory, the Quick install / catalogue inventory, notices and SBOM freshness,
                       Buildroot legal-info completeness, and the content scan of target/buildroot-*/images. Exit 1 on FAIL (--strict: also REVIEW).
                       --write refreshes legal/THIRD-PARTY-NOTICES.md and legal/sbom.cdx.json
-  image-scan [ROOT] (--image DIR | --cpio FILE|- | --tree DIR | --names FILE) [--base BUILD_DIR]... [--verbose]
-                      scan one image: every file mapped to its Buildroot package and licence, vendor blobs and unexplained files reported
+  image-scan [ROOT] (--image DIR | --cpio FILE|- | --file FILE | --tree DIR | --names FILE) [--base BUILD_DIR]... [--verbose]
+                      scan one image (--file takes a cpio, ISO 9660 or FAT volume image by its content; .zst through dist/release/image-gate.sh): every file mapped to its Buildroot package and licence, vendor blobs and unexplained files reported
   release-image-check [ROOT] [--config FILE]... [--simulate-cpio FILE|-] [--base BUILD_DIR]... [--verbose]
                       the RELEASE image profile without a build (docs/development/RELEASE-IMAGE-PROFILE.md): legal/release-profile.txt against
                       board/iyakki/release-firmware.keep and the two release fragments; each --config (a Buildroot .config) must switch nothing
@@ -34,7 +34,7 @@ fn main() -> ExitCode {
         eprint!("{USAGE}");
         return ExitCode::from(2);
     };
-    let root = args.iter().enumerate().skip(1).find(|(i, a)| !a.starts_with("--") && Path::new(a).is_dir() && !matches!(args[i - 1].as_str(), "--image" | "--base" | "--cpio" | "--tree" | "--names" | "--out" | "--date" | "--config" | "--simulate-cpio")).map(|(_, a)| PathBuf::from(a)).unwrap_or_else(|| PathBuf::from("."));
+    let root = args.iter().enumerate().skip(1).find(|(i, a)| !a.starts_with("--") && Path::new(a).is_dir() && !matches!(args[i - 1].as_str(), "--image" | "--base" | "--cpio" | "--file" | "--tree" | "--names" | "--out" | "--date" | "--config" | "--simulate-cpio")).map(|(_, a)| PathBuf::from(a)).unwrap_or_else(|| PathBuf::from("."));
     let flag = |n: &str| args.iter().position(|a| a == n).and_then(|i| args.get(i + 1)).cloned();
     match cmd {
         "links" => {
@@ -91,6 +91,11 @@ fn main() -> ExitCode {
             let (entries, rootfs) = if let Some(c) = flag("--cpio") {
                 let r = if c == "-" { cpio::list(std::io::BufReader::new(std::io::stdin().lock())) } else { std::fs::File::open(&c).and_then(|f| cpio::list(std::io::BufReader::new(f))) };
                 (r, true)
+            } else if let Some(f) = flag("--file") {
+                match iyakki_relcheck::fsimage::list_file(Path::new(&f)) {
+                    Ok((e, rootfs)) => (Ok(e), rootfs),
+                    Err(e) => (Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e)), false),
+                }
             } else if let Some(t) = flag("--tree") {
                 (cpio::walk(Path::new(&t)), false)
             } else if let Some(n) = flag("--names") {

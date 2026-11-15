@@ -140,7 +140,7 @@ fn read_text(mut head: iyakki_proxy::StreamHead, cap: u64) -> Result<String, Str
 
 /// Step 1: the session cookie (`name=value`, as it must be sent back).
 pub fn get_session(st: &dyn Streamer, base: &str) -> Result<String, String> {
-    let head = st.open(&format!("{base}/"), &base_headers()).map_err(|e| format!("could not reach Apple's recovery service: {e}"))?;
+    let head = st.open(&format!("{base}/"), &base_headers()).map_err(|e| if iyakki_proxy::guard::is_no_network(&e) { e } else { format!("could not reach Apple's recovery service: {e}") })?;
     if head.status / 100 != 2 {
         return Err(format!("Apple's recovery service answered HTTP {}", head.status));
     }
@@ -155,7 +155,7 @@ pub fn get_image_info(st: &dyn Streamer, base: &str, cookie: &str, board_id: &st
     let mut h = base_headers();
     h.push(("Cookie".into(), cookie.into()));
     h.push(("Content-Type".into(), "text/plain".into()));
-    let head = st.post(&format!("{base}/InstallationPayload/RecoveryImage"), &h, request_body(ids, mlb, board_id, os).as_bytes()).map_err(|e| format!("could not ask Apple's recovery service: {e}"))?;
+    let head = st.post(&format!("{base}/InstallationPayload/RecoveryImage"), &h, request_body(ids, mlb, board_id, os).as_bytes()).map_err(|e| if iyakki_proxy::guard::is_no_network(&e) { e } else { format!("could not ask Apple's recovery service: {e}") })?;
     let status = head.status;
     let text = read_text(head, 64 * 1024)?;
     if status / 100 != 2 {
@@ -229,6 +229,8 @@ pub fn download(st: &dyn Streamer, policy: &Policy, url: &str, token: &str, dest
         let have = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
         let head = match open_asset(st, policy, url, token, have) {
             Ok(h) => h,
+            // no network at all: another try in a few seconds would find the same, so tell the person now
+            Err(e) if iyakki_proxy::guard::is_no_network(&e) => return Err(e),
             Err(e) => {
                 last_err = e;
                 continue;

@@ -382,8 +382,12 @@ impl Runner for System {
 
     fn prime(&self, pcm: &str) -> Result<(), String> {
         use std::io::Write;
-        let mut child = std::process::Command::new("aplay")
-            .args(["-q", "-D", pcm, "-t", "raw", "-f", "S16_LE", "-r", "48000", "-c", "2", "-"])
+        let mut child = {
+            let argv = crate::voice::sound_player_argv(&["aplay", "-q", "-D", pcm, "-t", "raw", "-f", "S16_LE", "-r", "48000", "-c", "2", "-"].map(String::from));
+            let mut c = std::process::Command::new(&argv[0]);
+            c.args(&argv[1..]);
+            c
+        }
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

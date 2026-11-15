@@ -125,7 +125,7 @@ impl SettingsApp {
     }
 
     /// Under the provider list: the options in one line, the "not offered" warning, and the buttons (list, options). The area ends
-    /// at `a.y + a.h`; a block that does not fit is not drawn (the keys still work).
+    /// at `a.y + a.h` when it fits; the page scrolls when it does not.
     pub(super) fn mo_render(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx, p: &ProviderCfg, admin: bool) {
         let mut y = a.y;
         let model = Self::mo_model(cx, p);
@@ -144,10 +144,7 @@ impl SettingsApp {
                 y += lh;
             }
         }
-        let bh = 13.0 * s * 1.7 + 8.0 * s;
-        if y + bh > a.y + a.h {
-            return;
-        }
+        // always drawn: the Models page scrolls (its generic scroll bar) when this block is under the window's bottom edge
         let mut bx = a.x + 4.0 * s;
         let mut acts: Vec<(&str, [u8; 4], char)> = Vec::new();
         if admin {

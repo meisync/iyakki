@@ -11,12 +11,16 @@ pub mod caps;
 pub mod dhcp;
 pub mod dns;
 pub mod eapol;
+pub mod groupkey;
 pub mod handshake;
 pub mod hostap;
 pub mod kdf;
 pub mod keywrap;
 pub mod mgmt;
 pub mod nl80211;
+pub mod rotation;
+pub mod rsn;
+pub mod sae;
 pub mod settings;
 pub mod subnet;
 
