@@ -445,7 +445,7 @@ Most rows are <code>partial</code>: some of it works and the notes in the matrix
 <p>The honest list is <a href="%(repo)s/blob/HEAD/KNOWN-ISSUES.md">KNOWN-ISSUES.md</a>; it names %(n_ki)d numbered issues (KI-numbers), grouped by hardware, browser and media, assistant, security, install and tests.
 Its first section, "Do not use it for", says:</p>
 <ul>%(ki)s</ul>
-<p>From the <a href="%(repo)s/blob/HEAD/%(rel)s">alpha.2 release notes</a>, known limits include: the wake phrase has no real-voice measurement and should stay off;
+<p>From the <a href="%(repo)s/blob/HEAD/%(rel)s">release notes</a>, known limits include: the wake phrase has no real-voice measurement and should stay off;
 the encrypted home folder is a first version (whole-disk encryption and TPM sealing are not built); Secure Boot is verified in QEMU only on most machines.</p>
 
 <h2 id="roadmap">Roadmap</h2>
