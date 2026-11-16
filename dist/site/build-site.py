@@ -560,7 +560,11 @@ def main():
     counts = {s: sum(1 for r in rows if r[2] == s) for s in STATUSES}
     draw_images()
     write("index.html", page_index(ver, rel_file, rel_date, counts, len(rows), metrics(rows)))
-    write("progress.html", page_progress(ver, rows, rel_file))
+    # on a development line (Cargo version ends in -dev) the counts are the development line's, not the release's: say so in the heading
+    m_cargo = re.search(r'^version = "([^"]+)"', read("Cargo.toml"), re.M)
+    cargo_ver = m_cargo.group(1) if m_cargo else ""
+    progress_ver = f"{cargo_ver}, the development line after {ver}" if cargo_ver.endswith("-dev") else ver
+    write("progress.html", page_progress(progress_ver, rows, rel_file))
     write("privacy.html", page_privacy(ver))
     write("404.html", page_404(ver))
     write("sitemap.xml", '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
