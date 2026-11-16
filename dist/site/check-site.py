@@ -70,8 +70,13 @@ n = len(live)
 half = lambda xs: (2 * sum(xs) + n) // (2 * n) if xs is not None else 0
 want = {"impl": half([r[1] for r in live]), "test": half([r[2] for r in live]), "full-impl": sum(r[1] == 100 for r in live), "full-test": sum(r[2] == 100 for r in live),
         "passed": sum(r[3].startswith("passed") for r in live), "needed": sum(r[3] == "needed" for r in live), "failed": sum(r[3].startswith("failed") for r in live)}
+tenth = lambda xs: (20 * sum(xs) + n) // (2 * n)
+want_tenths = {"impl": tenth([r[1] for r in live]), "test": tenth([r[2] for r in live])}
 for k, v in want.items():
-    mm = re.search(r'data-metric="%s">(\d+)' % k, prog)
+    mm = re.search(r'data-metric="%s">(\d+(?:\.\d)?)' % k, prog)
+    if k in want_tenths:
+        ok(mm and round(float(mm.group(1)) * 10) == want_tenths[k], "progress.html metric %s = %s, FEATURES.md = %.1f (run dist/site/build-site.py)" % (k, mm and mm.group(1), want_tenths[k] / 10))
+        continue
     ok(mm and int(mm.group(1)) == v, "progress.html metric %s = %s, FEATURES.md = %d (run dist/site/build-site.py)" % (k, mm and mm.group(1), v))
 part = [[x.strip() for x in l.split("|")] for l in rows if l.split("|")[4].strip() == "partial"]
 ok(sum(1 for c in part if int(c[6].split("/")[0]) < 100) == summary["impl_open"], "FEATURES.md impl open count disagrees with its rows")

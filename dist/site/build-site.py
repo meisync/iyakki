@@ -56,9 +56,15 @@ def avg(vals):
     return (2 * sum(vals) + len(vals)) // (2 * len(vals)) if vals else 0
 
 
+def avg10(vals):
+    """The average in tenths of a percent, rounded half up, as text such as 93.4 (the progress page shows the fraction, so small steps are visible)."""
+    t = (20 * sum(vals) + len(vals)) // (2 * len(vals)) if vals else 0
+    return "%d.%d" % (t // 10, t % 10)
+
+
 def metrics(rows):
     live = [r for r in rows if r[2] != "deprecated"]
-    return dict(live=len(live), impl=avg([r[3] for r in live]), test=avg([r[4] for r in live]),
+    return dict(live=len(live), impl=avg([r[3] for r in live]), test=avg([r[4] for r in live]), impl_f=avg10([r[3] for r in live]), test_f=avg10([r[4] for r in live]),
                 full_impl=sum(1 for r in live if r[3] == 100), full_test=sum(1 for r in live if r[4] == 100),
                 passed=sum(1 for r in live if r[5].startswith("passed")), needed=sum(1 for r in live if r[5] == "needed"),
                 failed=sum(1 for r in live if r[5].startswith("failed")))
@@ -392,10 +398,10 @@ Most rows are <code>partial</code>: some of it works and the notes in the matrix
 
 <h2 id="overall">How far along it is</h2>
 <p>Two separate questions for every feature: how much of it is <em>written</em>, and how much of it is <em>proven to work</em>. Averages over the %(live)d features that are not deprecated.</p>
-<div class="meter"><div class="top"><span>Implementation</span><span data-metric="impl">%(impl)d%%</span></div>
+<div class="meter"><div class="top"><span>Implementation</span><span data-metric="impl">%(impl_f)s%%</span></div>
 %(stack_impl)s
 <p><b data-metric="full-impl">%(full_impl)d</b> of %(live)d features are fully written (code implemented).</p></div>
-<div class="meter"><div class="top"><span>Tested</span><span data-metric="test">%(test)d%%</span></div>
+<div class="meter"><div class="top"><span>Tested</span><span data-metric="test">%(test_f)s%%</span></div>
 %(stack_test)s
 <p><b data-metric="full-test">%(full_test)d</b> of %(live)d features are fully proven (fully tested).</p></div>
 <div class="stats">
@@ -466,7 +472,7 @@ Not machine translation; English complete, a pseudo-locale and one small sample 
 </ul>
 <h3>Before 1.0</h3>
 <p>The v1.0.0 gate and the open decisions are in <a href="%(repo)s/blob/HEAD/docs/project/BACKLOG.md">the backlog</a> and <a href="%(repo)s/blob/HEAD/docs/BETA-SCOPE.md">the beta scope</a>.</p>
-""" % dict(asof=datetime.date.today().isoformat(), repo=REPO, ver=esc(ver), area_impl_rows=area_impl_rows, impl=mt["impl"], test=mt["test"], live=mt["live"], full_impl=mt["full_impl"], stack_impl=stack("impl", rows), stack_test=stack("test", rows),
+""" % dict(asof=datetime.date.today().isoformat(), repo=REPO, ver=esc(ver), area_impl_rows=area_impl_rows, impl=mt["impl"], test=mt["test"], impl_f=mt["impl_f"], test_f=mt["test_f"], live=mt["live"], full_impl=mt["full_impl"], stack_impl=stack("impl", rows), stack_test=stack("test", rows),
            full_test=mt["full_test"], passed=mt["passed"], needed=mt["needed"], failed=mt["failed"], stats=stats, bar=bar(counts, total), key=key, thead_s=thead % "Snapshot", snap_rows=snap_rows,
            thead_p=thead % "Phase", phase_rows=phase_rows, thead_a=thead % "Area", area_rows=area_rows, n_areas=len(by_area), n_ki=n_ki, ki=ki,
            rel=rel_file, exp=EXP)
