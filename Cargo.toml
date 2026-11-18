@@ -1,0 +1,212 @@
+[workspace]
+resolver = "2"
+exclude = ["crates/iyakki-gui"]
+members = [
+    "crates/iyakki-sec",
+    "crates/iyakki-edit-wasm",
+    "crates/iyakki-vfs",
+    "crates/iyakki-wasm",
+    "crates/iyakki-ledger",
+    "crates/iyakki-mem",
+    "crates/iyakki-hw",
+    "crates/iyakki-agent",
+    "crates/iyakki-sshfs",
+    "crates/iyakki-accounts",
+    "crates/iyakki-vt",
+    "crates/iyakki-camdetect",
+    "crates/iyakki-diskcrypt",
+    "crates/iyakki-battery",
+    "crates/iyakki-clockfloor",
+    "crates/iyakki-macrecovery",
+    "crates/iyakki-regex",
+    "crates/iyakki-openpgp",
+    "crates/iyakki-lint",
+    "crates/iyakki-bindelta",
+    "crates/iyakki-archive",
+    "crates/iyakki-qr",
+    "crates/iyakki-webcrypto",
+    "crates/iyakki-audiodec",
+    "crates/iyakki-wordtime",
+    "crates/iyakki-clock",
+    "crates/iyakki-cloudmode",
+    "crates/iyakki-shared",
+    "crates/iyakki-dash",
+    "crates/iyakki-agent-api",
+    "crates/iyakki-filescope",
+    "crates/iyakki-shell",
+    "crates/iyakki-compose",
+    "crates/iyakki-apps",
+    "crates/iyakki-core",
+    "crates/iyakki-core-api",
+    "crates/iyakki-core-fake",
+    "crates/iyakki-core-browser",
+    "crates/iyakki-core-local",
+    "crates/iyakki-uikit",
+    "crates/iyakki-ui-sdk",
+    "crates/iyakki-app-sample",
+    "crates/iyakki-app-markdown",
+    "crates/iyakki-ui-preview",
+    "crates/iyakki-ui-client",
+    "crates/iyakki-tile-api",
+    "crates/iyakki-tile-usage",
+    "crates/iyakki-tile-radio",
+    "crates/iyakki-tile-pdf",
+    "crates/iyakki-tile-calendar",
+    "crates/iyakki-tile-remotefiles",
+    "crates/iyakki-tile-cameras",
+    "crates/iyakki-proxy",
+    "crates/iyakki-swarm",
+    "crates/iyakki-storage",
+    "crates/iyakki-edit",
+    "crates/iyakki-hwinfo",
+    "crates/iyakki-usb",
+    "crates/iyakki-devctl",
+    "crates/iyakki-web",
+    "crates/iyakki-js",
+    "crates/iyakki-netscan",
+    "crates/iyakki-rtsp",
+    "crates/iyakki-remote",
+    "crates/iyakki-webview",
+    "crates/iyakki-data",
+    "crates/iyakki-drivers",
+    "crates/iyakki-flow",
+    "crates/iyakki-flowsx",
+    "crates/iyakki-disksx",
+    "crates/iyakki-memx",
+    "crates/iyakki-extagentx",
+    "crates/iyakki-zram",
+    "crates/iyakki-fw",
+    "crates/iyakki-vpn",
+    "crates/iyakki-filter",
+    "crates/iyakki-relcheck",
+    "crates/iyakki-store-server",
+    "crates/iyakki-stage1",
+    "crates/iyakki-rfb",
+    "crates/iyakki-schema",
+    "crates/iyakki-link",
+    "crates/iyakki-tile-abi",
+    "crates/iyakki-tile-host",
+    "crates/iyakki-sdk-tile",
+    "crates/iyakki-tile-example",
+    "crates/iyakki-core-lib",
+    "crates/iyakki-tile-runs",
+    "crates/iyakki-tile-kit",
+    "crates/iyakki-tile-settings",
+    "crates/iyakki-tile-edit",
+    "crates/iyakki-tile-chat",
+    "crates/iyakki-sdk-emulator",
+    "crates/iyakki-connect",
+    "crates/iyakki-hotspot",
+    "crates/iyakki-volcrypt",
+    "crates/iyakki-enchome",
+    "crates/iyakki-pdf",
+    "crates/iyakki-wake",
+    "crates/iyakki-client-engine",
+]
+
+[workspace.package]
+version = "0.1.0-alpha.6"
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+iyakki-sshfs = { path = "crates/iyakki-sshfs" }
+iyakki-vt = { path = "crates/iyakki-vt" }
+iyakki-camdetect = { path = "crates/iyakki-camdetect" }
+iyakki-diskcrypt = { path = "crates/iyakki-diskcrypt" }
+iyakki-battery = { path = "crates/iyakki-battery" }
+iyakki-clockfloor = { path = "crates/iyakki-clockfloor" }
+iyakki-macrecovery = { path = "crates/iyakki-macrecovery" }
+iyakki-regex = { path = "crates/iyakki-regex" }
+iyakki-openpgp = { path = "crates/iyakki-openpgp" }
+iyakki-lint = { path = "crates/iyakki-lint" }
+iyakki-bindelta = { path = "crates/iyakki-bindelta" }
+iyakki-archive = { path = "crates/iyakki-archive" }
+iyakki-qr = { path = "crates/iyakki-qr" }
+iyakki-webcrypto = { path = "crates/iyakki-webcrypto" }
+iyakki-audiodec = { path = "crates/iyakki-audiodec" }
+iyakki-wordtime = { path = "crates/iyakki-wordtime" }
+iyakki-clock = { path = "crates/iyakki-clock" }
+iyakki-cloudmode = { path = "crates/iyakki-cloudmode" }
+iyakki-shared = { path = "crates/iyakki-shared" }
+iyakki-dash = { path = "crates/iyakki-dash" }
+iyakki-agent-api = { path = "crates/iyakki-agent-api" }
+iyakki-filescope = { path = "crates/iyakki-filescope" }
+iyakki-sec = { path = "crates/iyakki-sec" }
+iyakki-devctl = { path = "crates/iyakki-devctl" }
+iyakki-web = { path = "crates/iyakki-web" }
+iyakki-pdf = { path = "crates/iyakki-pdf" }
+iyakki-wake = { path = "crates/iyakki-wake" }
+iyakki-client-engine = { path = "crates/iyakki-client-engine" }
+iyakki-webview = { path = "crates/iyakki-webview" }
+iyakki-rfb = { path = "crates/iyakki-rfb" }
+iyakki-js = { path = "crates/iyakki-js" }
+iyakki-vfs = { path = "crates/iyakki-vfs" }
+iyakki-wasm = { path = "crates/iyakki-wasm" }
+iyakki-agent = { path = "crates/iyakki-agent" }
+iyakki-mem = { path = "crates/iyakki-mem" }
+iyakki-ledger = { path = "crates/iyakki-ledger" }
+iyakki-storage = { path = "crates/iyakki-storage" }
+iyakki-edit = { path = "crates/iyakki-edit" }
+iyakki-hwinfo = { path = "crates/iyakki-hwinfo" }
+iyakki-netscan = { path = "crates/iyakki-netscan" }
+iyakki-rtsp = { path = "crates/iyakki-rtsp" }
+iyakki-volcrypt = { path = "crates/iyakki-volcrypt" }
+iyakki-enchome = { path = "crates/iyakki-enchome" }
+iyakki-data = { path = "crates/iyakki-data" }
+iyakki-drivers = { path = "crates/iyakki-drivers" }
+iyakki-flow = { path = "crates/iyakki-flow" }
+iyakki-flowsx = { path = "crates/iyakki-flowsx" }
+iyakki-disksx = { path = "crates/iyakki-disksx" }
+iyakki-memx = { path = "crates/iyakki-memx" }
+iyakki-extagentx = { path = "crates/iyakki-extagentx" }
+iyakki-zram = { path = "crates/iyakki-zram" }
+iyakki-fw = { path = "crates/iyakki-fw" }
+iyakki-schema = { path = "crates/iyakki-schema" }
+iyakki-link = { path = "crates/iyakki-link" }
+iyakki-core-api = { path = "crates/iyakki-core-api" }
+iyakki-core-fake = { path = "crates/iyakki-core-fake" }
+iyakki-core-local = { path = "crates/iyakki-core-local" }
+thiserror = "2"
+log = "0.4"
+wasmtime = { version = "*", default-features = false, features = ["runtime", "cranelift", "wat", "std"] }
+
+# Development and test builds: line tables only (file and line numbers in backtraces, no variable debug info) and none for
+# dependencies. 2026-10-28: with full debug info target/debug grew to 690 GB and rustc needed 5-6 GB for iyakki-shell.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.test]
+debug = "line-tables-only"
+
+[profile.release]
+lto = true
+codegen-units = 1
+# panics unwind so the supervisor can report them and keep running; "abort" would turn any panic into a
+# kernel panic when IYAKKI is PID 1
+strip = true
+
+# Quick test images (IYAKKI_PROFILE=fast ./dist/buildroot/build.sh): parallel code generation, a bigger and slower binary.
+# the browser engine is downloaded by every client: small beats fast
+[profile.release.package.iyakki-client-engine]
+opt-level = "s"
+
+[profile.fast]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+
+# Device-test builds (IYAKKI_PROFILE=device ./dist/buildroot/repack.sh ..., docs/development/COMPILE-SPEED-PLAN.md): no LTO, 16 parallel
+# code-generation units and incremental compilation, so a one-line change recompiles only the changed units. The binary is bigger and
+# slower than a release one: for test images and `dev update` pushes only, never for a release (profile.release stays fat LTO).
+[profile.device]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+opt-level = 2
+debug = false
+strip = true

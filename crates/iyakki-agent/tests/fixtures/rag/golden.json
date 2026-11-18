@@ -1,0 +1,24 @@
+{
+  "note": "Synthetic evaluation set written for IYAKKI (CC0). The scripted model acts as a grader and rewriter that knows the answer phrases; it checks the loop mechanics, not a real model.",
+  "k": 3,
+  "cases": [
+    {"q": "How many days off do staff get each year?", "expect": ["leave-policy.md"], "plan": [{"q": "How many days off do staff get each year?", "keys": ["paid holiday"], "rewrites": ["annual leave entitlement paid holiday"]}]},
+    {"q": "What must I do when I am ill and cannot come in?", "expect": ["sick-leave.md"], "plan": [{"q": "What must I do when I am ill and cannot come in?", "keys": ["illness to your line manager"], "rewrites": ["sick absence report illness doctor note"]}]},
+    {"q": "Who has to sign off a production release, and when is nothing allowed to ship?", "expect": ["deploy-approval.md", "change-freeze.md"], "plan": [
+      {"q": "Who has to sign off a production release?", "keys": ["sign-off from the release manager"], "rewrites": ["production release approval sign-off reviewer"]},
+      {"q": "When is nothing allowed to ship to production?", "keys": ["no production changes are allowed"], "rewrites": ["change freeze december production changes"]}]},
+    {"q": "How long are service credentials valid before they must be changed?", "expect": ["password-rotation.md"], "plan": [{"q": "How long are service credentials valid before they must be changed?", "keys": ["rotated every ninety days"], "rewrites": ["service account credentials rotated ninety days"]}]},
+    {"q": "If the database is lost, how far back can we restore and how often is that tested?", "expect": ["backup-schedule.md"], "plan": [{"q": "If the database is lost, how far back can we restore and how often is that tested?", "keys": ["restore test"], "rewrites": ["nightly backups kept restore test quarter"]}]},
+    {"q": "What happens in the first minutes of a sev 1 outage?", "expect": ["incident-response.md"], "plan": [{"q": "What happens in the first minutes of a sev 1 outage?", "keys": ["bridge call within ten minutes"], "rewrites": ["severity 1 incident on-call bridge call"]}]},
+    {"q": "When is a customer's information erased after they leave?", "expect": ["data-retention.md"], "plan": [{"q": "When is a customer's information erased after they leave?", "keys": ["deleted thirty days after an account is closed"], "rewrites": ["customer data deleted account closed retention"]}]},
+    {"q": "Which flights may I book for a business trip and when must I file the claim?", "expect": ["expenses.md"], "plan": [{"q": "Which flights may I book for a business trip and when must I file the claim?", "keys": ["economy class"], "rewrites": ["travel expenses economy class claim thirty days"]}]},
+    {"q": "What is arranged for a new colleague's first day?", "expect": ["onboarding.md"], "plan": [{"q": "What is arranged for a new colleague's first day?", "keys": ["receives a laptop"], "rewrites": ["new colleague checklist laptop buddy accounts"]}]},
+    {"q": "Can I carry unused holiday into next year, and on which days is the company shut?", "expect": ["leave-policy.md", "holiday-calendar.md"], "plan": [
+      {"q": "Can I carry unused holiday into next year?", "keys": ["carried over"], "rewrites": ["annual leave carried over unused paid holiday"]},
+      {"q": "On which days is the company shut?", "keys": ["company is closed on"], "rewrites": ["public holidays company closed"]}]}
+  ],
+  "unanswerable": [
+    {"q": "What is the company policy on bringing pets to the office?"},
+    {"q": "Who won the football match last night?"}
+  ]
+}

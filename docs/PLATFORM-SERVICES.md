@@ -1,0 +1,327 @@
+# Platform services in k3s (design)
+
+Status: **built and tested with fakes** (a fake `kubectl`/`podman`/`git`, fake HTTP, an in-memory vault, temp folders). It has **not been run
+against a real cluster**: see "Not verified" at the end.
+
+A platform service is something IYAKKI deploys *into a cluster the person picked*, to be used by the person, their workspaces and the assistant:
+today **Gitea** (a git server) and, registered by the store side, the **private store**. The Registry (option A of the dev cluster setup,
+`docs/K3S-DEV.md`) shows in the same list as installed or not, but keeps its own setup.
+
+Nothing here is silent. Every change is a **plan** the person reads, then **approves**; nothing runs on a cluster the person did not pick.
+
+## What the person sees
+
+* **Settings → Dev cluster → Platform services** (button, key `P`): the list of services (Gitea, Private store, Registry) with the installed
+  instances under each (live state, version), and the buttons *Deploy to k3s…*, *Connect to existing*, *Open*, *Details*, *Stop/Start*,
+  *Upgrade*, *Backup*, *Connect workspace*, *Remove*. The same panel opens from the **STORE → Settings "Private store" card** (preselecting the
+  store service) and from the **AI IDE's K8S panel** (*Services…*, and *Git* to connect the open workspace to Gitea).
+* **The deploy wizard**: 1. choose the cluster (every cluster the person can see, with the badges: reachable, k3s, this machine or remote,
+  in-cluster, production-looking, read-only; refused ones are listed with the reason and cannot be chosen); 2. the options (made from the
+  service's schema: namespace, version, storage size and class, exposure ClusterIP / NodePort / LoadBalancer / Ingress, admin user,
+  mirror images, and the service's own); 3. **review**: the exact commands, the images, the storage, what it exposes, the addresses, the
+  credentials it creates (names only), warnings and blockers, the full manifest (selectable text), and an example NetworkPolicy that is *not*
+  applied; 4. **approve**; 5. progress with live output; 6. the result: addresses and how to use it, and a masked one-time reveal of the
+  generated admin password (Show, Copy, Done; Copy puts it in the clipboard history and Done takes it out again).
+* While the panel is open it is the only owner of keys and clicks of its host.
+
+## The engine (`crates/iyakki-agent/src/platform/`)
+
+| Piece | What it does |
+|---|---|
+| `ServiceDef` (mod.rs) | One service: id, title, kind, pinned `versions()` (the last is the default; upgrades only go forward in the list), `images(version)` with architectures (and an optional digest), the options schema, `build()` (namespaced objects as block-style YAML, the Secrets to generate, the addresses), workloads, health path, `how_to_use`, backup hint and plan, `exposes`, `detect_existing`, `post_deploy`, `network_policy_example`. |
+| `register` / `specs` | The registry of services. `register(Arc<dyn ServiceDef>)` adds one (the store does this at start). |
+| `plan` / `preview` | Checks the options, probes the cluster read-only, builds and lints the manifest, returns a `Plan` with `blockers` (cannot be applied) and `warnings`. `preview` is the exact text the person approves. |
+| `apply` | Needs the approval flag; re-checks the cluster; namespace, mirror, Secrets, manifest, wait, first-run setup, health, record. |
+| `status` / `power` / `plan_upgrade` + `upgrade` / `backup` / `plan_remove` + `remove` | The lifecycle, each with its own preview and approval. |
+| `installed.rs` | `installed-services-<user>.json`: the instance id, cluster reference, namespace, version, options, addresses, vault entry **names**, connected workspaces. Never a value. |
+| `secrets.rs` | Generation, the vault, the 0600 temp file that carries a value to `kubectl create secret --from-file`. |
+| `connect.rs` | HTTP through the in-house client (`NetHttp` over `gitnet::NetGit`; the token only in memory and the request header, the image has no curl), workspace connect and push. |
+| `tools.rs` | The assistant's tools. |
+
+### Choosing and guarding the cluster
+
+* The clusters are the dev-cluster profiles (`devcluster::resolve_hiding`): hidden kubeconfigs are never probed or listed.
+* `deploy_refusal` refuses: unreadable, unreachable, **production-looking** (`prod` in the name, context or server), and anything
+  `devcluster::read_only_reason` says is read-only (a remote cluster that only came from `$KUBECONFIG` or `~/.kube/config` and was never chosen,
+  an in-cluster service account that is cluster-admin). To use such a cluster the person makes it their choice first (Settings → Dev cluster,
+  *My default*).
+* Every write (`apply`, `power`, `upgrade`, `backup`, `remove`) inspects the profile **again** and refuses if it became unusable or the API
+  server behind the kubeconfig changed since the service was deployed.
+* **Namespaces** reuse the dev-cluster rules (`k8stools::protected_namespace`, the `app.kubernetes.io/managed-by=iyakki` label). Default is
+  `iyakki-<service>`; a missing namespace is created as a **visible, approved step** and labelled `managed-by=iyakki` and
+  `iyakki.dev/service=<id>`. An existing namespace must already carry `managed-by=iyakki` (the refusal prints the exact `kubectl label`
+  command); one that belongs to another service is refused. A namespace is only ever deleted when IYAKKI created it for that service, it still
+  carries the service label, and nothing else is in it.
+* Objects carry `iyakki.dev/service` and `iyakki.dev/instance`; status, stop and remove select by the instance label only.
+
+### Capacity precheck and images
+
+Before the plan is shown the engine reads the nodes (Ready, architecture, pod capacity), the StorageClasses (default or `local-path`), the
+Services (taken NodePorts) and the workloads. Blockers: no Ready node, pod limit reached, **no StorageClass** for the PVC, an unknown
+class, a taken NodePort, a namespace that is not IYAKKI's. Warnings: NotReady nodes, few free pod slots, an image **not published for the
+nodes' CPU architecture** (an amd64-only image on arm64), an existing service of the same kind.
+
+Images are **pinned tags** pulled by the cluster from their public registry (Gitea: `docker.io/gitea/gitea:<version>-rootless`); the
+`ImageRef` can carry a digest (the reference becomes `repo@sha256:...`). On an air-gapped or local cluster the option **Mirror images** pulls
+them on this machine (podman or docker; the Docker Hub pull is stated in the plan), tags them and pushes them to the in-cluster registry
+(option A); the pods then pull `localhost:<nodePort>/iyakki-platform/...`. It is a blocker if the registry is not set up.
+
+Every container the built-in services run: non-root (`runAsNonRoot`, uid 1000 for Gitea), `allowPrivilegeEscalation: false`, all
+capabilities dropped, a RuntimeDefault seccomp profile, requests and limits, readiness, liveness and startup probes, no service account token,
+no privileged, no hostPath, no host networking. The same manifest linter as `k8s_apply` (`deploylint`) must pass; for the built-in services
+with **no warnings**.
+
+### A program the image is built from (`platform/localbin.rs`)
+
+A service whose image is built on this machine (the private store) declares `ServiceDef::local_binary()` (the file name, the cargo package, the
+folder). `apply` then looks for the program **before the namespace is touched**, for the architecture of the Ready nodes (`Plan::target_arch`),
+in this order: shipped with the install (`/usr/share/iyakki/<sub>/<arch>/`, beside the window binary), the cache `<data>/<sub>/`, the source tree's
+`target/<musl triple>/release/`. A file counts only if its **ELF headers** say static (no `PT_INTERP`, no `DT_NEEDED`) and the machine is the
+cluster's; the running program is never a candidate, and nothing is ever run to find out. When nothing is found the wizard's result is a red
+card (the reason, the list of what is missing, "Nothing further was done"), with these buttons: **Build now** (offered only when the source tree,
+`cargo`, the musl target and a linker exist; it shows the exact command for approval, runs it as a detached job through the jobs engine with a
+moving bar, and the deploy continues by itself when it succeeds, or shows the last lines when it fails), **Choose a binary file...** (a typed path,
+checked by its headers and copied into the cache; a static file of the other CPU is called out as such), **Open docs**, **Try again**. Re-running
+resumes: an existing namespace and Secret are reused. The plan shows a warning when the program is not at hand yet. The assistant's
+`platform_deploy` gets the same text as its error. Details: docs/STORE.md, section 13.1.
+
+### Secrets
+
+A generated password or token exists in exactly three places: the Kubernetes Secret, the person's vault (`uvault:svc.<instance>.<key>`), and
+the one-time reveal returned to the host that shows the masked dialog. The order is: check the vault is writable (a locked vault stops
+everything before the cluster is touched) → generate → write the vault → create the Secret from a 0600 temp file in RAM
+(`--from-file=key=path`; the command line holds a path, never a value) → on failure the vault entries are removed again. An existing Secret
+is never regenerated. Values never appear in an argument, an environment variable of the engine's own calls, the manifest, a log, the audit
+log (action, service, namespace and server only), the installed-services file, a tool result or the model's context. The Gitea admin user is
+created inside the pod from the pod's own environment (`$GITEA_ADMIN_PASSWORD` comes from the Secret through `secretKeyRef`), so the command
+line holds the variable name only. Tests plant a known value and scan every command, environment, audit line, file and output.
+
+The exception to "values are never shown" is the reveal dialog, and *Details → Reveal password*, which reads the vault entry on an explicit
+action. Connecting an existing Gitea stores the token the person typed in the vault only.
+
+## Why Gitea
+
+The need: a small, self-hosted git server for a single person or a small team, running in k3s on modest hardware (a Mac mini, an arm64 board),
+with an HTTP API IYAKKI can drive (create a repository, open a pull request) and permissive licensing.
+
+| Candidate | Licence | Weight | Verdict |
+|---|---|---|---|
+| **Gitea** | MIT | one Go binary, ~100-250 MB RAM with SQLite, official rootless image for amd64 and arm64 | **Chosen.** Light, complete REST API, Actions-compatible runners if wanted later, SQLite for zero extra services and Postgres when needed, a rootless image fits the non-root rule, the person already runs it (`meisync-gitea`) so nothing new to learn. |
+| Forgejo | GPL-3.0-or-later since v9 (hard fork of Gitea) | the same | Technically close and API compatible, but **GPL**: the project's rule is permissive licences only for what it bundles or ships. IYAKKI *detects* an existing Forgejo and connects to it (the API is the same); it does not deploy one. |
+| Gogs | MIT | lightest | Much less active, fewer features (no Actions), weaker API. |
+| soft-serve | MIT | tiny | SSH and a TUI only: no web UI, no pull requests, no API IYAKKI could use for them. |
+| GitLab CE | MIT core | very heavy (several GB RAM, Postgres, Redis, Gitaly) | Wrong size for one machine; slow to start; far more to secure and upgrade. |
+| Plain git over SSH or `git http-backend` | GPL-2.0 (git) | smallest | No web, no pull requests, no API; more to hand-build than to adopt. |
+
+### The Gitea deployment
+
+One replica (`Recreate` strategy, because the PVC is `ReadWriteOnce`), SQLite on a PVC mounted twice with sub paths (`data` →
+`/var/lib/gitea`, `config` → `/etc/gitea`), configuration through `GITEA__section__KEY` environment variables: `INSTALL_LOCK=true`,
+`DISABLE_REGISTRATION=true`, `REQUIRE_SIGNIN_VIEW=true`, `DEFAULT_PRIVATE=private`, `ROOT_URL` from the chosen exposure, SSH on 2222 in the pod
+(built-in server) and the advertised port from the exposure, LFS on, `webhook.ALLOWED_HOST_LIST=external` (webhooks may only call public hosts).
+Two Services: `gitea-http` and `gitea-ssh`. **ClusterIP with a port on this machine** is the default: the Services stay inside the cluster and the pod
+publishes its web port as a `hostPort` on 127.0.0.1 of the node (`http://127.0.0.1:3300`, option *Port on this machine*; `none` publishes nothing). Nothing
+is open on the network, which is the same shape the Quick install item makes, so the two installers agree. **NodePort** is a deliberate, labelled
+choice that opens ports on every address of the machine (your LAN): it uses the first free ports from 30300 and 30222 and the review warns
+"NodePort OPENS Gitea's ports ... because you chose it". LoadBalancer (needs a *Public host*) and Ingress (needs a host; SSH stays a ClusterIP Service) are
+the other options.
+
+**Deploying again never changes who can reach it.** With the exposure left alone, a Gitea that exists (by record, or by the live Service) keeps its
+exposure, NodePort included. Closing a NodePort Gitea is the person's explicit choice: tick *Close the open NodePorts* (or ask for ClusterIP),
+and the review shows "THIS CLOSES the NodePorts 30300, 30222 ..." before anything is applied. It never widens by itself.
+
+After the pod is ready: create the administrator (`gitea admin user create`), create an **API token for IYAKKI** (`gitea admin user
+generate-access-token`, scopes `write:repository,read:user`) and store it in the vault as `uvault:svc.<instance>.token`. The token is never
+shown. Health: `GET /api/healthz` on the first address.
+
+**Backup**: `gitea dump` inside the pod into the volume (`/var/lib/gitea/backups/gitea-dump-<time>.zip`), then optionally `kubectl cp` to
+`<services dir>/platform-backups/<instance>/`. Each needs the person's approval. Copy dumps off the cluster too.
+
+**Upgrade**: change the pinned image tag with `kubectl set image` and wait for the rollout; offered only along `versions()` (forward);
+a backup first is the default (a failed backup stops the upgrade); IYAKKI does not roll back by itself because the data may already be
+migrated: it says so and points at the backup.
+
+**NetworkPolicy**: an example restricting ingress to the LAN is part of the plan text and is **not applied**.
+
+**Postgres** is a later option (a second Deployment with its own PVC); SQLite is fine for one person and a few workspaces.
+
+### An existing Gitea or Forgejo
+
+`detect_existing` looks at every Deployment, StatefulSet and DaemonSet of the cluster (image names `gitea/gitea`, `forgejo/forgejo`, or a name
+starting with `gitea` or `forgejo`) and offers it in the plan as a warning: "A Gitea is already running here: ns/name. Connect to it instead of
+installing a second one", with its NodePort address as a hint. **Connect to existing** asks for the address and a token the person
+creates in that service (a masked field), checks `/api/v1/version` and `/api/v1/user`, stores the token in the vault, and records the service
+as *connected*: IYAKKI deploys, stops and removes nothing for it (Remove only forgets the record and the token).
+
+### Gitea from Store -> Setup (Quick install)
+
+**Store -> Setup -> Coding agents -> Gitea (versioning for your work)** (`iyakki quick-install gitea`, needs k3s) puts this same Gitea into the
+managed cluster in one click, so there is a place to keep projects versioned without opening Platform services. It is not a second Gitea
+implementation: the job calls `Gitea::build` with fixed options (namespace `iyakki-gitea`, version 1.24.5, ClusterIP, the new option
+`loopback_port`) and applies the objects it returns, so the rootless, unprivileged pod, the probes, the limits, the 10 GB claim and the admin
+Secret are exactly the ones above (`quickinstall_gitea.rs`).
+
+* **Image.** `docker.io/gitea/gitea:1.24.5-rootless@sha256:3595...` (tag and digest of the multi-arch index, read from Docker Hub's registry API).
+  The Platform services wizard still uses the tag alone. Gitea is MIT (the `LICENSE` file of the v1.24.5 release); the cluster pulls the image
+  when you click Install and IYAKKI ships nothing.
+* **Address.** The Services stay ClusterIP. `loopback_port` (ClusterIP only, 1024 or higher) publishes the web port as a `hostPort` bound to
+  `127.0.0.1` of the node, so `git`, the AI IDE and the browser on this machine reach `http://127.0.0.1:3300` (the first free port from 3300
+  to 3309) and no other computer can. The ROOT_URL is that address, so Gitea's own clone addresses are right. Git over HTTP with a token is the
+  first cut; SSH is not published (no `clone-ssh` address is shown). The job checks `/api/healthz` on that address before it goes on and says
+  plainly when nothing answers (port taken, or a cluster network that does not publish host ports on loopback).
+* **Secrets.** The administrator password is generated in the job and goes into the Secret `gitea-admin` through a 0600 file (never an argument, a
+  log or a manifest). The job creates the administrator and an API token with the scopes `write:repository,read:user` inside the pod and parks
+  the token in the Secret `gitea-iyakki-token`. A job has no vault, so IYAKKI (the shell) moves both into your vault as
+  `svc.<instance>.admin-password` and `svc.<instance>.token` (the names this page uses, so `platform_*`, Connect workspace and the connection find them),
+  deletes the token Secret, notes the names in the record and retries while the vault is locked.
+* **The record** in `installed-services-<user>.json` is the one Platform services keeps: `platform_list`, `git_service_status`, the K8S tile and
+  Connect workspace see the instance, Upgrade and Backup work on it, and Remove removes it (the Setup row then says not installed). A
+  `loopback_port` Gitea is not "ClusterIP only" for Connect workspace: that blocker applies when the port is empty.
+* **A Gitea deployed from Platform services already** is used as it is when it is reachable (NodePort, Ingress); when it is ClusterIP only the
+  job stops with a plain message and changes nothing. A Platform-services Gitea with a loopback port is the Quick install's own. **Adoption:** when the
+  cluster holds the Deployment `gitea` and the volume `gitea-data` in `iyakki-gitea` but no record exists, a NodePort one is adopted as it is (the
+  record is written from the live Services, a token is made for the vault, nothing in the cluster changes) and a ClusterIP one is taken over by the
+  idempotent run (its Secret and volume are kept). The other way round, Platform services lists and redeploys the Quick install's record and keeps
+  its loopback port.
+* **The Git connection** "Local Gitea" is added once (found again by the instance it names; a moved port updates it). See `GIT-AND-SSH.md`.
+
+## Connect a workspace to Gitea
+
+There are now three ways in, all ending in the same `platform/connect.rs` review and approval: IDE → K8S panel → *Git*; Services → *Connect workspace*;
+and the unified **Connect Git / Gitea** flow (IDE top bar chip, `⋯` menu, Repositories panel; Settings → Git and SSH keys → *Add connection* →
+*The Gitea running on my cluster*, which lists the instances installed here and, when there is none, offers *Open Platform services*). The unified
+flow's connection for the cluster's Gitea points at the vault entry this service already keeps and calls `plan_connect` / `connect` for *Create a new
+repository*; see [`GIT-AND-SSH.md`](GIT-AND-SSH.md), "Connect Git or Gitea".
+
+IDE → K8S panel → *Git* (or Services → *Connect workspace*): 1. the review shows the repository name (from the workspace, lowercased), the
+privacy (**private by default**), the origin change and warnings (plain http is called out); approve → IYAKKI asks the service who the token
+belongs to, creates the repository through the API (an existing one is reused), and sets `origin` to the repository's HTTPS address (the
+address never holds a credential; an `origin` that points somewhere else is not replaced unless the plan said so). 2. A **second approval card**
+for the push (`git push --set-upstream origin <branch>`). The token is given to git through its environment for that one command
+(`http.extraHeader` as basic authentication; inherited credential helpers are switched off), never in the address, an argument or a file; the
+push is refused when `origin` is on another host than the service or holds a credential. The repository link is shown in the result.
+
+For your own terminal pushes afterwards there is no persistent credential helper (IYAKKI's vault is not reachable from a git subprocess
+outside IYAKKI): use SSH (your key added in Gitea) or `git credential approve` yourself. For parallel tasks (`tasks.rs`) pushing a task
+branch and opening a pull request (`POST /api/v1/repos/{owner}/{repo}/pulls`) is **not wired**: it would be a third approval (Ask level) using
+the same `connect::push` and the same token handling.
+
+## The assistant
+
+| Tool | Level |
+|---|---|
+| `platform_list`, `platform_status`, `git_service_status` | Safe |
+| `platform_deploy {service, profile, namespace?, options?}` | Ask, and **hard-ask** (never run by Auto or Autopilot, never covered by an "always" grant) |
+| `platform_upgrade {instance, version?, backup_first?}` | Ask, hard-ask |
+| `platform_remove {instance, delete_data?, confirm}` | Ask, hard-ask; `confirm` is the instance id typed by the person |
+
+The tools exist in a workspace chat that has the cluster tools. `profile` must be an id `platform_list` gave (written to
+`platform-profiles-<user>.json`); an unknown, hidden, production-looking or read-only cluster is refused, so the assistant cannot invent or
+pick a cluster. The approval card names the cluster and its **server**, and its preview is the same exact plan. Results carry the vault
+entry names, never a value; the person reveals them in Details.
+
+## Object storage (Quick install: SeaweedFS and RustFS)
+
+Two S3-compatible stores, both Apache-2.0, are Quick install items in the Cluster section (pick one or both; they use different names in
+the namespace `iyakki-objects`, so they run side by side). They follow the ClickHouse/Matrix item pattern (`quickinstall_objstore.rs`), not
+the `ServiceDef` engine above: nothing of the vendor's is shipped, the cluster pulls the image at the person's click, the licence is shown first.
+
+* **SeaweedFS** is the dependable choice (mature, S3 gateway on port 8333, a bucket `iyakki` made on first start). **RustFS** is the Rust-native
+  and young one (releases are still alpha; S3 port 9000; the first client makes the bucket). Both: ClusterIP only, non-root, 20 GB claim, 1 Gi
+  memory limit. MinIO and Garage are AGPL-3 and are not offered.
+* The access key and secret key are generated at install, written to the Secret `<name>-s3` through 0600 files, read by the pod by reference, and moved
+  into the person's vault as `svc.<name>.access-key` and `svc.<name>.secret-key`, plus the typed record `s3.<name>` (endpoint, region, bucket,
+  path style and the two vault NAMES; never a key). A locked vault is handled by the same pending list as the databases.
+* Chat tools: `object_storage_status` (free; names only), `object_storage_install` and `object_storage_remove` (ask every time). Remove keeps the
+  volume, the Secret and the vault entries unless `delete_data` is true.
+* The endpoint (`http://<name>.iyakki-objects.svc:<port>`) is reachable inside the cluster only. DASH has no S3 source kind yet, so nothing is
+  registered in DASH.
+* Images are pinned by tag; the digest field in `quickinstall_objstore.rs` stays empty until a person fills it from the first real pull (the job
+  logs the `imageID` the cluster resolved). The tags and the container arguments were written offline and are not verified.
+
+## Removing a Quick install item (uninstall)
+
+Each Quick install item has a removal plan next to its install steps (`quickinstall_uninstall.rs`, the `uninstall` submodule). A plan lists named targets only: one object by kind and name, one folder under the item's own root, one vault entry, one DASH source or a named hook (CLI catalogue, driver pack, sandbox). Nothing is deleted by wildcard, label or `--all`.
+
+| Group | Always removed | Kept unless "also delete the data" |
+|---|---|---|
+| Cluster pods (Elasticsearch, OpenSearch, Prometheus, graph database, ClickHouse, Matrix, Gitea, SeaweedFS, RustFS, Lemonade, Ollama in the cluster, registry) | Deployment, Service (Prometheus: ConfigMap, ServiceAccount, its read-only ClusterRole and binding; Gitea: its record in installed services; Lemonade and Ollama: the Models entry) | the volume claim and its retained volume folder, the Secret, the vault entries, the DASH connection (Gitea: the "Local Gitea" Git connection), the namespace where only this item lives |
+| k3s | the cluster is stopped, the k3s program, kubeconfig and log go | the folder `k3s-dev/data` (database and every volume); "also delete" removes the whole `k3s-dev` |
+| Programs (Node.js, Python, DuckDB, Claude Code, Copilot, ffmpeg, and Ollama when it runs on the host) | the program and its folder in the tools folder (host Ollama: also the running server and `ollama-local` in Models) | the host Ollama's models folder |
+| Add-ons and drivers (browser audio and video, Mac Wi-Fi/Bluetooth/camera, firmware packs, extra firmware, GPU Vulkan/NVIDIA) | the add-on folder or driver pack, the device plugin, the CDI specs | downloaded vendor files (recovery image, NVIDIA `.run`, camera pieces) |
+| Sandboxes, Kokoro, voice pack | nothing without the tick: they are their own data | all of it |
+
+Rules the runner enforces before the first change: kubernetes targets must be in IYAKKI's namespaces (`iyakki-data`, `-monitoring`, `-ai`, `-matrix`, `-gitea`, `-objects`, `iyakki-registry`) or the single `nvidia-device-plugin` in `kube-system`; a namespace is deleted only if one item uses it and only with the data; folders must lie under the item's own root inside the data folder, without `..` and not through a link; vault entries must be `svc.*` or `s3.*` names. Removing k3s or Lemonade while installed items need them is refused with their names. Audit lines: `quickinstall.uninstall.start|done|failed <item> data=kept|deleted`, never a secret or a path.
+
+Data safety: after an install (and when the Setup page refreshes) the volume bound to each item's claim is patched to `persistentVolumeReclaimPolicy: Retain`, because k3s' local-path class defaults to Delete. Deleting the data deletes the claim, then the retained volume object, then its folder under `k3s-dev/data/storage` (only a folder named for that volume).
+
+Chat: `quick_install_status` (read) and `quick_uninstall` (hard ask). Not verified on a real cluster; see `docs/project/test-plans/k3s-and-cluster.md`.
+
+## Ollama in the cluster (Quick install)
+
+Ollama is a pod now, like Lemonade (`quickinstall_ollama.rs`): namespace `iyakki-ai`, claim `ollama-data` (30 GB, kept when the item is removed:
+the Retain logic knows it), a ClusterIP Service, and the API published on this machine's loopback only at `127.0.0.1:11436` (11434 is a host
+Ollama, 11435 the older GPU Ollama, so a move can run both for a while). The pod is unprivileged (user 10001, no capabilities, no service
+account token; one init container hands the volume over), has a readiness probe and the limits in the table below. The image
+(`docker.io/ollama/ollama`, MIT) is pulled by the cluster at the person's click, pinned by tag; the digest field is empty until the first real
+pull is checked (the job logs the digest the cluster resolved). The item keeps its id `ollama` and its marker `quick-install/ollama.done`; the
+marker text starts with "in the cluster" for the cluster shape, and an older marker or the CLI catalogue record means the host.
+
+* **GPU:** the same mechanism as Lemonade: the Vulkan and NVIDIA GPU steps patch the Deployment `ollama` (`gpu_workloads::ollama_patch`: the
+  device plugin's resource limit, `OLLAMA_VULKAN=1`, the render group); nothing privileged is added. Removing the GPU step takes it out again.
+* **An Ollama on the host keeps working.** The Quick install page shows "Ollama runs on this machine's host" with two buttons. *Move into the
+  cluster* opens a review card (sizes, room, licence, what is kept): after the person agrees, the host models folder is copied into the claim
+  (`kubectl cp`; a copy, nothing is deleted from the host), the job checks that every model the host lists is now in the cluster, and only then
+  the shell points `ollama-local` at the cluster pod and stops the host server (a server IYAKKI did not start is left running). If the
+  folder is over 20 GB, or the data partition cannot hold a second copy plus 2 GB, the card says so and nothing starts; *Start fresh in the
+  cluster, keep host models where they are* is the other way (empty claim, host folder untouched, host server stopped after the cluster one
+  answers).
+* **Chat:** `ollama_status` (free: where it runs, its pod, limits) and `ollama_install` (asks every time; `how` = `cluster`, `move` or `fresh`).
+  Removing goes through `quick_uninstall` with the item `ollama`: the default keeps the claim; "also delete the data" deletes it (and the host
+  models folder a move left behind). Not verified on a real cluster; see `docs/project/test-plans/k3s-and-cluster.md`.
+
+## Resource limits and the idle profile
+
+Every Quick install pod has CPU and memory requests and limits (`quickinstall_resources.rs` is the table; a test compares each manifest with
+it; the item's popup shows the pod name, what it asks for, what it may use and the idle number). The warning in an install review adds the memory
+limits of the selected services and the installed ones and speaks when the total passes 60 % of the machine's memory.
+
+| Service (pod) | CPU asks / up to | Memory asks / up to | Idle memory, measured by the owner on 2026-11-06 |
+|---|---|---|---|
+| ClickHouse | 100m / 1 core | 512 MB / 1 GB | about 775 MB, and about 100 % of one core |
+| OpenSearch | 100m / 2 cores | 1 GB / 1.5 GB | about 990 MB |
+| Elasticsearch | 250m / 2 cores | 1 GB / 1.5 GB | about 925 MB |
+| Neo4j (graph database) | 100m / 2 cores | 640 MB / 1 GB | about 400 MB |
+| Prometheus | 100m / 0.5 core | 256 MB / 768 MB | about 190 MB |
+| Gitea | 100m / 1 core | 256 MB / 1 GB | about 180 MB |
+| Matrix, SeaweedFS, RustFS | 50m to 100m / 1 core | 128 to 256 MB / 512 MB to 1 GB | not measured |
+| Registry | 50m / 0.5 core | 64 MB / 512 MB | not measured |
+| Lemonade, Ollama (model servers) | 500m / 6 cores | 1 to 2 GB / 16 GB | not measured (a loaded model needs the memory) |
+
+ClickHouse used about a core while idle. Why it is busy is not claimed here (the System tile's "What is it busy with" aid is for that). The item
+writes no ClickHouse configuration of its own (no `max_server_memory_usage_to_ram_ratio`, no `background_pool_size`), so none was guessed:
+only the pod's CPU limit (1 core) bounds it. Whether the limits suit a real Mac mini (the cores a model server may take, the 16 GB ceiling) is to be
+checked on the machine.
+
+## Adding a service
+
+1. Implement `platform::ServiceDef` (see `gitea.rs`). `build` returns namespaced objects without a `namespace:` key, without Secret values and
+   without `hostPath`, privileged containers or added capabilities; use `labels` with `iyakki.dev/service` and `iyakki.dev/instance`
+   (`BuildCtx::instance`); name Services `<x>-http` / `<x>-ssh` if you want their NodePorts kept across deployments. Declare generated
+   values as `SecretSpec`/`SecretEntry` (vault name `format!("{}.<key>", ctx.vault_prefix)`) and read them in the pod through `secretKeyRef`.
+   A service that builds its image from a local program also implements `local_binary()` and `prepare_images(pl, version, arch, progress)`;
+   the finding, building and choosing come with it.
+2. `platform::register(Arc::new(MyService))` at start. The list, the wizard, the tools and the registry file need nothing else.
+3. Tests: plan text and manifest lint clean, options, refusals, apply order with a `FakeRunner`, no secret in any command (see
+   `platform/tests.rs`).
+
+## Not verified
+
+* The Quick install item (above) was tested with fakes only: the `hostPort` on `127.0.0.1` with k3s's network, `kubectl exec` of the administrator and
+  token commands, the 20 s limit of the managed `kubectl` for them, and the handoff into a real vault are not tried on a cluster.
+* No real cluster, registry, Gitea, curl, podman or git push was used. The pinned tags (`1.23.8`, `1.24.5-rootless`) and the Gitea command
+  line flags (`--scopes`, `--raw`, `--must-change-password=false`, `dump -f ... --type zip --tempdir`) are written from the documentation and must be
+  checked on a real run; digests are not pinned yet.
+* `kubectl` custom-columns output for several kinds in one `get`, the `kubectl cp` of a dump (needs `tar` in the image), and NodePort
+  reachability on `localhost` depend on the cluster.
+* Vault-held kubeconfig profiles are not offered as a target (they are not probed by the profile list).

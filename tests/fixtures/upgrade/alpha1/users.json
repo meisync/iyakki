@@ -1,0 +1,98 @@
+{
+  "users": [
+    {
+      "name": "admin",
+      "hash": "$argon2id$v=19$m=19456,t=2,p=1$Ut7DTAtsOo2c6o1ud9SjPQ$5KM2PRed38P4StqjKTkP0mX9OPw+rN90uIGXsZiD7sc",
+      "role": "admin",
+      "overrides": {
+        "deny_apps": [],
+        "allow_apps": [],
+        "net_hosts": null,
+        "mcp_servers": null,
+        "fs_read": null,
+        "fs_write": null,
+        "max_fuel": null,
+        "max_memory_mb": null,
+        "vfs_quota_mb": null,
+        "voice": null,
+        "agent": null,
+        "skills": null,
+        "budget": null,
+        "browser_agent": null,
+        "browser_max_actions": null,
+        "browser_max_minutes": null
+      }
+    },
+    {
+      "name": "amy",
+      "hash": "$argon2id$v=19$m=19456,t=2,p=1$huXLwABL+en4Ya/44uuUnA$47kLKV2NdyA5iyRCwOlufUMEYv2lTPqiyG09NEUhu+M",
+      "role": "user",
+      "overrides": {
+        "deny_apps": [
+          "radio"
+        ],
+        "allow_apps": [],
+        "net_hosts": null,
+        "mcp_servers": null,
+        "fs_read": null,
+        "fs_write": null,
+        "max_fuel": 1000,
+        "max_memory_mb": null,
+        "vfs_quota_mb": null,
+        "voice": null,
+        "agent": null,
+        "skills": null,
+        "budget": null,
+        "browser_agent": null,
+        "browser_max_actions": null,
+        "browser_max_minutes": null
+      }
+    },
+    {
+      "name": "ola",
+      "hash": "$argon2id$v=19$m=19456,t=2,p=1$Bst1SgH08iPYgQPcTukNsg$ASCcVaf4VdqE7QEc37G5jP+fRGoExv8bIsgoWTs7U2U",
+      "role": "operator",
+      "overrides": {
+        "deny_apps": [],
+        "allow_apps": [],
+        "net_hosts": null,
+        "mcp_servers": null,
+        "fs_read": null,
+        "fs_write": null,
+        "max_fuel": null,
+        "max_memory_mb": null,
+        "vfs_quota_mb": null,
+        "voice": null,
+        "agent": null,
+        "skills": null,
+        "budget": null,
+        "browser_agent": null,
+        "browser_max_actions": null,
+        "browser_max_minutes": null
+      }
+    },
+    {
+      "name": "visitor",
+      "hash": "$argon2id$v=19$m=19456,t=2,p=1$UnYMnJiCT9SzhlaMT9kxAw$oJI92j+3xCE6Z2GYzpfvNkIEwYY1AWxga3mnoZ1Yg9w",
+      "role": "guest",
+      "overrides": {
+        "deny_apps": [],
+        "allow_apps": [],
+        "net_hosts": null,
+        "mcp_servers": null,
+        "fs_read": null,
+        "fs_write": null,
+        "max_fuel": null,
+        "max_memory_mb": null,
+        "vfs_quota_mb": null,
+        "voice": null,
+        "agent": null,
+        "skills": null,
+        "budget": null,
+        "browser_agent": null,
+        "browser_max_actions": null,
+        "browser_max_minutes": null
+      }
+    }
+  ]
+}

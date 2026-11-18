@@ -1,0 +1,80 @@
+{
+  "contract": {
+    "major": 0,
+    "minor": 1
+  },
+  "oldest_minor": 1,
+  "machine": "fixture-machine",
+  "build": "alpha.2",
+  "domains": [
+    {
+      "domain": "settings",
+      "since_minor": 1,
+      "calls": [
+        "schema",
+        "get",
+        "set",
+        "watch"
+      ],
+      "events": [
+        "changed"
+      ]
+    },
+    {
+      "domain": "vault",
+      "since_minor": 1,
+      "calls": [
+        "status",
+        "unlock",
+        "lock",
+        "use_secret"
+      ],
+      "events": []
+    },
+    {
+      "domain": "flows",
+      "since_minor": 1,
+      "calls": [
+        "list",
+        "status",
+        "events",
+        "start",
+        "stop",
+        "approve"
+      ],
+      "events": [
+        "started",
+        "step",
+        "approval_needed",
+        "approval_answered",
+        "frame",
+        "finished"
+      ]
+    },
+    {
+      "domain": "consent",
+      "since_minor": 1,
+      "calls": [
+        "pending",
+        "answer"
+      ],
+      "events": [
+        "asked",
+        "answered",
+        "expired"
+      ]
+    }
+  ],
+  "capabilities": {
+    "audio": true,
+    "display": true,
+    "camera": true,
+    "keyboard": true,
+    "battery": false,
+    "bluetooth": true
+  },
+  "rate_limit": {
+    "calls": 120,
+    "per_ms": 60000
+  }
+}

@@ -1,0 +1,13 @@
+# a text scenario: Settings, the Firewall page, nothing changed (one step per line; see DEVICE-UI-TESTS.md)
+name: firewall-page-text
+devices: real qemu
+restore: none (read-only)
+doc: opens the Firewall page of Settings (read only) and checks it is drawn
+key s
+wait app=Settings
+skip-unless-button Firewall
+click-sidebar Firewall
+wait app=Settings page=Firewall
+shot firewall
+expect-not-blank
+expect-page Firewall

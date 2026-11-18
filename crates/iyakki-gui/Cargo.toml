@@ -1,0 +1,40 @@
+# Standalone workspace: egui's wasm-bindgen pins conflict with libp2p's in a single lockfile,
+# so the GPU front-end resolves its dependencies separately. Build: `cd crates/iyakki-gui && cargo run`.
+[workspace]
+
+[package]
+name = "iyakki-gui"
+version = "0.1.0-alpha.6"
+edition = "2021"
+license = "Apache-2.0"
+
+[[bin]]
+name = "iyakki-editor"
+path = "src/main.rs"
+
+[[bin]]
+name = "iyakki-desktop"
+path = "src/desktop.rs"
+
+[[bin]]
+name = "iyakki-sdk-emulate-window"
+path = "src/sdk_emulate.rs"
+
+[[bin]]
+name = "iyakki-installer"
+path = "src/installer.rs"
+
+[dependencies]
+iyakki-usb = { path = "../iyakki-usb" }
+iyakki-sdk-emulator = { path = "../iyakki-sdk-emulator" }
+iyakki-proxy = { path = "../iyakki-proxy" }
+iyakki-edit = { path = "../iyakki-edit" }
+iyakki-shell = { path = "../iyakki-shell" }
+iyakki-compose = { path = "../iyakki-compose" }
+iyakki-agent = { path = "../iyakki-agent" }
+iyakki-storage = { path = "../iyakki-storage" }
+# Polars answers the DATA viewer and the assistant's table tools on the desktop; the Buildroot image uses the small built-in engine instead
+iyakki-data = { path = "../iyakki-data", features = ["polars"] }
+# no swarm/egress features: libp2p's wasm-bindgen pins conflict with egui's (see comment at top)
+iyakki-core = { path = "../iyakki-core", default-features = false, features = ["shell"] }
+eframe = "0.36"

@@ -1,0 +1,19 @@
+[package]
+name = "iyakki-ui-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The contract client for a UI written outside the IYAKKI repository: the typed core contract over a line-based JSON transport, plus the reference server that serves a contract implementation on a socket."
+
+# F-SPLIT-04 (docs/development/UI-BOUNDARY.md section 8). A UI program that lives in its own repository depends on this crate and on nothing
+# else from IYAKKI: the contract types come re-exported from here. The crate has no I/O of its own beyond the stream it is given; the TCP helpers
+# connect to an address the caller names. The identity of a caller is decided by the machine's end of the transport (the server below), never
+# by what the client says, so a client cannot make itself local.
+
+[dependencies]
+iyakki-core-api = { path = "../iyakki-core-api", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+iyakki-core-fake = { path = "../iyakki-core-fake" }

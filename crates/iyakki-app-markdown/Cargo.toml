@@ -1,0 +1,15 @@
+[package]
+name = "iyakki-app-markdown"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# MARKDOWN: the viewer that `iyakki.markdown.view` and `openFile` open (F-SDK-14), written only against the UI SDK
+# (docs/development/UI-SDK.md): it depends on `iyakki-ui-sdk` and nothing else from IYAKKI. The document is handed to it as text by whoever
+# opens it (the core, after the person's card); the app never sees a path, a file or a network.
+
+[dependencies]
+iyakki-ui-sdk = { path = "../iyakki-ui-sdk" }
+
+[dev-dependencies]
+iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }

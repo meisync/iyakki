@@ -1,0 +1,24 @@
+{
+  "learned": true,
+  "enabled": true,
+  "devices": {
+    "aa:bb:cc:00:00:01": {
+      "mac": "aa:bb:cc:00:00:01",
+      "ip": "192.0.2.1",
+      "iface": "eth0",
+      "first_seen": 1700000000,
+      "last_seen": 1700000050,
+      "trusted": true,
+      "name": "Router"
+    },
+    "de:ad:be:ef:00:09": {
+      "mac": "de:ad:be:ef:00:09",
+      "ip": "192.0.2.9",
+      "iface": "eth0",
+      "first_seen": 1700000030,
+      "last_seen": 1700000060,
+      "trusted": false,
+      "name": ""
+    }
+  }
+}

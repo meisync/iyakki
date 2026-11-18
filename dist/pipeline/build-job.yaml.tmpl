@@ -1,0 +1,82 @@
+# BUILD stage skeleton (design; NOT launched, NOT validated by running it). Render with sed the way run-boot-test.sh does:
+#   @HOME@ @REPO@ @UID@ @GID@ @NODE@ @RUN_ID@ @BUILDER_IMAGE@ @BUILD_CMD@
+# Same absolute paths inside the pod as on the host (HOME and the repo are mounted at their host paths), so the owner's
+# scripts, which cd into the checkout and use ~/.cache, run unchanged. Nothing here ever mounts ~/.config/iyakki/secureboot.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: build-@RUN_ID@
+  namespace: iyakki-build
+  labels:
+    app.kubernetes.io/part-of: iyakki-build
+    app.kubernetes.io/component: builder
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 21600          # 6 h: a build that runs longer is stuck (a lock wait counts too: see the flock timeout below)
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: iyakki-build
+        app.kubernetes.io/component: builder
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: @NODE@
+      securityContext:
+        runAsUser: @UID@                 # the owner's uid: files in target/ and ~/.cargo stay owned by the owner
+        runAsGroup: @GID@
+      containers:
+        - name: build
+          # Must have the SAME libc as the host (the mounted ~/.rustup toolchain and the Buildroot host tools were built
+          # against it): the host is Ubuntu 26.04, so use ubuntu:26.04 plus build-essential, git, pkg-config, cpio, unzip,
+          # rsync, bc, flex, bison, libssl-dev, libelf-dev, zstd, squashfs-tools, util-linux (flock). Built once by the owner.
+          image: @BUILDER_IMAGE@
+          imagePullPolicy: IfNotPresent
+          workingDir: @REPO@
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -eu
+              # ONE build at a time: the same lock file the owner's scripts already take (flock ~/.cache/iyakki-build.lock),
+              # so a pod build and a hand-started build (or another agent's) queue behind each other. Wait at most 2 h.
+              exec 9>@HOME@/.cache/iyakki-build.lock
+              flock -w 7200 9 || { echo "build lock busy for 2 h, giving up" >&2; exit 75; }
+              echo "lock taken $(date -u +%T)"
+              @BUILD_CMD@
+          env:
+            - {name: HOME, value: "@HOME@"}
+            - {name: CARGO_HOME, value: "@HOME@/.cargo"}
+            - {name: RUSTUP_HOME, value: "@HOME@/.rustup"}
+            - {name: PATH, value: "@HOME@/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
+            - {name: CARGO_BUILD_JOBS, value: "4"}
+            - {name: TMPDIR, value: "@HOME@/.cache/iyakki-tmp"}
+            # same flags as the owner's runner; no IYAKKI_SB_KEY / IYAKKI_SB_CERT here on purpose (signing stays on the host)
+            - {name: WEB_IRIS, value: "1"}
+            - {name: WEB_MEDIA, value: "1"}
+          resources:
+            requests: {cpu: "4", memory: 6Gi}
+            limits: {cpu: "6", memory: 9Gi}    # the owner's cap: never more than ~9 GB for a build (the pod is OOM-killed, not the PC)
+          volumeMounts:
+            - {name: repo, mountPath: "@REPO@"}                              # includes target/ and target/buildroot-*: incremental
+            - {name: cargo, mountPath: "@HOME@/.cargo"}                      # registry + git caches + cargo bin
+            - {name: rustup, mountPath: "@HOME@/.rustup", readOnly: true}    # the toolchain the host already uses
+            - {name: lock, mountPath: "@HOME@/.cache/iyakki-build.lock"}     # the shared lock file (a single file, not the directory)
+            - {name: tmp, mountPath: "@HOME@/.cache/iyakki-tmp"}             # TMPDIR on disk, not tmpfs
+            - {name: dl, mountPath: "@HOME@/.cache/iyakki-dl"}               # Buildroot download cache, if BR2_DL_DIR is set to it
+            - {name: images, mountPath: "@HOME@/iyakki-work"}                # images/packs/logs: artifacts never go to /tmp
+      volumes:
+        - name: repo
+          hostPath: {path: "@REPO@", type: Directory}
+        - name: cargo
+          hostPath: {path: "@HOME@/.cargo", type: Directory}
+        - name: rustup
+          hostPath: {path: "@HOME@/.rustup", type: Directory}
+        - name: lock
+          hostPath: {path: "@HOME@/.cache/iyakki-build.lock", type: FileOrCreate}
+        - name: tmp
+          hostPath: {path: "@HOME@/.cache/iyakki-tmp", type: DirectoryOrCreate}
+        - name: dl
+          hostPath: {path: "@HOME@/.cache/iyakki-dl", type: DirectoryOrCreate}
+        - name: images
+          hostPath: {path: "@HOME@/iyakki-work", type: Directory}

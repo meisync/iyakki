@@ -1,0 +1,874 @@
+From: Kerem Karabay <kekrby@gmail.com>
+Subject: [PATCH] HID: Apple Touch Bar backlight and keyboard mode (hid-appletb-bl, hid-appletb-kbd), backport to 6.12
+
+Backport of the two Touch Bar HID drivers that are upstream since Linux
+6.15, for the Touch Bar of T2 MacBook Pros (2018-2020) reached through the
+T2's internal USB (apple-bce VHCI): hid-appletb-kbd puts the Touch Bar in
+its "keyboard" mode, where the T2 itself draws Esc + F1-F12 or the media
+and brightness keys and reports them as key presses (Fn switches between
+the two layers); hid-appletb-bl drives its backlight (dim and off after
+inactivity). No DRM driver is needed for this mode; appletbdrm (custom
+drawing with tiny-dfr) and the hid-multitouch Touch Bar changes are NOT
+part of this patch.
+
+Authors: Ronald Tschalär, Kerem Karabay <kekrby@gmail.com>,
+Aditya Garg <gargaditya08@live.com>. Licence: GPL-2.0 (kernel code).
+
+Sources (pinned):
+  * drivers/hid/hid-appletb-bl.c, drivers/hid/hid-appletb-kbd.c: copied
+    unchanged from Linux v6.18 (https://github.com/torvalds/linux/tree/v6.18,
+    the upstream files with the later fixes: probe error path, backlight
+    reference put, timer only deleted when it was set up), except one API
+    bridge: timer_container_of() (6.16+) -> from_timer() (6.12).
+  * Kconfig, Makefile, hid-quirks.c and the sysfs ABI file: from t2linux
+    linux-t2-patches commit 7a48a744e190400606a032d4d2b8704ee908fb2c
+    (the 6.12 series), patches 1005-HID-hid-appletb-bl-add-driver-for-the-
+    backlight-of-A.patch and 1006-HID-hid-appletb-kbd-add-driver-for-the-
+    keyboard-mode.patch (https://github.com/t2linux/linux-t2-patches),
+    plus upstream's "depends on X86 || COMPILE_TEST".
+
+Carried by IYAKKI for the optional Mac image variant only
+(dist/buildroot/configs/iyakki_mac.fragment). Applies to Linux 6.12.112.
+---
+ .../ABI/testing/sysfs-driver-hid-appletb-kbd  |  13 +
+ drivers/hid/Kconfig                           |  27 +
+ drivers/hid/Makefile                          |   2 +
+ drivers/hid/hid-appletb-bl.c                  | 204 +++++++
+ drivers/hid/hid-appletb-kbd.c                 | 519 ++++++++++++++++++
+ drivers/hid/hid-quirks.c                      |   8 +-
+ 6 files changed, 771 insertions(+), 2 deletions(-)
+ create mode 100644 Documentation/ABI/testing/sysfs-driver-hid-appletb-kbd
+ create mode 100644 drivers/hid/hid-appletb-bl.c
+ create mode 100644 drivers/hid/hid-appletb-kbd.c
+
+diff --git a/Documentation/ABI/testing/sysfs-driver-hid-appletb-kbd b/Documentation/ABI/testing/sysfs-driver-hid-appletb-kbd
+new file mode 100644
+index 000000000..2a19584d0
+--- /dev/null
++++ b/Documentation/ABI/testing/sysfs-driver-hid-appletb-kbd
+@@ -0,0 +1,13 @@
++What:		/sys/bus/hid/drivers/hid-appletb-kbd/<dev>/mode
++Date:		September, 2023
++KernelVersion:	6.5
++Contact:	linux-input@vger.kernel.org
++Description:
++		The set of keys displayed on the Touch Bar.
++		Valid values are:
++		== =================
++		0  Escape key only
++		1  Function keys
++		2  Media/brightness keys
++		3  None
++		== =================
+diff --git a/drivers/hid/Kconfig b/drivers/hid/Kconfig
+index f283f271d..ec956f85d 100644
+--- a/drivers/hid/Kconfig
++++ b/drivers/hid/Kconfig
+@@ -148,6 +148,33 @@ config HID_APPLEIR
+ 
+ 	Say Y here if you want support for Apple infrared remote control.
+ 
++config HID_APPLETB_BL
++	tristate "Apple Touch Bar Backlight"
++	depends on BACKLIGHT_CLASS_DEVICE
++	depends on X86 || COMPILE_TEST
++	help
++	  Say Y here if you want support for the backlight of Touch Bars on x86
++	  MacBook Pros.
++
++	  To compile this driver as a module, choose M here: the
++	  module will be called hid-appletb-bl.
++
++config HID_APPLETB_KBD
++	tristate "Apple Touch Bar Keyboard Mode"
++	depends on USB_HID
++	depends on BACKLIGHT_CLASS_DEVICE
++	depends on INPUT
++	depends on X86 || COMPILE_TEST
++	select INPUT_SPARSEKMAP
++	select HID_APPLETB_BL
++	help
++	  Say Y here if you want support for the keyboard mode (escape,
++	  function, media and brightness keys) of Touch Bars on x86 MacBook
++	  Pros.
++
++	  To compile this driver as a module, choose M here: the
++	  module will be called hid-appletb-kbd.
++
+ config HID_ASUS
+ 	tristate "Asus"
+ 	depends on USB_HID
+diff --git a/drivers/hid/Makefile b/drivers/hid/Makefile
+index 27ee02bf6..307bc1c67 100644
+--- a/drivers/hid/Makefile
++++ b/drivers/hid/Makefile
+@@ -29,6 +29,8 @@ obj-$(CONFIG_HID_ALPS)		+= hid-alps.o
+ obj-$(CONFIG_HID_ACRUX)		+= hid-axff.o
+ obj-$(CONFIG_HID_APPLE)		+= hid-apple.o
+ obj-$(CONFIG_HID_APPLEIR)	+= hid-appleir.o
++obj-$(CONFIG_HID_APPLETB_BL)	+= hid-appletb-bl.o
++obj-$(CONFIG_HID_APPLETB_KBD)	+= hid-appletb-kbd.o
+ obj-$(CONFIG_HID_CREATIVE_SB0540)	+= hid-creative-sb0540.o
+ obj-$(CONFIG_HID_ASUS)		+= hid-asus.o
+ obj-$(CONFIG_HID_AUREAL)	+= hid-aureal.o
+diff --git a/drivers/hid/hid-appletb-bl.c b/drivers/hid/hid-appletb-bl.c
+new file mode 100644
+index 000000000..bad2aead8
+--- /dev/null
++++ b/drivers/hid/hid-appletb-bl.c
+@@ -0,0 +1,204 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Apple Touch Bar Backlight Driver
++ *
++ * Copyright (c) 2017-2018 Ronald Tschalär
++ * Copyright (c) 2022-2023 Kerem Karabay <kekrby@gmail.com>
++ */
++
++#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
++
++#include <linux/hid.h>
++#include <linux/backlight.h>
++#include <linux/device.h>
++
++#include "hid-ids.h"
++
++#define APPLETB_BL_ON			1
++#define APPLETB_BL_DIM			3
++#define APPLETB_BL_OFF			4
++
++#define HID_UP_APPLEVENDOR_TB_BL	0xff120000
++
++#define HID_VD_APPLE_TB_BRIGHTNESS	0xff120001
++#define HID_USAGE_AUX1			0xff120020
++#define HID_USAGE_BRIGHTNESS		0xff120021
++
++static int appletb_bl_def_brightness = 2;
++module_param_named(brightness, appletb_bl_def_brightness, int, 0444);
++MODULE_PARM_DESC(brightness, "Default brightness:\n"
++			 "    0 - Touchbar is off\n"
++			 "    1 - Dim brightness\n"
++			 "    [2] - Full brightness");
++
++struct appletb_bl {
++	struct hid_field *aux1_field, *brightness_field;
++	struct backlight_device *bdev;
++
++	bool full_on;
++};
++
++static const u8 appletb_bl_brightness_map[] = {
++	APPLETB_BL_OFF,
++	APPLETB_BL_DIM,
++	APPLETB_BL_ON,
++};
++
++static int appletb_bl_set_brightness(struct appletb_bl *bl, u8 brightness)
++{
++	struct hid_report *report = bl->brightness_field->report;
++	struct hid_device *hdev = report->device;
++	int ret;
++
++	ret = hid_set_field(bl->aux1_field, 0, 1);
++	if (ret) {
++		hid_err(hdev, "Failed to set auxiliary field (%pe)\n", ERR_PTR(ret));
++		return ret;
++	}
++
++	ret = hid_set_field(bl->brightness_field, 0, brightness);
++	if (ret) {
++		hid_err(hdev, "Failed to set brightness field (%pe)\n", ERR_PTR(ret));
++		return ret;
++	}
++
++	if (!bl->full_on) {
++		ret = hid_hw_power(hdev, PM_HINT_FULLON);
++		if (ret < 0) {
++			hid_err(hdev, "Device didn't power on (%pe)\n", ERR_PTR(ret));
++			return ret;
++		}
++
++		bl->full_on = true;
++	}
++
++	hid_hw_request(hdev, report, HID_REQ_SET_REPORT);
++
++	if (brightness == APPLETB_BL_OFF) {
++		hid_hw_power(hdev, PM_HINT_NORMAL);
++		bl->full_on = false;
++	}
++
++	return 0;
++}
++
++static int appletb_bl_update_status(struct backlight_device *bdev)
++{
++	struct appletb_bl *bl = bl_get_data(bdev);
++	u8 brightness;
++
++	if (backlight_is_blank(bdev))
++		brightness = APPLETB_BL_OFF;
++	else
++		brightness = appletb_bl_brightness_map[backlight_get_brightness(bdev)];
++
++	return appletb_bl_set_brightness(bl, brightness);
++}
++
++static const struct backlight_ops appletb_bl_backlight_ops = {
++	.options = BL_CORE_SUSPENDRESUME,
++	.update_status = appletb_bl_update_status,
++};
++
++static int appletb_bl_probe(struct hid_device *hdev, const struct hid_device_id *id)
++{
++	struct hid_field *aux1_field, *brightness_field;
++	struct backlight_properties bl_props = { 0 };
++	struct device *dev = &hdev->dev;
++	struct appletb_bl *bl;
++	int ret;
++
++	ret = hid_parse(hdev);
++	if (ret)
++		return dev_err_probe(dev, ret, "HID parse failed\n");
++
++	aux1_field = hid_find_field(hdev, HID_FEATURE_REPORT,
++				    HID_VD_APPLE_TB_BRIGHTNESS, HID_USAGE_AUX1);
++
++	brightness_field = hid_find_field(hdev, HID_FEATURE_REPORT,
++					  HID_VD_APPLE_TB_BRIGHTNESS, HID_USAGE_BRIGHTNESS);
++
++	if (!aux1_field || !brightness_field)
++		return -ENODEV;
++
++	if (aux1_field->report != brightness_field->report)
++		return dev_err_probe(dev, -ENODEV, "Encountered unexpected report structure\n");
++
++	bl = devm_kzalloc(dev, sizeof(*bl), GFP_KERNEL);
++	if (!bl)
++		return -ENOMEM;
++
++	ret = hid_hw_start(hdev, HID_CONNECT_DRIVER);
++	if (ret)
++		return dev_err_probe(dev, ret, "HID hardware start failed\n");
++
++	ret = hid_hw_open(hdev);
++	if (ret) {
++		dev_err_probe(dev, ret, "HID hardware open failed\n");
++		goto stop_hw;
++	}
++
++	bl->aux1_field = aux1_field;
++	bl->brightness_field = brightness_field;
++
++	ret = appletb_bl_set_brightness(bl,
++		appletb_bl_brightness_map[(appletb_bl_def_brightness > 2) ? 2 : appletb_bl_def_brightness]);
++
++	if (ret) {
++		dev_err_probe(dev, ret, "Failed to set default touch bar brightness to %d\n",
++			      appletb_bl_def_brightness);
++		goto close_hw;
++	}
++
++	bl_props.type = BACKLIGHT_RAW;
++	bl_props.max_brightness = ARRAY_SIZE(appletb_bl_brightness_map) - 1;
++
++	bl->bdev = devm_backlight_device_register(dev, "appletb_backlight", dev, bl,
++						  &appletb_bl_backlight_ops, &bl_props);
++	if (IS_ERR(bl->bdev)) {
++		ret = PTR_ERR(bl->bdev);
++		dev_err_probe(dev, ret, "Failed to register backlight device\n");
++		goto close_hw;
++	}
++
++	hid_set_drvdata(hdev, bl);
++
++	return 0;
++
++close_hw:
++	hid_hw_close(hdev);
++stop_hw:
++	hid_hw_stop(hdev);
++
++	return ret;
++}
++
++static void appletb_bl_remove(struct hid_device *hdev)
++{
++	struct appletb_bl *bl = hid_get_drvdata(hdev);
++
++	appletb_bl_set_brightness(bl, APPLETB_BL_OFF);
++
++	hid_hw_close(hdev);
++	hid_hw_stop(hdev);
++}
++
++static const struct hid_device_id appletb_bl_hid_ids[] = {
++	/* MacBook Pro's 2018, 2019, with T2 chip: iBridge DFR Brightness */
++	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_TOUCHBAR_BACKLIGHT) },
++	{ }
++};
++MODULE_DEVICE_TABLE(hid, appletb_bl_hid_ids);
++
++static struct hid_driver appletb_bl_hid_driver = {
++	.name = "hid-appletb-bl",
++	.id_table = appletb_bl_hid_ids,
++	.probe = appletb_bl_probe,
++	.remove = appletb_bl_remove,
++};
++module_hid_driver(appletb_bl_hid_driver);
++
++MODULE_AUTHOR("Ronald Tschalär");
++MODULE_AUTHOR("Kerem Karabay <kekrby@gmail.com>");
++MODULE_DESCRIPTION("MacBook Pro Touch Bar Backlight driver");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/hid/hid-appletb-kbd.c b/drivers/hid/hid-appletb-kbd.c
+new file mode 100644
+index 000000000..271d1b27b
+--- /dev/null
++++ b/drivers/hid/hid-appletb-kbd.c
+@@ -0,0 +1,519 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Apple Touch Bar Keyboard Mode Driver
++ *
++ * Copyright (c) 2017-2018 Ronald Tschalär
++ * Copyright (c) 2022-2023 Kerem Karabay <kekrby@gmail.com>
++ * Copyright (c) 2024-2025 Aditya Garg <gargaditya08@live.com>
++ */
++
++#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
++
++#include <linux/hid.h>
++#include <linux/usb.h>
++#include <linux/input.h>
++#include <linux/sysfs.h>
++#include <linux/bitops.h>
++#include <linux/module.h>
++#include <linux/string.h>
++#include <linux/backlight.h>
++#include <linux/timer.h>
++#include <linux/input/sparse-keymap.h>
++
++#include "hid-ids.h"
++
++#define APPLETB_KBD_MODE_ESC	0
++#define APPLETB_KBD_MODE_FN	1
++#define APPLETB_KBD_MODE_SPCL	2
++#define APPLETB_KBD_MODE_OFF	3
++#define APPLETB_KBD_MODE_MAX	APPLETB_KBD_MODE_OFF
++
++#define APPLETB_DEVID_KEYBOARD	1
++#define APPLETB_DEVID_TRACKPAD	2
++
++#define HID_USAGE_MODE		0x00ff0004
++
++static int appletb_tb_def_mode = APPLETB_KBD_MODE_SPCL;
++module_param_named(mode, appletb_tb_def_mode, int, 0444);
++MODULE_PARM_DESC(mode, "Default touchbar mode:\n"
++			 "    0 - escape key only\n"
++			 "    1 - function-keys\n"
++			 "    [2] - special keys");
++
++static bool appletb_tb_fn_toggle = true;
++module_param_named(fntoggle, appletb_tb_fn_toggle, bool, 0644);
++MODULE_PARM_DESC(fntoggle, "Switch between Fn and media controls on pressing Fn key");
++
++static bool appletb_tb_autodim = true;
++module_param_named(autodim, appletb_tb_autodim, bool, 0644);
++MODULE_PARM_DESC(autodim, "Automatically dim and turn off the Touch Bar after some time");
++
++static int appletb_tb_dim_timeout = 60;
++module_param_named(dim_timeout, appletb_tb_dim_timeout, int, 0644);
++MODULE_PARM_DESC(dim_timeout, "Dim timeout in sec");
++
++static int appletb_tb_idle_timeout = 15;
++module_param_named(idle_timeout, appletb_tb_idle_timeout, int, 0644);
++MODULE_PARM_DESC(idle_timeout, "Idle timeout in sec");
++
++struct appletb_kbd {
++	struct hid_field *mode_field;
++	struct input_handler inp_handler;
++	struct input_handle kbd_handle;
++	struct input_handle tpd_handle;
++	struct backlight_device *backlight_dev;
++	struct timer_list inactivity_timer;
++	bool has_dimmed;
++	bool has_turned_off;
++	u8 saved_mode;
++	u8 current_mode;
++};
++
++static const struct key_entry appletb_kbd_keymap[] = {
++	{ KE_KEY, KEY_ESC, { KEY_ESC } },
++	{ KE_KEY, KEY_F1,  { KEY_BRIGHTNESSDOWN } },
++	{ KE_KEY, KEY_F2,  { KEY_BRIGHTNESSUP } },
++	{ KE_KEY, KEY_F3,  { KEY_RESERVED } },
++	{ KE_KEY, KEY_F4,  { KEY_RESERVED } },
++	{ KE_KEY, KEY_F5,  { KEY_KBDILLUMDOWN } },
++	{ KE_KEY, KEY_F6,  { KEY_KBDILLUMUP } },
++	{ KE_KEY, KEY_F7,  { KEY_PREVIOUSSONG } },
++	{ KE_KEY, KEY_F8,  { KEY_PLAYPAUSE } },
++	{ KE_KEY, KEY_F9,  { KEY_NEXTSONG } },
++	{ KE_KEY, KEY_F10, { KEY_MUTE } },
++	{ KE_KEY, KEY_F11, { KEY_VOLUMEDOWN } },
++	{ KE_KEY, KEY_F12, { KEY_VOLUMEUP } },
++	{ KE_END, 0 }
++};
++
++static int appletb_kbd_set_mode(struct appletb_kbd *kbd, u8 mode)
++{
++	struct hid_report *report = kbd->mode_field->report;
++	struct hid_device *hdev = report->device;
++	int ret;
++
++	ret = hid_hw_power(hdev, PM_HINT_FULLON);
++	if (ret) {
++		hid_err(hdev, "Device didn't resume (%pe)\n", ERR_PTR(ret));
++		return ret;
++	}
++
++	ret = hid_set_field(kbd->mode_field, 0, mode);
++	if (ret) {
++		hid_err(hdev, "Failed to set mode field to %u (%pe)\n", mode, ERR_PTR(ret));
++		goto power_normal;
++	}
++
++	hid_hw_request(hdev, report, HID_REQ_SET_REPORT);
++
++	kbd->current_mode = mode;
++
++power_normal:
++	hid_hw_power(hdev, PM_HINT_NORMAL);
++
++	return ret;
++}
++
++static ssize_t mode_show(struct device *dev,
++			 struct device_attribute *attr, char *buf)
++{
++	struct appletb_kbd *kbd = dev_get_drvdata(dev);
++
++	return sysfs_emit(buf, "%d\n", kbd->current_mode);
++}
++
++static ssize_t mode_store(struct device *dev,
++			  struct device_attribute *attr,
++			  const char *buf, size_t size)
++{
++	struct appletb_kbd *kbd = dev_get_drvdata(dev);
++	u8 mode;
++	int ret;
++
++	ret = kstrtou8(buf, 0, &mode);
++	if (ret)
++		return ret;
++
++	if (mode > APPLETB_KBD_MODE_MAX)
++		return -EINVAL;
++
++	ret = appletb_kbd_set_mode(kbd, mode);
++
++	return ret < 0 ? ret : size;
++}
++static DEVICE_ATTR_RW(mode);
++
++static struct attribute *appletb_kbd_attrs[] = {
++	&dev_attr_mode.attr,
++	NULL
++};
++ATTRIBUTE_GROUPS(appletb_kbd);
++
++static int appletb_tb_key_to_slot(unsigned int code)
++{
++	switch (code) {
++	case KEY_ESC:
++		return 0;
++	case KEY_F1 ... KEY_F10:
++		return code - KEY_F1 + 1;
++	case KEY_F11 ... KEY_F12:
++		return code - KEY_F11 + 11;
++
++	default:
++		return -EINVAL;
++	}
++}
++
++static void appletb_inactivity_timer(struct timer_list *t)
++{
++	struct appletb_kbd *kbd = from_timer(kbd, t, inactivity_timer);
++
++	if (kbd->backlight_dev && appletb_tb_autodim) {
++		if (!kbd->has_dimmed) {
++			backlight_device_set_brightness(kbd->backlight_dev, 1);
++			kbd->has_dimmed = true;
++			mod_timer(&kbd->inactivity_timer,
++				jiffies + secs_to_jiffies(appletb_tb_idle_timeout));
++		} else if (!kbd->has_turned_off) {
++			backlight_device_set_brightness(kbd->backlight_dev, 0);
++			kbd->has_turned_off = true;
++		}
++	}
++}
++
++static void reset_inactivity_timer(struct appletb_kbd *kbd)
++{
++	if (kbd->backlight_dev && appletb_tb_autodim) {
++		if (kbd->has_dimmed || kbd->has_turned_off) {
++			backlight_device_set_brightness(kbd->backlight_dev, 2);
++			kbd->has_dimmed = false;
++			kbd->has_turned_off = false;
++		}
++		mod_timer(&kbd->inactivity_timer,
++			jiffies + secs_to_jiffies(appletb_tb_dim_timeout));
++	}
++}
++
++static int appletb_kbd_hid_event(struct hid_device *hdev, struct hid_field *field,
++				      struct hid_usage *usage, __s32 value)
++{
++	struct appletb_kbd *kbd = hid_get_drvdata(hdev);
++	struct key_entry *translation;
++	struct input_dev *input;
++	int slot;
++
++	if ((usage->hid & HID_USAGE_PAGE) != HID_UP_KEYBOARD || usage->type != EV_KEY)
++		return 0;
++
++	input = field->hidinput->input;
++
++	/*
++	 * Skip non-touch-bar keys.
++	 *
++	 * Either the touch bar itself or usbhid generate a slew of key-down
++	 * events for all the meta keys. None of which we're at all interested
++	 * in.
++	 */
++	slot = appletb_tb_key_to_slot(usage->code);
++	if (slot < 0)
++		return 0;
++
++	reset_inactivity_timer(kbd);
++
++	translation = sparse_keymap_entry_from_scancode(input, usage->code);
++
++	if (translation && kbd->current_mode == APPLETB_KBD_MODE_SPCL) {
++		input_event(input, usage->type, translation->keycode, value);
++
++		return 1;
++	}
++
++	return kbd->current_mode == APPLETB_KBD_MODE_OFF;
++}
++
++static void appletb_kbd_inp_event(struct input_handle *handle, unsigned int type,
++			      unsigned int code, int value)
++{
++	struct appletb_kbd *kbd = handle->private;
++
++	reset_inactivity_timer(kbd);
++
++	if (type == EV_KEY && code == KEY_FN && appletb_tb_fn_toggle &&
++		(kbd->current_mode == APPLETB_KBD_MODE_SPCL ||
++		 kbd->current_mode == APPLETB_KBD_MODE_FN)) {
++		if (value == 1) {
++			kbd->saved_mode = kbd->current_mode;
++			appletb_kbd_set_mode(kbd, kbd->current_mode == APPLETB_KBD_MODE_SPCL
++						? APPLETB_KBD_MODE_FN : APPLETB_KBD_MODE_SPCL);
++		} else if (value == 0) {
++			if (kbd->saved_mode != kbd->current_mode)
++				appletb_kbd_set_mode(kbd, kbd->saved_mode);
++		}
++	}
++}
++
++static int appletb_kbd_inp_connect(struct input_handler *handler,
++			       struct input_dev *dev,
++			       const struct input_device_id *id)
++{
++	struct appletb_kbd *kbd = handler->private;
++	struct input_handle *handle;
++	int rc;
++
++	if (id->driver_info == APPLETB_DEVID_KEYBOARD) {
++		handle = &kbd->kbd_handle;
++		handle->name = "tbkbd";
++	} else if (id->driver_info == APPLETB_DEVID_TRACKPAD) {
++		handle = &kbd->tpd_handle;
++		handle->name = "tbtpd";
++	} else {
++		return -ENOENT;
++	}
++
++	if (handle->dev)
++		return -EEXIST;
++
++	handle->open = 0;
++	handle->dev = input_get_device(dev);
++	handle->handler = handler;
++	handle->private = kbd;
++
++	rc = input_register_handle(handle);
++	if (rc)
++		goto err_free_dev;
++
++	rc = input_open_device(handle);
++	if (rc)
++		goto err_unregister_handle;
++
++	return 0;
++
++ err_unregister_handle:
++	input_unregister_handle(handle);
++ err_free_dev:
++	input_put_device(handle->dev);
++	handle->dev = NULL;
++	return rc;
++}
++
++static void appletb_kbd_inp_disconnect(struct input_handle *handle)
++{
++	input_close_device(handle);
++	input_unregister_handle(handle);
++
++	input_put_device(handle->dev);
++	handle->dev = NULL;
++}
++
++static int appletb_kbd_input_configured(struct hid_device *hdev, struct hid_input *hidinput)
++{
++	int idx;
++	struct input_dev *input = hidinput->input;
++
++	/*
++	 * Clear various input capabilities that are blindly set by the hid
++	 * driver (usbkbd.c)
++	 */
++	memset(input->evbit, 0, sizeof(input->evbit));
++	memset(input->keybit, 0, sizeof(input->keybit));
++	memset(input->ledbit, 0, sizeof(input->ledbit));
++
++	__set_bit(EV_REP, input->evbit);
++
++	sparse_keymap_setup(input, appletb_kbd_keymap, NULL);
++
++	for (idx = 0; appletb_kbd_keymap[idx].type != KE_END; idx++)
++		input_set_capability(input, EV_KEY, appletb_kbd_keymap[idx].code);
++
++	return 0;
++}
++
++static const struct input_device_id appletb_kbd_input_devices[] = {
++	{
++		.flags = INPUT_DEVICE_ID_MATCH_BUS |
++			INPUT_DEVICE_ID_MATCH_VENDOR |
++			INPUT_DEVICE_ID_MATCH_KEYBIT,
++		.bustype = BUS_USB,
++		.vendor = USB_VENDOR_ID_APPLE,
++		.keybit = { [BIT_WORD(KEY_FN)] = BIT_MASK(KEY_FN) },
++		.driver_info = APPLETB_DEVID_KEYBOARD,
++	},
++	{
++		.flags = INPUT_DEVICE_ID_MATCH_BUS |
++			INPUT_DEVICE_ID_MATCH_VENDOR |
++			INPUT_DEVICE_ID_MATCH_KEYBIT,
++		.bustype = BUS_USB,
++		.vendor = USB_VENDOR_ID_APPLE,
++		.keybit = { [BIT_WORD(BTN_TOUCH)] = BIT_MASK(BTN_TOUCH) },
++		.driver_info = APPLETB_DEVID_TRACKPAD,
++	},
++	{ }
++};
++
++static bool appletb_kbd_match_internal_device(struct input_handler *handler,
++					  struct input_dev *inp_dev)
++{
++	struct device *dev = &inp_dev->dev;
++
++	/* in kernel: dev && !is_usb_device(dev) */
++	while (dev && !(dev->type && dev->type->name &&
++			!strcmp(dev->type->name, "usb_device")))
++		dev = dev->parent;
++
++	/*
++	 * Apple labels all their internal keyboards and trackpads as such,
++	 * instead of maintaining an ever expanding list of product-id's we
++	 * just look at the device's product name.
++	 */
++	if (dev)
++		return !!strstr(to_usb_device(dev)->product, "Internal Keyboard");
++
++	return false;
++}
++
++static int appletb_kbd_probe(struct hid_device *hdev, const struct hid_device_id *id)
++{
++	struct appletb_kbd *kbd;
++	struct device *dev = &hdev->dev;
++	struct hid_field *mode_field;
++	int ret;
++
++	ret = hid_parse(hdev);
++	if (ret)
++		return dev_err_probe(dev, ret, "HID parse failed\n");
++
++	mode_field = hid_find_field(hdev, HID_OUTPUT_REPORT,
++				    HID_GD_KEYBOARD, HID_USAGE_MODE);
++	if (!mode_field)
++		return -ENODEV;
++
++	kbd = devm_kzalloc(dev, sizeof(*kbd), GFP_KERNEL);
++	if (!kbd)
++		return -ENOMEM;
++
++	kbd->mode_field = mode_field;
++
++	ret = hid_hw_start(hdev, HID_CONNECT_HIDINPUT);
++	if (ret)
++		return dev_err_probe(dev, ret, "HID hw start failed\n");
++
++	ret = hid_hw_open(hdev);
++	if (ret) {
++		dev_err_probe(dev, ret, "HID hw open failed\n");
++		goto stop_hw;
++	}
++
++	kbd->backlight_dev = backlight_device_get_by_name("appletb_backlight");
++	if (!kbd->backlight_dev) {
++		dev_err_probe(dev, -ENODEV, "Failed to get backlight device\n");
++	} else {
++		backlight_device_set_brightness(kbd->backlight_dev, 2);
++		timer_setup(&kbd->inactivity_timer, appletb_inactivity_timer, 0);
++		mod_timer(&kbd->inactivity_timer,
++			jiffies + secs_to_jiffies(appletb_tb_dim_timeout));
++	}
++
++	kbd->inp_handler.event = appletb_kbd_inp_event;
++	kbd->inp_handler.connect = appletb_kbd_inp_connect;
++	kbd->inp_handler.disconnect = appletb_kbd_inp_disconnect;
++	kbd->inp_handler.name = "appletb";
++	kbd->inp_handler.id_table = appletb_kbd_input_devices;
++	kbd->inp_handler.match = appletb_kbd_match_internal_device;
++	kbd->inp_handler.private = kbd;
++
++	ret = input_register_handler(&kbd->inp_handler);
++	if (ret) {
++		dev_err_probe(dev, ret, "Unable to register keyboard handler\n");
++		goto close_hw;
++	}
++
++	ret = appletb_kbd_set_mode(kbd, appletb_tb_def_mode);
++	if (ret) {
++		dev_err_probe(dev, ret, "Failed to set touchbar mode\n");
++		goto unregister_handler;
++	}
++
++	hid_set_drvdata(hdev, kbd);
++
++	return 0;
++
++unregister_handler:
++	input_unregister_handler(&kbd->inp_handler);
++close_hw:
++	if (kbd->backlight_dev) {
++		put_device(&kbd->backlight_dev->dev);
++		timer_delete_sync(&kbd->inactivity_timer);
++	}
++	hid_hw_close(hdev);
++stop_hw:
++	hid_hw_stop(hdev);
++	return ret;
++}
++
++static void appletb_kbd_remove(struct hid_device *hdev)
++{
++	struct appletb_kbd *kbd = hid_get_drvdata(hdev);
++
++	appletb_kbd_set_mode(kbd, APPLETB_KBD_MODE_OFF);
++
++	input_unregister_handler(&kbd->inp_handler);
++	if (kbd->backlight_dev) {
++		put_device(&kbd->backlight_dev->dev);
++		timer_delete_sync(&kbd->inactivity_timer);
++	}
++
++	hid_hw_close(hdev);
++	hid_hw_stop(hdev);
++}
++
++#ifdef CONFIG_PM
++static int appletb_kbd_suspend(struct hid_device *hdev, pm_message_t msg)
++{
++	struct appletb_kbd *kbd = hid_get_drvdata(hdev);
++
++	kbd->saved_mode = kbd->current_mode;
++	appletb_kbd_set_mode(kbd, APPLETB_KBD_MODE_OFF);
++
++	return 0;
++}
++
++static int appletb_kbd_reset_resume(struct hid_device *hdev)
++{
++	struct appletb_kbd *kbd = hid_get_drvdata(hdev);
++
++	appletb_kbd_set_mode(kbd, kbd->saved_mode);
++
++	return 0;
++}
++#endif
++
++static const struct hid_device_id appletb_kbd_hid_ids[] = {
++	/* MacBook Pro's 2018, 2019, with T2 chip: iBridge Display */
++	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_TOUCHBAR_DISPLAY) },
++	{ }
++};
++MODULE_DEVICE_TABLE(hid, appletb_kbd_hid_ids);
++
++static struct hid_driver appletb_kbd_hid_driver = {
++	.name = "hid-appletb-kbd",
++	.id_table = appletb_kbd_hid_ids,
++	.probe = appletb_kbd_probe,
++	.remove = appletb_kbd_remove,
++	.event = appletb_kbd_hid_event,
++	.input_configured = appletb_kbd_input_configured,
++#ifdef CONFIG_PM
++	.suspend = appletb_kbd_suspend,
++	.reset_resume = appletb_kbd_reset_resume,
++#endif
++	.driver.dev_groups = appletb_kbd_groups,
++};
++module_hid_driver(appletb_kbd_hid_driver);
++
++/* The backlight driver should be loaded before the keyboard driver is initialised */
++MODULE_SOFTDEP("pre: hid_appletb_bl");
++
++MODULE_AUTHOR("Ronald Tschalär");
++MODULE_AUTHOR("Kerem Karabay <kekrby@gmail.com>");
++MODULE_AUTHOR("Aditya Garg <gargaditya08@live.com>");
++MODULE_DESCRIPTION("MacBook Pro Touch Bar Keyboard Mode driver");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/hid/hid-quirks.c b/drivers/hid/hid-quirks.c
+index b95521c50..aa1b789c1 100644
+--- a/drivers/hid/hid-quirks.c
++++ b/drivers/hid/hid-quirks.c
+@@ -347,8 +347,6 @@ static const struct hid_device_id hid_have_special_driver[] = {
+ 	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_GEYSER1_TP_ONLY) },
+ 	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_MAGIC_KEYBOARD_2021) },
+ 	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_MAGIC_KEYBOARD_FINGERPRINT_2021) },
+-	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_TOUCHBAR_BACKLIGHT) },
+-	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_TOUCHBAR_DISPLAY) },
+ #endif
+ #if IS_ENABLED(CONFIG_HID_APPLEIR)
+ 	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_IRCONTROL) },
+@@ -357,6 +355,12 @@ static const struct hid_device_id hid_have_special_driver[] = {
+ 	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_IRCONTROL4) },
+ 	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_IRCONTROL5) },
+ #endif
++#if IS_ENABLED(CONFIG_HID_APPLETB_BL)
++	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_TOUCHBAR_BACKLIGHT) },
++#endif
++#if IS_ENABLED(CONFIG_HID_APPLETB_KBD)
++	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_TOUCHBAR_DISPLAY) },
++#endif
+ #if IS_ENABLED(CONFIG_HID_ASUS)
+ 	{ HID_I2C_DEVICE(USB_VENDOR_ID_ASUSTEK, USB_DEVICE_ID_ASUSTEK_I2C_KEYBOARD) },
+ 	{ HID_I2C_DEVICE(USB_VENDOR_ID_ASUSTEK, USB_DEVICE_ID_ASUSTEK_I2C_TOUCHPAD) },

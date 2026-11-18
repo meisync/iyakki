@@ -1,0 +1,5 @@
+{"kind":"PersistentVolumeClaimList","items":[
+{"metadata":{"namespace":"iyakki-data","name":"es-data"},"spec":{"storageClassName":"local-path","resources":{"requests":{"storage":"10Gi"}}},"status":{"phase":"Bound","capacity":{"storage":"10Gi"}}},
+{"metadata":{"namespace":"shop","name":"db"},"spec":{"storageClassName":"fast","resources":{"requests":{"storage":"500Mi"}}},"status":{"phase":"Pending"}},
+{"metadata":{"namespace":"shop","name":"odd"},"spec":{},"status":{}}
+]}

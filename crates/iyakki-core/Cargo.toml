@@ -1,0 +1,49 @@
+[package]
+name = "iyakki-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "iyakki"
+path = "src/main.rs"
+
+[features]
+default = ["swarm", "egress", "shell", "web"]
+swarm = ["dep:iyakki-swarm", "dep:tokio"]
+egress = ["dep:iyakki-proxy"]
+# `headless`: the web service without the desktop (`iyakki serve --profile ...`): the agent, no shell, no screen, no browser engine
+headless = ["dep:iyakki-agent", "dep:iyakki-dash"]
+shell = ["headless", "dep:iyakki-shell", "dep:iyakki-compose"]
+web = ["shell", "dep:iyakki-remote"]
+
+[dependencies]
+iyakki-ledger.workspace = true
+iyakki-swarm = { path = "../iyakki-swarm", optional = true }
+iyakki-proxy = { path = "../iyakki-proxy", optional = true }
+iyakki-shell = { path = "../iyakki-shell", optional = true }
+iyakki-compose = { path = "../iyakki-compose", optional = true }
+iyakki-agent = { path = "../iyakki-agent", optional = true }
+iyakki-dash = { path = "../iyakki-dash", optional = true }
+iyakki-remote = { path = "../iyakki-remote", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"], optional = true }
+iyakki-sec.workspace = true
+iyakki-accounts = { path = "../iyakki-accounts" }
+iyakki-core-api.workspace = true
+iyakki-devctl.workspace = true
+iyakki-storage.workspace = true
+iyakki-zram.workspace = true
+iyakki-fw.workspace = true
+iyakki-vpn = { path = "../iyakki-vpn" }
+iyakki-usb = { path = "../iyakki-usb" }
+iyakki-hwinfo.workspace = true
+iyakki-drivers.workspace = true
+iyakki-vfs.workspace = true
+iyakki-wasm.workspace = true
+thiserror.workspace = true
+log.workspace = true
+libc = "0.2"
+serde_json = "1"
+
+[dev-dependencies]
+iyakki-relcheck = { path = "../iyakki-relcheck" }

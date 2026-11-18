@@ -1,0 +1,24 @@
+# OPTIONAL: use only when the local-path provisioner cannot start its helper pod (seen 2026-11-15: this PC's disk was above 85%, so the
+# node carried the disk-pressure taint and the provisioner's helper pod in kube-system could not be scheduled; the claim stayed Pending).
+# A static volume on a folder of the node, bound to the store's claim, needs no helper. Make the folder first, as root on the node:
+#   mkdir -p /var/lib/iyakki-store && chown 10001:10001 /var/lib/iyakki-store && chmod 750 /var/lib/iyakki-store
+# Apply it BEFORE 10-pvc.yaml. The size is not enforced by the node (the server's --store-cap-mib is the limit).
+# Remove it with the namespace: kubectl delete pv iyakki-store-data   (the folder's files stay on the disk until deleted by hand)
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: iyakki-store-data
+  labels:
+    app.kubernetes.io/part-of: iyakki-store
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-path
+  claimRef:
+    namespace: iyakki-store
+    name: store-data
+  hostPath:
+    path: /var/lib/iyakki-store
+    type: Directory

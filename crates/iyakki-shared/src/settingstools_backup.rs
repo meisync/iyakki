@@ -1,0 +1,5 @@
+//! Types moved out of `iyakki_agent::settingstools_backup` (F-SPLIT-03, scripted by dist/split/move_types.py); the agent re-exports them.
+
+use crate::backup;
+
+pub const PROMPT_RULE: &str = "\nBACKUP (Settings -> Backup and restore): backup_status shows what a backup would hold (free). backup_inspect reads a backup file made for this account (free; an encrypted file is opened in Settings, never with a passphrase typed to you). backup_create (a folder in the person's home) and backup_restore (a file and the areas to bring back) and backup_schedule (a backup every N days at an hour into a folder of the home, keeping the newest few; an encrypted schedule names a passphrase file the person made, otherwise it needs unencrypted: true; turn it off with enabled: false) each ask first; a passphrase never goes through the chat, so backup_create writes an unencrypted file only when the person agreed to that (unencrypted: true) and says so. checkup_result_verify checks the signature of a CHECK-UP result file (free). edit_run_stop stops the file the editor is running (asks). edit_run_input sets the text the editor gives the next run on its standard input (asks).";

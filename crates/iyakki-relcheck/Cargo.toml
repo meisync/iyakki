@@ -1,0 +1,10 @@
+[package]
+name = "iyakki-relcheck"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Release checks for the repository (no dependencies): markdown link checker, secret scan, version consistency, FEATURES totals, SBOM."
+
+[[bin]]
+name = "iyakki-relcheck"
+path = "src/main.rs"

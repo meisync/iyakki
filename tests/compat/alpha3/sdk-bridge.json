@@ -1,0 +1,30 @@
+{
+  "about": "A recorded transcript of the app bridge (docs/development/SDK-BRIDGE-V2.md). 'old' are calls written for SDK 1.0 and 1.1 and what they answered then: a newer host must answer the same. 'future' are calls an app written for a later SDK might make: this host must degrade with a structured answer, never a crash. Replayed by crates/iyakki-agent/src/store/sdkv2_tests.rs.",
+  "caps": {"storage": true, "notifications": true, "llm": true, "speech": true},
+  "old": [
+    {"op": "app.info", "args": {}, "ok": true, "has_keys": ["id", "name", "version", "publisher", "trust", "dev", "capabilities"]},
+    {"op": "storage.set", "args": {"k": "a.b", "v": "1"}, "ok": true, "equals": null},
+    {"op": "storage.get", "args": {"k": "a.b"}, "ok": true, "equals": "1"},
+    {"op": "storage.get", "args": {"k": "missing"}, "ok": true, "equals": null},
+    {"op": "storage.list", "args": {}, "ok": true, "equals": ["a.b"]},
+    {"op": "storage.remove", "args": {"k": "a.b"}, "ok": true, "equals": null},
+    {"op": "ui.toast", "args": {"text": "hi"}, "ok": true, "equals": null},
+    {"op": "ui.title", "args": {"text": "Title"}, "ok": true, "equals": null},
+    {"op": "notify.show", "args": {"title": "t", "body": "b"}, "ok": true, "equals": null},
+    {"op": "models.list", "args": {}, "ok": true, "is_array": true},
+    {"op": "llm.usage", "args": {}, "ok": true, "has_keys": ["since", "today", "range", "limits", "remaining", "resetsAt", "byDay"]},
+    {"op": "clipboard.read", "args": {}, "error_contains": "did not ask for"},
+    {"op": "storage.get", "args": {"k": "bad key"}, "error_contains": "key"},
+    {"op": "llm.chat", "args": {"messages": []}, "error_code": "BadArgument"},
+    {"op": "speech.say", "args": {"text": ""}, "error_code": "BadArgument"}
+  ],
+  "future": [
+    {"op": "hologram.show", "args": {"x": 1}, "error_code": "Unsupported", "namespace": "hologram"},
+    {"op": "markdown.future", "args": {}, "error_code": "Unsupported", "namespace": "markdown"},
+    {"op": "storage.get", "args": {"k": "x", "future_option": true}, "ok": true, "equals": null},
+    {"op": "sdk.call", "args": {"op": "hologram.show", "args": {}}, "error_code": "Unsupported"},
+    {"op": "sdk.call", "args": {"op": "sdk.call", "args": {}}, "error_code": "Unsupported"},
+    {"op": "sdk.has", "args": {"name": "hologram", "future_option": 1}, "ok": true, "equals": false},
+    {"op": "audio.play", "args": {"url": "https://example.com/a.mp3"}, "error_code": "NoCapability"}
+  ]
+}

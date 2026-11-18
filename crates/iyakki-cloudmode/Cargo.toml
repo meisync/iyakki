@@ -1,0 +1,13 @@
+[package]
+name = "iyakki-cloudmode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cloud mode: the setting, the facts of a machine and the pure decision of what is hidden (split out of iyakki-agent for F-SPLIT-03)."
+
+[dependencies]
+iyakki-sec = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

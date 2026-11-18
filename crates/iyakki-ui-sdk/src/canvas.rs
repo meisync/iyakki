@@ -1,0 +1,172 @@
+//! The `Canvas` trait: every call an app makes to draw. Two implementations here: [`crate::raster::RasterCanvas`] (pixels, through the
+//! toolkit's `Gfx`: the device and the desktop window) and [`crate::list::ListCanvas`] (records a [`crate::list::DisplayList`]: a browser,
+//! a client, a test, a WASM tile). An app written against this trait runs on both without a change.
+
+use crate::geom::{Color, Rect};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextStyle {
+    Regular,
+    Bold,
+    Mono,
+}
+
+/// What a clickable region is, for the screen reader and for a client that exposes ARIA.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    Button,
+    Link,
+    ListItem,
+    Tab,
+    Field,
+    Text,
+    Image,
+}
+
+impl Role {
+    pub const ALL: [Role; 7] = [Role::Button, Role::Link, Role::ListItem, Role::Tab, Role::Field, Role::Text, Role::Image];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Role::Button => "button",
+            Role::Link => "link",
+            Role::ListItem => "item",
+            Role::Tab => "tab",
+            Role::Field => "field",
+            Role::Text => "text",
+            Role::Image => "image",
+        }
+    }
+
+    pub fn from_key(k: &str) -> Option<Role> {
+        Role::ALL.iter().copied().find(|r| r.key() == k)
+    }
+}
+
+/// A clickable region: what the app is told when it is used (`UiEvent::Action(action)`), its name and its role.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Hit {
+    pub action: u32,
+    pub name: String,
+    pub role: Role,
+}
+
+/// How the bytes of an [`Image`] are laid out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageFormat {
+    /// 8-bit red, green, blue, alpha, row after row (`width * height * 4` bytes).
+    Rgba,
+    /// One complete JPEG file.
+    Jpeg,
+}
+
+impl ImageFormat {
+    pub fn key(self) -> &'static str {
+        match self {
+            ImageFormat::Rgba => "rgba",
+            ImageFormat::Jpeg => "jpeg",
+        }
+    }
+    pub fn from_key(k: &str) -> Option<ImageFormat> {
+        [ImageFormat::Rgba, ImageFormat::Jpeg].into_iter().find(|f| f.key() == k)
+    }
+}
+
+/// The most bytes one image carries, and the largest picture in pixels each way. A larger one is refused by the list reader.
+pub const MAX_IMAGE_BYTES: usize = 1024 * 1024;
+pub const MAX_IMAGE_SIDE: u32 = 4096;
+
+/// A picture an app got from the core (a camera frame, a video frame). `seq` grows with every new picture of the same source, so a
+/// renderer that keeps the last decoded one can tell a new picture from the same one drawn again.
+#[derive(Clone, PartialEq)]
+pub struct Image {
+    pub format: ImageFormat,
+    pub width: u32,
+    pub height: u32,
+    pub seq: u64,
+    pub data: std::sync::Arc<Vec<u8>>,
+}
+
+impl std::fmt::Debug for Image {
+    // short on purpose: a picture's bytes never go into a log or a test failure (and the engine module stays small)
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Image")
+    }
+}
+
+impl Image {
+    /// Whether the picture is well formed and within the limits (the reader and the canvases refuse what is not).
+    pub fn check(&self) -> Result<(), String> {
+        if self.width == 0 || self.height == 0 || self.width > MAX_IMAGE_SIDE || self.height > MAX_IMAGE_SIDE {
+            return Err("an image is 1 to 4096 pixels each way".into());
+        }
+        if self.data.len() > MAX_IMAGE_BYTES {
+            return Err("an image is at most 1024 KB".into());
+        }
+        match self.format {
+            ImageFormat::Rgba if self.data.len() != self.width as usize * self.height as usize * 4 => Err("an RGBA image has width x height x 4 bytes".into()),
+            ImageFormat::Jpeg if !self.data.starts_with(&[0xFF, 0xD8]) => Err("a JPEG image starts with FF D8".into()),
+            _ => Ok(()),
+        }
+    }
+}
+
+pub trait Canvas {
+    /// The drawing area in logical units. Lay the screen out from this, never from a constant.
+    fn size(&self) -> (f32, f32);
+    fn rect(&mut self, r: Rect, c: Color);
+    fn rrect(&mut self, r: Rect, radius: f32, c: Color);
+    fn outline(&mut self, r: Rect, radius: f32, width: f32, c: Color);
+    fn line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, c: Color);
+    /// A vertical gradient from `top` to `bottom`.
+    fn gradient(&mut self, r: Rect, top: Color, bottom: Color);
+    /// A soft glow around a rounded rectangle (a shadow when the colour is dark).
+    fn shadow(&mut self, r: Rect, radius: f32, spread: f32, c: Color);
+    /// Text with its top-left at (x, y); returns the advance width.
+    fn text(&mut self, x: f32, y: f32, size: f32, c: Color, s: &str, style: TextStyle) -> f32;
+    fn measure(&mut self, size: f32, s: &str, style: TextStyle) -> f32;
+    /// Everything `f` draws or registers is cut to `r`.
+    fn clipped(&mut self, r: Rect, f: &mut dyn FnMut(&mut dyn Canvas));
+    /// A picture stretched to `r` (keep the aspect yourself: see [`contain`]). A canvas that cannot draw it draws nothing; the default does.
+    fn image(&mut self, _r: Rect, _img: &Image) {}
+    /// How text is set from now on (family, letter spacing, tabular figures). The host sets it once a frame from the person's choices;
+    /// a canvas that cannot honour part of it (the pixel canvas draws the person's family by itself) ignores that part.
+    fn set_type(&mut self, _o: crate::typeface::TextOpts) {}
+    /// The type options now in force (so a replayed run can put them back).
+    fn type_opts(&self) -> crate::typeface::TextOpts {
+        crate::typeface::TextOpts::default()
+    }
+    /// Blur what is already drawn inside `r` (the back of a glass surface). A canvas without blur ignores it.
+    fn blur(&mut self, _r: Rect, _radius: f32) {}
+    /// A clickable region (also the accessibility tree: every control has a name and a role).
+    fn hit(&mut self, r: Rect, hit: Hit);
+}
+
+/// The largest rectangle of the aspect `w` by `h` that fits in `r`, centred (letterboxed).
+pub fn contain(r: Rect, w: u32, h: u32) -> Rect {
+    if w == 0 || h == 0 || r.w <= 0.0 || r.h <= 0.0 {
+        return Rect::new(r.x, r.y, 0.0, 0.0);
+    }
+    let k = (r.w / w as f32).min(r.h / h as f32);
+    let (iw, ih) = (w as f32 * k, h as f32 * k);
+    Rect::new(r.x + (r.w - iw) / 2.0, r.y + (r.h - ih) / 2.0, iw, ih)
+}
+
+/// `s` shortened with an ellipsis so that it is at most `max_w` wide.
+pub fn fit(c: &mut dyn Canvas, size: f32, s: &str, style: TextStyle, max_w: f32) -> String {
+    if c.measure(size, s, style) <= max_w {
+        return s.to_string();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let (mut lo, mut hi) = (0usize, chars.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        let t: String = chars[..mid].iter().collect::<String>() + "\u{2026}";
+        if c.measure(size, &t, style) <= max_w {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    chars[..lo].iter().collect::<String>() + "\u{2026}"
+}

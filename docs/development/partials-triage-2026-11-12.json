@@ -1,0 +1,2468 @@
+[
+ {
+  "id": "F-CORE-06",
+  "class": "B",
+  "size": "-",
+  "reason": "Code done; the Linux-only kubectl child test was written on a Mac and never run, and the real PID 1 reaper path was only run on the Mac mini once.",
+  "try": "Run `cargo test -p iyakki-agent --lib childgone_tests` on the Linux PC; on the Mac mini kill a child under the real reaper and read `iyakki dev logs`. Then Impl 100.",
+  "needs": [
+   "MM",
+   "PC"
+  ],
+  "impl_semantics": true,
+  "impl": 95
+ },
+ {
+  "id": "F-CORE-07",
+  "class": "F",
+  "size": "-",
+  "reason": "Row is the contract types and fakes; the only unbuilt part is the cloud relay (owner decided: owner-run relay later, after beta).",
+  "wording": "Split: new planned row 'Cloud relay transport for the core contract'; this row keeps the types and goes to its honest Impl.",
+  "impl": 30
+ },
+ {
+  "id": "F-CORE-10",
+  "class": "F",
+  "size": "M",
+  "reason": "Loopback TLS channel is built; missing are a Settings page for the switch and grants (buildable), the cloud relay and push events (not).",
+  "wording": "Split relay and push into planned rows; remaining here: Settings page for the contract switch and per-computer scopes (A, M).",
+  "impl": 40
+ },
+ {
+  "id": "F-CORE-12",
+  "class": "E",
+  "size": "-",
+  "reason": "Row title is slice 1 only; the broker it says is 'NOT built' is F-CORE-13. Everything the title lists is built.",
+  "evidence": "Ran on the Mac: `cargo test -p iyakki-core-api --lib appcaps` (10 pass); `iyakki-agent store::lifecycle_tests::app_json_takes_a_core_capability_list_refuses_unknown_names_and_keeps_the_old_object_form` and `...the_install_card_lists_core_capabilities_asks_first_and_records_who_approved_what_for_which_version` (pass); `iyakki-shell ...manage_tests::the_install_card_of_an_app_that_asks_for_device_access_lists_it_marks_hard_asks_and_fits_every_size` (pass). Impl set to 90: the old object form of `capabilities` is kept but not mapped onto the catalogue, wasm32 build unchecked.",
+  "verified": true,
+  "impl": 20
+ },
+ {
+  "id": "F-CORE-14",
+  "class": "C",
+  "size": "-",
+  "reason": "Client session endpoint, EXPERIMENTAL; the engine, page, sound, camera and approvals UI named as NOT built here were built later in F-CLIENT-01..09, so the row text is stale; what is really open is pinning TLS/browsers/phones.",
+  "question": "Decision D4: declare the client-split family experimental-by-decision (recommended: keep partial, verify the Chrome path only, list Safari/Firefox/phone as known limits), or schedule a real-device pass (phone + Safari + Firefox + macOS window).",
+  "impl": 35
+ },
+ {
+  "id": "F-CORE-16",
+  "class": "F",
+  "size": "L",
+  "reason": "Charter steps 1-3 and gate 6 built; steps 5-7 (hello deprecations list and compat report, two-phase migration, QEMU upgrade/rollback test, C interface) are separate work.",
+  "wording": "Split steps 5, 6 and 7 into three planned rows; step 4 is F-CORE-15; this row becomes 'gates 1-3 and 6'.",
+  "impl": 45
+ },
+ {
+  "id": "F-CORE-15",
+  "class": "F",
+  "size": "-",
+  "reason": "Title says 'data and validation only'; wizard engine, snapshot/migration runner, WASM migrators and member kinds are other rows' work (bundles design).",
+  "wording": "Split: planned rows 'Bundle wizard engine', 'Bundle migration runner', 'Bundle member kinds tool/mcp/nested tile'; here keep data and validation.",
+  "impl": 25
+ },
+ {
+  "id": "F-CLIENT-01",
+  "class": "C",
+  "size": "-",
+  "reason": "Client engine and browser page, EXPERIMENTAL; ran once in headless Chrome; TLS/cloud, Firefox, Safari, phone untried; file exchange and display-list mode not built.",
+  "question": "Decision D4 (see F-CORE-14).",
+  "impl": 40
+ },
+ {
+  "id": "F-CLIENT-02",
+  "class": "C",
+  "size": "-",
+  "reason": "Window program, EXPERIMENTAL; Linux Chrome only; does not build on Windows; key store, packaging and signing not built.",
+  "question": "Decision D4; plus D4: which OS the connector targets for 1.0 (Linux+macOS only, recommended; Windows later as a planned row).",
+  "impl": 45
+ },
+ {
+  "id": "F-CLIENT-03",
+  "class": "C",
+  "size": "-",
+  "reason": "Sound to the client, EXPERIMENTAL; fake card; lip-sync and per-person mixer open.",
+  "question": "Decision D4.",
+  "impl": 55
+ },
+ {
+  "id": "F-CLIENT-04",
+  "class": "C",
+  "size": "-",
+  "reason": "Client clipboard, EXPERIMENTAL; fake screen; real permission prompt and Safari untried.",
+  "question": "Decision D4.",
+  "impl": 50
+ },
+ {
+  "id": "F-CLIENT-05",
+  "class": "C",
+  "size": "-",
+  "reason": "Camera frames to a client, EXPERIMENTAL; fake USB camera only.",
+  "question": "Decision D4.",
+  "impl": 45
+ },
+ {
+  "id": "F-CLIENT-06",
+  "class": "C",
+  "size": "-",
+  "reason": "Client's own camera/mic as virtual sources, EXPERIMENTAL; no consumer of the virtual sources exists on the machine.",
+  "question": "Decision D4; if experimental, add a planned row 'first consumer of a client camera source'.",
+  "impl": 45
+ },
+ {
+  "id": "F-CLIENT-07",
+  "class": "C",
+  "size": "-",
+  "reason": "Media half wired into the shell, EXPERIMENTAL; seen in test rigs only.",
+  "question": "Decision D4.",
+  "impl": 50
+ },
+ {
+  "id": "F-CLIENT-08",
+  "class": "C",
+  "size": "-",
+  "reason": "Client device permissions in Settings/chat, EXPERIMENTAL; no live-chat run, no real device.",
+  "question": "Decision D4.",
+  "impl": 55
+ },
+ {
+  "id": "F-CLIENT-09",
+  "class": "C",
+  "size": "-",
+  "reason": "Window program media pass-through and Cmd+V text, EXPERIMENTAL; macOS never run.",
+  "question": "Decision D4 and D4.",
+  "impl": 60
+ },
+ {
+  "id": "F-WASM-09",
+  "class": "A",
+  "size": "L",
+  "reason": "Tile host runner measured at 45 us per frame but real tiles and the shell are not connected to it.",
+  "plan": "Add a `wasm` tile kind to the shell tile loader behind a setting off by default, load one example tile, headless-harness test. Ties to alpha.3 'experimental browser WASM renderer'.",
+  "impl": 60
+ },
+ {
+  "id": "F-NET-02",
+  "class": "B",
+  "size": "-",
+  "reason": "WPA planner never associated with a real access point; Mac mini needs Apple firmware (F-DRIVERS-24); MBP14 Wi-Fi board files unverified.",
+  "try": "On MBP14: fetch firmware by the Mac drivers page, join a real WPA2 AP, record `iw` output. Mac mini after firmware.",
+  "needs": [
+   "MM",
+   "MBP14",
+   "NET"
+  ],
+  "impl": 70
+ },
+ {
+  "id": "F-NET-05",
+  "class": "F",
+  "size": "-",
+  "reason": "Umbrella row; HID, tether and A2DP sink are F-NET-18..24; what is unwritten here is A2DP source (sending to headphones) and AVRCP.",
+  "wording": "Split A2DP source and AVRCP into two planned rows; this row then describes userland that exists.",
+  "impl": 55
+ },
+ {
+  "id": "F-NET-07",
+  "class": "B",
+  "size": "-",
+  "reason": "Wi-Fi settings page tested with `iw` output and stand-ins only; enterprise, WEP, captive portals not done.",
+  "try": "Scan and join a real WPA2 network from Settings; open enterprise/WEP/captive portal as planned rows or mark out of scope.",
+  "needs": [
+   "MBP14",
+   "NET"
+  ],
+  "impl": 70
+ },
+ {
+  "id": "F-NET-09",
+  "class": "B",
+  "size": "-",
+  "reason": "Private MAC logic tested on a fake driver; real drivers may refuse the change.",
+  "try": "On MBP14 Wi-Fi and a USB Ethernet adapter run `iyakki net mac apply`; record which drivers refuse.",
+  "needs": [
+   "MBP14",
+   "LEN",
+   "NET"
+  ],
+  "impl_semantics": true,
+  "impl": 80
+ },
+ {
+  "id": "F-NET-18",
+  "class": "B",
+  "size": "-",
+  "reason": "Classic BT HID session with fakes; Device ID record added; never ran against a real keyboard/mouse/pad. Project notes say pairing and A2DP were verified on MBP14 on 2026-11-08: record that result in the row.",
+  "try": "Follow docs/BLUETOOTH-INPUT.md with a real keyboard, mouse and pad; test reconnect after reboot.",
+  "needs": [
+   "MBP14",
+   "PH"
+  ],
+  "impl_semantics": true,
+  "impl": 75
+ },
+ {
+  "id": "F-NET-19",
+  "class": "B",
+  "size": "-",
+  "reason": "Settings Bluetooth page driven with a fake machine; the pairing popup not seen with a real device.",
+  "try": "Same session as F-NET-18, eyes on the popup and the Connect/Forget buttons.",
+  "needs": [
+   "MBP14",
+   "PH"
+  ],
+  "impl_semantics": true,
+  "impl": 75
+ },
+ {
+  "id": "F-NET-20",
+  "class": "B",
+  "size": "-",
+  "reason": "Tethering and the new retry loop never run against a phone (owner verified a tether on 2026-11-08 per project notes; retry loop is newer).",
+  "try": "Tether to a phone, switch phone BT off and on, watch 3/10/30/60 s retries and the give-up state.",
+  "needs": [
+   "MBP14",
+   "PH"
+  ],
+  "impl_semantics": true,
+  "impl": 75
+ },
+ {
+  "id": "F-NET-21",
+  "class": "B",
+  "size": "-",
+  "reason": "Phone pairing from Settings fake only; Mac mini controller still needs its firmware file.",
+  "try": "Pair a phone on MBP14; on the Mac mini after the firmware install.",
+  "needs": [
+   "MBP14",
+   "MM",
+   "PH"
+  ],
+  "impl_semantics": true,
+  "impl": 60
+ },
+ {
+  "id": "F-NET-22",
+  "class": "B",
+  "size": "-",
+  "reason": "BLE HID over GATT only with scripted peers.",
+  "try": "Pair a real BLE keyboard and mouse; test reconnect after restart.",
+  "needs": [
+   "MBP14",
+   "PH"
+  ],
+  "impl_semantics": true,
+  "impl": 55
+ },
+ {
+  "id": "F-NET-23",
+  "class": "B",
+  "size": "-",
+  "reason": "SBC encoder verified against ffmpeg; the designed window tables need to be heard on a phone/headphone before the legacy feature is removed.",
+  "try": "Play the same tone and a song with the designed and the legacy tables to a real A2DP sink, owner chooses; then remove `legacy-sbc-window`.",
+  "needs": [
+   "PH",
+   "EAR"
+  ],
+  "impl": 75
+ },
+ {
+  "id": "F-NET-24",
+  "class": "B",
+  "size": "-",
+  "reason": "A2DP sink protocol with scripted peers; owner heard it on MBP14 on 2026-11-08 (project notes) but the row says no radio traffic.",
+  "try": "Record the MBP14 result, then test latency and a second phone.",
+  "needs": [
+   "MBP14",
+   "PH"
+  ],
+  "impl_semantics": true,
+  "impl": 65
+ },
+ {
+  "id": "F-NET-14",
+  "class": "B",
+  "size": "-",
+  "reason": "Direct-link bring-up never ran with two real machines.",
+  "try": "Connect MBP16 and the Linux PC with a Thunderbolt or USB bridge cable and run `iyakki dev usb link`.",
+  "needs": [
+   "MBP16",
+   "PC"
+  ],
+  "impl": 60
+ },
+ {
+  "id": "F-DISP-02",
+  "class": "F",
+  "size": "S",
+  "reason": "UI size is built; the resolution half waits for the DRM/KMS renderer; some pages overflow at the largest sizes on small screens.",
+  "wording": "Split resolution choice into a planned row (needs DRM/KMS); fix the overflowing pages (A, S) via the existing size tests.",
+  "impl": 50
+ },
+ {
+  "id": "F-DISP-12",
+  "class": "F",
+  "size": "-",
+  "reason": "The retrain step was tried on the Mac mini after a cold boot on 2026-11-07 and does not wake the panel; the real cause was found and fixed in the shell (touch cold boot).",
+  "wording": "Deprecate the 'retrain the display link' step (keep as last resort only if cheap), mark this row's Notes 'tried, no effect'; the fix is tracked in the touch rows.",
+  "impl": 50
+ },
+ {
+  "id": "F-SND-03",
+  "class": "F",
+  "size": "-",
+  "reason": "Softvol is verified by hand on the Mac mini; left open are a program opening plughw itself (documented limit) and the web-engine mix, which is F-SND-15.",
+  "wording": "Reword: limit documented; web mix lives in F-SND-15; set Impl 100 once the owner agrees.",
+  "impl": 80
+ },
+ {
+  "id": "F-SND-04",
+  "class": "B",
+  "size": "-",
+  "reason": "One master volume never heard on MBP14 (S24_LE card, softvol over route).",
+  "try": "Play chime and radio on MBP14; check the `IYAKKI` control exists and levels match; try Boost.",
+  "needs": [
+   "MBP14",
+   "EAR"
+  ],
+  "impl": 75
+ },
+ {
+  "id": "F-KBD-01",
+  "class": "B",
+  "size": "-",
+  "reason": "Fn/media keys tested with synthetic events; no real laptop keyboard.",
+  "try": "Use docs/KEYBOARD-AND-FN-KEYS.md checklist on each laptop.",
+  "needs": [
+   "MBP14",
+   "MBP16",
+   "LEN",
+   "EYE"
+  ],
+  "impl_semantics": true,
+  "impl": 85
+ },
+ {
+  "id": "F-KBD-13",
+  "class": "B",
+  "size": "-",
+  "reason": "Touch Bar bring-up fakes only; behaviour of configuration 2 unknown.",
+  "try": "Boot MBP16 (has a Touch Bar), read the bring-up log, check whether keys survive.",
+  "needs": [
+   "MBP16"
+  ],
+  "impl": 60
+ },
+ {
+  "id": "F-KBD-14",
+  "class": "B",
+  "size": "-",
+  "reason": "Touch Bar strip never run; touch needs the hid-multitouch Apple class that 6.12 lacks (kernel config).",
+  "try": "Rebuild kernel with the class if it exists in 6.12 patches (kernel recipe, ~9 min), then show the strip on MBP16.",
+  "needs": [
+   "MBP16"
+  ],
+  "impl": 50
+ },
+ {
+  "id": "F-KBD-16",
+  "class": "B",
+  "size": "-",
+  "reason": "Sleep button and key written; the kernel with suspend is not built; T2 wake is a known Linux problem (KI-073).",
+  "try": "Build a kernel with suspend, test sleep/wake on HP first (not T2), then MBP14, last the T2 machines.",
+  "needs": [
+   "MM",
+   "MBP14",
+   "HP"
+  ],
+  "impl": 50
+ },
+ {
+  "id": "F-KBD-19",
+  "class": "B",
+  "size": "-",
+  "reason": "Input profile with synthetic events; Ctrl+Cmd+Q/L mapping needs a try on an Apple keyboard.",
+  "try": "Try on MBP14 keyboard and a USB keyboard; three-finger drag becomes a planned row.",
+  "needs": [
+   "MBP14"
+  ],
+  "impl": 70
+ },
+ {
+  "id": "F-A11Y-01",
+  "class": "F",
+  "size": "L",
+  "reason": "Access model and a ratchet exist; web content in the Browser tile and WASM/third-party tiles are not exposed to it; wording needs a screen reader user.",
+  "wording": "Split 'expose web content and WASM tiles to the access tree' into a planned row; here keep native tiles; a person who uses a screen reader tries the wording.",
+  "impl": 65
+ },
+ {
+  "id": "F-A11Y-02",
+  "class": "A",
+  "size": "S",
+  "reason": "Screen reader mode exists; missing: typing echo and tile dialog titles announced (Braille out of scope). [N1b: typing echo built (always on while the reader is on; test in shell and uikit). Still open: announce tile dialog titles; a separate echo switch; Braille is a planned row.]",
+  "plan": "Add typing echo (setting, off) and announce dialog titles through the existing speak hook, tests with the recording voice; Braille becomes a planned row.",
+  "impl": 65,
+  "n1b": "N1b: typing echo built (always on while the reader is on; test in shell and uikit). Still open: announce tile dialog titles; a separate echo switch; Braille is a planned row."
+ },
+ {
+  "id": "F-PKG-05",
+  "class": "B",
+  "size": "-",
+  "reason": "Budget checker and measure script written, ceilings are estimates, never run on built images.",
+  "try": "Build `full` and `libre` images, run `dist/release/measure-budgets.sh target/buildroot-mac/images full 3`, replace the estimates, wire into the release gate.",
+  "needs": [
+   "PC"
+  ],
+  "impl": 70
+ },
+ {
+  "id": "F-SHELL-13",
+  "class": "B",
+  "size": "-",
+  "reason": "KI-092 fix and loop measured in QEMU only; Mac mini idle frames and PID 1 CPU must be re-measured; software rendering still single threaded.",
+  "try": "Read the 10 s frame log on the Mac mini idle Home. Threaded software rendering: planned row.",
+  "needs": [
+   "MM"
+  ],
+  "impl": 90
+ },
+ {
+  "id": "F-VAULT-06",
+  "class": "F",
+  "size": "L",
+  "reason": "Browser data protection needs a real WebKit profile test on the Mac; timed checkpoint, lock-screen option, clear-on-exit, per-site never-persist, reader data file and cloud moves are unbuilt.",
+  "wording": "Split the five unbuilt options into planned rows; keep encrypt-on-lock here and test it on the Mac mini with the full engine.",
+  "impl": 60
+ },
+ {
+  "id": "F-ASSIST-10",
+  "class": "D",
+  "size": "-",
+  "reason": "Scripted models plus one live Ollama check; non-English phrase tables absent.",
+  "plan": "Run the 'live-model session' (decision D3): same scenarios as the cited scripted tests against the real model, record transcripts; non-English phrase tables are split to one planned row.",
+  "needs": [
+   "live local model (Ollama qwen3:8b or qwen2.5-coder:14b on a GPU PC)"
+  ],
+  "impl": 90
+ },
+ {
+  "id": "F-ASSIST-14",
+  "class": "D",
+  "size": "-",
+  "reason": "Stall guard verified with scripted models; no live qwen3:8b.",
+  "plan": "Run the 'live-model session' (decision D3): same scenarios as the cited scripted tests against the real model, record transcripts; non-English phrase tables are split to one planned row.",
+  "needs": [
+   "live local model (Ollama qwen3:8b or qwen2.5-coder:14b on a GPU PC)"
+  ],
+  "impl": 90
+ },
+ {
+  "id": "F-ASSIST-15",
+  "class": "D",
+  "size": "-",
+  "reason": "Planning rule on the board; scripted model only.",
+  "plan": "Run the 'live-model session' (decision D3): same scenarios as the cited scripted tests against the real model, record transcripts; non-English phrase tables are split to one planned row.",
+  "needs": [
+   "live local model (Ollama qwen3:8b or qwen2.5-coder:14b on a GPU PC)"
+  ],
+  "impl": 90
+ },
+ {
+  "id": "F-ASSIST-17",
+  "class": "D",
+  "size": "-",
+  "reason": "Board status tracker heuristics; scripted only.",
+  "plan": "Run the 'live-model session' (decision D3): same scenarios as the cited scripted tests against the real model, record transcripts; non-English phrase tables are split to one planned row.",
+  "needs": [
+   "live local model (Ollama qwen3:8b or qwen2.5-coder:14b on a GPU PC)"
+  ],
+  "impl": 90
+ },
+ {
+  "id": "F-ASSIST-20",
+  "class": "D",
+  "size": "-",
+  "reason": "Done-needs-proof refusal; scripted only (the hand-set vs forced done split is F-ASSIST-44).",
+  "plan": "Run the 'live-model session' (decision D3): same scenarios as the cited scripted tests against the real model, record transcripts; non-English phrase tables are split to one planned row.",
+  "needs": [
+   "live local model (Ollama qwen3:8b or qwen2.5-coder:14b on a GPU PC)"
+  ],
+  "impl": 90
+ },
+ {
+  "id": "F-ASSIST-21",
+  "class": "D",
+  "size": "-",
+  "reason": "Claims of done trigger checks; scripted only.",
+  "plan": "Run the 'live-model session' (decision D3): same scenarios as the cited scripted tests against the real model, record transcripts; non-English phrase tables are split to one planned row.",
+  "needs": [
+   "live local model (Ollama qwen3:8b or qwen2.5-coder:14b on a GPU PC)"
+  ],
+  "impl": 90
+ },
+ {
+  "id": "F-ASSIST-23",
+  "class": "D",
+  "size": "-",
+  "reason": "Autopilot compaction; scripted only; token usage split to F-ASSIST-45.",
+  "plan": "Run the 'live-model session' (decision D3): same scenarios as the cited scripted tests against the real model, record transcripts; non-English phrase tables are split to one planned row.",
+  "needs": [
+   "live local model (Ollama qwen3:8b or qwen2.5-coder:14b on a GPU PC)"
+  ],
+  "impl": 90
+ },
+ {
+  "id": "F-ASSIST-25",
+  "class": "D",
+  "size": "-",
+  "reason": "Hard limits per Autopilot step; scripted only.",
+  "plan": "Run the 'live-model session' (decision D3): same scenarios as the cited scripted tests against the real model, record transcripts; non-English phrase tables are split to one planned row.",
+  "needs": [
+   "live local model (Ollama qwen3:8b or qwen2.5-coder:14b on a GPU PC)"
+  ],
+  "impl": 90
+ },
+ {
+  "id": "F-ASSIST-26",
+  "class": "D",
+  "size": "-",
+  "reason": "Autopilot fixes instead of advising; scripted only.",
+  "plan": "Run the 'live-model session' (decision D3): same scenarios as the cited scripted tests against the real model, record transcripts; non-English phrase tables are split to one planned row.",
+  "needs": [
+   "live local model (Ollama qwen3:8b or qwen2.5-coder:14b on a GPU PC)"
+  ],
+  "impl": 90
+ },
+ {
+  "id": "F-ASSIST-28",
+  "class": "D",
+  "size": "-",
+  "reason": "Prompts say the assistant acts itself; scripted only.",
+  "plan": "Run the 'live-model session' (decision D3): same scenarios as the cited scripted tests against the real model, record transcripts; non-English phrase tables are split to one planned row.",
+  "needs": [
+   "live local model (Ollama qwen3:8b or qwen2.5-coder:14b on a GPU PC)"
+  ],
+  "impl": 90
+ },
+ {
+  "id": "F-IDE-08",
+  "class": "D",
+  "size": "-",
+  "reason": "PROJECT STATE block; scripted only.",
+  "plan": "Run the 'live-model session' (decision D3): same scenarios as the cited scripted tests against the real model, record transcripts; non-English phrase tables are split to one planned row.",
+  "needs": [
+   "live local model (Ollama qwen3:8b or qwen2.5-coder:14b on a GPU PC)"
+  ],
+  "impl": 90
+ },
+ {
+  "id": "F-ASSIST-18",
+  "class": "D",
+  "size": "-",
+  "reason": "Autopilot for the IDE chat; not driven with a live qwen3:8b on a real build and deploy.",
+  "plan": "Run the 'live-model session' (decision D3): same scenarios as the cited scripted tests against the real model, record transcripts; non-English phrase tables are split to one planned row.",
+  "needs": [
+   "live local model (Ollama qwen3:8b or qwen2.5-coder:14b on a GPU PC)"
+  ],
+  "impl": 85
+ },
+ {
+  "id": "F-DASH-12",
+  "class": "A",
+  "size": "S",
+  "reason": "Add source form pre-fills the address but runs kubectl on the screen thread (up to 10 s freeze); ClickHouse installer item is an owner choice. [N1b: the lookup no longer blocks the screen beyond 0.4 s (suggest_within, tested). Still open: live update of an open form, ClickHouse item (owner).]",
+  "plan": "Move the lookup to a worker thread with a 'looking...' state (S); keep ClickHouse item out until the owner says.",
+  "impl": 75,
+  "n1b": "N1b: the lookup no longer blocks the screen beyond 0.4 s (suggest_within, tested). Still open: live update of an open form, ClickHouse item (owner)."
+ },
+ {
+  "id": "F-VOICE-15",
+  "class": "D",
+  "size": "-",
+  "reason": "Alignment tested against fake servers on loopback.",
+  "plan": "Run speech with a whisper model on a PC, compare word times; Indic native durations split to a planned row.",
+  "needs": [
+   "real Lemonade or whisper.cpp server, heard by a person"
+  ],
+  "impl": 80
+ },
+ {
+  "id": "F-EDIT-16",
+  "class": "A",
+  "size": "M",
+  "reason": "Run from editor works; missing: input to the program and a real stop (run is not killed).",
+  "plan": "Pipe a stdin box into the run; for `.wasm` raise a cancel flag in the fuel hook; test runners (cargo test, pytest) become planned rows.",
+  "impl": 70
+ },
+ {
+  "id": "F-IDE-10",
+  "class": "D",
+  "size": "-",
+  "reason": "Parallel tasks only with scripted models, fake runner and fake `claude`.",
+  "plan": "Run two tasks with Ollama and one with the Claude Code CLI; A M: read-only reference access to the main workspace.",
+  "needs": [
+   "live model or vendor CLI (Claude Code login)"
+  ],
+  "impl": 70
+ },
+ {
+  "id": "F-IDE-15",
+  "class": "D",
+  "size": "-",
+  "reason": "Agents on the board tested with fake runners.",
+  "plan": "Same live session as D3 with 2-3 agents.",
+  "needs": [
+   "several real agents (live model, vendor CLI)"
+  ],
+  "impl": 85
+ },
+ {
+  "id": "F-EXTA-02",
+  "class": "D",
+  "size": "-",
+  "reason": "Policy bridge untested against a live Claude Code; `_meta` shape is from docs.",
+  "plan": "With a person signed in to Claude Code, run a tool call through the bridge and read the audit log.",
+  "needs": [
+   "live Claude Code (account sign-in)"
+  ],
+  "impl": 85
+ },
+ {
+  "id": "F-EXTA-06",
+  "class": "D",
+  "size": "-",
+  "reason": "CLI catalogue tested with stand-in node/npm.",
+  "plan": "On a PC with node, install each catalogue package for real and record the version; person-clicked.",
+  "needs": [
+   "npm registry (network), vendor packages"
+  ],
+  "impl": 85
+ },
+ {
+  "id": "F-EXTA-09",
+  "class": "D",
+  "size": "-",
+  "reason": "Pasting the long sign-in code untried on a phone.",
+  "plan": "With a person's Claude account on a phone, paste the code through the relay.",
+  "needs": [
+   "a real Claude sign-in page and a phone"
+  ],
+  "impl": 80
+ },
+ {
+  "id": "F-EXTA-13",
+  "class": "B",
+  "size": "-",
+  "reason": "tile_ship against loopback store only.",
+  "try": "Deploy the store on k3s (Store -> Private store), run `tile_ship` from the dev CLI.",
+  "needs": [
+   "PC",
+   "MM"
+  ],
+  "impl": 85
+ },
+ {
+  "id": "F-K8S-13",
+  "class": "B",
+  "size": "-",
+  "reason": "Local cluster set-up tested with stand-in k3s; the Mac mini reboot case (k3s exits before DHCP) unconfirmed.",
+  "try": "Run 'Set up a local cluster' on the Mac mini, reboot three times, check node Ready.",
+  "needs": [
+   "MM"
+  ],
+  "impl": 75
+ },
+ {
+  "id": "F-K8S-24",
+  "class": "B",
+  "size": "-",
+  "reason": "Cluster change gates tested with a fake kubectl.",
+  "try": "Run against a live k3s on the PC: scale, delete pod, with Allow changes off then on.",
+  "needs": [
+   "PC"
+  ],
+  "impl_semantics": true,
+  "impl": 85
+ },
+ {
+  "id": "F-CLUSTER-01",
+  "class": "B",
+  "size": "-",
+  "reason": "Registry and switching tested with fakes; no real remote cluster.",
+  "try": "Add a second k3s (VM on the PC), switch active cluster, run the K8S tile and AI IDE deploy against both.",
+  "needs": [
+   "PC"
+  ],
+  "impl_semantics": true,
+  "impl": 90
+ },
+ {
+  "id": "F-INST-06",
+  "class": "F",
+  "size": "-",
+  "reason": "No in-place resize is a documented design limit (shrink with the other system's tool); legacy BIOS shared disk is F-INST-13.",
+  "wording": "Reword so the plan model's scope is what it covers; planned row 'resize an existing partition' only if wanted.",
+  "impl": 80
+ },
+ {
+  "id": "F-INST-08",
+  "class": "B",
+  "size": "-",
+  "reason": "In-house FAT32 appender for another system's ESP; short device path may not boot on every firmware.",
+  "try": "Dual-boot install next to Windows on the HP or Lenovo ESP; boot menu entry and fsck.vfat.",
+  "needs": [
+   "HP",
+   "LEN"
+  ],
+  "impl": 70
+ },
+ {
+  "id": "F-INST-13",
+  "class": "B",
+  "size": "-",
+  "reason": "Legacy BIOS shared-disk install written; QEMU proof script written, not run.",
+  "try": "Run `dist/qemu/bios-shared-disk-test.sh` on the PC with KVM; then Test 70.",
+  "needs": [
+   "PC"
+  ],
+  "impl": 70
+ },
+ {
+  "id": "F-STORE-05",
+  "class": "C",
+  "size": "-",
+  "reason": "Encrypted home ran on the real kernel on 2026-11-10 (3 bugs fixed); still open: admin password reset of a sealed home, removing the old plain copy, busy-home lock, large trees.",
+  "question": "Q: how may an administrator reset an encrypted-home person's password? (a) never, recovery key only; (b) reset recreates an empty home after confirm (recommended); (c) a recovery key escrowed to an admin. Then A M for the rest.",
+  "impl": 60
+ },
+ {
+  "id": "F-WEB-04",
+  "class": "F",
+  "size": "L",
+  "reason": "Only the tile mechanism and a counter example exist; Chat, Edit, Runs, Settings have no tile form.",
+  "wording": "Split into four planned rows (web Chat, Edit, Runs, Settings); this row = mechanism, Impl to its scope; approvals for tile calls become a planned row.",
+  "impl": 15
+ },
+ {
+  "id": "F-WEB-13",
+  "class": "B",
+  "size": "-",
+  "reason": "Worker decoding, touch, soft keyboard, fullscreen untried on a phone.",
+  "try": "Open the Connect page on a phone and in Safari, test touch and fullscreen.",
+  "needs": [
+   "PH",
+   "MM"
+  ],
+  "impl": 70
+ },
+ {
+  "id": "F-WEB-16",
+  "class": "A",
+  "size": "M",
+  "reason": "Web UI never opened in a real browser; events by polling.",
+  "plan": "Add an events WebSocket (reuse the client session WS framing) and a headless-Chrome smoke test like the F-CLIENT one.",
+  "impl": 40
+ },
+ {
+  "id": "F-WEB-17",
+  "class": "A",
+  "size": "M",
+  "reason": "Cloud access page rendered only under node. [N1c: not built here. Branch mac/N3-browser already runs this page in real Chrome (its pagesuite opens Cloud access in the cloud profile); its row figures come with the N3 merge.]",
+  "plan": "Add a headless-Chrome render test of /ui/ cloud page (existing harness) and phone-width screenshot.",
+  "impl": 60,
+  "n1b": "N1c: not built here. Branch mac/N3-browser already runs this page in real Chrome (its pagesuite opens Cloud access in the cloud profile); its row figures come with the N3 merge."
+ },
+ {
+  "id": "F-QA-05",
+  "class": "C",
+  "size": "-",
+  "reason": "Image content scan works; the current images fail it (proprietary linux-firmware, missing legal-info rows, unlisted firmware); owner decision 2026-11-06 says the same as F-PKG-04.",
+  "question": "Q: release image excludes all proprietary firmware and offers it by button (already decided; recommended: execute it) - then rebuild, rerun the scan, wire the gate into CI (A M after the image build).",
+  "impl": 75
+ },
+ {
+  "id": "F-QA-06",
+  "class": "D",
+  "size": "-",
+  "reason": "Downloads inventory: remaining REVIEW rows must be pinned, marked unverified or removed per the owner rule. [N1e reclassified A to D: pinning a floating item needs the vendor's file and a hash read from it; the remaining REVIEW rows are Apple, Debian apt and similar items with no stable pin.]",
+  "plan": "Go through docs/project/LICENCE-REVIEW-ROWS.md row by row, pin or remove, extend the inventory test.",
+  "impl": 70,
+  "try": null,
+  "needs": [
+   "vendor download hosts (to read or compute each pin and checksum)"
+  ],
+  "n1b": "N1e reclassified A to D: pinning a floating item needs the vendor's file and a hash read from it; the remaining REVIEW rows are Apple, Debian apt and similar items with no stable pin."
+ },
+ {
+  "id": "F-QA-11",
+  "class": "A",
+  "size": "M",
+  "reason": "Manifest verification built; lookups for items other than kubectl/helm and a relcheck step are missing; public key is `unset` until the owner makes it.",
+  "plan": "Wire remaining lookups against a throwaway test key; manifest check into iyakki-relcheck; key creation stays an owner action (D9).",
+  "impl": 35
+ },
+ {
+  "id": "F-QA-12",
+  "class": "D",
+  "size": "-",
+  "reason": "Fetch tested with scripted network; no repository exists (404 = no update).",
+  "plan": "Owner creates the key (D9) and publishes the first signed manifest on the store k3s; then fetch it once.",
+  "needs": [
+   "a hosted manifest repository and the owner's offline signing key"
+  ],
+  "impl": 80
+ },
+ {
+  "id": "F-QA-13",
+  "class": "D",
+  "size": "-",
+  "reason": "OpenPGP check works with throw-away keys; the real key is `unset`.",
+  "plan": "Owner fetches the key from the vendor page, adds `legal/aws-cli-pgp.asc` with fingerprint check, run the real download.",
+  "needs": [
+   "Amazon's published AWS CLI PGP key (person downloads)"
+  ],
+  "impl": 70
+ },
+ {
+  "id": "F-BOOT-02",
+  "class": "B",
+  "size": "-",
+  "reason": "Secure Boot route 1 proven in QEMU; no real PC or T2 Mac tried; unified signed kernel image not built.",
+  "try": "Enrol MOK on the Lenovo with Secure Boot on, boot; then HP; T2 Mac last. Signed unified image split to a planned row.",
+  "needs": [
+   "LEN",
+   "HP",
+   "MM"
+  ],
+  "impl": 70
+ },
+ {
+  "id": "F-SYS-01",
+  "class": "A",
+  "size": "M",
+  "reason": "Per-user process view and disk activity missing; per-process network use missing. [N1c done in part: disk read/write speed on the overview (parser + tile, tested on made-up files). Left: per-IYAKKI-user process view, per-process network use (planned rows).]",
+  "plan": "Disk activity from /proc/diskstats (S); per-process network needs eBPF-free counters (skip): split that to planned.",
+  "impl": 90,
+  "n1b": "N1c done in part: disk read/write speed on the overview (parser + tile, tested on made-up files). Left: per-IYAKKI-user process view, per-process network use (planned rows)."
+ },
+ {
+  "id": "F-APPS-45",
+  "class": "A",
+  "size": "M",
+  "reason": "Tile apps lack WASM modules inside the bundle and picture icons.",
+  "plan": "Allow `.wasm` files in a tile bundle loaded through the F-WASM-09 runner; draw PNG icons (the renderer decodes PNG).",
+  "impl": 85
+ },
+ {
+  "id": "F-IDE-12",
+  "class": "D",
+  "size": "-",
+  "reason": "Target choice tested with scripted models and the owner's exact prompt.",
+  "plan": "Part of the D3 live-model session.",
+  "needs": [
+   "live local model"
+  ],
+  "impl": 85
+ },
+ {
+  "id": "F-APPS-50",
+  "class": "B",
+  "size": "-",
+  "reason": "Private store repair/reset/remove tested with scripted kubectl; KI-091 fix needs a recheck on the Mac mini.",
+  "try": "Run repair, reset and remove against the real store on k3s; recheck 'running (installed outside Store)'.",
+  "needs": [
+   "PC",
+   "MM"
+  ],
+  "impl": 85
+ },
+ {
+  "id": "F-APPS-51",
+  "class": "B",
+  "size": "-",
+  "reason": "Publish into a private store never run against the real NodePort.",
+  "try": "Deploy the store, add it, publish from MBP16.",
+  "needs": [
+   "MBP16",
+   "PC"
+  ],
+  "impl": 70
+ },
+ {
+  "id": "F-APPSTORE-02",
+  "class": "C",
+  "size": "-",
+  "reason": "Official root key not generated: `official-roots.txt` is empty so nothing is Official but built-in items.",
+  "question": "Owner action (decided 2026-11-06: made offline outside the repo, two copies, pin at release). Question: do it before beta (recommended, unblocks F-QA-11/12/13 and trust tests with a real key) or at release.",
+  "impl": 80
+ },
+ {
+  "id": "F-APPSTORE-06",
+  "class": "D",
+  "size": "-",
+  "reason": "Catalog fetch tested with a fake; default catalog list empty.",
+  "plan": "Publish the first catalog from the PC's k3s store and fetch it from the Mac mini.",
+  "needs": [
+   "a hosted signed catalog (our store server on k3s)"
+  ],
+  "impl": 80
+ },
+ {
+  "id": "F-APPSTORE-08",
+  "class": "F",
+  "size": "-",
+  "reason": "Owner decision 2026-11-06: licence tokens are file-only, no payment, paid apps out of scope for 1.0; Buy button disabled.",
+  "wording": "Reword to the 1.0 scope (token check, file-only); new planned row 'paid apps and checkout' after 1.0.",
+  "impl": 50
+ },
+ {
+  "id": "F-DEV-10",
+  "class": "B",
+  "size": "-",
+  "reason": "Dev-over-USB/Thunderbolt/gadget never ran on two real machines.",
+  "try": "Thunderbolt cable between MBP16 and the PC: `iyakki dev usb check`, `link`, `speed`; gadget board later.",
+  "needs": [
+   "MBP16",
+   "PC"
+  ],
+  "impl": 60
+ },
+ {
+  "id": "F-DEV-16",
+  "class": "B",
+  "size": "-",
+  "reason": "Terminal code tested on macOS; the Linux run of `devmode::tty_tests` is still to do; client raw-mode loop untried.",
+  "try": "On the PC: `cargo test -p iyakki-agent --lib devmode::tty_tests`; then `iyakki dev shell --tty` against the Mac mini with vi and resize. Impl then 100.",
+  "needs": [
+   "PC"
+  ],
+  "impl": 95
+ },
+ {
+  "id": "F-DRIVERS-11",
+  "class": "B",
+  "size": "-",
+  "reason": "apple-bce proven by hand; the Buildroot package never built into an image; Bluetooth options never booted.",
+  "try": "Build the Mac image with the package (image build on the PC), boot the Mac mini, audio card present.",
+  "needs": [
+   "MM"
+  ],
+  "impl": 50
+ },
+ {
+  "id": "F-DRIVERS-20",
+  "class": "D",
+  "size": "-",
+  "reason": "Extractor tested with made-up platform names; real macOS folder shape unseen.",
+  "plan": "On the Mac mini or MBP14 let the person run the Mac drivers page, record the real tree and adjust fixtures.",
+  "needs": [
+   "Apple's firmware download on the person's click (macOS image)"
+  ],
+  "impl": 65
+ },
+ {
+  "id": "F-DRIVERS-28",
+  "class": "B",
+  "size": "-",
+  "reason": "facetimehd modules build and ship; no camera tried; firmware from F-DRIVERS-29 needed.",
+  "try": "Install firmware by button on MBP14, open the camera in CAMERA tile.",
+  "needs": [
+   "MBP14"
+  ],
+  "impl": 30
+ },
+ {
+  "id": "F-DRIVERS-52",
+  "class": "B",
+  "size": "-",
+  "reason": "Offline firmware over a cable: command lists with fakes only.",
+  "try": "Cable PC to Mac mini, push firmware through `files push`, check route and resolver.",
+  "needs": [
+   "PC",
+   "MM"
+  ],
+  "impl": 65
+ },
+ {
+  "id": "F-DRIVERS-15",
+  "class": "C",
+  "size": "-",
+  "reason": "Optional `macweb` variant never built or booted; Haswell unsupported; crocus hours of unverified work.",
+  "question": "Q: keep macweb (build + test on the Mac mini once) or deprecate it in favour of the web image. Recommend deprecate unless the web image fails on Mac mini 2018.",
+  "impl": 25
+ },
+ {
+  "id": "F-BROW-01",
+  "class": "B",
+  "size": "-",
+  "reason": "Anchors and find unit-tested; needs a person with the real keyboard on a real page.",
+  "try": "Use find and anchor jumps on three real pages.",
+  "needs": [
+   "MM",
+   "EYE"
+  ],
+  "impl_semantics": true,
+  "impl": 95
+ },
+ {
+  "id": "F-BROW-05",
+  "class": "F",
+  "size": "L",
+  "reason": "WebP/PNG/JPEG/GIF done; animated WebP beyond frame 1, SVG clip/masks/filters/patterns and inline <svg> are separate large work.",
+  "wording": "Split into planned rows: animated WebP (M), SVG advanced (L), inline SVG (M).",
+  "impl": 72
+ },
+ {
+  "id": "F-RADIO-03",
+  "class": "F",
+  "size": "M",
+  "reason": "HLS MP3 and AAC-via-add-on exist; in-house AAC blocked on codebook tables, Ogg Vorbis/Opus and the directory search box are unbuilt.",
+  "wording": "Split: Ogg Vorbis/Opus (L), in-house AAC (blocked, deprecate in favour of the add-on or keep planned), directory search box in RADIO (S).",
+  "impl": 30
+ },
+ {
+  "id": "F-STORE-09",
+  "class": "A",
+  "size": "M",
+  "reason": "IDE build/run panel and voice tools still pass the inherited HOME; bind mount untested on a disk. [N1c: Impl 100 by a reading of the callers: the voice helpers are machine services without a person at the call and touch no person files, so the inherited HOME is by design; the IDE panel half was already built. Left: the bind mount on a real disk (B, Mac mini).]",
+  "plan": "Pass the per-person HOME in ide_bottom and voice tools (S); mount check on the Mac mini is a B follow-up with KI-095 recheck.",
+  "impl": 85,
+  "n1b": "N1c: Impl 100 by a reading of the callers: the voice helpers are machine services without a person at the call and touch no person files, so the inherited HOME is by design; the IDE panel half was already built. Left: the bind mount on a real disk (B, Mac mini)."
+ },
+ {
+  "id": "F-SHELL-20",
+  "class": "A",
+  "size": "S",
+  "reason": "macOS fallbacks (job liveness by ps/kill, empty /proc readers) have no macOS-only tests; x86_64-apple-darwin not built. [N1b: liveness tests for the ps/kill fallbacks added (run on the Mac) and check-macos passes for x86_64-apple-darwin too. Left: a person drives the window once.]",
+  "plan": "Write the macOS-gated tests and a `cargo check --target x86_64-apple-darwin` on a Mac build host; then a person drives the window once.",
+  "impl": 75,
+  "n1b": "N1b: liveness tests for the ps/kill fallbacks added (run on the Mac) and check-macos passes for x86_64-apple-darwin too. Left: a person drives the window once."
+ },
+ {
+  "id": "F-RAG-12",
+  "class": "F",
+  "size": "L",
+  "reason": "Agentic RAG built; re-ranking models, graph RAG and web retrieval feeding documents are separate.",
+  "wording": "Split three planned rows; keep this row for the agentic switch and a screen look.",
+  "impl": 75
+ },
+ {
+  "id": "F-CLI-08",
+  "class": "A",
+  "size": "L",
+  "reason": "SSH pty engine written; the tile that draws the terminal, forwards keys and starts ssh under the CLI-SSH rules is missing.",
+  "plan": "Build the terminal tile on the existing engine (vt screen, key encoding), keys-only ssh launch; test with the pty tests and a loopback sshd.",
+  "impl": 55
+ },
+ {
+  "id": "F-CLI-09",
+  "class": "D",
+  "size": "-",
+  "reason": "No real vendor download run; musl builds on the image unverified.",
+  "plan": "Person clicks install for Claude Code and Copilot on the Mac mini image, run `--version`.",
+  "needs": [
+   "vendor download hosts (120-250 MB programs)"
+  ],
+  "impl": 80
+ },
+ {
+  "id": "F-INBOX-06",
+  "class": "D",
+  "size": "-",
+  "reason": "Network side (TLS mail, https POST) never ran against a server.",
+  "plan": "Use a test SMTP (local server or a mail account) and a webhook echo service; Web Push becomes a planned row.",
+  "needs": [
+   "a real SMTP server and a webhook receiver"
+  ],
+  "impl": 70
+ },
+ {
+  "id": "F-BROW-35",
+  "class": "F",
+  "size": "-",
+  "reason": "Print to PDF and PDF viewer built; Office files (F-MEDIA-01), faithful print of the full engine page (no WPE print API), password PDFs, form editing and OCR are separate.",
+  "wording": "Split: password PDFs (M), form editing (L), OCR (L, would need a model) as planned rows; WPE print is a documented engine limit.",
+  "impl": 60
+ },
+ {
+  "id": "F-PDF-04",
+  "class": "E",
+  "size": "-",
+  "reason": "Row was split on 2026-11-12: it now covers the Windows-1252 writer; other scripts are F-PDF-11. Impl 80 is left from before the split.",
+  "evidence": "Ran `cargo test -p iyakki-pdf --locked` on the Mac: 72 pass, including the_writer_makes_files_the_reader_reads_back, pictures_in_written_files_are_drawn_when_read_back, the_writer_is_safe_with_odd_text, filter::tests::deflate_round_trips_and_shrinks_repetitive_data. Impl set to 100.",
+  "verified": true,
+  "impl": 80
+ },
+ {
+  "id": "F-BROX-01",
+  "class": "A",
+  "size": "M",
+  "reason": "Request to open a saved download is tested; the shell step opening the tile, EDIT open_item and MEDIA play: were not driven end to end.",
+  "plan": "Add a shell-level test that opens EDIT and MEDIA from a Downloads row; pictures viewer becomes a planned row.",
+  "impl": 80
+ },
+ {
+  "id": "F-BROW-37",
+  "class": "E",
+  "size": "-",
+  "reason": "Impl 95 only because suggestions from the search engine are not sent (by design: a keystroke would leave the machine).",
+  "evidence": "Ran on the Mac: `iyakki-shell ...browser::tests::the_address_bar_offers_bookmarks_and_visited_pages_and_enter_opens_the_chosen_one` (pass), `short_words` tests in shell (4 pass) and `iyakki-agent browsershort_tests` (4 pass). Impl set to 100 with the by-design sentence kept.",
+  "verified": true,
+  "impl": 95
+ },
+ {
+  "id": "F-BROW-41",
+  "class": "A",
+  "size": "M",
+  "reason": "Developer tools lack the report-a-broken-site button; full engine has no safe script run. [N1c done in part: key ! saves a local report about the page (host only, scrubbed notes, last 100 lines, audited); tests. Left: a button, a chat tool, full-engine pages.]",
+  "plan": "Add the button (form to a file/inbox note, no network); full-engine script eval stays a documented limit.",
+  "impl": 90,
+  "n1b": "N1c done in part: key ! saves a local report about the page (host only, scrubbed notes, last 100 lines, audited); tests. Left: a button, a chat tool, full-engine pages."
+ },
+ {
+  "id": "F-BROW-50",
+  "class": "B",
+  "size": "-",
+  "reason": "No message on H.264-only pages; VA-API hardware decode not enabled. [N1b reclassified: the H.264 signal must come from the C helper in the web engine; needs a web image and the Mac mini to prove.]",
+  "impl": 85,
+  "try": "Add the 'this page needs H.264' note (S); VA-API becomes a planned row (needs hardware).",
+  "needs": [
+   "MM"
+  ],
+  "n1b": "N1b reclassified: the H.264 signal must come from the C helper in the web engine; needs a web image and the Mac mini to prove."
+ },
+ {
+  "id": "F-BROW-51",
+  "class": "F",
+  "size": "L",
+  "reason": "Cache change measured on one busy PC; HTTP/2, Happy Eyeballs, async/defer scheduling, decoded-picture and style caches are a backlog.",
+  "wording": "Split the backlog into planned rows by item; keep the measured cache change here.",
+  "impl": 60
+ },
+ {
+  "id": "F-BROW-55",
+  "class": "B",
+  "size": "-",
+  "reason": "Content blockers written as WebKit content-blocker JSON; never run in a real WPE.",
+  "try": "Boot the web image on MBP14, load the 100000-rule list, measure compile time and memory.",
+  "needs": [
+   "MBP14"
+  ],
+  "impl": 50
+ },
+ {
+  "id": "F-BROW-56",
+  "class": "C",
+  "size": "-",
+  "reason": "Rebuild proposals (WEB_IRIS=1, brotli, woff2) never built; Skia default stays.",
+  "question": "Q (D5): approve one consolidated web-engine rebuild (iris, brotli, woff2, WEB_MEDIA=1, VA-API) measured on MBP14, or freeze the full engine as is and mark these options deprecated (recommended: one rebuild, since four rows wait on it).",
+  "impl": 15
+ },
+ {
+  "id": "F-BROW-57",
+  "class": "B",
+  "size": "-",
+  "reason": "Probe measured; the shell's own draw time with a live tile is not.",
+  "try": "Run the kit with a signed-in session on the Mac mini and record the draw time.",
+  "needs": [
+   "MM",
+   "EYE"
+  ],
+  "impl": 70
+ },
+ {
+  "id": "F-BROW-58",
+  "class": "B",
+  "size": "-",
+  "reason": "Smooth pages measured engine-side; tile-only painting never measured on a screen; needs the next web image.",
+  "try": "Build a web image with the helper change, measure the tile on the Mac mini.",
+  "needs": [
+   "MM"
+  ],
+  "impl": 60
+ },
+ {
+  "id": "F-BROW-59",
+  "class": "B",
+  "size": "-",
+  "reason": "GPU paint path cannot run without a GPU; only the protocol half tested.",
+  "try": "Run on MBP14 (Intel) and the Lenovo (AMD), fill docs/BROWSER-SPEED.md numbers.",
+  "needs": [
+   "MBP14",
+   "LEN"
+  ],
+  "impl": 10
+ },
+ {
+  "id": "F-MEDIA-02",
+  "class": "B",
+  "size": "-",
+  "reason": "DLNA server tested on loopback; no TV, VLC or phone; multicast untested.",
+  "try": "On the LAN run VLC and a phone app against the Mac mini; add the firewall rule for the media port (A S).",
+  "needs": [
+   "NET"
+  ],
+  "impl": 75
+ },
+ {
+  "id": "F-MEDIA-05",
+  "class": "A",
+  "size": "S",
+  "reason": "Download resume done; remaining: stale `.part.src` cleanup by age; yt-dlp is installer-only by policy. [N1b: stale part notes (older than 14 days or orphaned) are cleaned before the next download (tested). Remaining: yt-dlp is installer-only by policy, not code.]",
+  "plan": "Add age-based cleanup of part notes (S); yt-dlp remains a person-clicked installer item (not an implementation gap).",
+  "impl": 90,
+  "n1b": "N1b: stale part notes (older than 14 days or orphaned) are cleaned before the next download (tested). Remaining: yt-dlp is installer-only by policy, not code."
+ },
+ {
+  "id": "F-MEDIA-06",
+  "class": "B",
+  "size": "-",
+  "reason": "Queue tested on loopback only; disk-full wording tested on the message.",
+  "try": "Fill a small loop volume and download; read the inbox note.",
+  "needs": [
+   "MM"
+  ],
+  "impl_semantics": true,
+  "impl": 95
+ },
+ {
+  "id": "F-MEDIA-09",
+  "class": "D",
+  "size": "-",
+  "reason": "xz reader verified with real xz output; the real download and install on the Mac mini not run.",
+  "plan": "Press Install on the Mac mini; verify the checksum path; Buildroot fragment build is a separate image step.",
+  "needs": [
+   "johnvansickle.com download and install"
+  ],
+  "impl": 90
+ },
+ {
+  "id": "F-TALES-09",
+  "class": "B",
+  "size": "-",
+  "reason": "Browser voice verified in headless Chrome; no speaker, Firefox, Safari or Mac.",
+  "try": "Click through TALES with the browser voice on Chrome and Safari with speakers.",
+  "needs": [
+   "MM",
+   "EYE"
+  ],
+  "impl_semantics": true,
+  "impl": 90
+ },
+ {
+  "id": "F-TALES-18",
+  "class": "D",
+  "size": "-",
+  "reason": "Pictures tested with fakes and 8x8 samples.",
+  "plan": "Point TALES at a local image model server; poster frame and video player are A M.",
+  "needs": [
+   "a real image/video model service"
+  ],
+  "impl": 70
+ },
+ {
+  "id": "F-CAM-15",
+  "class": "B",
+  "size": "-",
+  "reason": "RTSP/MJPEG client tested on loopback cameras and one ffmpeg stream.",
+  "try": "Connect to a real RTSP camera (Digest auth), record the unsupported features hit.",
+  "needs": [
+   "CAM"
+  ],
+  "impl": 70
+ },
+ {
+  "id": "F-CAM-03",
+  "class": "B",
+  "size": "-",
+  "reason": "Recording tested with an in-house fake camera; no long run or disk speed.",
+  "try": "Record a real camera 24 h to an encrypted folder, measure CPU and disk.",
+  "needs": [
+   "CAM"
+  ],
+  "impl": 75
+ },
+ {
+  "id": "F-CAM-05",
+  "class": "F",
+  "size": "L",
+  "reason": "Motion events and inbox notices built; the vision-model summary is not built (documented follow-up, opt-in).",
+  "wording": "Split the vision summary into a planned row; this row is the notice pipeline.",
+  "impl": 40
+ },
+ {
+  "id": "F-ARCH-02",
+  "class": "F",
+  "size": "-",
+  "reason": "The ratchet gates work; the work they count (moving call sites behind the core API) is steps 5-7 of UI-OS-SPLIT-PLAN.",
+  "wording": "Mark this row as the gate (done once the count test is the evidence) and make steps 5, 6, 7 planned rows with the ratchet numbers as their goal.",
+  "impl": 30
+ },
+ {
+  "id": "F-ARCH-03",
+  "class": "F",
+  "size": "L",
+  "reason": "Crates and traits exist; nothing calls Sysinfo; no local implementation, Audio trait or transport.",
+  "wording": "Split 'core-local implementation' and 'Audio trait' into planned rows.",
+  "impl": 40
+ },
+ {
+  "id": "F-ARCH-04",
+  "class": "A",
+  "size": "M",
+  "reason": "Harness takes today's AppCx; only two tests migrated; build-time gain unmeasured. [N1c: checked, not built. Seven tests already use the harness (the Notes said two); baseline timing taken (one tile file touched, shell test binary rebuilt in about 14 s on Apple silicon). Left: build from FakeOs (needs step 5).]",
+  "plan": "Migrate ten more tile tests, take a before/after build timing with `cargo build --timings`.",
+  "impl": 70,
+  "n1b": "N1c: checked, not built. Seven tests already use the harness (the Notes said two); baseline timing taken (one tile file touched, shell test binary rebuilt in about 14 s on Apple silicon). Left: build from FakeOs (needs step 5)."
+ },
+ {
+  "id": "F-FLOW-06",
+  "class": "D",
+  "size": "-",
+  "reason": "Healing tested with a scripted healer; external agent via the executor seam not wired.",
+  "plan": "D3 live session; wire the executor seam (A M).",
+  "needs": [
+   "live model as healer"
+  ],
+  "impl": 90
+ },
+ {
+  "id": "F-FLOW-15",
+  "class": "B",
+  "size": "-",
+  "reason": "Webhook trigger run against loopback only.",
+  "try": "Send a signed webhook from the PC with curl to the Mac mini with an unlocked vault.",
+  "needs": [
+   "MM"
+  ],
+  "impl_semantics": true,
+  "impl": 85
+ },
+ {
+  "id": "F-REL-08",
+  "class": "B",
+  "size": "-",
+  "reason": "Firmware audit text done; no release image built or booted.",
+  "try": "Build the release profile image, boot on the Mac mini, confirm no vendor firmware inside (QA-05 scan).",
+  "needs": [
+   "PC",
+   "MM"
+  ],
+  "impl": 80
+ },
+ {
+  "id": "F-REL-09",
+  "class": "B",
+  "size": "-",
+  "reason": "Release image profile never built; GPU guard untested on hardware.",
+  "try": "Same build as F-REL-08, test the guard on LEN.",
+  "needs": [
+   "PC",
+   "MM"
+  ],
+  "impl": 60
+ },
+ {
+  "id": "F-REL-10",
+  "class": "B",
+  "size": "-",
+  "reason": "legal-collect ran for real; existing images still carry deselected packages; fonts path untested in an image.",
+  "try": "Full image rebuild (30-40 min libre) after the cache refresh; run the content scan.",
+  "needs": [
+   "PC"
+  ],
+  "impl": 70
+ },
+ {
+  "id": "F-BOOT-20",
+  "class": "B",
+  "size": "-",
+  "reason": "GRUB logo menu passes in QEMU/OVMF; BIOS and real Mac firmware unverified.",
+  "try": "Boot a built image on the Mac mini; BIOS in QEMU SeaBIOS (S).",
+  "needs": [
+   "MM",
+   "PC"
+  ],
+  "impl": 70
+ },
+ {
+  "id": "F-BOOT-25",
+  "class": "B",
+  "size": "-",
+  "reason": "Mac image boot-wait sizes measured on a copy, real seconds unknown.",
+  "try": "Time the GRUB wait on the Mac mini from the stick.",
+  "needs": [
+   "MM"
+  ],
+  "impl": 70
+ },
+ {
+  "id": "F-BOOT-30",
+  "class": "B",
+  "size": "-",
+  "reason": "Prefetch planner built; fanotify recorder never ran; QEMU proof script not run.",
+  "try": "Run `dist/qemu/boot-prefetch-test.sh` on the PC; measure first start with and without.",
+  "needs": [
+   "PC"
+  ],
+  "impl": 70
+ },
+ {
+  "id": "F-BOOT-31",
+  "class": "B",
+  "size": "-",
+  "reason": "Compressed memory (EXPERIMENTAL) built; QEMU proof written not run; benefit unmeasured.",
+  "try": "Run `dist/qemu/compressed-memory-test.sh`; time a stick boot with and without.",
+  "needs": [
+   "PC",
+   "MM"
+  ],
+  "impl": 75
+ },
+ {
+  "id": "F-SHELL-28",
+  "class": "B",
+  "size": "-",
+  "reason": "Quick install tested with a scripted environment; nothing installed for real.",
+  "try": "Install k3s, Lemonade and Claude Code CLI items on the Mac mini one by one and record failures.",
+  "needs": [
+   "MM",
+   "PC"
+  ],
+  "impl": 70
+ },
+ {
+  "id": "F-SETUP-06",
+  "class": "A",
+  "size": "M",
+  "reason": "Scroll list works with wheel and trackpad; touch dragging on the list body and the About/Linux apps lists are not converted.",
+  "plan": "Add touch drag to the list helper and convert About and Linux apps lists; tests with synthetic frames.",
+  "impl": 85
+ },
+ {
+  "id": "F-SHELL-40",
+  "class": "A",
+  "size": "M",
+  "reason": "Restart card is a toast without a button; panic under a held lock or in an app thread not contained; session lost on whole-process crash.",
+  "plan": "Add the reopen button, poison-tolerant locks in the app thread helpers, and a session snapshot file reread at sign-in.",
+  "impl": 85
+ },
+ {
+  "id": "F-SHELL-41",
+  "class": "F",
+  "size": "M",
+  "reason": "Themes work (owner verified on the Mac on 2026-11-06); user theme files and hand-picked light colours for apps are missing.",
+  "wording": "Split 'user theme files' into a planned row; here keep built-in themes; screenshot review of Light via `./run.sh screens`.",
+  "impl": 70
+ },
+ {
+  "id": "F-SHELL-43",
+  "class": "E",
+  "size": "-",
+  "reason": "Fields not converted are already planned as F-SHELL-60 (row exists); nothing else in the description is unwritten.",
+  "evidence": "Ran on the Mac: `cargo test -p iyakki-shell --lib filepicker_tests` (15 pass, includes the 14 cited). Impl set to 100; Test stays 30 (fake filesystem, no device).",
+  "verified": true,
+  "impl": 85
+ },
+ {
+  "id": "F-SHELL-46",
+  "class": "B",
+  "size": "-",
+  "reason": "Pane tab clicks tested on made-up screens and 5 apps at one size; all-size run is opt-in (about 15 minutes per size).",
+  "try": "Run with PANE_TABS_ALL=1 on the PC (S); MBP16 with an external monitor.",
+  "needs": [
+   "PC",
+   "MBP16"
+  ],
+  "impl_semantics": true,
+  "impl": 85
+ },
+ {
+  "id": "F-IDE-18",
+  "class": "B",
+  "size": "-",
+  "reason": "Chat box fix not re-tried on the Mac after the layout panic.",
+  "try": "Click the IDE chat box on the Mac mini at two window sizes.",
+  "needs": [
+   "MM"
+  ],
+  "impl_semantics": true,
+  "impl": 85
+ },
+ {
+  "id": "F-IDE-19",
+  "class": "D",
+  "size": "-",
+  "reason": "Skill text only checked for size and wording.",
+  "plan": "D3 live session: ask the model to deploy a sample app with the skill.",
+  "needs": [
+   "live local model"
+  ],
+  "impl": 80
+ },
+ {
+  "id": "F-CLOUD-11",
+  "class": "D",
+  "size": "-",
+  "reason": "Listener only on loopback.",
+  "plan": "Test domain pointing at the PC; run `iyakki cloud listen` with the firewall on; members-route enforcement (A M).",
+  "needs": [
+   "a domain with real DNS and open ports 80/443"
+  ],
+  "impl": 55
+ },
+ {
+  "id": "F-DOMAIN-05",
+  "class": "D",
+  "size": "-",
+  "reason": "Domain tools tested with fakes; the desktop browser server does not register sessions (A M).",
+  "plan": "Same test domain as F-CLOUD-11; fix session registration first.",
+  "needs": [
+   "a domain, real DNS, a second computer"
+  ],
+  "impl": 90
+ },
+ {
+  "id": "F-CLOUD-15",
+  "class": "D",
+  "size": "-",
+  "reason": "Shared vault key wrapping tested with a fake KV; shown as 'not externally reviewed'.",
+  "plan": "Run OpenBao/Vault in k3s as test provider; ask for the outside review (owner).",
+  "needs": [
+   "a real HashiCorp-Vault-compatible KV v2 server and an outside crypto review"
+  ],
+  "impl": 60
+ },
+ {
+  "id": "F-CLOUD-23",
+  "class": "F",
+  "size": "L",
+  "reason": "Tenant switcher built; never looked at on a screen; the native tile connector (stage 2) is not built.",
+  "wording": "Split stage 2 into a planned row; person looks at the switcher on the Mac mini.",
+  "impl": 45
+ },
+ {
+  "id": "F-CLOUD-33",
+  "class": "A",
+  "size": "M",
+  "reason": "Tenant pod uses its vault link only for status and rotation, no secret reads/writes for its own use; pin optional. [N1d done in part: read_secret/write_secret over the link, refused without a pin; tested on a real loopback vault. Left: a tenant feature that calls them in a real pod.]",
+  "plan": "Add read/write secret calls in the cloud profile with the pin mandatory; test against the loopback vault.",
+  "impl": 40,
+  "n1b": "N1d done in part: read_secret/write_secret over the link, refused without a pin; tested on a real loopback vault. Left: a tenant feature that calls them in a real pod."
+ },
+ {
+  "id": "F-CLOUD-42",
+  "class": "B",
+  "size": "-",
+  "reason": "Pod/service targets for the local listener tested with a fake kubectl; real port-forward never run.",
+  "try": "Run against k3s on the PC with a sample pod.",
+  "needs": [
+   "PC"
+  ],
+  "impl": 55
+ },
+ {
+  "id": "F-CLOUD-49",
+  "class": "A",
+  "size": "L",
+  "reason": "Listener-to-pod link has no mutual TLS. [N1e looked at, not built (size M to L): mutual TLS needs the pod side to serve TLS and check the listener's client certificate; the pod serves plain HTTP today, so both ends change.]",
+  "plan": "Wire mTLS between listener and pod using the existing CA code; loopback tests.",
+  "impl": 60,
+  "n1b": "N1e looked at, not built (size M to L): mutual TLS needs the pod side to serve TLS and check the listener's client certificate; the pod serves plain HTTP today, so both ends change."
+ },
+ {
+  "id": "F-CLOUD-71",
+  "class": "A",
+  "size": "L",
+  "reason": "No time zone database; only UTC and offsets work in the scratch image; tenant run cap counts per process.",
+  "plan": "Generate a compact rule table from IANA tzdata (public domain) into the repo and use it in the schedule evaluator; shared run counter via the tenant store.",
+  "impl": 55
+ },
+ {
+  "id": "F-CLOUD-72",
+  "class": "A",
+  "size": "M",
+  "reason": "Engine must ask the secret gate on {{secret.NAME}} (notes contradict their own test list); `_flows` vault key enrolment and run-token presentation are open. [N1b: cited engine-gate tests found in iyakki-flow (7 pass); stale note fixed; Impl 45 to 55. Open: enrol the _flows key, present the run token.]",
+  "plan": "Confirm the cited gate tests pass, then enrol the `_flows` key and present the run token in the engine; add the gate test per node kind.",
+  "impl": 45,
+  "n1b": "N1b: cited engine-gate tests found in iyakki-flow (7 pass); stale note fixed; Impl 45 to 55. Open: enrol the _flows key, present the run token."
+ },
+ {
+  "id": "F-CLOUD-74",
+  "class": "A",
+  "size": "M",
+  "reason": "Notice has no `to` or channel field; email/webhook channels not exercised from flows. [N1d: Notes corrected (the notify node already carries `to`; tests pass), Impl 70. Left: e-mail and web hook channels (D).]",
+  "plan": "Add `to`/channel to Notice; test with the fake hub; real channels are D (see F-INBOX-06).",
+  "impl": 45,
+  "n1b": "N1d: Notes corrected (the notify node already carries `to`; tests pass), Impl 70. Left: e-mail and web hook channels (D)."
+ },
+ {
+  "id": "F-TCFG-09",
+  "class": "A",
+  "size": "M",
+  "reason": "Egress and git clone are enforced; firewall rules, token counts and a git push route are not.",
+  "plan": "Make iyakki-fw read the policy table; count tokens when the provider reports usage; push route stays unwritten until a git push route exists (planned row).",
+  "impl": 75
+ },
+ {
+  "id": "F-TCFG-10",
+  "class": "A",
+  "size": "M",
+  "reason": "Approvals routed to a team exist; no cluster manager files or consumes them; no page. [N1d: 'no page exists' is stale (F-TCFG-15 has an approvals inbox). Left: a cluster manager that files and consumes requests.]",
+  "plan": "File approvals from the deploy flow and add a small team approvals page.",
+  "impl": 60,
+  "n1b": "N1d: 'no page exists' is stale (F-TCFG-15 has an approvals inbox). Left: a cluster manager that files and consumes requests."
+ },
+ {
+  "id": "F-TCFG-11",
+  "class": "D",
+  "size": "-",
+  "reason": "Team integrations tested with fake vault/accounts.",
+  "plan": "Owner supplies a test key per provider; call each once.",
+  "needs": [
+   "real provider API keys (Anthropic, OpenAI, others)"
+  ],
+  "impl": 60
+ },
+ {
+  "id": "F-TCFG-14",
+  "class": "A",
+  "size": "L",
+  "reason": "Local host gate and slot exist; no chat backend calls `call_local`; team host as Service unbuilt. [N1e looked at, not built (size M to L): runtime::call_local needs a chat backend that talks to the team's Ollama or OpenAI-compatible host with the base URL, style and token it hands over, and the run path in webservice/tenantcfg.rs must use it; that backend does not exist yet.]",
+  "plan": "Call `runtime::call_local` from the chat backend and hold the slot for the run; Service publishing becomes a planned row.",
+  "impl": 55,
+  "n1b": "N1e looked at, not built (size M to L): runtime::call_local needs a chat backend that talks to the team's Ollama or OpenAI-compatible host with the base URL, style and token it hands over, and the run path in webservice/tenantcfg.rs must use it; that backend does not exist yet."
+ },
+ {
+  "id": "F-TCFG-15",
+  "class": "A",
+  "size": "M",
+  "reason": "Tenant settings page tested with a fake DOM only. [N1c: not built here. Branch mac/N3-browser lists Tenant settings in its Chrome page suite; merge N3 first, then decide what is left.]",
+  "plan": "Render it in headless Chrome at desktop and phone width (existing harness).",
+  "impl": 70,
+  "n1b": "N1c: not built here. Branch mac/N3-browser lists Tenant settings in its Chrome page suite; merge N3 first, then decide what is left."
+ },
+ {
+  "id": "F-CLOCK-01",
+  "class": "B",
+  "size": "-",
+  "reason": "Clock floor tested with fakes; compiled-in date must be raised at each release.",
+  "try": "Boot Mac mini with a dead clock, read the audit log; add a release-script check that the floor date is newer than the last tag (A S).",
+  "needs": [
+   "MM"
+  ],
+  "impl": 60
+ },
+ {
+  "id": "F-K3S-27",
+  "class": "F",
+  "size": "S",
+  "reason": "Clock gate proven with a stand-in; the Podman variant gets the gate but not the restart.",
+  "wording": "Split 'Podman variant restart' into a planned row (or deprecate the Podman variant); the native variant is done once re-run on the Mac mini.",
+  "impl": 60
+ },
+ {
+  "id": "F-K3S-28",
+  "class": "B",
+  "size": "-",
+  "reason": "Node address held by a dummy link; needs the dummy module on the Mac kernel and flannel on a link-local address.",
+  "try": "Run the real k3s on the Mac mini, change the network, check node Ready and the supervisor log.",
+  "needs": [
+   "MM"
+  ],
+  "impl": 60
+ },
+ {
+  "id": "F-INST-01",
+  "class": "B",
+  "size": "-",
+  "reason": "Installer proven in QEMU; first T2 MacBook internal install worked (owner, 2026-10-24); not on other real computers from the loader row.",
+  "try": "Install from the loader row to the HP internal disk (wipe allowed) then boot from it.",
+  "needs": [
+   "HP",
+   "LEN"
+  ],
+  "impl_semantics": true,
+  "impl": 90
+ },
+ {
+  "id": "F-INST-03",
+  "class": "B",
+  "size": "-",
+  "reason": "GPT install proven in QEMU; real 4Kn, Secure Boot, other computers untried.",
+  "try": "Install GPT on HP and Lenovo with Secure Boot on.",
+  "needs": [
+   "HP",
+   "LEN"
+  ],
+  "impl_semantics": true,
+  "impl": 80
+ },
+ {
+  "id": "F-GPU-01",
+  "class": "B",
+  "size": "-",
+  "reason": "Vulkan GPU in k3s proven on AMD 780M; Intel and NVIDIA (nouveau/NVK) untried.",
+  "try": "Run the GPU card on the Lenovo and the 4090 PC; MBP14 Intel.",
+  "needs": [
+   "LEN",
+   "PC"
+  ],
+  "impl": 70
+ },
+ {
+  "id": "F-AIHW-01",
+  "class": "B",
+  "size": "-",
+  "reason": "AI hardware profile is from fake files; no Apple Silicon, AMD or NVIDIA machine used.",
+  "try": "Read /proc and sysfs on the Lenovo and the 4090 PC and compare `fits`; Apple Silicon build host for M-series ids.",
+  "needs": [
+   "LEN",
+   "PC"
+  ],
+  "impl": 90
+ },
+ {
+  "id": "F-APPLE-01",
+  "class": "F",
+  "size": "-",
+  "reason": "Route 2 (macOS bridge) built; route 3 (light Linux VM for k3s) documented not built; native Asahi later.",
+  "wording": "Split route 3 and Asahi into planned rows; this row = route 2 plus its limits.",
+  "impl": 60
+ },
+ {
+  "id": "F-GIT-01",
+  "class": "B",
+  "size": "-",
+  "reason": "Git built into the web ISO; the ISO was never booted.",
+  "try": "Boot the grafted ISO in QEMU, run `git clone` of a public repo inside.",
+  "needs": [
+   "PC"
+  ],
+  "impl": 75
+ },
+ {
+  "id": "F-PWR-01",
+  "class": "A",
+  "size": "L",
+  "reason": "Lid and power-button actions are 'not supported yet'; suspend unproven. [N1e looked at, not built (size M to L): lid and power-key actions need an evdev switch reader, new settings, a page and chat tools.]",
+  "plan": "Handle lid and power key events from evdev with the setting values, tests with synthetic events; suspend test is B (HP).",
+  "impl": 55,
+  "n1b": "N1e looked at, not built (size M to L): lid and power-key actions need an evdev switch reader, new settings, a page and chat tools."
+ },
+ {
+  "id": "F-SCRN-02",
+  "class": "E",
+  "size": "-",
+  "reason": "Impl 85 came from the sentence 'a starfield and a photo slideshow are not built'; they are built in F-SCRN-05. CPU cost on hardware is a Test item.",
+  "evidence": "Ran on the Mac: `cargo test -p iyakki-shell --lib saver` (69 pass, 2 ignored) including the cited saver::tests and shell::saver_tests. Impl set to 100; Test stays 30; the Mac mini CPU/frame reading remains.",
+  "verified": true,
+  "impl": 85
+ },
+ {
+  "id": "F-SCRN-05",
+  "class": "B",
+  "size": "-",
+  "reason": "Starfield and slideshow need eyes and CPU cost on the Mac mini.",
+  "try": "Run each style 5 minutes, record CPU.",
+  "needs": [
+   "MM",
+   "EYE"
+  ],
+  "impl_semantics": true,
+  "impl": 70
+ },
+ {
+  "id": "F-FW-14",
+  "class": "A",
+  "size": "M",
+  "reason": "Counters and sets built and accepted by the kernel; the Firewall page and a chat tool do not show them. [N1c done in part: per-rule 'N let in' on the advanced Firewall page and the chat tool firewall_counters (free, administrators); tested on fakes. Left: interval/concatenated sets; real-kernel traffic proof.]",
+  "plan": "Show per-rule counts on the Firewall page and add `firewall_counters` chat tool (free).",
+  "impl": 70,
+  "n1b": "N1c done in part: per-rule 'N let in' on the advanced Firewall page and the chat tool firewall_counters (free, administrators); tested on fakes. Left: interval/concatenated sets; real-kernel traffic proof."
+ },
+ {
+  "id": "F-LINAPP-02",
+  "class": "D",
+  "size": "-",
+  "reason": "Distribution fetch tested against a fake transport; no GPG verification; Debian pin owner choice.",
+  "plan": "Click-install each base once; owner pins Debian (D7).",
+  "needs": [
+   "cdimage.ubuntu.com, Docker Hub, Debian mirrors (network)"
+  ],
+  "impl": 80
+ },
+ {
+  "id": "F-LINAPP-08",
+  "class": "B",
+  "size": "-",
+  "reason": "IDE panel commands in a Linux sandbox not run on a device.",
+  "try": "Run a build in a sandboxed workspace on the Mac mini.",
+  "needs": [
+   "MM"
+  ],
+  "impl": 80
+ },
+ {
+  "id": "F-LINAPP-10",
+  "class": "F",
+  "size": "L",
+  "reason": "Root-tarball import works; on-device builder and sandbox-to-cluster image are planned.",
+  "wording": "Split the builder and the cluster-image conversion into planned rows.",
+  "impl": 60
+ },
+ {
+  "id": "F-LINAPP-13",
+  "class": "B",
+  "size": "-",
+  "reason": "Sandbox networking built; QEMU proof script not run.",
+  "try": "Run `dist/qemu/sandbox-net-test.sh` on the PC with KVM; add the sandbox chat tools (A M).",
+  "needs": [
+   "PC"
+  ],
+  "impl": 75
+ },
+ {
+  "id": "F-DISKS-01",
+  "class": "B",
+  "size": "-",
+  "reason": "Disk engine tested on a fake /sys; kernel lacks NTFS, exFAT, XFS, Btrfs, HFS+ drivers.",
+  "try": "Plug a USB stick and an HFS+/exFAT drive into the Mac mini; kernel drivers are decision D7.",
+  "needs": [
+   "MM"
+  ],
+  "impl_semantics": true,
+  "impl": 70
+ },
+ {
+  "id": "F-DISKS-02",
+  "class": "B",
+  "size": "-",
+  "reason": "Mount/unmount/eject with a fake runner.",
+  "try": "Mount, eject a real USB stick; LUKS/BitLocker stay out of scope (planned row).",
+  "needs": [
+   "MM"
+  ],
+  "impl_semantics": true,
+  "impl": 70
+ },
+ {
+  "id": "F-SDK-03",
+  "class": "F",
+  "size": "-",
+  "reason": "Phase 1 bridge built and fakes-tested; the rest is F-SDK-04.",
+  "wording": "Reword so Impl covers phase 1; then a real-provider and real-tile run is the B step.",
+  "impl": 55
+ },
+ {
+  "id": "F-INST-18",
+  "class": "F",
+  "size": "-",
+  "reason": "Object storage tools exist but DASH has no S3 source kind. [N1e split done: the row is the chat tools (built, tests pass, Impl 100); the DASH S3 source kind is the new planned row F-DASH-19. Row stays partial for Test 50 only.]",
+  "plan": "Add an S3 source kind to DASH or remove the 'registered in DASH' claim and say so.",
+  "impl": 60,
+  "wording": "Add an S3 source kind to DASH or remove the 'registered in DASH' claim and say so.",
+  "try": null,
+  "n1b": "N1e split done: the row is the chat tools (built, tests pass, Impl 100); the DASH S3 source kind is the new planned row F-DASH-19. Row stays partial for Test 50 only."
+ },
+ {
+  "id": "F-INST-19",
+  "class": "B",
+  "size": "-",
+  "reason": "Uninstall for 35 items tested with fakes; checklist in test-plans.",
+  "try": "Run docs/project/test-plans/k3s-and-cluster.md on a real cluster.",
+  "needs": [
+   "PC",
+   "MM"
+  ],
+  "impl": 70
+ },
+ {
+  "id": "F-AI-16",
+  "class": "A",
+  "size": "L",
+  "reason": "Ledger exists; Waiting strip, Settings rows, HTTP probes, model-judged checks and reports from installs, pulls, flows, rollouts, git, browser jobs are not built.",
+  "plan": "Build the strip + Settings rows first (M), then wire reporters one by one.",
+  "impl": 55
+ },
+ {
+  "id": "F-SETUP-18",
+  "class": "A",
+  "size": "M",
+  "reason": "Quick install review of verify-before-mark for the remaining items is unfinished.",
+  "plan": "Walk the item list, add a post-check to each, test with the scripted environment.",
+  "impl": 70
+ },
+ {
+  "id": "F-RADIO-06",
+  "class": "D",
+  "size": "-",
+  "reason": "AAC path tested with a fake decoder.",
+  "plan": "Install the add-on on the Mac mini and play an AAC and an HLS-AAC station.",
+  "needs": [
+   "ffmpeg add-on download (person-clicked)"
+  ],
+  "impl": 55
+ },
+ {
+  "id": "F-SND-15",
+  "class": "B",
+  "size": "-",
+  "reason": "Browser sound through the mixer: fix for the EBUSY on the Mac mini written; retest pending (radio + TikTok together).",
+  "try": "Retest on the Mac mini with the new image; measure lip-sync.",
+  "needs": [
+   "MM",
+   "EAR"
+  ],
+  "impl": 40
+ },
+ {
+  "id": "F-SND-20",
+  "class": "B",
+  "size": "-",
+  "reason": "T2 microphone switch fake sysfs; freeze risk.",
+  "try": "Enable the T2 mic on MBP16 and record 10 s; be ready to power-cycle.",
+  "needs": [
+   "MBP16",
+   "MM"
+  ],
+  "impl": 50
+ },
+ {
+  "id": "F-FLOW-27",
+  "class": "D",
+  "size": "-",
+  "reason": "Assistant sees the open flow failure; scripted model.",
+  "plan": "D3 live session.",
+  "needs": [
+   "live local model"
+  ],
+  "impl": 80
+ },
+ {
+  "id": "F-FLOW-29",
+  "class": "D",
+  "size": "-",
+  "reason": "Camera node tested with a fake camera and scripted model.",
+  "plan": "Run the node with a USB camera and a local vision model.",
+  "needs": [
+   "a real camera and a vision model (Qwen-VL)"
+  ],
+  "impl": 65
+ },
+ {
+  "id": "F-FLOW-31",
+  "class": "A",
+  "size": "L",
+  "reason": "Toolkit (scikit-learn, OpenCV) is a planned Quick install item, so the sample flows cannot run on the device.",
+  "plan": "Implement the Quick install item per DATA-SCIENCE-ADDON-PLAN (k3s job, isolated); then B PC for the end-to-end test.",
+  "impl": 50
+ },
+ {
+  "id": "F-FLOW-32",
+  "class": "A",
+  "size": "M",
+  "reason": "Assist setting exists; global defaults page and named agent profile are not built.",
+  "plan": "Add the defaults page and agent profile record per FLOW-AUTOPILOT-PLAN.",
+  "impl": 90
+ },
+ {
+  "id": "F-FLOW-33",
+  "class": "A",
+  "size": "M",
+  "reason": "Whole-flow no-side-effect trial run, Activity log and CLI readout missing; real model unrun.",
+  "plan": "Build the dry-run mode in the engine (S) and the activity log (M); live check is D3.",
+  "impl": 84
+ },
+ {
+  "id": "F-FLOW-34",
+  "class": "D",
+  "size": "-",
+  "reason": "Autopilot fixes with a scripted model; matrix notice and agent profile unbuilt.",
+  "plan": "D3 live session; build agent profile with F-FLOW-32.",
+  "needs": [
+   "live local model"
+  ],
+  "impl": 80
+ },
+ {
+  "id": "F-FLOW-39",
+  "class": "B",
+  "size": "-",
+  "reason": "Canvas node icons never seen on a real screen or touch panel; tooltips missing.",
+  "try": "Look at the canvas on the Mac mini at 100 % zoom; add toolbar tooltips (A S).",
+  "needs": [
+   "MM",
+   "EYE"
+  ],
+  "impl": 60
+ },
+ {
+  "id": "F-BROW-69",
+  "class": "B",
+  "size": "-",
+  "reason": "Camera/mic/screen share for pages: engine built without media-stream (WEB_MEDIA=1, F-BROW-72).",
+  "try": "Build the web image with WEB_MEDIA=1, run the mock pages on MBP14 (two cameras).",
+  "needs": [
+   "MBP14"
+  ],
+  "impl": 55
+ },
+ {
+  "id": "F-BROW-71",
+  "class": "C",
+  "size": "-",
+  "reason": "Screen share in the full engine needs the in-house portal service, a PipeWire feeder and PipeWire in the image; only the mock works.",
+  "question": "Q (D5): build the portal+PipeWire path (L), defer to a planned post-1.0 row (recommended), or deprecate screen share in the full engine.",
+  "impl": 40
+ },
+ {
+  "id": "F-BROW-73",
+  "class": "A",
+  "size": "M",
+  "reason": "Mock media pages and helper switch never ran in an engine; the QEMU smoke test is not written.",
+  "plan": "Write the QEMU smoke test using the mock switch; run it (B PC) after the WEB_MEDIA image.",
+  "impl": 30
+ },
+ {
+  "id": "F-BELL-01",
+  "class": "B",
+  "size": "-",
+  "reason": "Inbox grouping not seen on the Mac with 130 unread notes.",
+  "try": "Look at the real inbox.",
+  "needs": [
+   "MM",
+   "EYE"
+  ],
+  "impl_semantics": true,
+  "impl": 85
+ },
+ {
+  "id": "F-BELL-02",
+  "class": "B",
+  "size": "-",
+  "reason": "Bell count not seen on a screen.",
+  "try": "Same session as F-BELL-01.",
+  "needs": [
+   "MM",
+   "EYE"
+  ],
+  "impl_semantics": true,
+  "impl": 85
+ },
+ {
+  "id": "F-BELL-04",
+  "class": "B",
+  "size": "-",
+  "reason": "First scan baseline untried on a real network.",
+  "try": "Run NET SCAN on the Mac mini twice.",
+  "needs": [
+   "MM",
+   "NET"
+  ],
+  "impl_semantics": true,
+  "impl": 80
+ },
+ {
+  "id": "F-BROW-75",
+  "class": "B",
+  "size": "-",
+  "reason": "browser_headers tested with a scripted web; not on a real site.",
+  "try": "Run it on three real sites. Engine-side headers are an A M extra.",
+  "needs": [
+   "MM"
+  ],
+  "impl_semantics": true,
+  "impl": 60
+ },
+ {
+  "id": "F-BROW-77",
+  "class": "B",
+  "size": "-",
+  "reason": "Mic choice tested with fake /proc/asound; the engine needs media streams.",
+  "try": "After the WEB_MEDIA image, open a mic test page on MBP16.",
+  "needs": [
+   "MBP16"
+  ],
+  "impl": 70
+ },
+ {
+  "id": "F-BROW-78",
+  "class": "B",
+  "size": "-",
+  "reason": "Camera/mic chooser tested with fakes; `make check` needs GStreamer; default camera relies on engine behaviour.",
+  "try": "Run `make check` on a machine with GStreamer; pick between the two MBP cameras.",
+  "needs": [
+   "MBP14"
+  ],
+  "impl": 60
+ },
+ {
+  "id": "F-BROW-79",
+  "class": "B",
+  "size": "-",
+  "reason": "Custom request headers reach the helper by tests of the wire only; not run in a real WPE.",
+  "try": "Set a header rule in the web image on the Mac mini and watch the request on a local server.",
+  "needs": [
+   "MM"
+  ],
+  "impl_semantics": true,
+  "impl": 85
+ },
+ {
+  "id": "F-BROW-80",
+  "class": "A",
+  "size": "M",
+  "reason": "AV add-on proven in QEMU; Settings -> Browser add-on page and the tenant `media.codecs` switch are not built; the image lacks the bridge plugin until a full web build.",
+  "plan": "Build the Settings page and tenant switch (M); full ./build.sh web is a B step.",
+  "impl": 70
+ },
+ {
+  "id": "F-BROW-91",
+  "class": "B",
+  "size": "-",
+  "reason": "The Lenovo freeze of 2026-11-06 did not repeat; AMD path cause unproven; safe-mode fallback never triggered.",
+  "try": "Run the browser on the Lenovo 5 times with YouTube; if no freeze, mark the hypothesis closed.",
+  "needs": [
+   "LEN"
+  ],
+  "impl": 70
+ },
+ {
+  "id": "F-BROW-92",
+  "class": "B",
+  "size": "-",
+  "reason": "Graphics row draws nothing in a very small pane and shares room with the Smooth pages hint at 2560x1600. [N1b reclassified: the row's own tests are ignored on a Mac (they need a Linux DRM card); a fix cannot be proven here. Run them on the Linux PC with a 2560x1600 size added, then fix what shows.]",
+  "impl": 70,
+  "try": "Fix the layout rows with the existing size tests.",
+  "needs": [
+   "PC"
+  ],
+  "n1b": "N1b reclassified: the row's own tests are ignored on a Mac (they need a Linux DRM card); a fix cannot be proven here. Run them on the Linux PC with a 2560x1600 size added, then fix what shows."
+ },
+ {
+  "id": "F-VOICE-28",
+  "class": "F",
+  "size": "L",
+  "reason": "My IYAKKI first slice (push to talk) built; echo cancellation, results spoken later, cloud audio, top-bar mic glyph and voice-marked turns are the plan's next steps.",
+  "wording": "Split steps 4+ of MY-IYAKKI-PLAN into planned rows; test push to talk with a real mic on the Mac mini.",
+  "impl": 35
+ },
+ {
+  "id": "F-VOICE-35",
+  "class": "C",
+  "size": "-",
+  "reason": "Wake phrase: owner decided 2026-11-10 it stays EXPERIMENTAL, off by default; accuracy unverified and the trained model is synthetic.",
+  "question": "Confirm the final state 'experimental-by-decision' (recommended) so the row is allowed to stay partial; no further build.",
+  "impl": 55
+ },
+ {
+  "id": "F-MSG-02",
+  "class": "D",
+  "size": "-",
+  "reason": "Adapter tested only against an in-process fake; E2EE is F-MSG-08.",
+  "plan": "Run a Synapse or Conduit container on the PC, sign in, send and receive.",
+  "needs": [
+   "a real Matrix homeserver and account"
+  ],
+  "impl": 80
+ },
+ {
+  "id": "F-MSG-04",
+  "class": "A",
+  "size": "M",
+  "reason": "Flows notify node has the per-flow switch and cool-down; no Flows-tile toggle, assistant tool, quiet hours or escalation. [N1d done in part: chat tools flow_outside_messages (free) and flow_outside_messages_set (asks, audited); tests. Left: a Flows-tile toggle, quiet hours, escalation (planned rows).]",
+  "plan": "Add the toggle and a `flow_external_notify_set` tool (asks); quiet hours and escalation as planned rows.",
+  "impl": 65,
+  "n1b": "N1d done in part: chat tools flow_outside_messages (free) and flow_outside_messages_set (asks, audited); tests. Left: a Flows-tile toggle, quiet hours, escalation (planned rows)."
+ },
+ {
+  "id": "F-MSG-07",
+  "class": "D",
+  "size": "-",
+  "reason": "Mirror tested against the fake only; prompt rule is text, not observed behaviour.",
+  "plan": "Same homeserver as F-MSG-02 plus the D3 session.",
+  "needs": [
+   "real Matrix homeserver and a live model"
+  ],
+  "impl": 90
+ },
+ {
+  "id": "F-STARTUP-01",
+  "class": "A",
+  "size": "M",
+  "reason": "Web engine start step and quick-install services do not report to the registry.",
+  "plan": "Wire both to `startup_probe`, tests with fake services; boot timing is B (Mac mini).",
+  "impl": 70
+ },
+ {
+  "id": "F-WEBSVC-01",
+  "class": "F",
+  "size": "L",
+  "reason": "Headless service tested over TLS loopback; events polled, no /metrics, no JSON logs, the headless feature needs accounts moved out of the shell crate, other profiles planned.",
+  "wording": "Split: events WebSocket (M), metrics + JSON logs (M), headless accounts crate (L), other profiles (planned).",
+  "impl": 80
+ },
+ {
+  "id": "F-LDR-08",
+  "class": "B",
+  "size": "-",
+  "reason": "Own boot loader proven in QEMU; some real Macs boot (MBP14,1); other firmwares unverified.",
+  "try": "Boot each machine from the loader-default image and record the log.",
+  "needs": [
+   "MM",
+   "MBP14",
+   "HP",
+   "LEN"
+  ],
+  "impl": 65
+ },
+ {
+  "id": "F-CONN-04",
+  "class": "A",
+  "size": "M",
+  "reason": "ssh-agent signing not built; sign-in not run against a real `serve --web`.",
+  "plan": "Add the agent signing path (M) and an integration test against `serve --web` on loopback (S).",
+  "impl": 55
+ },
+ {
+  "id": "F-UPG-05",
+  "class": "A",
+  "size": "L",
+  "reason": "`iyakki-usb --update` does not exist: it needs a FAT overwrite writer and a real-stick test.",
+  "plan": "Write the FAT overwrite writer reusing `fatwrit`, test on image files, then a stick on the Mac mini (B).",
+  "impl": 70
+ },
+ {
+  "id": "F-UPG-09",
+  "class": "B",
+  "size": "-",
+  "reason": "Upgrade of accounts, vaults and settings proven by tests; the stick update path needs hardware (and F-UPG-05).",
+  "try": "After F-UPG-05, update a T7 stick install from alpha.2 to the new one.",
+  "needs": [
+   "MM",
+   "HP"
+  ],
+  "impl_semantics": true,
+  "impl": 85
+ },
+ {
+  "id": "F-SSHTUN-03",
+  "class": "A",
+  "size": "M",
+  "reason": "SSH tunnel tools tested with fakes only. [N1c done in part: the tunnel runner now runs against a real OpenSSH server (system sshd as the current user on a high port, skipped when absent): bytes through a local forward, and wrong host key / unknown client key classified. The chat tools were not driven against it.]",
+  "plan": "Run against a real sshd (macOS Remote Login on the build Mac or Linux sshd) in a gated ignored test.",
+  "impl": 80,
+  "n1b": "N1c done in part: the tunnel runner now runs against a real OpenSSH server (system sshd as the current user on a high port, skipped when absent): bytes through a local forward, and wrong host key / unknown client key classified. The chat tools were not driven against it."
+ },
+ {
+  "id": "F-CHECKUP-02",
+  "class": "B",
+  "size": "-",
+  "reason": "CHECK-UP tile never looked at on a real screen.",
+  "try": "Run it on the Mac mini and verify the signed result file with `iyakki checkup-result`.",
+  "needs": [
+   "MM",
+   "EYE"
+  ],
+  "impl_semantics": true,
+  "impl": 90
+ },
+ {
+  "id": "F-SELFTEST-01",
+  "class": "B",
+  "size": "-",
+  "reason": "Boot self-test pathcheck is unit tested; images predate it.",
+  "try": "Repack, run `qemu-test.sh`, read the lines.",
+  "needs": [
+   "PC"
+  ],
+  "impl": 60
+ },
+ {
+  "id": "F-VPN-02",
+  "class": "C",
+  "size": "-",
+  "reason": "OpenVPN sanitiser is parser only; no OpenVPN program ships and the musl build source is still open (owner decision 2026-10-28).",
+  "question": "Q (D10): (a) label OpenVPN unsupported now and deprecate F-VPN-02/06 (recommended; WireGuard is the VPN), (b) person-clicked download of a vendor build for the musl image (need a source), (c) build OpenVPN ourselves from source in the add-on pod.",
+  "impl": 25
+ },
+ {
+  "id": "F-VPN-06",
+  "class": "C",
+  "size": "-",
+  "reason": "OpenVPN backend: Impl was lowered to 40 on 2026-11-12; spawn, pushed options and applying them are not written and no binary source exists.",
+  "question": "Decision D10 (same as F-VPN-02).",
+  "impl": 40
+ },
+ {
+  "id": "F-VPN-08",
+  "class": "C",
+  "size": "-",
+  "reason": "Hybrid filters are pure code, called by no browser, HTTP client or proxy; precedence decided (most specific wins, deny beats allow). [N1d reclassified A to C. The Notes sentence that nothing calls the filters is stale (browserheaders.rs uses FilterSet). The open part is routing: a fetch decided Tunnel must leave through the tunnel. Question: (a) bind the browser and HTTP client sockets to the tunnel interface or its source address with a policy route, (b) give the VPN manager a local SOCKS proxy on the tunnel that the clients use for Tunnel decisions, (c) drop app-layer routing and keep the OS route rules only. Recommended: (b), it needs no kernel policy routing and works the same for the reader browser, the HTTP client and the proxy.]",
+  "plan": "Hook the filter into the egress proxy and the reader browser's fetch path; tests with fake requests.",
+  "impl": 40,
+  "question": "Hook the filter into the egress proxy and the reader browser's fetch path; tests with fake requests.",
+  "try": null,
+  "n1b": "N1d reclassified A to C. The Notes sentence that nothing calls the filters is stale (browserheaders.rs uses FilterSet). The open part is routing: a fetch decided Tunnel must leave through the tunnel. Question: (a) bind the browser and HTTP client sockets to the tunnel interface or its source address with a policy route, (b) give the VPN manager a local SOCKS proxy on the tunnel that the clients use for Tunnel decisions, (c) drop app-layer routing and keep the OS route rules only. Recommended: (b), it needs no kernel policy routing and works the same for the reader browser, the HTTP client and the proxy."
+ },
+ {
+  "id": "F-VPN-14",
+  "class": "B",
+  "size": "-",
+  "reason": "Kill switch and DNS redirect tables loaded in `unshare -rn` only; never on an image or with traffic.",
+  "try": "Boot the image in QEMU, bring up WireGuard to a second VM, pull the tunnel, check no leak.",
+  "needs": [
+   "PC"
+  ],
+  "impl": 85
+ },
+ {
+  "id": "F-VPN-16",
+  "class": "A",
+  "size": "M",
+  "reason": "Privileged VPN helper: nothing starts it on an image, no allowed-user config, no settings page.",
+  "plan": "Add the init service and allowed-user setting, then the page; QEMU run for the helper under a non-root session.",
+  "impl": 60
+ },
+ {
+  "id": "F-BACKUP-01",
+  "class": "A",
+  "size": "M",
+  "reason": "Backup reads the file twice with no progress or cancel; big sets and real stick untried. [N1e done in part: create_with_progress (progress over both passes) and Cancelled with the half file removed; tested. The file stays two-pass by design (the manifest at the front holds every hash). Left: a bar and a stop button on the page and the CLI; multi-GB and real-stick runs (B).]",
+  "plan": "Single pass with a progress callback and cancel flag; test with a multi-GB sparse set.",
+  "impl": 75,
+  "n1b": "N1e done in part: create_with_progress (progress over both passes) and Cancelled with the half file removed; tested. The file stays two-pass by design (the manifest at the front holds every hash). Left: a bar and a stop button on the page and the CLI; multi-GB and real-stick runs (B)."
+ },
+ {
+  "id": "F-DEVT-05",
+  "class": "B",
+  "size": "-",
+  "reason": "QR drawn and read back by our own reader; no phone scan.",
+  "try": "Scan each of the eight code kinds with a phone camera.",
+  "needs": [
+   "PH"
+  ],
+  "impl_semantics": true,
+  "impl": 90
+ },
+ {
+  "id": "F-WEBDEV-01",
+  "class": "B",
+  "size": "-",
+  "reason": "Clipboard beyond text ran only under node with stand-ins.",
+  "try": "Test image/HTML clipboard in Chrome, Firefox and Safari against the Connect page.",
+  "needs": [
+   "PC",
+   "MM"
+  ],
+  "impl": 70
+ },
+ {
+  "id": "F-BOOT-42",
+  "class": "E",
+  "size": "-",
+  "reason": "Kernel built with CONFIG_X86_X2APIC=y and CONFIG_IRQ_REMAP=y; the HP boots from the T7 stick (owner, 2026-11-07, QEMU IOMMU run). The 'not yet' items (HP disk install, rest of the HP matrix) are other rows.",
+  "evidence": "Ran on the Mac: `cargo test -p iyakki-core --test kernel_platform` (2 pass: the_x86_kernel_supports_x2apic_with_interrupt_remapping, the_hp_plan_records_the_x2apic_finding); dist/buildroot/board/iyakki/linux.fragment lines 22-23 carry both options. Impl set to 100, row to done (Test 100, Manual passed 2026-11-07 qemu).",
+  "verified": true,
+  "impl": 75
+ },
+ {
+  "id": "F-HOTSPOT-04",
+  "class": "B",
+  "size": "-",
+  "reason": "Authenticator handshake tested against our own supplicant; iOS, Android, Windows, macOS, wpa_supplicant are the real check; group key rotation has no trigger.",
+  "try": "Join from an iPhone and an Android phone on the Mac mini hotspot; add rotation timer (A M).",
+  "needs": [
+   "MM",
+   "PH"
+  ],
+  "impl": 90
+ },
+ {
+  "id": "F-HOTSPOT-11",
+  "class": "B",
+  "size": "-",
+  "reason": "Sharing firewall golden text only; bridge-family table unwritten.",
+  "try": "Load the table in the Mac mini kernel, share a cable's internet to a phone.",
+  "needs": [
+   "MM"
+  ],
+  "impl": 75
+ },
+ {
+  "id": "F-HOTSPOT-15",
+  "class": "A",
+  "size": "L",
+  "reason": "Bluetooth NAP (phones using this machine) only modelled: needs BNEP server code, SDP record, pairing and kernel options.",
+  "plan": "Implement BNEP server over a raw L2CAP socket like bt_pan client, SDP NAP record, add kernel options; fakes first, phone test B.",
+  "impl": 50
+ },
+ {
+  "id": "F-HOTSPOT-16",
+  "class": "B",
+  "size": "-",
+  "reason": "Capability probe not called by any Settings page or the manager. [N1c: looked at, not built. The probe is called only by the radio test bed (hotspot_radio.rs); wiring it into the sharing manager and the page touches the real nl80211 path, which cannot run on a Mac. Reclassified: A to needs a Linux machine with a Wi-Fi card for the proof; the wiring itself is M.]",
+  "impl": 70,
+  "try": "Call the probe from the manager before start and show the result on the hotspot page.",
+  "needs": [
+   "PC"
+  ],
+  "n1b": "N1c: looked at, not built. The probe is called only by the radio test bed (hotspot_radio.rs); wiring it into the sharing manager and the page touches the real nl80211 path, which cannot run on a Mac. Reclassified: A to needs a Linux machine with a Wi-Fi card for the proof; the wiring itself is M."
+ },
+ {
+  "id": "F-HOTSPOT-18",
+  "class": "B",
+  "size": "-",
+  "reason": "Broadcom FullMAC hotspot start accepted; phones joining after the interface fix not re-run; WPA2 2.4 GHz only.",
+  "try": "Re-run on the Mac mini with two phones; 5 GHz and country page become planned rows.",
+  "needs": [
+   "MM",
+   "PH"
+  ],
+  "impl": 55
+ },
+ {
+  "id": "F-HOTSPOT-19",
+  "class": "C",
+  "size": "-",
+  "reason": "One-radio sharing: on `pause_client` failure the code logs and starts the hotspot unpaused, while the description says the start fails; decision open in the row.",
+  "question": "Q: (a) fail the start cleanly with a plain message (recommended: matches the description, no half state), (b) carry on unpaused and change the description, (c) ask the person at that moment.",
+  "impl": 90
+ },
+ {
+  "id": "F-SBX-03",
+  "class": "A",
+  "size": "L",
+  "reason": "Sandbox executors tested with a fake cluster; real kubeconfig from the team binding, artifacts from a finished pod and the namespace tier in a pod are not built.",
+  "plan": "Build kubeconfig-from-binding and artifact copy with fake kubectl first, then one run on k3s (B PC).",
+  "impl": 65
+ },
+ {
+  "id": "F-SBX-05",
+  "class": "A",
+  "size": "M",
+  "reason": "Nothing installs the runner at pod start; the scheduler does not call `spec_from_flow_job`. [N1d: found already built (runner installed at pod start, scheduler builds its Job via spec_from_flow_job); Notes corrected, Impl 85. Left: a real pod run.]",
+  "plan": "Install the runner in the pod entry and call `spec_from_flow_job` from the cloud-flows scheduler; fake-launcher tests.",
+  "impl": 50,
+  "n1b": "N1d: found already built (runner installed at pod start, scheduler builds its Job via spec_from_flow_job); Notes corrected, Impl 85. Left: a real pod run."
+ },
+ {
+  "id": "F-VIEW-01",
+  "class": "A",
+  "size": "M",
+  "reason": "Views model done; window layout saved across sign-out, per-app single/multiple instance rule and a Settings list of own templates are missing. [N1d done in part: the Settings picker lists and uses the person's own templates (tested). Left: per-view window layout across sign-out, per-app single/multiple instance rule.]",
+  "plan": "Persist layout in the views file, add the instance rule, list templates on the Settings page.",
+  "impl": 70,
+  "n1b": "N1d done in part: the Settings picker lists and uses the person's own templates (tested). Left: per-view window layout across sign-out, per-app single/multiple instance rule."
+ },
+ {
+  "id": "F-VIEW-02",
+  "class": "A",
+  "size": "M",
+  "reason": "Switching works (owner tried the buttons and keys); other displays are not switched; no chat tool for the set choice.",
+  "plan": "Switch panes on every display and add the chat tool; locked-view and step-key checks are a person's try on the Mac mini.",
+  "impl": 55
+ }
+]

@@ -1,0 +1,21 @@
+{
+  "profile": "cloud",
+  "listen": "0.0.0.0:8444",
+  "lan": true,
+  "allow_from": ["10.0.0.0/8"],
+  "tls": { "cert": "/etc/iyakki/tls/service.crt", "key": "/etc/iyakki/tls/service.key" },
+  "token_store": "/var/lib/iyakki/service/tokens.json",
+  "data_dir": "/var/lib/iyakki",
+  "cors_origins": ["https://app.example.org"],
+  "enable_tools": [],
+  "limits": {
+    "requests_per_minute": 60,
+    "logins_per_minute": 10,
+    "concurrent_runs": 4,
+    "max_body_bytes": 1048576,
+    "max_connections": 128,
+    "approval_timeout_secs": 300,
+    "token_lifetime_secs": 86400,
+    "token_idle_secs": 28800
+  }
+}

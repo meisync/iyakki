@@ -1,0 +1,23 @@
+{"dir":"c","msg":{"client":"compat-fixture","min_v":1,"needed":["calls"],"offered":["picture","input","events","calls"],"t":"hello","v":1}}
+{"dir":"s","msg":{"caps":["picture","input","events","calls"],"challenge":"00112233445566778899aabbccddeeff","max_message":65536,"t":"hello_ok","tile":64,"v":1}}
+{"dir":"c","msg":{"name":"Fixture laptop","public":"abababababababababababababababababababababababababababababababab","t":"enrol","token":"synthetic-one-time-token"}}
+{"dir":"s","msg":{"challenge":"ffeeddccbbaa99887766554433221100","device":"dev-000001","t":"enrolled"}}
+{"dir":"c","msg":{"authorization":"IYAKKI-SIG synthetic-signature","t":"auth"}}
+{"dir":"s","msg":{"device":"dev-000001","name":"Fixture laptop","t":"authed"}}
+{"dir":"c","msg":{"password":"synthetic-password-not-real","t":"sign_in","user":"amy"}}
+{"dir":"s","msg":{"person":"amy","t":"signed_in"}}
+{"dir":"c","msg":{"capability":"camera.view","id":1,"t":"call","unit":"front"}}
+{"dir":"s","msg":{"detail":"","id":1,"t":"call_ok"}}
+{"dir":"c","msg":{"capability":"camera.record","id":2,"t":"call","unit":null}}
+{"dir":"s","msg":{"code":"not_granted","id":2,"message":"this app was not given that access","t":"call_err"}}
+{"dir":"c","msg":{"deflate":true,"t":"picture_open"}}
+{"dir":"s","msg":{"t":"picture_ok"}}
+{"dir":"c","msg":{"last_seq":0,"t":"resume"}}
+{"dir":"s","msg":{"count":1,"from":1,"t":"resume_ok"}}
+{"dir":"s","msg":{"body":"hello","seq":1,"t":"event","topic":"notify"}}
+{"dir":"c","msg":{"t":"ping","ts":5}}
+{"dir":"s","msg":{"t":"pong","ts":5}}
+{"dir":"s","msg":{"code":"version_mismatch","message":"this instance speaks protocol 1 to 1; the client speaks 8 to 9: update this IYAKKI instance","t":"error"}}
+{"dir":"s","msg":{"code":"capability_missing","message":"this instance cannot offer: hologram","t":"error"}}
+{"dir":"c","msg":{"t":"bye"}}
+{"dir":"s","msg":{"reason":"closed","t":"bye"}}

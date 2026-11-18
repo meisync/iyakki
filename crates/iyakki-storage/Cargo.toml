@@ -1,0 +1,9 @@
+[package]
+name = "iyakki-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Where IYAKKI keeps its data: detect disks, find the IYAKKI-DATA volume, make a disk persistent."
+
+[dependencies]
+libc = "0.2"

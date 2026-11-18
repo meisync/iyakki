@@ -1,0 +1,9 @@
+{
+  "_note": "WHEN AVAILABLE: `iyakki dev mcp` is designed (docs/development/SDK-API.md, section 7.2) but NOT BUILT yet. Until it exists, an agent uses the iyakki dev commands in a shell. Delete this note and the leading underscore of the entry below once `iyakki dev mcp --help` works.",
+  "mcpServers": {
+    "_iyakki-device": {
+      "command": "iyakki",
+      "args": ["dev", "mcp"]
+    }
+  }
+}

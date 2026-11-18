@@ -1,0 +1,15 @@
+# Glass night: a dark skin with frosted surfaces, round corners and a soft shadow under raised things.
+[look]
+name = Glass night
+
+[colours]
+base = dark
+
+[shape]
+shape = round
+edge = thin
+
+[effects]
+elevation = low
+glass = on
+blur = 16

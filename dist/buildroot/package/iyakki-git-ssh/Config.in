@@ -1,0 +1,11 @@
+config BR2_PACKAGE_IYAKKI_GIT_SSH
+	bool "iyakki-git-ssh"
+	depends on BR2_USE_MMU
+	select BR2_PACKAGE_OPENSSL
+	select BR2_PACKAGE_ZLIB
+	help
+	  The OpenSSH `ssh` client program ONLY (BSD/ISC licence), installed
+	  as /usr/libexec/iyakki/git-ssh and used by git through
+	  GIT_SSH_COMMAND, because it speaks the ssh-agent protocol and
+	  Dropbear's dbclient does not. Not on the PATH: the CLI tile keeps
+	  using Dropbear's `ssh`. docs/GIT-AND-SSH.md

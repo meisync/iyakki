@@ -1,0 +1,2361 @@
+//! Runtime hub: owns settings, the vaults, the knowledge base and the model/RAG clients, and hands
+//! the apps live views of them. Everything here reads Settings at call time, so changing a model or
+//! a backend takes effect immediately without restarting anything.
+
+pub use iyakki_shared::services::{PullStatus, SessionDeleted};
+pub use iyakki_shared::services::{LoginReport};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use iyakki_proxy::Upstream;
+
+use crate::chat::{ChatBackend, Message, ModelTurn, ToolSpec};
+use crate::embed::{HashEmbed, TextEmbedder};
+use crate::kb::{Hit, KnowledgeBase};
+use crate::providers::{ProviderClient, ProviderCfg};
+use crate::rag_ext::ExtClient;
+use crate::settings::{ModelChoice, SettingsStore};
+use crate::runs::RunStore;
+use crate::sessions::SessionStore;
+use crate::skills::SkillStore;
+use crate::vault::{LocalVault, Secrets, VaultError};
+use crate::voice::{self, VoiceSettings};
+pub use iyakki_shared::services::{VaultState};
+
+
+
+pub struct Services {
+    /// This object as an `Arc` (set when it is opened): the handle the UI holds (`facets_h`) answers the calls that need `self: &Arc<Self>` through it.
+    pub(crate) me: std::sync::Weak<Services>,
+    pub settings: Arc<Mutex<SettingsStore>>,
+    /// The engine of the events apps hear (`appevent_sources.rs`): the services below tell it what happens; the core's facet reads from it.
+    pub app_events: Arc<iyakki_core_api::appevents::SharedHub>,
+    pub secrets: Secrets,
+    pub kb: Arc<Mutex<KnowledgeBase>>,
+    /// Recorded agent runs.
+    pub runs: Arc<RunStore>,
+    pub skills: Arc<SkillStore>,
+    /// What a browser tile says about its own app icon (`dock.status`): per person and tile, the corner number and the line. Merged into the
+    /// apps' statuses by the core (`corehandle.rs`), so the home screen shows it like any other.
+    pub tile_status: Mutex<HashMap<(String, String), (Option<u32>, String)>>,
+    /// The internet radio: one player for the whole system, so it keeps playing while apps come and go.
+    pub radio: crate::radio::RadioPlayer,
+    /// The online radio directory the chat's radio tools search (with an hour of memory).
+    pub radio_dir: crate::radiotools::Directory,
+    /// Developer tools for the chat agent: the per-person switch and the bounded buffers of failed requests, timings and console messages.
+    pub devtools: crate::devtools::DevTools,
+    /// The assistant's web client (search, fetch, weather, quotes) and the page each person has open in the browser.
+    pub web: crate::webtools::WebClient,
+    pub page_snapshot: Mutex<HashMap<String, crate::webtools::PageSnapshot>>,
+    /// What the assistant's tools did, kept for a few days.
+    pub toollog: crate::toollog::ToolLog,
+    /// Detached jobs (long commands that outlive the chat), found again after a restart (see `docs/JOBS.md`).
+    pub jobs: crate::jobs::Jobs,
+    /// The vendor session id of each chat with an external coding agent (so the next message resumes it).
+    pub ext_sessions: crate::extagent::run::SessionMap,
+    /// What the last look at each external coding agent found (Settings → Agents, the model list).
+    pub ext_status: Arc<crate::extagent::StatusCache>,
+    /// Tokens used by each model, for the USAGE tile.
+    pub usage: crate::usage::UsageLog,
+    /// The consent gate of the cloud audio stream (F-VOICE-38): the Voice tile follows the settings through it and answers the card.
+    pub(crate) cloud_gate: Mutex<crate::cloudstream::Gate>,
+    /// Each person's events and alarms, shared by the calendar app, the chat and the terminal.
+    pub calendar: crate::calendar::CalendarStore,
+    /// Each person's study plans and quizzes, shared by the LEARN tile and the chat (`docs/STUDY.md`).
+    pub study: crate::study::StudyStore,
+    /// Command-line tools installed from the CLI tile (kubectl, aws, gcloud, …).
+    pub clis: Arc<crate::clis::CliManager>,
+    /// The container cluster (k3s) the assistant can run code in.
+    pub cluster: Arc<crate::cluster::Cluster>,
+    /// The local dev cluster IYAKKI installs and keeps on a bare-metal machine (Settings \u{2192} Dev cluster, SYSTEM).
+    pub k3sdev: Arc<crate::k3sdev::K3sDev>,
+    /// Every managed local cluster (the one above and the optional extra ones of Settings \u{2192} Clusters), one supervisor each.
+    fleet: std::sync::OnceLock<Arc<crate::clusters::Fleet>>,
+    /// Machines seen on the local network, and which of them are new.
+    pub devwatch: Arc<crate::devwatch::DeviceWatch>,
+    /// Each person's notifications and tasks (the INBOX).
+    pub inbox: crate::inbox::Inbox,
+    /// The speech engines found on this computer (detected in the background, `docs/VOICE.md`) and the browser voice helper.
+    pub host_tts: Arc<crate::hostengines::HostTts>,
+    watching: std::sync::atomic::AtomicBool,
+    /// A local Ollama server, started from the CLI tile once Ollama is installed there.
+    pub ollama: Arc<crate::ollama::OllamaServer>,
+    /// MCP servers added from the MCP tile.
+    pub mcp: crate::mcp::McpStore,
+    /// UTCP manuals added from the UTCP tile.
+    pub utcp: crate::utcp::UtcpStore,
+    /// Installed skill packages and the publishers we trust.
+    pub packages: Arc<crate::pkg::Packages>,
+    pub sessions: Arc<SessionStore>,
+    /// Secrets the assistant asked the person to enter themselves (they never pass through the assistant).
+    pub secret_requests: crate::secretreq::SecretRequests,
+    /// The assistant's use of the person's browser: the job queue the shell services, the questions it asks, the grants and budgets.
+    pub browser: crate::browserconsent::BrowserState,
+    /// The assistant's `screen_capture`: requests the shell answers with the frame it last drew.
+    pub screen: crate::screencap::ScreenCapture,
+    /// The assistant's camera tools: the shell's camera, the 5-minute grants and the "in use" sign.
+    pub camera: crate::camtools::CameraHub,
+    media_indexes: Mutex<HashMap<String, Arc<Mutex<crate::mediaindex::MediaIndex>>>>,
+    media_queues: Mutex<HashMap<String, Arc<crate::mediaqueue::DownloadQueue>>>,
+    quick: Arc<dyn Upstream>,
+    slow: Arc<dyn Upstream>,
+    dir: PathBuf,
+    user_vaults: Mutex<HashMap<String, LocalVault>>,
+    /// The person signed in at the screen: whose home and vault the vendor coding agents are looked at and started with.
+    agent_user: Arc<Mutex<String>>,
+    /// For model downloads (their progress arrives over time).
+    streamer: Mutex<Option<Arc<dyn iyakki_proxy::Streamer>>>,
+    /// For model answers read as they are written (waits long for the first byte: a local model may need loading).
+    chat_streamer: Mutex<Option<Arc<dyn iyakki_proxy::Streamer>>>,
+    /// How long the last model warm-up took (milliseconds), for the benchmark and the SYSTEM tile.
+    pub last_warm_up_ms: std::sync::atomic::AtomicU64,
+    pulls: Mutex<HashMap<String, PullStatus>>,
+    /// Bringing documents up to date with the embedding model in use: whether it is going and how the last run ended.
+    reindexing: std::sync::atomic::AtomicBool,
+    reindex_note: Mutex<Option<String>>,
+    /// What "Use all parts" of a Lemonade collection replaced, for Undo.
+    pub(crate) parts_undo: Mutex<Option<crate::omni::AllPartsUndo>>,
+}
+
+
+
+
+fn count_files(dir: &Path) -> usize {
+    let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
+    rd.flatten().map(|e| match e.file_type() {
+        Ok(t) if t.is_dir() => count_files(&e.path()),
+        Ok(_) => 1,
+        Err(_) => 0,
+    }).sum()
+}
+
+fn io_err(e: impl std::fmt::Display) -> String {
+    e.to_string()
+}
+
+impl Services {
+    /// `quick` is used for tests and model listing (short timeout), `slow` for generation.
+    pub fn open(dir: &Path, quick: Arc<dyn Upstream>, slow: Arc<dyn Upstream>) -> Result<Arc<Services>, String> {
+        let t0 = std::time::Instant::now();
+        // a decrypted browser profile left by a crash is wiped before anybody can sign in (`profilestore.rs`)
+        crate::profilestore::wipe_stale(dir);
+        std::fs::create_dir_all(dir.join("vault/users")).map_err(io_err)?;
+        let settings = SettingsStore::open(&dir.join("settings.json")).map_err(io_err)?;
+        let sys_path = dir.join("vault/system.afv");
+        // A system vault that cannot be read must not stop the whole system from starting (the shell would not come up at all): the
+        // file is left exactly as it is, the administrators are told it is locked (`admin_login_system` never creates a new vault over
+        // an existing file), and a line goes to the audit log.
+        let system = if LocalVault::exists(&sys_path) {
+            match LocalVault::open(&sys_path) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    iyakki_schema::report(format!("system vault {}: cannot be opened ({e}); the file is left as it is and the system vault stays locked", sys_path.display()));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        // every request to Google passes the consent gate of the person signed in (`crate::gemini`): no code path can send without it
+        let agent_user_arc = Arc::new(Mutex::new(String::new()));
+        let who: Arc<dyn Fn() -> String + Send + Sync> = {
+            let a = agent_user_arc.clone();
+            Arc::new(move || a.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone())
+        };
+        let quick: Arc<dyn Upstream> = Arc::new(crate::gemini::GuardedUpstream::new(quick, dir, who.clone()));
+        let slow: Arc<dyn Upstream> = Arc::new(crate::gemini::GuardedUpstream::new(slow, dir, who.clone()));
+        let secrets = Secrets::new(system, quick.clone());
+        secrets.set_providers(settings.get().secret_providers.clone().into_iter().collect());
+        // a cloud instance's common vault (cvault:NAME), when the operator mounted one
+        secrets.set_common(crate::commonvault::load(&crate::commonvault::dir()));
+        // models a server said can see pictures (Lemonade's vision label) stay known after a restart
+        let vision: Vec<String> = settings.get().providers.iter().flat_map(|p| p.model_kinds.iter().filter(|(_, k)| k.as_str() == "vision").map(|(m, _)| m.clone())).collect();
+        crate::providers::note_vision_models(&vision);
+        let clis = Arc::new(crate::clis::CliManager::new(&dir.join("cli")));
+        let svc = Arc::new_cyclic(|weak: &std::sync::Weak<Services>| {
+            let embedder: Arc<dyn TextEmbedder> = Arc::new(DynamicEmbed { svc: weak.clone() });
+            let kb = Arc::new(Mutex::new(KnowledgeBase::open(&dir.join("kb"), embedder)));
+            let skills = Arc::new(SkillStore::new(&dir.join("skills"), kb.clone()));
+            let settings_arc = Arc::new(Mutex::new(settings));
+            Services {
+                me: weak.clone(),
+                settings: settings_arc.clone(),
+                app_events: iyakki_core_local::appevents::local_app_events_with(dir, Box::new(crate::appevent_sources::AgentScopes { dir: dir.to_path_buf() })),
+                secrets,
+                packages: Arc::new(crate::pkg::Packages::new(&dir.join("packages"), skills.clone())),
+                skills,
+                tile_status: Mutex::new(HashMap::new()),
+                radio: {
+                    // the radio's volume is the master volume, not a second one
+                    let r = crate::radio::RadioPlayer::default();
+                    r.set_master_link(master_link(&settings_arc));
+                    r.announce_holder();
+                    r
+                },
+                devtools: crate::devtools::DevTools::new(dir),
+                radio_dir: crate::radiotools::Directory::new(Arc::new(crate::radiotools::UpstreamFetcher(quick.clone()))),
+                web: crate::webtools::WebClient::new(),
+                page_snapshot: Mutex::new(HashMap::new()),
+                toollog: crate::toollog::ToolLog::new(&dir.join("tools.jsonl")),
+                jobs: crate::jobs::Jobs::new(&dir.join("jobs")),
+                ext_sessions: crate::extagent::run::SessionMap::open(&dir.join("ext-sessions.json")),
+                ext_status: Arc::new(crate::extagent::StatusCache::open(&dir.join("ext-models.json"))),
+                usage: crate::usage::UsageLog::open(&dir.join("usage.jsonl")),
+                calendar: crate::calendar::CalendarStore::new(&dir.join("calendar")),
+                study: crate::study::StudyStore::new(&dir.join("study")),
+                clis: clis.clone(),
+                cluster: Arc::new(crate::cluster::Cluster::new(&dir.join("cluster"), clis.clone())),
+                k3sdev: crate::k3sdev::K3sDev::new(dir, clis.clone(), Arc::new(crate::wsexec::System)),
+                cloud_gate: Mutex::new(crate::cloudstream::Gate::new(false, "")),
+                fleet: std::sync::OnceLock::new(),
+                devwatch: Arc::new(crate::devwatch::DeviceWatch::open(&dir.join("devices.json"))),
+                inbox: crate::inbox::Inbox::new(&dir.join("inbox")),
+                host_tts: Arc::new(crate::hostengines::HostTts::new(&[dir.join("voices")])),
+                watching: std::sync::atomic::AtomicBool::new(false),
+                ollama: {
+                    let server = Arc::new(crate::ollama::OllamaServer::new(&dir.join("ollama"), clis.clone()));
+                    // when the server answers, it becomes a model provider the chat can use
+                    let weak = weak.clone();
+                    server.set_on_ready(move |url| {
+                        if let Some(svc) = weak.upgrade() {
+                            svc.use_local_ollama(url);
+                        }
+                    });
+                    server
+                },
+                mcp: crate::mcp::McpStore::new(&dir.join("mcp-servers.json")),
+                utcp: crate::utcp::UtcpStore::new(&dir.join("utcp-manuals.json")),
+                sessions: Arc::new(SessionStore::new(&dir.join("sessions"), kb.clone())),
+                kb,
+                secret_requests: crate::secretreq::SecretRequests::new(),
+                browser: crate::browserconsent::BrowserState::new(),
+                screen: crate::screencap::ScreenCapture::new(),
+                camera: crate::camtools::CameraHub::new(),
+                media_indexes: Mutex::new(HashMap::new()),
+                media_queues: Mutex::new(HashMap::new()),
+                runs: Arc::new(RunStore::new(&dir.join("runs"))),
+                quick,
+                slow,
+                dir: dir.into(),
+                user_vaults: Mutex::new(HashMap::new()),
+                agent_user: agent_user_arc,
+                streamer: Mutex::new(None),
+                chat_streamer: Mutex::new(None),
+                last_warm_up_ms: std::sync::atomic::AtomicU64::new(0),
+                pulls: Mutex::new(HashMap::new()),
+                reindexing: std::sync::atomic::AtomicBool::new(false),
+                reindex_note: Mutex::new(None),
+                parts_undo: Mutex::new(None),
+            }
+        });
+        let t_build = t0.elapsed();
+        svc.wire_agent_installs();
+        svc.unlock_with_keyfile();
+        let t_unlock = t0.elapsed();
+        // the managed dev cluster never starts next to the sandbox cluster, and starts with IYAKKI when it was installed here
+        {
+            let sandbox = svc.cluster.clone();
+            svc.k3sdev.set_sandbox_probe(Arc::new(move || matches!(sandbox.state(), crate::cluster::ClusterState::Starting | crate::cluster::ClusterState::Running)));
+            svc.k3sdev.autostart();
+            // a lost and reconnected boot drive: the cluster keeps files open on it, so it is stopped before and started after
+            if !cfg!(test) {
+                let (a, b, c) = (svc.k3sdev.clone(), svc.k3sdev.clone(), svc.k3sdev.clone());
+                iyakki_storage::loss::register_component(
+                    "k3s",
+                    move || matches!(a.state(), crate::k3sdev::Svc::Running | crate::k3sdev::Svc::Starting),
+                    move || {
+                        let _ = b.stop("system");
+                    },
+                    move || {
+                        let _ = c.start("system");
+                    },
+                );
+            }
+            {
+                let (fleet, dir) = (svc.fleet(), dir.to_path_buf());
+                let _ = std::thread::Builder::new().name("iyakki-clusters-autostart".into()).spawn(move || {
+                    let _ = fleet.autostart_all(&dir);
+                });
+            }
+        }
+        log::info!("boot: services opened in {} ms (stores {}, vault key {}, dev cluster {})", t0.elapsed().as_millis(), t_build.as_millis(), (t_unlock - t_build).as_millis(), (t0.elapsed() - t_unlock).as_millis());
+        // MP3 files of the MEDIA library play in IYAKKI's own player (the one the RADIO tile uses)
+        let weak_svc = Arc::downgrade(&svc);
+        crate::media::set_builtin_audio(svc.radio.clone(), Arc::new(move || weak_svc.upgrade().map(|s| s.voice_settings().play_cmd).unwrap_or_default()));
+        // a run that ends leaves a note in its owner's inbox
+        let weak = Arc::downgrade(&svc);
+        svc.runs.set_on_finish(move |log| {
+            if let Some(svc) = weak.upgrade() {
+                svc.notify_run_finished(log);
+            }
+        });
+        Ok(svc)
+    }
+
+    /// Leave a notification in a person's inbox (reminders, finished runs, downloads, warnings). The link says which
+    /// app and item it is about. Errors (a full disk, a bad user name) are returned, never raised.
+    pub fn notify(&self, user: &str, kind: crate::inbox::Kind, title: &str, body: &str, link: Option<crate::inbox::Link>) -> Result<(), String> {
+        let source = link.as_ref().map(|l| l.app.clone()).unwrap_or_else(|| "system".into());
+        self.inbox.add(user, kind, title, body, &source, link, crate::clock::now_unix()).map(|_| ())
+    }
+
+    /// Like [`Services::notify`], but not again while an unread note with the same title is still there (for warnings
+    /// that would otherwise pile up at every sign-in).
+    pub fn notify_once(&self, user: &str, kind: crate::inbox::Kind, title: &str, body: &str, link: Option<crate::inbox::Link>) -> Result<(), String> {
+        if self.inbox.list(user).iter().any(|n| !n.read && n.title == title) {
+            return Ok(());
+        }
+        self.notify(user, kind, title, body, link)
+    }
+
+    fn notify_run_finished(&self, log: &crate::runs::RunLog) {
+        use crate::agent::RunEvent;
+        let ask: String = log.prompt.chars().take(80).collect();
+        let (kind, title, body) = match log.events.last() {
+            Some(RunEvent::Final { text }) => (crate::inbox::Kind::Agent, format!("Finished: {ask}"), text.chars().take(400).collect::<String>()),
+            Some(RunEvent::Failed { error }) => (crate::inbox::Kind::Error, format!("Failed: {ask}"), error.chars().take(400).collect::<String>()),
+            // stopped by the person (or by closing the chat): they know
+            _ => return,
+        };
+        let _ = self.notify(&log.user, kind, &title, &body, Some(crate::inbox::Link::new("runs", &log.id)));
+    }
+
+    /// A tile sets the status of its own icon: `badge` is the corner number, `line` the words under the name (cut to 40 characters, no control
+    /// characters). An empty line and no badge clears it. At most 64 tiles are kept per person.
+    pub fn set_tile_status(&self, user: &str, tile: &str, badge: Option<u32>, line: &str) {
+        let line: String = line.chars().filter(|c| !c.is_control()).take(40).collect();
+        let mut m = self.tile_status.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = (user.to_string(), tile.to_string());
+        if line.is_empty() && badge.is_none_or(|b| b == 0) {
+            m.remove(&key);
+        } else if m.contains_key(&key) || m.keys().filter(|(u, _)| u == user).count() < 64 {
+            m.insert(key, (badge.map(|b| b.min(999)), line));
+        }
+    }
+
+    /// The tool calls waiting for this person's answer, in the runs they have going (from the chat or anywhere else).
+    pub fn approvals(&self, user: &str) -> Vec<crate::runs::PendingApproval> {
+        self.runs.pending_approvals(Some(user))
+    }
+
+    /// Answer one waiting tool call. `approve` false rejects it. Each call is answered on its own; there is no way to
+    /// answer several at once.
+    pub fn decide_approval(&self, user: &str, run_id: &str, call_id: &str, approve: bool) -> Result<crate::runs::PendingApproval, String> {
+        let v = if approve { crate::agent::Verdict::Approve } else { crate::agent::Verdict::Deny };
+        self.runs.decide_pending(user, false, run_id, call_id, v)
+    }
+
+    /// Re-embed, in the background, every namespace whose documents were embedded by another model than the one in use now
+    /// (after the embedding model was changed). One run at a time; each namespace is locked only while it is being done, so
+    /// search carries on meanwhile. Returns false when a run is already going or nothing is out of date.
+    pub fn reindex_stale_in_background(self: &Arc<Self>) -> bool {
+        use std::sync::atomic::Ordering;
+        if self.kb.lock().unwrap_or_else(std::sync::PoisonError::into_inner).stale_namespaces().is_empty() || self.reindexing.swap(true, Ordering::SeqCst) {
+            return false;
+        }
+        let me = self.clone();
+        let spawned = std::thread::Builder::new().name("iyakki-reindex".into()).spawn(move || {
+            let (mut done, mut first_err) = (0usize, None::<String>);
+            let stale = me.kb.lock().unwrap_or_else(std::sync::PoisonError::into_inner).stale_namespaces();
+            for ns in stale {
+                match me.kb.lock().unwrap_or_else(std::sync::PoisonError::into_inner).reindex(&ns) {
+                    Ok(()) => done += 1,
+                    Err(e) => {
+                        first_err.get_or_insert(format!("{ns}: {e:?}"));
+                    }
+                }
+            }
+            let id = me.kb.lock().unwrap_or_else(std::sync::PoisonError::into_inner).embedder_id();
+            *me.reindex_note.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(match first_err {
+                None => format!("Documents brought up to date with {id} ({done} collection{}).", if done == 1 { "" } else { "s" }),
+                Some(e) => format!("Some documents could not be brought up to date with {id}: {e}"),
+            });
+            me.reindexing.store(false, Ordering::SeqCst);
+        });
+        if spawned.is_err() {
+            self.reindexing.store(false, Ordering::SeqCst);
+            return false;
+        }
+        true
+    }
+
+    pub fn is_reindexing(&self) -> bool {
+        self.reindexing.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// How the last background run ended (for the Settings page).
+    pub fn reindex_note(&self) -> Option<String> {
+        self.reindex_note.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
+    /// Make the Ollama server at `url` (the one started from the CLI tile, or one already running on this machine) available
+    /// in Models as `ollama-local`, if it is not there already. The chat model is not changed.
+    pub fn use_local_ollama(&self, url: &str) {
+        let url = url.trim_end_matches('/');
+        let mut st = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        use crate::providers::Kind;
+        // an `ollama-local` that points at the cluster's Ollama is not pulled back to a host one that happens to answer
+        let cluster_url = format!(":{}", crate::quickinstall::ollama_cluster::LOCAL_PORT);
+        if st.get().provider("ollama-local").is_some_and(|p| p.base_url.as_deref().is_some_and(|u| u.trim_end_matches('/').ends_with(&cluster_url))) && !url.ends_with(&cluster_url) {
+            return;
+        }
+        let known = st.get().providers.iter().any(|p| p.kind == Kind::Ollama && p.base_url.as_deref().map(|u| u.trim_end_matches('/')) == Some(url));
+        if known {
+            return;
+        }
+        let mut p = ProviderCfg::new("ollama-local", Kind::Ollama);
+        p.base_url = Some(url.to_string());
+        let _ = st.upsert_provider(p);
+    }
+
+    /// Point `ollama-local` at the Ollama that runs in the cluster (`url` on its loopback port): the entry the person may already have
+    /// (the host one) keeps its other settings and only gets the new address; when there is none it is added. Never touches another entry.
+    pub fn use_cluster_ollama(&self, url: &str) {
+        use crate::providers::Kind;
+        let url = url.trim_end_matches('/');
+        let mut st = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut p = match st.get().provider("ollama-local") {
+            Some(p) if p.kind == Kind::Ollama => p.clone(),
+            Some(_) => return,
+            None => ProviderCfg::new("ollama-local", Kind::Ollama),
+        };
+        if p.base_url.as_deref().map(|u| u.trim_end_matches('/')) == Some(url) {
+            return;
+        }
+        p.base_url = Some(url.to_string());
+        let _ = st.upsert_provider(p);
+    }
+
+    /// Make the Lemonade server at `base` available in Models as `lemonade-local` (or `lemonade-local-<port>` when that name is
+    /// taken by another address). Never overwrites: a provider that already points at this server, or one named like that,
+    /// is left exactly as the person set it. Returns what to tell the person.
+    pub fn use_local_lemonade(&self, base: &str, version: Option<&str>) -> String {
+        use crate::providers::Kind;
+        let base = crate::lemonade::api_base(base);
+        let found = crate::lemonade::Server::Lemonade { base: base.clone(), version: version.map(str::to_string) }.found();
+        let same = |u: &str| crate::lemonade::api_base(u) == base || crate::lemonade::origin(u) == crate::lemonade::origin(&base) && crate::lemonade::api_base(u).ends_with("/v1");
+        let mut st = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(p) = st.get().providers.iter().find(|p| p.base_url.as_deref().is_some_and(same)) {
+            return format!("{found}; it is already in Models as {}.", p.id);
+        }
+        let port = base.rsplit_once(':').and_then(|(_, r)| r.split('/').next()).unwrap_or("").to_string();
+        let id = ["lemonade-local".to_string(), format!("lemonade-local-{port}")].into_iter().find(|id| st.get().provider(id).is_none() && crate::providers::valid_provider_id(id));
+        let Some(id) = id else { return format!("{found}; a provider named lemonade-local already exists, so it was not added (add it in Settings → Models).") };
+        let mut p = ProviderCfg::new(&id, Kind::Lemonade);
+        p.base_url = Some(base);
+        match st.upsert_provider(p) {
+            Ok(()) => format!("{found}; added to Models as {id}."),
+            Err(e) => format!("{found}, but it could not be added: {e}"),
+        }
+    }
+
+    /// Look for Ollama and Lemonade on this machine (Ollama's port, Lemonade's ports) and add what answers to Models. Blocking,
+    /// with short timeouts; returns one line per server found.
+    pub fn detect_local_servers(&self) -> Vec<String> {
+        match crate::lemonade::local_ports_override() {
+            Some((o, l)) => self.detect_local_servers_at(o, &l),
+            None => self.detect_local_servers_at(crate::ollama::DEFAULT_PORT, &crate::lemonade::local_ports()),
+        }
+    }
+
+    pub fn detect_local_servers_at(&self, ollama_port: u16, lemonade_ports: &[u16]) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(v) = crate::ollama::probe(ollama_port) {
+            let url = format!("http://127.0.0.1:{ollama_port}");
+            let had = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().providers.iter().any(|p| p.kind == crate::providers::Kind::Ollama && p.base_url.as_deref().map(|u| u.trim_end_matches('/')) == Some(url.as_str()));
+            self.use_local_ollama(&url);
+            out.push(format!("Ollama found at {url} (version {v}){}", if had { "; it is already in Models." } else { "; it is in Models as ollama-local." }));
+        }
+        for port in lemonade_ports {
+            if let Some((base, version)) = crate::lemonade::probe_local(*port) {
+                let msg = self.use_local_lemonade(&base, version.as_deref());
+                let _ = self.refresh_lemonade_at(&base);
+                out.push(msg);
+            }
+        }
+        out
+    }
+
+    /// Look (briefly, in the background) for a Lemonade server on this machine and add it to Models like Ollama.
+    pub fn detect_local_lemonade_in_background(self: &Arc<Self>) {
+        let me = self.clone();
+        let _ = std::thread::Builder::new().name("iyakki-lemonade-detect".into()).spawn(move || {
+            for port in crate::lemonade::local_ports() {
+                if let Some((base, version)) = crate::lemonade::probe_local(port) {
+                    me.use_local_lemonade(&base, version.as_deref());
+                    let _ = me.refresh_lemonade_at(&base);
+                }
+            }
+        });
+    }
+
+    fn refresh_lemonade_at(&self, base: &str) -> Result<(), String> {
+        let id = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().providers.iter().find(|p| p.kind == crate::providers::Kind::Lemonade && p.base_url.as_deref().is_some_and(|u| crate::lemonade::api_base(u) == crate::lemonade::api_base(base))).map(|p| p.id.clone());
+        id.map_or(Ok(()), |id| self.refresh_lemonade(&id).map(|_| ()))
+    }
+
+    /// Which server answers at `url` (Ollama, Lemonade or another OpenAI-compatible one), asked with GET requests only.
+    pub fn detect_server(&self, url: &str) -> Result<crate::lemonade::Server, String> {
+        crate::lemonade::detect(url, self.quick.as_ref(), &[])
+    }
+
+    /// Read a Lemonade provider's typed model list and keep it: the chat models in `models`, the type of each in `model_kinds`.
+    pub fn refresh_lemonade(&self, provider: &str) -> Result<Vec<crate::lemonade::Model>, String> {
+        let list = self.client_for(provider, true)?.lemonade_catalog()?;
+        let mut st = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(mut cfg) = st.get().provider(provider).cloned() {
+            cfg.models = list.iter().filter(|m| m.downloaded && m.kind.chats()).map(|m| m.id.clone()).collect();
+            cfg.model_kinds = crate::lemonade::kinds_map(&list);
+            st.upsert_provider(cfg).map_err(|e| e.to_string())?;
+        }
+        Ok(list)
+    }
+
+    /// A Lemonade provider's typed list without waiting on the network: the one last read, else the saved types.
+    pub fn lemonade_cached(&self, provider: &str) -> Vec<crate::lemonade::Model> {
+        let Some(cfg) = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().provider(provider).cloned() else { return vec![] };
+        if let Some(c) = cfg.base().ok().and_then(|b| crate::lemonade::cached(&crate::lemonade::api_base(&b))) {
+            return c;
+        }
+        cfg.model_kinds
+            .iter()
+            .map(|(id, k)| crate::lemonade::Model { id: id.clone(), kind: crate::lemonade::ModelType::from_key(k).unwrap_or(crate::lemonade::ModelType::Other), recipe: String::new(), checkpoint: String::new(), labels: vec![], downloaded: true, loaded: false, suggested: false, size_gb: None, image_defaults: None })
+            .collect()
+    }
+
+    /// The downloaded models of one type on every enabled Lemonade provider, as (provider, model).
+    pub fn lemonade_models(&self, t: crate::lemonade::ModelType) -> Vec<(String, String)> {
+        let ids: Vec<String> = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().providers.iter().filter(|p| p.enabled && p.kind == crate::providers::Kind::Lemonade).map(|p| p.id.clone()).collect();
+        ids.into_iter().flat_map(|id| self.lemonade_cached(&id).into_iter().filter(|m| m.kind == t && m.downloaded).map(move |m| (id.clone(), m.id)).collect::<Vec<_>>()).collect()
+    }
+
+    /// The Lemonade list entry of one model (its size, steps, whether it is downloaded or in memory), from the last list read.
+    pub fn lemonade_model(&self, provider: &str, model: &str) -> Option<crate::lemonade::Model> {
+        self.lemonade_cached(provider).into_iter().find(|m| m.id == model)
+    }
+
+    /// The picture models of the Lemonade servers that are not downloaded yet (they have to be pulled in Settings -> Models).
+    pub fn lemonade_images_missing(&self) -> Vec<crate::lemonade::Model> {
+        let ids: Vec<String> = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().providers.iter().filter(|p| p.enabled && p.kind == crate::providers::Kind::Lemonade).map(|p| p.id.clone()).collect();
+        ids.into_iter().flat_map(|id| self.lemonade_cached(&id)).filter(|m| m.kind == crate::lemonade::ModelType::Image && !m.downloaded).collect()
+    }
+
+    /// The Lemonade list entry of one model, asked of the server now (the cached list may be old or only the saved types).
+    pub fn lemonade_live_model(&self, provider: &str, model: &str) -> Result<Option<crate::lemonade::Model>, String> {
+        Ok(self.refresh_lemonade(provider)?.into_iter().find(|m| m.id == model))
+    }
+
+    /// A Lemonade server's health now: a line of text and the names of the loaded models.
+    pub fn lemonade_health(&self, provider: &str) -> Result<(String, Vec<String>), String> {
+        self.client_for(provider, true)?.lemonade_health()
+    }
+
+    pub fn provider_is_lemonade(&self, provider: &str) -> bool {
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().provider(provider).is_some_and(|p| p.kind == crate::providers::Kind::Lemonade)
+    }
+
+    /// The picture models of `found` plus the picture models Lemonade servers have but have not downloaded, as choices that say
+    /// where they are, whether they are installed, their size and their own size and steps.
+    pub fn picture_choices(&self, found: &[(String, String)]) -> Vec<crate::storyillus::Cand> {
+        let mut v = self.picture_candidates(found);
+        let ids: Vec<String> = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().providers.iter().filter(|p| p.enabled && p.kind == crate::providers::Kind::Lemonade).map(|p| p.id.clone()).collect();
+        for id in ids {
+            for m in self.lemonade_cached(&id).into_iter().filter(|m| m.kind == crate::lemonade::ModelType::Image && !m.downloaded) {
+                v.push(crate::storyillus::Cand { remote: self.provider_is_remote(&id), provider: id.clone(), model: m.id, downloaded: false, loaded: false, size_gb: m.size_gb, defaults: m.image_defaults });
+            }
+        }
+        v
+    }
+
+    /// Load a model into a Lemonade server's memory (or unload it); blocking, for a background job.
+    pub fn lemonade_load(&self, provider: &str, model: &str, load: bool) -> Result<String, String> {
+        let msg = self.client_for(provider, false)?.lemonade_call(if load { "load" } else { "unload" }, model)?;
+        let _ = self.refresh_lemonade(provider);
+        Ok(msg)
+    }
+
+    /// Read aloud with a Lemonade text-to-speech model (TALES, chat replies): the speech engine becomes its endpoint.
+    pub fn use_lemonade_voice(&self, provider: &str, model: &str, voice: Option<&str>) -> Result<String, String> {
+        let cfg = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().provider(provider).cloned().ok_or("unknown provider")?;
+        let base = cfg.base()?;
+        if !self.speech_server_allowed(&base) {
+            return Err(format!("{provider} is {}: what is read aloud would be sent there. Say yes to that first.", crate::speechtime::locality(&base).label()));
+        }
+        let engine = crate::lemonade::tts_engine(&base, model, voice, cfg.key_ref.clone());
+        let label = engine.label();
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| s.voice.tts = Some(engine)).map_err(|e| e.to_string())?;
+        Ok(format!("Reading voice: {model} on {provider} ({label})."))
+    }
+
+    /// Listen with a Lemonade whisper model (Settings → Voice speech-to-text).
+    pub fn use_lemonade_stt(&self, provider: &str, model: &str) -> Result<String, String> {
+        let cfg = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().provider(provider).cloned().ok_or("unknown provider")?;
+        let base = cfg.base()?;
+        if !self.speech_server_allowed(&base) {
+            return Err(format!("{provider} is {}: what the microphone hears, and speech whose words are timed, would be sent there. Say yes to that first.", crate::speechtime::locality(&base).label()));
+        }
+        let engine = crate::lemonade::stt_engine(&base, model, cfg.key_ref.clone());
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| s.voice.stt = Some(engine)).map_err(|e| e.to_string())?;
+        Ok(format!("Speech-to-text: {model} on {provider}."))
+    }
+
+    /// Start reading the network neighbour table every half minute for new devices (once; a second call does nothing).
+    pub fn start_device_watch(self: &Arc<Self>) {
+        self.start_device_watch_from(std::path::PathBuf::from("/proc/net/arp"), std::time::Duration::from_secs(30));
+    }
+
+    pub fn start_device_watch_from(self: &Arc<Self>, arp: std::path::PathBuf, every: std::time::Duration) {
+        use std::sync::atomic::Ordering;
+        if self.watching.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let me = Arc::downgrade(self);
+        let spawned = std::thread::Builder::new().name("iyakki-device-watch".into()).spawn(move || loop {
+            let Some(svc) = me.upgrade() else { return };
+            svc.devwatch.observe(&crate::devwatch::read_arp(&arp), crate::clock::now_unix());
+            drop(svc);
+            std::thread::sleep(every);
+        });
+        if spawned.is_err() {
+            self.watching.store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// Look (briefly, in the background) for an Ollama already answering on this machine at its usual port, started by the
+    /// system or by someone else (on a Mac, the Ollama app), and add it to Models like the one started from the CLI tile.
+    pub fn detect_local_ollama_in_background(self: &Arc<Self>) {
+        self.detect_local_ollama_at(crate::ollama::DEFAULT_PORT);
+    }
+
+    pub fn detect_local_ollama_at(self: &Arc<Self>, port: u16) {
+        let me = self.clone();
+        let _ = std::thread::Builder::new().name("iyakki-ollama-detect".into()).spawn(move || {
+            if crate::ollama::probe(port).is_some() {
+                me.use_local_ollama(&format!("http://127.0.0.1:{port}"));
+            }
+        });
+    }
+
+    /// Days the tool log is kept.
+    /// The size cap for media downloads, in bytes.
+    pub fn media_download_limit(&self) -> u64 {
+        match self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().media_download_max_mb {
+            0 => crate::mediadl::DEFAULT_MAX_BYTES,
+            mb => mb as u64 * (1 << 20),
+        }
+    }
+
+    pub fn tool_log_days(&self) -> u32 {
+        crate::toollog::effective_days(self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().tool_log_days)
+    }
+
+    /// A folder of its own for one chat: files the assistant creates for that conversation go here and stay apart
+    /// from every other chat's. Made when first needed.
+    pub fn session_workdir(&self, user: &str, session_id: &str) -> Result<PathBuf, String> {
+        let safe = |s: &str| -> Result<String, String> {
+            let t: String = s.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
+            if t.is_empty() || t != s { Err("bad name for a work folder".into()) } else { Ok(t) }
+        };
+        let dir = self.dir.join("work").join(safe(user)?).join(safe(session_id)?);
+        std::fs::create_dir_all(&dir).map_err(io_err)?;
+        std::fs::canonicalize(&dir).map_err(io_err)
+    }
+
+    /// The managed local clusters of this process (the registry's `local` and the extra ones).
+    pub fn fleet(&self) -> Arc<crate::clusters::Fleet> {
+        self.fleet.get_or_init(|| Arc::new(crate::clusters::Fleet::new(self.k3sdev.clone(), &self.dir, self.clis.clone(), Arc::new(crate::wsexec::System)))).clone()
+    }
+
+    /// The streaming transport, when one was set (downloads use it).
+    pub fn streamer(&self) -> Option<Arc<dyn iyakki_proxy::Streamer>> {
+        self.streamer.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone().map(|s| self.guard_streamer(s))
+    }
+
+    /// The transport model answers are streamed over; without one answers arrive in one piece.
+    pub fn set_chat_streamer(&self, s: Arc<dyn iyakki_proxy::Streamer>) {
+        *self.chat_streamer.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(s);
+    }
+
+    pub fn chat_streamer(&self) -> Option<Arc<dyn iyakki_proxy::Streamer>> {
+        self.chat_streamer.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone().map(|s| self.guard_streamer(s))
+    }
+
+    /// Load the chat model into memory in the background when it is a local Ollama model, so the first question is not slow.
+    pub fn warm_up_chat(self: &Arc<Self>) {
+        let svc = self.clone();
+        let _ = std::thread::Builder::new().name("iyakki-warm".into()).spawn(move || {
+            let Some(c) = svc.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().chat.clone() else { return };
+            let reg = crate::startup::global();
+            reg.starting("models", &format!("loading the model {}", c.model));
+            match svc.client_for(&c.provider, false).and_then(|client| client.warm_up(&c.model)) {
+                Ok(t) => {
+                    svc.last_warm_up_ms.store(t, std::sync::atomic::Ordering::Relaxed);
+                    // a model that is not a local one needs no loading
+                    if t == 0 {
+                        reg.disabled("models");
+                    } else {
+                        reg.ready("models");
+                    }
+                }
+                Err(e) => {
+                    reg.failed("models", &format!("{}: {e}", c.model));
+                }
+            }
+        });
+    }
+
+    pub fn set_streamer(&self, s: Arc<dyn iyakki_proxy::Streamer>) {
+        self.clis.set_streamer(s.clone());
+        *self.streamer.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(s);
+    }
+
+    /// Every model of every enabled provider, as (provider, model); the server's own list when it answers, otherwise
+    /// the one saved in Settings.
+    pub fn all_models(&self) -> Vec<(String, String)> {
+        let providers: Vec<ProviderCfg> = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().providers.iter().filter(|p| p.enabled).cloned().collect();
+        let mut out = Vec::new();
+        for p in providers {
+            let live = self.client_for(&p.id, true).and_then(|c| c.list_models());
+            for m in live.unwrap_or_else(|_| p.models.clone()) {
+                out.push((p.id.clone(), m));
+            }
+        }
+        out
+    }
+
+    /// The models that draw pictures, as (provider, model).
+    pub fn image_models(&self) -> Vec<(String, String)> {
+        // a Lemonade server says which of its models draw (they are not in its chat list); the others are judged by name
+        let mut v: Vec<(String, String)> = self.all_models().into_iter().filter(|(_, m)| crate::models::is_image_model(m)).collect();
+        for m in self.lemonade_models(crate::lemonade::ModelType::Image) {
+            if !v.contains(&m) {
+                v.push(m);
+            }
+        }
+        v
+    }
+
+    /// The picture model to draw with: the one named, else the first picture model found.
+    fn pick_image_model(&self, model: Option<(&str, &str)>) -> Result<(String, String), String> {
+        match model {
+            Some((p, m)) => Ok((p.to_string(), m.to_string())),
+            None => {
+                let found = self.image_models();
+                found.first().cloned().ok_or_else(|| {
+                    let checked: Vec<String> = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().providers.iter().filter(|p| p.enabled).map(|p| p.id.clone()).collect();
+                    format!("No model that draws pictures was found{}. A picture model such as Qwen-Image, FLUX or Stable Diffusion has to be available on a connected server; I can download one into Ollama if you tell me its name.", if checked.is_empty() { " (no model provider is connected at all)".to_string() } else { format!(" (looked at: {})", checked.join(", ")) })
+                })
+            }
+        }
+    }
+
+    /// Draws a picture with `model` (or, when none is named, the first picture model found).
+    pub fn generate_image(&self, model: Option<(&str, &str)>, prompt: &str, size: &str) -> Result<(String, String, Vec<u8>, &'static str), String> {
+        let (provider, model) = self.pick_image_model(model)?;
+        let (bytes, ext) = self.client_for(&provider, false)?.generate_image(&model, prompt, size)?;
+        Ok((provider, model, bytes, ext))
+    }
+
+    /// [`Self::generate_image`] that also says what was sent and what came back (the picture log), failures included.
+    pub fn generate_image_traced(&self, model: Option<(&str, &str)>, prompt: &str, size: &str, p: &crate::providers::ImageParams) -> (Result<(String, String, Vec<u8>, &'static str), String>, crate::providers::ImageTrace) {
+        let (provider, model) = match self.pick_image_model(model) {
+            Ok(x) => x,
+            Err(e) => return (Err(e.clone()), crate::providers::ImageTrace { error: e, ..Default::default() }),
+        };
+        let client = match self.client_for(&provider, false) {
+            Ok(c) => c,
+            Err(e) => return (Err(e.clone()), crate::providers::ImageTrace { provider, model, error: e, ..Default::default() }),
+        };
+        let (r, t) = client.generate_image_traced(&model, prompt, size, p);
+        (r.map(|(b, ext)| (provider, model, b, ext)), t)
+    }
+
+    /// Is this provider a server on another computer (not this one)?
+    pub fn provider_is_remote(&self, provider: &str) -> bool {
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().provider(provider).and_then(|c| c.base().ok()).is_some_and(|b| crate::speechtime::locality(&b) != crate::speechtime::Locality::ThisComputer)
+    }
+
+    /// The first enabled Lemonade provider that is not this computer (a GPU machine, as far as the settings can tell).
+    pub fn gpu_lemonade(&self) -> Option<String> {
+        let ids: Vec<String> = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().providers.iter().filter(|p| p.enabled && p.kind == crate::providers::Kind::Lemonade).map(|p| p.id.clone()).collect();
+        ids.into_iter().find(|id| self.provider_is_remote(id))
+    }
+
+    /// The picture models of `found` (provider, model) as choices: where each one is, its size and its own size and steps.
+    pub fn picture_candidates(&self, found: &[(String, String)]) -> Vec<crate::storyillus::Cand> {
+        found
+            .iter()
+            .map(|(p, m)| {
+                let info = self.lemonade_model(p, m);
+                crate::storyillus::Cand { provider: p.clone(), model: m.clone(), remote: self.provider_is_remote(p), downloaded: info.as_ref().is_none_or(|i| i.downloaded), loaded: info.as_ref().is_some_and(|i| i.loaded), size_gb: info.as_ref().and_then(|i| i.size_gb), defaults: info.and_then(|i| i.image_defaults) }
+            })
+            .collect()
+    }
+
+    pub fn pull_status(&self) -> Vec<PullStatus> {
+        let mut v: Vec<PullStatus> = self.pulls.lock().unwrap_or_else(std::sync::PoisonError::into_inner).values().cloned().collect();
+        v.sort_by(|a, b| (&a.provider, &a.model).cmp(&(&b.provider, &b.model)));
+        v
+    }
+
+    /// Starts downloading `model` into the Ollama server `provider` and returns at once; `pull_status` follows it.
+    pub fn pull_model(self: &Arc<Self>, provider: &str, model: &str) -> Result<(), String> {
+        self.pull_model_for("", provider, model)
+    }
+
+    /// Like [`Services::pull_model`], and the download is one piece of waiting work in the person's pending ledger (`user` empty: not
+    /// recorded), so the assistant that waits for it is woken when it ends.
+    pub fn pull_model_for(self: &Arc<Self>, user: &str, provider: &str, model: &str) -> Result<(), String> {
+        if !crate::models::valid_pull_name(model) {
+            return Err("that is not a model name Ollama can download".into());
+        }
+        let client = self.client_for(provider, false)?;
+        let (url, headers, body) = client.pull_request(model)?;
+        let streamer = self.streamer.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone().ok_or("no network connection is set up for downloads")?;
+        let key = format!("{provider}/{model}");
+        {
+            let mut p = self.pulls.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if p.get(&key).is_some_and(|s| !s.done && s.error.is_none()) {
+                return Err(format!("{model} is already downloading"));
+            }
+            p.insert(key.clone(), PullStatus { provider: provider.into(), model: model.into(), status: "starting".into(), completed: 0, total: 0, done: false, error: None });
+        }
+        let (me, provider, model) = (self.clone(), provider.to_string(), model.to_string());
+        let guard = (!user.is_empty()).then(|| crate::pendingplus::WorkGuard::start(&crate::pending::Ledger::open(&self.dir().join("pending"), user), crate::pending::Source::Pull, &key, &format!("download of {model}"), ""));
+        std::thread::Builder::new()
+            .name("iyakki-pull".into())
+            .spawn(move || {
+                me.run_pull(&key, &provider, &model, &*streamer, &url, &headers, &body);
+                if let Some(g) = guard {
+                    let st = me.pulls.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key).cloned();
+                    match st {
+                        Some(s) if s.done && s.error.is_none() => g.finish(true, "downloaded"),
+                        Some(s) => g.finish(false, &s.error.unwrap_or_else(|| "the download did not finish".into())),
+                        None => g.finish(false, "the download did not finish"),
+                    }
+                }
+            })
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_pull(&self, key: &str, provider: &str, model: &str, streamer: &dyn iyakki_proxy::Streamer, url: &str, headers: &[(String, String)], body: &[u8]) {
+        use std::io::BufRead;
+        let set = |f: &dyn Fn(&mut PullStatus)| {
+            if let Some(s) = self.pulls.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get_mut(key) {
+                f(s);
+            }
+        };
+        let lemonade = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().provider(provider).is_some_and(|p| p.kind == crate::providers::Kind::Lemonade);
+        let fail = |e: String| set(&|s: &mut PullStatus| s.error = Some(if lemonade { format!("the download of `{model}` into Lemonade failed: {e}") } else { crate::models::explain_pull_error(model, &e) }));
+        let head = match streamer.post(url, headers, body) {
+            Ok(h) => h,
+            Err(e) => return fail(format!("could not reach the server: {e}")),
+        };
+        let status = head.status;
+        let mut reader = std::io::BufReader::new(head.body);
+        let mut line = String::new();
+        let mut finished = false;
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            match crate::models::pull_line(&line) {
+                Some(crate::models::PullLine::Progress { status, completed, total }) => set(&|s: &mut PullStatus| {
+                    s.status = status.clone();
+                    if total > 0 {
+                        s.completed = completed;
+                        s.total = total;
+                    }
+                }),
+                Some(crate::models::PullLine::Done) => {
+                    finished = true;
+                    break;
+                }
+                Some(crate::models::PullLine::Error(e)) => return fail(e),
+                None => {
+                    if status >= 400 {
+                        return fail(format!("HTTP {status}: {}", line.trim()));
+                    }
+                }
+            }
+        }
+        if !finished {
+            return fail(if status >= 400 { format!("HTTP {status}") } else { "the server stopped answering before the download finished".into() });
+        }
+        // the new model goes into the provider's list so it can be chosen and found
+        let lemonade = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().provider(provider).is_some_and(|p| p.kind == crate::providers::Kind::Lemonade);
+        if lemonade {
+            let _ = self.refresh_lemonade(provider);
+        } else if let Ok(names) = self.client_for(provider, true).and_then(|c| c.list_models()) {
+            let mut st = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(mut cfg) = st.get().provider(provider).cloned() {
+                cfg.models = names;
+                let _ = st.upsert_provider(cfg);
+            }
+        }
+        set(&|s: &mut PullStatus| {
+            s.done = true;
+            s.status = "success".into();
+        });
+    }
+
+    /// Deletes a chat completely: its transcript, its memory, its agent runs and its work folder with every file in
+    /// it. Returns what was removed, for the confirmation message.
+    pub fn delete_session(&self, user: &str, id: &str) -> Result<SessionDeleted, String> {
+        self.sessions.delete(user, id)?;
+        let runs = self.runs.delete_for_session(user, id);
+        // the vendor session id of an external agent and what the chat added to the workspace history go too
+        self.ext_sessions.forget_chat(id);
+        crate::history::History::forget_session_everywhere(&self.kb, user, id);
+        let dir = self.dir.join("work").join(user).join(id);
+        let files = count_files(&dir);
+        if dir.is_dir() {
+            std::fs::remove_dir_all(&dir).map_err(|e| format!("the chat was deleted but its folder could not be removed: {e}"))?;
+        }
+        Ok(SessionDeleted { runs, files })
+    }
+
+    /// How many files a chat's work folder holds (for the question "delete its files too?").
+    pub fn session_files(&self, user: &str, id: &str) -> usize {
+        count_files(&self.dir.join("work").join(user).join(id))
+    }
+
+    /// The upstream for long requests (speech, transcription).
+    /// A streaming transport behind the Google consent gate (`crate::gemini`).
+    fn guard_streamer(&self, s: Arc<dyn iyakki_proxy::Streamer>) -> Arc<dyn iyakki_proxy::Streamer> {
+        let a = self.agent_user.clone();
+        Arc::new(crate::gemini::GuardedStreamer::new(s, &self.dir, Arc::new(move || a.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone())))
+    }
+
+    pub fn slow_upstream(&self) -> Arc<dyn Upstream> {
+        self.slow.clone()
+    }
+
+    pub fn quick_upstream(&self) -> Arc<dyn Upstream> {
+        self.quick.clone()
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    pub fn system_vault_state(&self) -> (bool, bool) {
+        self.system_state()
+    }
+
+    fn system_path(&self) -> PathBuf {
+        self.dir.join("vault/system.afv")
+    }
+
+    fn user_path(&self, user: &str) -> PathBuf {
+        self.dir.join(format!("vault/users/{user}.afv"))
+    }
+
+    // ------------------------------------------------------------ vault lifecycle
+
+    /// Called with the password the user just typed. Opens their personal vault (creating it the
+    /// first time) and, for admins, the system vault.
+    pub fn on_login(&self, user: &str, password: &str, is_admin: bool) -> LoginReport {
+        let report = self.on_login_inner(user, password, is_admin);
+        crate::appevent_sources::session_changed(&*self.app_events, user, "signed_in");
+        crate::appevent_sources::vault_changed(&*self.app_events, Some(user), if matches!(report.user_vault, VaultState::Unlocked | VaultState::Created) { "unlocked" } else { "locked" });
+        report
+    }
+
+    fn on_login_inner(&self, user: &str, password: &str, is_admin: bool) -> LoginReport {
+        *self.agent_user.lock().unwrap_or_else(|e| e.into_inner()) = user.to_string();
+        let slot = format!("user:{user}");
+        let up = self.user_path(user);
+        let user_state = if LocalVault::exists(&up) {
+            match LocalVault::open(&up).and_then(|mut v| v.unlock(&slot, password).map(|_| v)) {
+                Ok(v) => {
+                    self.user_vaults.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(user.into(), v);
+                    VaultState::Unlocked
+                }
+                Err(e) => VaultState::Locked(e.to_string()),
+            }
+        } else {
+            match LocalVault::create(&up, &slot, password) {
+                Ok(v) => {
+                    self.user_vaults.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(user.into(), v);
+                    VaultState::Created
+                }
+                Err(e) => VaultState::Locked(e.to_string()),
+            }
+        };
+        let sys_state = if is_admin { self.admin_login_system(&slot, password) } else { VaultState::NotApplicable };
+        // an encrypted home folder (F-STORE-05) opens with the same, just verified, password; a failure leaves a banner, never blocks sign-in
+        let _ = crate::enchome::EncHome::on_login_if_any(&self.dir, user, password);
+        // the person's home and vault are known now: what was found for the agents before (HOME=/, nobody signed in) is void
+        self.ext_status.invalidate();
+        if self.agents_cfg().claude.enabled || self.agents_cfg().copilot.enabled {
+            self.ext_status.refresh(self.agents_cfg());
+        }
+        let browser_data = crate::profilestore::sign_in_for(self, user);
+        LoginReport { user_vault: user_state, system_vault: sys_state, browser_data }
+    }
+
+    /// The unlocked vault keys of the signed-in people, for a live restart (docs/development/LIVE-RESTART.md): `(user, kind, key)` with kind
+    /// `user` for a personal vault and `system` for the system vault (user empty). Nothing is written anywhere here.
+    pub fn export_session_keys(&self) -> Vec<(String, String, zeroize::Zeroizing<[u8; 32]>)> {
+        let mut out = Vec::new();
+        for (u, v) in self.user_vaults.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter() {
+            if let Some(k) = v.unlock_material() {
+                out.push((u.clone(), "user".to_string(), k));
+            }
+        }
+        if let Some(k) = self.secrets.system.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().and_then(|v| v.unlock_material()) {
+            out.push((String::new(), "system".to_string(), k));
+        }
+        out
+    }
+
+    /// Open the vaults with keys the previous program handed over. A key that does not open its vault is ignored (the vault stays locked and
+    /// the person types the password). Returns how many vaults were opened.
+    pub fn import_session_keys(&self, keys: &[(String, String, [u8; 32])]) -> usize {
+        let mut n = 0;
+        for (user, kind, k) in keys {
+            if kind == "system" {
+                let p = self.system_path();
+                if let Ok(mut v) = LocalVault::open(&p) {
+                    if v.unlock_with_material(k).is_ok() {
+                        *self.secrets.system.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(v);
+                        n += 1;
+                    }
+                }
+            } else if kind == "user" && iyakki_sec::policy::valid_username(user) {
+                if let Ok(mut v) = LocalVault::open(&self.user_path(user)) {
+                    if v.unlock_with_material(k).is_ok() {
+                        self.user_vaults.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(user.clone(), v);
+                        n += 1;
+                    }
+                }
+            }
+        }
+        n
+    }
+
+    /// A person put back at the desktop after the shell restarted, without the password (F-SHELL-65, developer and test machines): nothing
+    /// is unlocked, created or opened. Every vault stays locked until the person signs in with the password.
+    pub fn on_resume(&self, user: &str, is_admin: bool) -> LoginReport {
+        *self.agent_user.lock().unwrap_or_else(|e| e.into_inner()) = user.to_string();
+        self.ext_status.invalidate();
+        let why = "the desktop restarted: type your password to unlock".to_string();
+        // a vault the previous program handed over (a live restart, `import_session_keys`) is open already; every other stays locked
+        let user_vault = if self.user_vault_unlocked(user) { VaultState::Unlocked } else { VaultState::Locked(why.clone()) };
+        let system_vault = if !is_admin { VaultState::NotApplicable } else if self.system_vault_state().1 { VaultState::Unlocked } else { VaultState::Locked(why) };
+        LoginReport { user_vault, system_vault, browser_data: crate::profilestore::SignIn::Off }
+    }
+
+    /// Open only the person's own vault with their login password (after an automatic sign-in that had none); no sign-out needed.
+    /// Passwords that waited for it are saved by the next Quick install service check.
+    pub fn unlock_user_vault(&self, user: &str, password: &str) -> Result<(), String> {
+        if self.user_vault_unlocked(user) {
+            return Ok(());
+        }
+        let up = self.user_path(user);
+        if !LocalVault::exists(&up) {
+            return Err("you have no personal vault yet; it is created when you sign in with your password".into());
+        }
+        let slot = format!("user:{user}");
+        match LocalVault::open(&up).and_then(|mut v| v.unlock(&slot, password).map(|_| v)) {
+            Ok(v) => {
+                self.user_vaults.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(user.into(), v);
+                crate::appevent_sources::vault_changed(&*self.app_events, Some(user), "unlocked");
+                Ok(())
+            }
+            Err(_) => Err("that password does not open your vault".into()),
+        }
+    }
+
+    fn admin_login_system(&self, slot: &str, password: &str) -> VaultState {
+        let mut g = self.secrets.system.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if g.is_none() {
+            let p = self.system_path();
+            *g = if LocalVault::exists(&p) { LocalVault::open(&p).ok() } else { LocalVault::create(&p, slot, password).ok() };
+            return match g.as_ref() {
+                Some(v) if v.is_unlocked() => VaultState::Created,
+                Some(_) => VaultState::Locked("could not read the system vault".into()),
+                None => VaultState::Locked("could not create the system vault".into()),
+            };
+        }
+        let v = g.as_mut().expect("checked");
+        if v.is_unlocked() {
+            // Another admin already opened it: give this admin their own slot if they lack one.
+            if !v.has_slot(slot) {
+                let _ = v.add_slot(slot, password);
+            }
+            return VaultState::Unlocked;
+        }
+        if !v.has_slot(slot) {
+            return VaultState::Locked("this admin has no key slot; an admin with access must sign in first".into());
+        }
+        match v.unlock(slot, password) {
+            Ok(()) => VaultState::Unlocked,
+            Err(e) => VaultState::Locked(e.to_string()),
+        }
+    }
+
+    pub fn on_logout(&self, user: &str, is_admin: bool) {
+        crate::appevent_sources::vault_changed(&*self.app_events, Some(user), "locked");
+        crate::appevent_sources::session_changed(&*self.app_events, user, "signed_out");
+        // the encrypted home folder closes with the sign-in (F-STORE-05)
+        let _ = crate::enchome::EncHome::on_logout_if_any(&self.dir, user);
+        self.user_vaults.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(user);
+        {
+            let mut au = self.agent_user.lock().unwrap_or_else(|e| e.into_inner());
+            if *au == user {
+                au.clear();
+            }
+        }
+        self.ext_status.invalidate();
+        // key passphrases typed this session and the keys an assistant was allowed to use are forgotten with the sign-in
+        crate::gitkeys::shared_session().forget();
+        self.page_snapshot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(user);
+        crate::devtools_headers::forget_engine_headers(user);
+        crate::datatools::forget(user);
+        self.browser.on_logout(user);
+        if is_admin && self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().vault.lock_on_admin_logout {
+            if let Some(v) = self.secrets.system.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_mut() {
+                v.lock();
+            }
+        }
+    }
+
+    /// Keep vault slots in step when the user changes their own password.
+    pub fn on_password_change(&self, user: &str, old: &str, new: &str) {
+        // the encrypted home folder's password slot is re-wrapped (F-STORE-05); the data is not touched
+        let _ = crate::enchome::EncHome::on_password_change_if_any(&self.dir, user, old, new);
+        let slot = format!("user:{user}");
+        if let Ok(mut v) = LocalVault::open(&self.user_path(user)) {
+            let _ = v.change_password(&slot, old, new);
+            self.user_vaults.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(user);
+        }
+        if let Some(v) = self.secrets.system.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_mut() {
+            if v.has_slot(&slot) {
+                let _ = v.change_password(&slot, old, new);
+            }
+        }
+    }
+
+    /// An admin reset someone's password: their personal vault can no longer be opened (by design,
+    /// admins cannot read user secrets). Start a fresh empty one at next login by removing the old.
+    pub fn reset_user_vault(&self, user: &str) -> Result<(), String> {
+        // an encrypted home keeps its own key: it stays sealed until the recovery key or an administrator slot is used (F-STORE-05)
+        crate::enchome::EncHome::note_admin_reset_if_any(&self.dir, user);
+        self.user_vaults.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(user);
+        match std::fs::remove_file(self.user_path(user)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(io_err(e)),
+        }
+    }
+
+    pub fn unlock_with_keyfile(&self) -> bool {
+        let Some(path) = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().vault.keyfile.clone() else { return false };
+        let Ok(key) = std::fs::read_to_string(&path) else { return false };
+        let mut g = self.secrets.system.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        match g.as_mut() {
+            Some(v) if v.has_slot("keyfile") => v.unlock("keyfile", key.trim()).is_ok(),
+            _ => false,
+        }
+    }
+
+    /// Create a random key file and add a `keyfile` slot so the system vault can open unattended.
+    pub fn enable_keyfile(&self, path: &str) -> Result<(), String> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut raw = [0u8; 32];
+        iyakki_sec::random_fill(&mut raw).map_err(|e| io_err(e.to_string()))?;
+        let key: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+        let mut g = self.secrets.system.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let v = g.as_mut().ok_or("the system vault does not exist yet")?;
+        if !v.is_unlocked() {
+            return Err(VaultError::Locked.to_string());
+        }
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path).map_err(|e| format!("{path}: {e}"))?;
+        f.write_all(key.as_bytes()).map_err(io_err)?;
+        v.add_slot("keyfile", &key).map_err(|e| {
+            let _ = std::fs::remove_file(path);
+            e.to_string()
+        })?;
+        drop(g);
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| s.vault.keyfile = Some(path.into())).map_err(io_err)
+    }
+
+    fn system_state(&self) -> (bool, bool) {
+        let g = self.secrets.system.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        (g.is_some(), g.as_ref().is_some_and(|v| v.is_unlocked()))
+    }
+
+    pub fn system_slots(&self) -> Vec<String> {
+        self.secrets.system.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().map(|v| v.slot_ids()).unwrap_or_default()
+    }
+
+    pub fn lock_system(&self) {
+        if let Some(v) = self.secrets.system.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_mut() {
+            v.lock();
+        }
+        crate::appevent_sources::vault_changed(&*self.app_events, None, "locked");
+    }
+
+    // secret CRUD — callers enforce who may use which (system: manage_settings; user: own only)
+    pub fn system_names(&self) -> Result<Vec<String>, VaultError> {
+        self.secrets.system.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().ok_or(VaultError::Locked)?.names()
+    }
+    pub fn system_set(&self, name: &str, value: &str) -> Result<(), VaultError> {
+        self.secrets.system.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_mut().ok_or(VaultError::Locked)?.set(name, value)
+    }
+    pub fn system_delete(&self, name: &str) -> Result<(), VaultError> {
+        self.secrets.system.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_mut().ok_or(VaultError::Locked)?.delete(name)
+    }
+    pub fn user_names(&self, user: &str) -> Result<Vec<String>, VaultError> {
+        self.user_vaults.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(user).ok_or(VaultError::Locked)?.names()
+    }
+    pub fn user_set(&self, user: &str, name: &str, value: &str) -> Result<(), VaultError> {
+        self.user_vaults.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get_mut(user).ok_or(VaultError::Locked)?.set(name, value)
+    }
+    pub fn user_get(&self, user: &str, name: &str) -> Result<zeroize::Zeroizing<String>, VaultError> {
+        self.user_vaults.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(user).ok_or(VaultError::Locked)?.get(name)
+    }
+    pub fn user_delete(&self, user: &str, name: &str) -> Result<(), VaultError> {
+        self.user_vaults.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get_mut(user).ok_or(VaultError::Locked)?.delete(name)
+    }
+    /// The person's answer to a secret request: the value goes into their vault under `name`, and the waiting tool is told
+    /// only the name. Returns the name stored.
+    pub fn answer_secret_request(&self, user: &str, id: &str, name: &str, value: &str) -> Result<String, String> {
+        if self.secret_requests.get(user, id).is_none() {
+            return Err("that request is not waiting any more".into());
+        }
+        let name = name.trim();
+        if !crate::vault::valid_secret_name(name) {
+            return Err("a vault name is lowercase letters, digits, . _ - (up to 64), for example svc.nas".into());
+        }
+        if value.is_empty() {
+            return Err("type the secret first".into());
+        }
+        self.user_set(user, name, value).map_err(|e| match e {
+            VaultError::Locked => "your personal vault is locked (it could not be opened at sign-in)".to_string(),
+            other => other.to_string(),
+        })?;
+        self.secret_requests.resolve(user, id, crate::secretreq::Outcome::Stored(name.to_string()))?;
+        Ok(name.to_string())
+    }
+
+    pub fn cancel_secret_request(&self, user: &str, id: &str) -> Result<(), String> {
+        self.secret_requests.resolve(user, id, crate::secretreq::Outcome::Cancelled)
+    }
+
+    /// The person's media index, shared by the MEDIA app and the assistant's tools.
+    pub fn media_index(self: &Arc<Self>, user: &str) -> Arc<Mutex<crate::mediaindex::MediaIndex>> {
+        let mut g = self.media_indexes.lock().unwrap_or_else(|e| e.into_inner());
+        g.entry(user.to_string()).or_insert_with(|| Arc::new(Mutex::new(crate::mediaindex::MediaIndex::open(&self.dir, user, Some(self.embedder()))))).clone()
+    }
+
+    /// The person's download queue, shared by the MEDIA app and the assistant's tools.
+    pub fn media_queue(&self, user: &str) -> Arc<crate::mediaqueue::DownloadQueue> {
+        let mut g = self.media_queues.lock().unwrap_or_else(|e| e.into_inner());
+        g.entry(user.to_string()).or_insert_with(|| Arc::new(crate::mediaqueue::DownloadQueue::open(&self.dir, user))).clone()
+    }
+
+    pub fn user_vault_unlocked(&self, user: &str) -> bool {
+        self.user_vaults.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains_key(user)
+    }
+
+    /// Close the person's own vault again without signing out (the decrypted secrets are forgotten); `unlock_user_vault` opens it.
+    pub fn lock_user_vault(&self, user: &str) {
+        self.user_vaults.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(user);
+        crate::appevent_sources::vault_changed(&*self.app_events, Some(user), "locked");
+    }
+
+    // ------------------------------------------------------------ models
+
+    /// Push secret-provider settings into the resolver (call after editing them).
+    pub fn refresh_secret_providers(&self) {
+        let p = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().secret_providers.clone();
+        self.secrets.set_providers(p.into_iter().collect());
+    }
+
+    pub fn client_for(&self, provider_id: &str, quick: bool) -> Result<ProviderClient, String> {
+        let cfg: ProviderCfg = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().provider(provider_id).cloned().ok_or_else(|| format!("unknown provider `{provider_id}`"))?;
+        Ok(ProviderClient::new(cfg, self.secrets.clone(), if quick { self.quick.clone() } else { self.slow.clone() }).with_options_dir(&self.dir))
+    }
+
+    /// The models of an NVIDIA provider that this person's key was found unable to use in the last 24 hours (`modelavail`).
+    pub fn unavailable_models(&self, provider_id: &str) -> Vec<String> {
+        let Ok(c) = self.client_for(provider_id, true) else { return Vec::new() };
+        if c.cfg.kind != crate::providers::Kind::Nvidia {
+            return Vec::new();
+        }
+        c.key_hash().map_or_else(Vec::new, |h| crate::modelavail::hidden(&self.dir, &h, provider_id, crate::jobs::now_ms()))
+    }
+
+    /// "Check my models" (Settings → Models, the `models_check` tool): a one-token request to the provider's chat models, one after the
+    /// other, the chosen model first, at most `cap` (default [`CHECK_CAP`]) and 1.6 s apart (NVIDIA's free tier allows about 40 a
+    /// minute). Spends the person's rate limit, so the callers ask first. NVIDIA keys only.
+    pub fn check_models(&self, provider_id: &str, cap: Option<usize>) -> Result<crate::modelavail::Report, String> {
+        let c = self.client_for(provider_id, true)?;
+        if c.cfg.kind != crate::providers::Kind::Nvidia {
+            return Err("only NVIDIA NIM keys are checked: the other providers answer for every model they list".into());
+        }
+        let chosen = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().chat.clone().filter(|m| m.provider == provider_id).map(|m| m.model);
+        let mut models = c.list_models()?;
+        if let Some(m) = chosen {
+            if let Some(i) = models.iter().position(|x| *x == m) {
+                let x = models.remove(i);
+                models.insert(0, x);
+            }
+        }
+        Ok(c.check_models(&models, cap.unwrap_or(crate::modelavail::CHECK_CAP).clamp(1, 200), std::time::Duration::from_millis(crate::modelavail::CHECK_GAP_MS)))
+    }
+
+    /// The external-agent settings, plus the CLI tile's folder so a Claude Code or Copilot installed from the tile is found.
+    pub fn agents_cfg(&self) -> crate::extagent::AgentsCfg {
+        let mut c = self.settings.lock().unwrap_or_else(|e| e.into_inner()).get().agents.clone();
+        c.extra_bin = Some(self.clis.bin_dir());
+        // the person's own home (the one the login runs in) and the token kept in their vault: one place for the chip, the status
+        // lookups, the agents' runs and the smoke tests
+        let user = self.agent_user.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if !user.is_empty() {
+            let home = crate::extagent::login::login_home(&user, &self.dir);
+            c.env = vec![("HOME".into(), home.display().to_string()), ("CLAUDE_CONFIG_DIR".into(), home.join(".claude").display().to_string())];
+            match self.user_get(&user, crate::extagent::login::COPILOT_VAULT) {
+                Ok(v) => {
+                    if let Some((login, _)) = crate::extagent::login::parse_vault_entry(&v) {
+                        c.vault_logins.insert(crate::extagent::COPILOT.into(), if login.is_empty() { "GitHub".into() } else { login });
+                    }
+                }
+                Err(VaultError::Locked) => c.vault_locked = true,
+                Err(_) => {}
+            }
+        }
+        c
+    }
+
+    /// The token of a coding agent kept in the person's vault, for the one process started for them (never for this process's own
+    /// environment): `(variable, token)`.
+    pub fn agent_vault_token(&self, user: &str, agent: &str) -> Option<(&'static str, zeroize::Zeroizing<String>)> {
+        if agent != crate::extagent::COPILOT {
+            return None;
+        }
+        let v = self.user_get(user, crate::extagent::login::COPILOT_VAULT).ok()?;
+        crate::extagent::login::parse_vault_entry(&v).map(|(_, t)| (crate::extagent::login::COPILOT_TOKEN_ENV, t))
+    }
+
+    /// An install from the CLI tile finished: look at the external agents again at once (no restart).
+    pub fn wire_agent_installs(self: &Arc<Self>) {
+        let me = Arc::downgrade(self);
+        self.clis.set_on_installed(Arc::new(move |_id| {
+            if let Some(s) = me.upgrade() {
+                s.ext_status.refresh(s.agents_cfg());
+            }
+        }));
+    }
+
+    /// A chat backend that always follows the *current* Settings.
+    pub fn chat_backend(self: &Arc<Self>) -> Arc<dyn ChatBackend> {
+        Arc::new(DynamicChat { svc: self.clone() })
+    }
+
+    /// A chat backend that always uses `choice` (a model chosen for one tile, such as TALES) instead of the chat model.
+    /// Providers are looked up when a request is made, so a provider removed later gives an error, not a stale answer.
+    pub fn chat_backend_for(self: &Arc<Self>, choice: ModelChoice) -> Arc<dyn ChatBackend> {
+        Arc::new(FixedChat { svc: self.clone(), choice })
+    }
+
+    pub fn embedder(self: &Arc<Self>) -> Arc<dyn TextEmbedder> {
+        Arc::new(DynamicEmbed { svc: Arc::downgrade(self) })
+    }
+
+    // ------------------------------------------------------------ voice
+
+    pub fn voice_settings(&self) -> VoiceSettings {
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().voice.clone()
+    }
+
+    /// The person's microphone (Voice tile and Browser): saved in the voice settings and handed to the web engine. Empty is automatic.
+    pub fn set_voice_mic(&self, id: &str) -> Result<(), String> {
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| s.voice.mic = id.to_string()).map_err(|e| e.to_string())?;
+        self.share_voice_mic();
+        Ok(())
+    }
+
+    /// Write the saved microphone choice where the web engine's microphone plugin reads it (at start and after every change).
+    pub fn share_voice_mic(&self) {
+        crate::voicedesk::share_mic_choice(&crate::voicedesk::mic_share_dir(), &self.voice_settings().mic);
+    }
+
+    // ------------------------------------------------------------ sound output (Settings -> Sound)
+
+    /// Settings -> Cloud mode: the administrator's choice (Automatic, On, Off).
+    pub fn cloud_setting(&self) -> crate::cloudmode::Setting {
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().cloud
+    }
+
+    /// Change the Cloud mode setting (callers check that the person may).
+    pub fn set_cloud_setting(&self, v: crate::cloudmode::Setting) -> Result<(), String> {
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| s.cloud = v).map_err(|e| e.to_string())
+    }
+
+    /// Settings -> Network: the person's choice about announcing the device's name (None: the default).
+    pub fn startup_reboot_into_iyakki(&self) -> bool {
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().startup_reboot_into_iyakki
+    }
+
+    pub fn set_startup_reboot_into_iyakki(&self, v: bool) -> Result<(), String> {
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| s.startup_reboot_into_iyakki = v).map_err(|e| e.to_string())
+    }
+
+    pub fn announce_name_setting(&self) -> Option<bool> {
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().announce_name
+    }
+
+    pub fn set_announce_name(&self, v: Option<bool>) -> Result<(), String> {
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| s.announce_name = v).map_err(|e| e.to_string())
+    }
+
+    /// Is the device announcing its name now: the choice, or the default (on, but off in cloud mode).
+    pub fn announce_name_on(&self) -> bool {
+        crate::devname::effective(self.announce_name_setting(), crate::cloudmode::detect(self.cloud_setting()).on)
+    }
+
+    /// Settings -> Remote access (web): is the desktop to be served to browsers, and on which port (always HTTPS).
+    pub fn web_access_on(&self) -> bool {
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().web_access
+    }
+
+    pub fn web_access_port(&self) -> u16 {
+        crate::webaccess::effective_port(self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().web_port)
+    }
+
+    pub fn set_web_access(&self, on: bool) -> Result<(), String> {
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| s.web_access = on).map_err(|e| e.to_string())
+    }
+
+    /// The port the person chose (0: the default, 8443).
+    pub fn set_web_access_port(&self, port: u16) -> Result<(), String> {
+        let port = crate::webaccess::check_port(port)?;
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| s.web_port = port).map_err(|e| e.to_string())
+    }
+
+    /// Settings: "Show all AI tools" (default off): the AI tools the hardware profile hides are shown as "not recommended".
+    pub fn show_all_ai(&self) -> bool {
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().show_all_ai
+    }
+
+    pub fn set_show_all_ai(&self, v: bool) -> Result<(), String> {
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(|s| s.show_all_ai = v).map_err(|e| e.to_string())
+    }
+
+    pub fn sound_settings(&self) -> crate::audioout::SoundSettings {
+        self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().sound.clone()
+    }
+
+    /// Change Settings -> Sound (callers check that the person may). Takes effect for the next sound, and at once for the
+    /// radio's volume.
+    /// The volume is remembered for the output in use (restored when that output is used again, see `audioout`); the
+    /// settings returned are the ones in effect afterwards (another output chosen brings its own volume).
+    pub fn update_sound(&self, f: impl FnOnce(&mut crate::audioout::SoundSettings)) -> Result<crate::audioout::SoundSettings, String> {
+        update_sound_in(&self.settings, f)
+    }
+
+    /// The master volume (percent, mute, change counter): the one value every volume control and every view shows.
+    pub fn master(&self) -> crate::audioout::Master {
+        self.sound_settings().master()
+    }
+
+    /// Set the master volume (0 to 100); a set also unmutes.
+    pub fn master_set(&self, percent: u32) -> Result<crate::audioout::Master, String> {
+        self.update_sound(|s| {
+            s.volume_pct = percent.min(100);
+            s.muted = false;
+        })
+        .map(|s| s.master())
+    }
+
+    /// Change the master volume by `delta` points; louder or quieter, it also unmutes.
+    pub fn master_nudge(&self, delta: i32) -> Result<crate::audioout::Master, String> {
+        self.update_sound(|s| {
+            s.volume_pct = (s.volume_pct as i32 + delta).clamp(0, 100) as u32;
+            s.muted = false;
+        })
+        .map(|s| s.master())
+    }
+
+    /// Mute or unmute (the level is kept; unmuting a volume of 0 comes back at a quiet level).
+    pub fn master_toggle_mute(&self) -> Result<crate::audioout::Master, String> {
+        self.update_sound(|s| {
+            if s.muted {
+                s.muted = false;
+                if s.volume_pct == 0 {
+                    s.volume_pct = 30;
+                }
+            } else {
+                s.muted = true;
+            }
+        })
+        .map(|s| s.master())
+    }
+
+    /// The real front end: IYAKKI's players use the output of Settings -> Sound from now on, and watch for changes. When the
+    /// selector restores the remembered volume of an output, the settings file follows.
+    pub fn start_sound_output(&self) {
+        let store = Arc::downgrade(&self.settings);
+        crate::audioout::global().set_on_prefs(move |p| {
+            if let Some(store) = store.upgrade() {
+                if let Ok(mut st) = store.lock() {
+                    let v = p.volume_pct;
+                    if let Err(e) = st.update(|s| s.sound.volume_pct = v) {
+                        log::warn!("sound: could not save the volume of the output now in use: {e}");
+                    }
+                }
+            }
+        });
+        crate::audioout::install(self.sound_settings());
+    }
+
+    /// Like [`start_sound_output`](Self::start_sound_output), but the sound card may not exist yet: the selector is installed
+    /// as soon as a card shows up in `/proc/asound/cards` (the MacBookPro14,1's registers about 11 s after boot, long after
+    /// the shell started). This is what the real front end calls.
+    pub fn start_sound_output_when_ready(&self) {
+        let store = Arc::downgrade(&self.settings);
+        let first = Arc::downgrade(&self.settings);
+        crate::audioout::global().set_on_prefs(move |p| {
+            if let Some(store) = store.upgrade() {
+                if let Ok(mut st) = store.lock() {
+                    let v = p.volume_pct;
+                    if let Err(e) = st.update(|s| s.sound.volume_pct = v) {
+                        log::warn!("sound: could not save the volume of the output now in use: {e}");
+                    }
+                }
+            }
+        });
+        crate::audioout::install_when_card_appears(move || first.upgrade().and_then(|s| s.lock().ok().map(|g| g.get().sound.clone())).unwrap_or_default());
+    }
+
+    /// Test sound: a short gentle chime on `device` (an ALSA device such as `plughw:0,3`), else on the output in use. Waits
+    /// for the end (up to 5 s); says where it played.
+    pub fn test_sound(&self, device: Option<&str>) -> Result<String, String> {
+        if self.sound_settings().muted {
+            return Err("Sound is muted in Settings → Sound.".into());
+        }
+        let play = self.voice_settings().play_cmd;
+        let cmd = match device {
+            Some(d) => crate::audioout::command_with_device(&play, d)?,
+            None => play,
+        };
+        let out = crate::audioout::global();
+        let args = crate::audioout::route_args(voice::split_command(&cmd)?, out.device().as_deref());
+        let used = args.iter().position(|a| a == "-D").and_then(|i| args.get(i + 1).cloned());
+        if args.is_empty() {
+            return Err("the play command is empty (Settings → Voice)".into());
+        }
+        // IYAKKI's own device carries the volume itself; a device named by hand (one output's row) bypasses it
+        let wav = crate::audioout::scale_wav(&crate::audioout::test_tone_wav(), crate::audioout::gain_for(out, &args));
+        if let Err(e) = voice::run_capture(voice::command_for(&args, None), Some(&wav), std::time::Duration::from_secs(8)) {
+            // the mixer ("Mix sounds from several apps") holds the card open, so a row's own device is busy: play through the mixer instead
+            if device.is_some() && e.to_lowercase().contains("busy") {
+                return self.test_sound(None).map(|m| format!("{m} (the sound mixer has that card open, so the chime went through it)"));
+            }
+            return Err(format!("The test sound did not play on {}: {e}", used.as_deref().unwrap_or("the default output")));
+        }
+        Ok(match used {
+            Some(d) if d == crate::softvol::PCM => format!("Played a short chime on the output in use (ALSA device {d}, with IYAKKI's volume)."),
+            Some(d) => format!("Played a short chime on {d}."),
+            None => "Played a short chime on the default output.".into(),
+        })
+    }
+
+    /// Settings -> Sound -> Advanced: the stereo test (left speaker, then right, 1 s each) through the same chain and at the
+    /// same volume as the radio, or the channel walk (every channel of a four-channel card alone, at a level that is audible on a quiet card).
+    pub fn test_pattern(&self, walk: bool) -> Result<String, String> {
+        if self.sound_settings().muted {
+            return Err("Sound is muted in Settings → Sound.".into());
+        }
+        let out = crate::audioout::global();
+        if walk {
+            let n = out.chain_channels().filter(|n| *n > 2 && out.device().as_deref() == Some(crate::softvol::PCM)).ok_or("The channel walk is only for cards that IYAKKI opens with more than two channels.")?;
+            let gain = out.prefs_gain().max(1);
+            let wav = crate::audioout::scale_wav(&crate::audioout::channel_walk_wav(n as u16), gain);
+            crate::audioout::play_wav_on("iyakkichan", &wav, 4 * n as u64 + 4)?;
+            return Ok(format!("Played channel 1 to {n} one after the other, 1 s each. Channels 1 and 3 carry the left side, 2 and 4 the right side of the sound IYAKKI plays."));
+        }
+        let dev = out.device();
+        let args = vec!["aplay".to_string(), "-D".to_string(), dev.clone().unwrap_or_else(|| "default".into())];
+        let wav = crate::audioout::scale_wav(&crate::audioout::stereo_test_wav(), crate::audioout::gain_for(out, &args));
+        crate::audioout::play_wav_on(dev.as_deref().unwrap_or("default"), &wav, 8)?;
+        Ok(format!("Played the left speaker for 1 s, then the right one (ALSA device {}, with IYAKKI's volume).", dev.as_deref().unwrap_or("default")))
+    }
+
+    /// "Does the hardware volume work?": see [`crate::audioout::hw_volume_check`]. Plays two tones on the card itself.
+    pub fn hw_volume_check(&self, card: u32, device: u32, control: &str) -> Result<String, String> {
+        crate::audioout::hw_volume_check_system(card, device, control)
+    }
+
+    /// Speech to text for recorded 16 kHz mono samples.
+    pub fn transcribe_samples(&self, pcm: &[i16]) -> Result<String, String> {
+        let engine = self.voice_settings().stt.ok_or("No speech-to-text engine is set up. Open Settings → Voice.")?;
+        if voice::peak(pcm) < 150 {
+            return Err("I only heard silence. Check the microphone and its volume.".into());
+        }
+        let text = voice::transcribe(&engine, &voice::encode_wav(pcm, voice::SAMPLE_RATE), &self.secrets, self.slow.as_ref())?;
+        if text.is_empty() { Err(crate::voicedesk::NO_SPEECH.into()) } else { Ok(text) }
+    }
+
+    /// The engine that makes speech for the assistant and the stories: the one of Settings → Voice, else the best engine found
+    /// on this computer (`hostengines`; `lang` prefers one that has a voice for it). The browser voice is not here: it needs
+    /// the screen (see `story::effective_engine_auto`).
+    pub fn effective_tts(&self, lang: Option<&str>) -> Option<voice::SpeechEngine> {
+        self.host_tts.ensure(); // the first call starts the look for engines in the background
+        // a Lemonade voice (Kokoro) on this computer, or on a server the person allowed, reads better than the engines found here
+        self.voice_settings().tts.or_else(|| self.lemonade_auto_voice(lang)).or_else(|| self.host_tts.auto_engine(lang))
+    }
+
+    /// Text to speech; returns WAV bytes.
+    pub fn synthesize_text(&self, text: &str) -> Result<Vec<u8>, String> {
+        let engine = self.effective_tts(None).ok_or("No text-to-speech engine is set up. Open Settings → Voice.")?;
+        voice::synthesize(&engine, text, &self.secrets, self.slow.as_ref())
+    }
+
+    /// Text to speech with a voice and speed chosen for this request (the STORY tile).
+    pub fn synthesize_with_opts(&self, text: &str, opts: &voice::SpeakOpts) -> Result<Vec<u8>, String> {
+        let engine = self.effective_tts(opts.lang.as_deref()).ok_or("No text-to-speech engine is set up. Open Settings → Voice.")?;
+        voice::synthesize_with(&engine, text, opts, &self.secrets, self.slow.as_ref())
+    }
+
+    /// Start reading `text` aloud (a chat reply): the engine speaks it itself when it can, otherwise a WAV is made and played
+    /// by the play command. Stop it with `Player::stop`.
+    pub fn speak_player(&self, text: &str) -> Result<voice::Player, String> {
+        let v = self.voice_settings();
+        let engine = self.effective_tts(None).ok_or("No text-to-speech engine is set up. Open Settings → Voice.")?;
+        if let voice::SpeechEngine::Host { engine: id, program, voice: vo } = &engine {
+            let said = voice::speakable(text);
+            if said.is_empty() {
+                return Err("nothing to say".into());
+            }
+            let spec = crate::hostengines::Spec::from_parts(id, program.as_deref(), vo.as_deref())?;
+            return crate::hostengines::speak(&spec, &said, None, v.speed_pct as f32 / 100.0, &v.play_cmd);
+        }
+        let wav = voice::synthesize(&engine, text, &self.secrets, self.slow.as_ref())?;
+        voice::Player::start(&v.play_cmd, &wav)
+    }
+
+    // ------------------------------------------------------------ RAG
+
+    /// Search the local knowledge base and every enabled external backend, merging the ranked
+    /// lists with Reciprocal Rank Fusion. Backend failures become warnings, not errors.
+    pub fn search(&self, namespaces: &[&str], query: &str, k: usize) -> (Vec<Hit>, Vec<String>) {
+        let mut lists = vec![self.kb.lock().unwrap_or_else(std::sync::PoisonError::into_inner).search(namespaces, query, k * 2)];
+        let (ext, warnings) = self.search_external(query, k);
+        lists.extend(ext);
+        (fuse(lists, k), warnings)
+    }
+
+    /// The ranked lists of every enabled external backend (one list each; a failing backend becomes a warning). Nothing when the
+    /// settings do not use external backends.
+    pub fn search_external(&self, query: &str, k: usize) -> (Vec<Vec<Hit>>, Vec<String>) {
+        let mut lists = Vec::new();
+        let mut warnings = Vec::new();
+        let (exts, use_ext) = {
+            let s = self.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            (s.get().external_rag.iter().filter(|e| e.enabled).map(|e| e.backend.clone()).collect::<Vec<_>>(), s.get().rag.use_external)
+        };
+        if use_ext {
+            let qvec = if exts.iter().any(|e| e.needs_vector()) {
+                match DynamicEmbed::embed_with(self, &[query.to_string()]) {
+                    Ok(mut v) => v.pop(),
+                    Err(e) => {
+                        warnings.push(format!("query embedding failed: {e}"));
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            for e in exts {
+                let id = e.id().to_string();
+                let c = ExtClient::new(e, self.secrets.clone(), self.quick.clone());
+                match c.search(query, qvec.as_deref(), k * 2) {
+                    Ok(h) => lists.push(h),
+                    Err(m) => warnings.push(format!("{id}: {m}")),
+                }
+            }
+        }
+        (lists, warnings)
+    }
+}
+
+/// Reciprocal Rank Fusion across several ranked hit lists (identical text counts once).
+pub fn fuse(lists: Vec<Vec<Hit>>, k: usize) -> Vec<Hit> {
+    let mut scored: Vec<(f32, Hit)> = Vec::new();
+    for list in lists {
+        for (rank, h) in list.into_iter().enumerate() {
+            let add = 1.0 / (60.0 + rank as f32 + 1.0);
+            match scored.iter_mut().find(|(_, x)| x.text == h.text) {
+                Some((s, _)) => *s += add,
+                None => scored.push((add, h)),
+            }
+        }
+    }
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+    scored.into_iter().take(k).map(|(s, mut h)| {
+        h.score = s;
+        h
+    }).collect()
+}
+
+struct DynamicChat {
+    svc: Arc<Services>,
+}
+
+struct FixedChat {
+    svc: Arc<Services>,
+    choice: ModelChoice,
+}
+
+impl ChatBackend for FixedChat {
+    fn provider_name(&self) -> String {
+        self.choice.provider.clone()
+    }
+
+    fn complete(&self, history: &[Message]) -> Result<String, String> {
+        self.svc.client_for(&self.choice.provider, false)?.chat(&self.choice.model, history)
+    }
+
+    fn complete_tools(&self, history: &[Message], tools: &[ToolSpec]) -> Result<ModelTurn, String> {
+        self.svc.client_for(&self.choice.provider, false)?.chat_turn(&self.choice.model, history, tools)
+    }
+
+    fn complete_tools_stream(&self, history: &[Message], tools: &[ToolSpec], on_text: &mut dyn FnMut(&str) -> bool) -> Result<ModelTurn, String> {
+        let client = self.svc.client_for(&self.choice.provider, false)?;
+        match self.svc.chat_streamer() {
+            Some(s) => client.chat_turn_stream(&self.choice.model, history, tools, s.as_ref(), on_text),
+            None => client.chat_turn(&self.choice.model, history, tools),
+        }
+    }
+}
+
+impl ChatBackend for DynamicChat {
+    fn provider_name(&self) -> String {
+        self.svc.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().chat.as_ref().map(|c| c.provider.clone()).unwrap_or_default()
+    }
+
+    fn complete(&self, history: &[Message]) -> Result<String, String> {
+        let choice: Option<ModelChoice> = self.svc.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().chat.clone();
+        let c = choice.ok_or("No chat model selected. Open Settings → Models, add a provider and pick a model.")?;
+        self.svc.client_for(&c.provider, false)?.chat(&c.model, history)
+    }
+
+    fn complete_tools(&self, history: &[Message], tools: &[ToolSpec]) -> Result<ModelTurn, String> {
+        let choice: Option<ModelChoice> = self.svc.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().chat.clone();
+        let c = choice.ok_or("No chat model selected. Open Settings → Models, add a provider and pick a model.")?;
+        self.svc.client_for(&c.provider, false)?.chat_turn(&c.model, history, tools)
+    }
+
+    fn complete_tools_stream(&self, history: &[Message], tools: &[ToolSpec], on_text: &mut dyn FnMut(&str) -> bool) -> Result<ModelTurn, String> {
+        let choice: Option<ModelChoice> = self.svc.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().chat.clone();
+        let c = choice.ok_or("No chat model selected. Open Settings → Models, add a provider and pick a model.")?;
+        let client = self.svc.client_for(&c.provider, false)?;
+        match self.svc.chat_streamer() {
+            Some(s) => client.chat_turn_stream(&c.model, history, tools, s.as_ref(), on_text),
+            None => client.chat_turn(&c.model, history, tools),
+        }
+    }
+}
+
+/// Embeddings that follow Settings: the configured provider+model, else the built-in hashing embedder.
+pub struct DynamicEmbed {
+    svc: std::sync::Weak<Services>,
+}
+
+impl DynamicEmbed {
+    fn embed_with(svc: &Services, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+        let choice = svc.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().embedding.clone();
+        match choice {
+            None => HashEmbed::default().embed(texts),
+            Some(c) => {
+                let client = svc.client_for(&c.provider, false)?;
+                let mut out = Vec::with_capacity(texts.len());
+                for batch in texts.chunks(64) {
+                    out.extend(client.embed(&c.model, batch)?);
+                }
+                Ok(out)
+            }
+        }
+    }
+}
+
+impl TextEmbedder for DynamicEmbed {
+    fn id(&self) -> String {
+        match self.svc.upgrade() {
+            Some(s) => match s.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get().embedding.clone() {
+                Some(c) => format!("remote:{}:{}", c.provider, c.model),
+                None => HashEmbed::default().id(),
+            },
+            None => HashEmbed::default().id(),
+        }
+    }
+
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+        match self.svc.upgrade() {
+            Some(s) => Self::embed_with(&s, texts),
+            None => HashEmbed::default().embed(texts),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::Kind;
+    use crate::rag_ext::ExternalRag;
+    use crate::settings::ExtEntry;
+    use iyakki_proxy::UpstreamResponse;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn deleting_a_chat_removes_its_transcript_memory_runs_and_work_folder_and_nothing_else() {
+        let (s, _m, _d) = svc("delsess", |_, _| (200, String::new()));
+        let (mut one, mut two) = (s.sessions.create("alice").unwrap(), s.sessions.create("alice").unwrap());
+        s.sessions.save(&mut one).unwrap();
+        s.sessions.save(&mut two).unwrap();
+        s.sessions.remember_turn(&one, "what is x", "x is 5");
+        let (w1, w2) = (s.session_workdir("alice", &one.id).unwrap(), s.session_workdir("alice", &two.id).unwrap());
+        std::fs::create_dir_all(w1.join("sub")).unwrap();
+        std::fs::write(w1.join("a.txt"), "a").unwrap();
+        std::fs::write(w1.join("sub/b.txt"), "b").unwrap();
+        std::fs::write(w2.join("keep.txt"), "k").unwrap();
+        let log = |id: &str, session: Option<&str>| crate::runs::RunLog { id: id.into(), user: "alice".into(), started: 1, prompt: "p".into(), status: "completed".into(), events: vec![], session: session.map(String::from), task_id: None, row: None, agent: None };
+        s.runs.save(&log("aaaaaaaaaaaa", Some(&one.id))).unwrap();
+        s.runs.save(&log("bbbbbbbbbbbb", Some(&two.id))).unwrap();
+        s.runs.save(&log("cccccccccccc", None)).unwrap();
+        s.ext_sessions.set(&one.id, "claude-code", "vendor-1");
+        s.ext_sessions.set(&two.id, "claude-code", "vendor-2");
+        crate::history::History::new(s.kb.clone(), "alice", "shop", Some(&one.id)).record("answer", "r", "gone with the chat");
+        crate::history::History::new(s.kb.clone(), "alice", "shop", Some(&two.id)).record("answer", "r", "stays");
+        assert_eq!(s.session_files("alice", &one.id), 2);
+        assert!(!s.sessions.recall("alice", &one.id, "what is x", 3).is_empty());
+        // someone else cannot delete it
+        assert!(s.delete_session("bob", &one.id).is_err() && w1.join("a.txt").exists());
+        let gone = s.delete_session("alice", &one.id).unwrap();
+        assert_eq!(gone, SessionDeleted { runs: 1, files: 2 });
+        assert!(!w1.exists(), "the folder and its files are gone");
+        assert!(s.sessions.load("alice", &one.id).is_none());
+        assert!(s.sessions.recall("alice", &one.id, "what is x", 3).is_empty(), "its memory is gone");
+        let left: Vec<String> = s.runs.list("alice").into_iter().map(|r| r.id).collect();
+        assert_eq!(left.len(), 2, "only that chat's run was removed: {left:?}");
+        assert!(w2.join("keep.txt").exists() && s.sessions.load("alice", &two.id).is_some(), "other chats are untouched");
+        assert!(s.ext_sessions.get(&one.id, "claude-code").is_none(), "the vendor session id is cleaned");
+        assert_eq!(s.ext_sessions.get(&two.id, "claude-code").as_deref(), Some("vendor-2"));
+        assert_eq!(crate::history::History::new(s.kb.clone(), "alice", "shop", None).len(), 1, "the chat's workspace history is forgotten");
+        assert!(s.delete_session("alice", &one.id).is_err(), "deleting twice is an error, not a crash");
+    }
+
+    type Reply = Box<dyn Fn(&str, &str) -> (u16, String) + Send + Sync>;
+    struct Mock {
+        calls: Mutex<Vec<(String, String)>>,
+        reply: Mutex<Reply>,
+    }
+    impl Upstream for Mock {
+        fn request(&self, m: &str, url: &str, _h: &[(String, String)], _b: &[u8]) -> Result<UpstreamResponse, String> {
+            self.calls.lock().unwrap().push((m.into(), url.into()));
+            let (status, body) = (self.reply.lock().unwrap())(m, url);
+            Ok(UpstreamResponse { status, body: body.into_bytes() })
+        }
+    }
+
+    fn svc(tag: &str, reply: impl Fn(&str, &str) -> (u16, String) + Send + Sync + 'static) -> (Arc<Services>, Arc<Mock>, PathBuf) {
+        let d = std::env::temp_dir().join(format!("iyakki-svc-{}-{}", std::process::id(), tag));
+        let _ = std::fs::remove_dir_all(&d);
+        let m = Arc::new(Mock { calls: Default::default(), reply: Mutex::new(Box::new(reply)) });
+        (Services::open(&d, m.clone(), m.clone()).unwrap(), m, d)
+    }
+
+    fn none(_: &str, _: &str) -> (u16, String) {
+        (500, String::new())
+    }
+
+
+    #[test]
+    fn the_vault_keys_of_signed_in_people_go_to_the_next_program_and_open_the_vaults_without_a_password_and_a_wrong_key_does_not() {
+        let (s, _m, d) = svc("handover", none);
+        s.on_login("alice", "alice-pass-1", false);
+        s.on_login("root", "root-pass-1", true);
+        s.user_set("alice", "token", "secret-value").unwrap_or_else(|e| panic!("{e:?}"));
+        let keys = s.export_session_keys();
+        assert_eq!(keys.len(), 3, "alice's vault, root's vault and the system vault");
+        // the next program: same files, nothing unlocked yet
+        let m2 = Arc::new(Mock { calls: Default::default(), reply: Mutex::new(Box::new(none)) });
+        let s2 = Services::open(&d, m2.clone(), m2).unwrap();
+        assert!(!s2.user_vault_unlocked("alice"));
+        let plain: Vec<(String, String, [u8; 32])> = keys.iter().map(|(u, k, m)| (u.clone(), k.clone(), **m)).collect();
+        // a wrong key opens nothing
+        let mut bad = plain.clone();
+        bad[0].2[0] ^= 0xff;
+        let opened_bad = s2.import_session_keys(&bad[..1]);
+        assert_eq!(opened_bad, 0);
+        assert!(!s2.user_vault_unlocked(&bad[0].0) || bad[0].1 != "user");
+        // the right keys open all three, and alice's secret reads back
+        assert_eq!(s2.import_session_keys(&plain), 3);
+        assert!(s2.user_vault_unlocked("alice") && s2.user_vault_unlocked("root"));
+        assert_eq!(&*s2.user_get("alice", "token").unwrap(), "secret-value");
+        assert_eq!(s2.system_vault_state().1, true, "the system vault is open");
+        // a kind or a name that is not valid is ignored
+        assert_eq!(s2.import_session_keys(&[("../x".into(), "user".into(), [0u8; 32]), ("a".into(), "weird".into(), [0u8; 32])]), 0);
+        // nothing readable about the keys is in the data folder
+        let mut found = false;
+        for e in walk(&d) {
+            let t = std::fs::read(&e).unwrap_or_default();
+            if t.windows(32).any(|w| plain.iter().any(|k| w == k.2)) {
+                found = true;
+            }
+        }
+        assert!(!found, "no key is written anywhere in the data folder");
+    }
+
+    fn walk(d: &std::path::Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                out.extend(walk(&p));
+            } else {
+                out.push(p);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn vault_lifecycle_across_logins() {
+        let (s, _, _) = svc("life", none);
+        // first admin creates the system vault and their own personal vault
+        let r = s.on_login("root", "root-pass-1", true);
+        assert_eq!((r.user_vault, r.system_vault), (VaultState::Created, VaultState::Created));
+        s.system_set("openai-key", "sk-123").unwrap();
+        s.user_set("root", "my-token", "personal").unwrap();
+        // a plain user never touches the system vault, and has their own private one
+        let r = s.on_login("amy", "amy-pass-123", false);
+        assert_eq!((r.user_vault, r.system_vault), (VaultState::Created, VaultState::NotApplicable));
+        s.user_set("amy", "note", "amys").unwrap();
+        assert_eq!(s.user_names("amy").unwrap(), vec!["note"]);
+        assert_eq!(s.user_names("root").unwrap(), vec!["my-token"], "vaults are separate");
+        // while an admin has unlocked it, a second admin signing in gets their own slot
+        let r = s.on_login("bob", "bob-pass-123", true);
+        assert_eq!(r.system_vault, VaultState::Unlocked);
+        assert!(s.system_slots().contains(&"user:bob".to_string()));
+        // logout forgets personal vaults
+        s.on_logout("amy", false);
+        assert!(!s.user_vault_unlocked("amy") && s.user_names("amy").is_err());
+        // back in, the data is still there
+        s.on_login("amy", "amy-pass-123", false);
+        assert_eq!(s.user_names("amy").unwrap(), vec!["note"]);
+    }
+
+    #[test]
+    fn locked_system_vault_rules() {
+        let (s, _, d) = svc("locked", none);
+        s.on_login("root", "root-pass-1", true);
+        s.system_set("k", "v").unwrap();
+        s.lock_system();
+        assert_eq!(s.system_names(), Err(VaultError::Locked));
+        // a new admin has no slot while it is locked: stays locked, clear reason
+        let r = s.on_login("eve", "eve-pass-123", true);
+        assert!(matches!(r.system_vault, VaultState::Locked(ref m) if m.contains("no key slot")), "{:?}", r.system_vault);
+        assert_eq!(s.system_names(), Err(VaultError::Locked));
+        // the original admin unlocks it again with their password
+        assert_eq!(s.on_login("root", "root-pass-1", true).system_vault, VaultState::Unlocked);
+        // a wrong password does not unlock
+        s.lock_system();
+        let r = s.on_login("root", "WRONG-pass-1", true);
+        assert!(matches!(r.system_vault, VaultState::Locked(_)));
+        assert!(matches!(r.user_vault, VaultState::Locked(_)), "personal vault also refuses a wrong password");
+        // a restart keeps the vault on disk, locked
+        let m = Arc::new(Mock { calls: Default::default(), reply: Mutex::new(Box::new(none)) });
+        let s2 = Services::open(&d, m.clone(), m).unwrap();
+        assert_eq!(s2.system_vault_state(), (true, false));
+        assert_eq!(s2.on_login("root", "root-pass-1", true).system_vault, VaultState::Unlocked);
+        assert_eq!(s2.system_names().unwrap(), vec!["k"]);
+    }
+
+    #[test]
+    fn lock_on_admin_logout_is_optional() {
+        let (s, _, _) = svc("logout", none);
+        s.on_login("root", "root-pass-1", true);
+        s.on_logout("root", true);
+        assert!(s.system_vault_state().1, "default: stays open so chat keeps working for everyone");
+        s.settings.lock().unwrap().update(|x| x.vault.lock_on_admin_logout = true).unwrap();
+        s.on_logout("root", true);
+        assert!(!s.system_vault_state().1);
+    }
+
+    #[test]
+    fn password_changes_and_resets() {
+        let (s, _, _) = svc("pw", none);
+        s.on_login("amy", "old-pass-123", false);
+        s.user_set("amy", "k", "v").unwrap();
+        s.on_logout("amy", false);
+        s.on_password_change("amy", "old-pass-123", "new-pass-123");
+        assert!(matches!(s.on_login("amy", "old-pass-123", false).user_vault, VaultState::Locked(_)));
+        assert_eq!(s.on_login("amy", "new-pass-123", false).user_vault, VaultState::Unlocked);
+        assert_eq!(s.user_names("amy").unwrap(), vec!["k"], "secrets survive a normal password change");
+        // an admin reset can't recover them: the vault is replaced with a fresh empty one
+        s.on_logout("amy", false);
+        s.reset_user_vault("amy").unwrap();
+        assert_eq!(s.on_login("amy", "admin-set-pw-1", false).user_vault, VaultState::Created);
+        assert!(s.user_names("amy").unwrap().is_empty());
+    }
+
+    #[test]
+    fn keyfile_unlocks_without_a_password() {
+        let (s, _, d) = svc("keyfile", none);
+        s.on_login("root", "root-pass-1", true);
+        s.system_set("k", "v").unwrap();
+        let kf = d.join("vault.key");
+        s.enable_keyfile(kf.to_str().unwrap()).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&kf).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(s.enable_keyfile(kf.to_str().unwrap()).is_err(), "never overwrites an existing key file");
+        // simulate a reboot
+        let m = Arc::new(Mock { calls: Default::default(), reply: Mutex::new(Box::new(none)) });
+        let s2 = Services::open(&d, m.clone(), m.clone()).unwrap();
+        assert_eq!(s2.system_vault_state(), (true, true), "unlocked at startup from the key file");
+        assert_eq!(s2.system_names().unwrap(), vec!["k"]);
+        // deleting the key file leaves it locked after the next start
+        std::fs::remove_file(&kf).unwrap();
+        let s3 = Services::open(&d, m.clone(), m).unwrap();
+        assert_eq!(s3.system_vault_state(), (true, false));
+    }
+
+    #[test]
+    fn chat_follows_settings_live_and_explains_problems() {
+        let (s, m, _) = svc("chat", |meth, url| {
+            if meth == "POST" && url.ends_with("/v1/chat/completions") {
+                (200, r#"{"choices":[{"message":{"content":"hello from ollama"}}]}"#.into())
+            } else {
+                (404, String::new())
+            }
+        });
+        let chat = s.chat_backend();
+        // nothing configured yet: the message tells the user what to do
+        assert!(chat.complete(&[Message::user("hi")]).unwrap_err().contains("Settings"));
+        s.settings.lock().unwrap().upsert_provider(ProviderCfg::new("local", Kind::Ollama)).unwrap();
+        s.settings.lock().unwrap().set_chat(Some(ModelChoice { provider: "local".into(), model: "qwen3:32b".into() })).unwrap();
+        // no restart, no rebuild: the same backend object now answers
+        assert_eq!(chat.complete(&[Message::user("hi")]).unwrap(), "hello from ollama");
+        assert_eq!(m.calls.lock().unwrap().last().unwrap().1, "http://localhost:11434/v1/chat/completions");
+        // a provider whose key lives in a locked vault fails closed with a clear reason
+        let mut openai = ProviderCfg::new("openai", Kind::OpenAi);
+        openai.key_ref = Some("vault:openai-key".into());
+        s.settings.lock().unwrap().upsert_provider(openai).unwrap();
+        s.settings.lock().unwrap().set_chat(Some(ModelChoice { provider: "openai".into(), model: "gpt-4o".into() })).unwrap();
+        let before = m.calls.lock().unwrap().len();
+        assert!(chat.complete(&[Message::user("hi")]).unwrap_err().contains("locked"));
+        assert_eq!(m.calls.lock().unwrap().len(), before, "no request is made without the key");
+    }
+
+    #[test]
+    fn embedding_choice_changes_the_embedder_id() {
+        let (s, _, _) = svc("embid", none);
+        let e = s.embedder();
+        assert_eq!(e.id(), "hash-256");
+        s.settings.lock().unwrap().upsert_provider(ProviderCfg::new("local", Kind::Ollama)).unwrap();
+        s.settings.lock().unwrap().set_embedding(Some(ModelChoice { provider: "local".into(), model: "nomic-embed-text".into() })).unwrap();
+        assert_eq!(e.id(), "remote:local:nomic-embed-text");
+    }
+
+    #[test]
+    fn federated_search_merges_local_and_external_and_survives_failures() {
+        let (s, _, _) = svc("fed", |meth, url| {
+            if meth == "POST" && url == "http://rag.corp/search" {
+                (200, r#"{"results":[{"text":"The handbook says deploy keys rotate quarterly.","source":"corp-wiki"},{"text":"Unrelated corporate text.","source":"wiki2"}]}"#.into())
+            } else {
+                (503, "down".into())
+            }
+        });
+        s.kb.lock().unwrap().add_document("shared", "ops", "ops.md", "Deploy keys live in the vault under prod.", BTreeMap::new()).unwrap();
+        {
+            let mut st = s.settings.lock().unwrap();
+            st.upsert_external(ExtEntry { enabled: true, backend: ExternalRag::Http { id: "corp".into(), url: "http://rag.corp/search".into(), key_ref: None } }).unwrap();
+            st.upsert_external(ExtEntry { enabled: true, backend: ExternalRag::Qdrant { id: "broken".into(), url: "http://qdrant.down:6333".into(), collection: "docs".into(), key_ref: None } }).unwrap();
+            st.upsert_external(ExtEntry { enabled: false, backend: ExternalRag::Http { id: "off".into(), url: "http://never".into(), key_ref: None } }).unwrap();
+        }
+        let (hits, warnings) = s.search(&["shared"], "deploy keys", 5);
+        let sources: Vec<&str> = hits.iter().map(|h| h.source.as_str()).collect();
+        assert!(sources.contains(&"ops.md") && sources.contains(&"corp-wiki"), "{sources:?}");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].starts_with("broken:"), "a failing backend is reported, not fatal");
+        // switching external use off leaves only the local base
+        s.settings.lock().unwrap().update(|x| x.rag.use_external = false).unwrap();
+        let (hits, warnings) = s.search(&["shared"], "deploy keys", 5);
+        assert!(hits.iter().all(|h| h.ns == "shared") && warnings.is_empty());
+    }
+
+    #[test]
+    fn rank_fusion_merges_and_dedupes() {
+        let h = |t: &str, ns: &str| Hit { ns: ns.into(), doc_id: t.into(), title: t.into(), source: t.into(), chunk_idx: 0, text: t.into(), score: 0.0, bm25: 0.0, vector: 0.0 };
+        let fused = fuse(vec![vec![h("a", "x"), h("b", "x"), h("c", "x")], vec![h("c", "y"), h("a", "y")]], 3);
+        assert_eq!(fused.iter().map(|h| h.text.as_str()).collect::<Vec<_>>(), vec!["a", "c", "b"], "items found by both lists rise");
+        assert!(fused[0].score > fused[2].score);
+        assert!(fuse(vec![], 3).is_empty());
+        assert_eq!(fuse(vec![vec![h("a", "x"), h("b", "x")]], 1).len(), 1);
+    }
+
+    #[test]
+    fn changing_the_embedding_model_brings_the_documents_up_to_date_in_the_background() {
+        let (s, _, _) = svc("autore", |meth, url| {
+            if meth == "POST" && url.ends_with("/embeddings") {
+                (200, r#"{"data":[{"embedding":[0.1,0.2,0.3]}]}"#.into())
+            } else {
+                (503, "down".into())
+            }
+        });
+        s.kb.lock().unwrap().add_document("shared", "t", "s", "alpha beta gamma", BTreeMap::new()).unwrap();
+        assert!(s.kb.lock().unwrap().stale_namespaces().is_empty());
+        assert!(!s.reindex_stale_in_background(), "nothing to do while the model is unchanged");
+        s.settings.lock().unwrap().upsert_provider(ProviderCfg::new("local", Kind::Ollama)).unwrap();
+        s.settings.lock().unwrap().set_embedding(Some(ModelChoice { provider: "local".into(), model: "nomic-embed-text".into() })).unwrap();
+        assert_eq!(s.kb.lock().unwrap().stale_namespaces(), vec!["shared".to_string()]);
+        assert!(s.reindex_stale_in_background());
+        for _ in 0..400 {
+            if !s.is_reindexing() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!s.is_reindexing());
+        let note = s.reindex_note().expect("a note");
+        assert!(note.contains("remote:local:nomic-embed-text") || note.contains("could not"), "{note}");
+    }
+
+    #[test]
+    fn a_local_ollama_that_comes_up_is_added_to_models_once_and_nothing_else_changes() {
+        let (s, _, _) = svc("localollama", none);
+        s.use_local_ollama("http://127.0.0.1:11434");
+        s.use_local_ollama("http://127.0.0.1:11434/");
+        let st = s.settings.lock().unwrap();
+        let ps: Vec<_> = st.get().providers.iter().filter(|p| p.kind == Kind::Ollama).collect();
+        assert_eq!(ps.len(), 1);
+        assert_eq!((ps[0].id.as_str(), ps[0].base_url.as_deref()), ("ollama-local", Some("http://127.0.0.1:11434")));
+        assert!(st.get().chat.is_none(), "the chat model is the person's choice");
+    }
+
+    #[test]
+    fn the_cluster_ollama_takes_over_ollama_local_and_a_host_one_is_not_pulled_back() {
+        let (s, _, _) = svc("clusterollama", none);
+        s.use_local_ollama("http://127.0.0.1:11434");
+        s.use_cluster_ollama("http://127.0.0.1:11436");
+        s.use_cluster_ollama("http://127.0.0.1:11436/");
+        let url = || {
+            let st = s.settings.lock().unwrap();
+            let ps: Vec<_> = st.get().providers.iter().filter(|p| p.id == "ollama-local").map(|p| p.base_url.clone()).collect();
+            assert_eq!(ps.len(), 1, "one entry, repointed");
+            ps[0].clone()
+        };
+        assert_eq!(url().as_deref(), Some("http://127.0.0.1:11436"));
+        // a host Ollama that still answers on 11434 does not take the entry back
+        s.use_local_ollama("http://127.0.0.1:11434");
+        assert_eq!(url().as_deref(), Some("http://127.0.0.1:11436"));
+        // with no entry at all it is added
+        let (t, _, _) = svc("clusterollama2", none);
+        t.use_cluster_ollama("http://127.0.0.1:11436");
+        assert!(t.settings.lock().unwrap().get().providers.iter().any(|p| p.id == "ollama-local"));
+    }
+
+    #[test]
+    fn an_ollama_already_running_on_this_machine_is_found_and_added_to_models() {
+        use std::io::{Read, Write};
+        let (s, _, _) = svc("detectollama", none);
+        // nothing there: nothing added
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        drop(l);
+        s.detect_local_ollama_at(port);
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        assert!(s.settings.lock().unwrap().get().providers.iter().all(|p| p.id != "ollama-local"));
+        // something answering like Ollama: added
+        let l = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+        std::thread::spawn(move || {
+            for _ in 0..3 {
+                if let Ok((mut c, _)) = l.accept() {
+                    let mut b = [0u8; 256];
+                    let _ = c.set_read_timeout(Some(std::time::Duration::from_millis(300)));
+                    let _ = c.read(&mut b);
+                    let _ = c.write_all(b"HTTP/1.0 200 OK\r\nContent-Length: 20\r\n\r\n{\"version\":\"0.35.1\"}");
+                }
+            }
+        });
+        s.detect_local_ollama_at(port);
+        for _ in 0..100 {
+            if s.settings.lock().unwrap().get().providers.iter().any(|p| p.id == "ollama-local") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        let st = s.settings.lock().unwrap();
+        let p = st.get().providers.iter().find(|p| p.id == "ollama-local").expect("added");
+        assert_eq!(p.base_url.as_deref(), Some(format!("http://127.0.0.1:{port}").as_str()));
+    }
+
+    /// Run by hand on a machine that really has Ollama running (`cargo test -p iyakki-agent --lib -- --ignored a_real_ollama`): the
+    /// real server on the usual port is found and added to Models as `ollama-local`. Skips quietly when nothing answers there.
+    #[test]
+    #[ignore = "needs an Ollama running on 127.0.0.1:11434"]
+    fn a_real_ollama_on_the_usual_port_is_found_and_added_to_models() {
+        let up = std::net::TcpStream::connect_timeout(&"127.0.0.1:11434".parse().unwrap(), std::time::Duration::from_millis(500)).is_ok();
+        if !up {
+            eprintln!("no Ollama on 127.0.0.1:11434: skipped");
+            return;
+        }
+        let (s, _, _) = svc("detectrealollama", none);
+        s.detect_local_ollama_at(11434);
+        for _ in 0..200 {
+            if s.settings.lock().unwrap().get().providers.iter().any(|p| p.id == "ollama-local") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        let st = s.settings.lock().unwrap();
+        let p = st.get().providers.iter().find(|p| p.id == "ollama-local").expect("the real Ollama was added to Models");
+        assert_eq!(p.base_url.as_deref(), Some("http://127.0.0.1:11434"));
+    }
+
+    #[test]
+    fn the_device_watch_reads_the_neighbour_table_in_the_background_and_reports_strangers_once() {
+        let (s, _, _) = svc("devwatch", none);
+        let arp = std::env::temp_dir().join(format!("iyakki-arp-{}", std::process::id()));
+        let row = |ip: &str, mac: &str| format!("{ip} 0x1 0x2 {mac} * eth0\n");
+        let head = "IP address HW type Flags HW address Mask Device\n";
+        std::fs::write(&arp, format!("{head}{}", row("10.0.0.1", "aa:aa:aa:aa:aa:01"))).unwrap();
+        s.start_device_watch_from(arp.clone(), std::time::Duration::from_millis(40));
+        s.start_device_watch_from(arp.clone(), std::time::Duration::from_millis(40)); // a second call does nothing
+        let wait = |f: &dyn Fn() -> bool| {
+            for _ in 0..200 {
+                if f() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            panic!("it never happened");
+        };
+        wait(&|| s.devwatch.list().len() == 1);
+        assert!(s.devwatch.take_fresh().is_empty());
+        std::fs::write(&arp, format!("{head}{}{}", row("10.0.0.1", "aa:aa:aa:aa:aa:01"), row("10.0.0.9", "bb:bb:bb:bb:bb:09"))).unwrap();
+        wait(&|| s.devwatch.untrusted_count() == 1);
+        // the report of a new device and the untrusted count are set by the same poll, but take_fresh is a separate call: collect (wall clock) until it has the stranger
+        let mut fresh = s.devwatch.take_fresh();
+        let t0 = std::time::Instant::now();
+        while fresh.is_empty() && t0.elapsed() < std::time::Duration::from_secs(10) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            fresh = s.devwatch.take_fresh();
+        }
+        assert_eq!(fresh.len(), 1);
+        assert_eq!(fresh[0].mac, "bb:bb:bb:bb:bb:09");
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert!(s.devwatch.take_fresh().is_empty(), "told once");
+        let _ = std::fs::remove_file(&arp);
+    }
+
+    #[test]
+    fn finished_and_failed_runs_leave_a_note_stopped_ones_do_not_and_warnings_are_not_repeated() {
+        use crate::agent::{RunLimits, Tools};
+        use crate::chat::{ChatBackend, Message, ModelTurn, ToolSpec};
+        struct Say(Result<String, String>);
+        impl ChatBackend for Say {
+            fn complete(&self, _: &[Message]) -> Result<String, String> {
+                Err("unused".into())
+            }
+            fn complete_tools(&self, _: &[Message], _: &[ToolSpec]) -> Result<ModelTurn, String> {
+                self.0.clone().map(|text| ModelTurn { text, calls: vec![] })
+            }
+        }
+        struct NoTools;
+        impl Tools for NoTools {
+            fn defs(&self) -> Vec<crate::agent::ToolDef> {
+                vec![]
+            }
+            fn call(&self, _: &str, _: &serde_json::Value) -> Result<String, String> {
+                Ok(String::new())
+            }
+            fn describe(&self, n: &str, _: &serde_json::Value) -> String {
+                n.into()
+            }
+        }
+        let (s, _, _) = svc("inboxruns", |_, _| (200, String::new()));
+        let run = |user: &str, r: Result<String, String>| {
+            let mut run = crate::runs::RunSession::start(Some(s.runs.clone()), user, "write the summary of everything", Arc::new(Say(r)), Arc::new(NoTools), vec![], RunLimits::default());
+            for _ in 0..500 {
+                run.poll();
+                if run.is_done() {
+                    return run;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            panic!("run did not end");
+        };
+        let ok = run("amy", Ok("Here is the summary: three things happened.".into()));
+        let notes = s.inbox.list("amy");
+        assert_eq!(notes.len(), 1);
+        assert_eq!((notes[0].kind, notes[0].title.as_str(), notes[0].body.as_str()), (crate::inbox::Kind::Agent, "Finished: write the summary of everything", "Here is the summary: three things happened."));
+        assert_eq!(notes[0].link, Some(crate::inbox::Link::new("runs", ok.id())));
+        run("amy", Err("the model is down".into()));
+        let notes = s.inbox.list("amy");
+        assert!(notes.iter().any(|n| n.kind == crate::inbox::Kind::Error && n.title.starts_with("Failed:") && n.body.contains("the model is down")), "{notes:?}");
+        assert!(s.inbox.list("bob").is_empty());
+        // a run stopped by the person leaves nothing
+        let st = crate::runs::RunSession::start(Some(s.runs.clone()), "cy", "x", Arc::new(Say(Ok("never".into()))), Arc::new(NoTools), vec![], RunLimits::default());
+        st.cancel();
+        drop(st);
+        assert!(s.inbox.list("cy").iter().all(|n| n.kind != crate::inbox::Kind::Agent || n.title.starts_with("Finished")), "a stopped run has no failure note");
+        // the helper the browser will use, and warnings that do not pile up
+        s.notify("amy", crate::inbox::Kind::Download, "report.pdf downloaded", "1.2 MB", Some(crate::inbox::Link::new("browser", "dl1"))).unwrap();
+        assert!(s.inbox.list("amy").iter().any(|n| n.kind == crate::inbox::Kind::Download && n.source == "browser"));
+        for _ in 0..3 {
+            s.notify_once("amy", crate::inbox::Kind::Warning, "The system vault is locked", "", None).unwrap();
+        }
+        assert_eq!(s.inbox.list("amy").iter().filter(|n| n.title == "The system vault is locked").count(), 1);
+        assert!(s.notify("../x", crate::inbox::Kind::Info, "t", "", None).is_err());
+    }
+
+}
+
+/// Change Settings -> Sound in `settings`, remembering the volume of the output in use, and tell the selector.
+pub(crate) fn update_sound_in(settings: &Arc<Mutex<SettingsStore>>, f: impl FnOnce(&mut crate::audioout::SoundSettings)) -> Result<crate::audioout::SoundSettings, String> {
+    let in_use = crate::audioout::global().current_key();
+    let now = {
+        let mut st = settings.lock().unwrap();
+        st.update(|s| {
+            f(&mut s.sound);
+            if let Some(k) = &in_use {
+                s.sound.remember_level(k);
+            }
+        })
+        .map_err(|e| e.to_string())?;
+        st.get().sound.clone()
+    };
+    // the settings lock is released: the selector may save a restored volume through `start_sound_output`'s hook
+    crate::audioout::apply_prefs(now.clone());
+    Ok(now)
+}
+
+/// The radio's view of the master volume.
+fn master_link(settings: &Arc<Mutex<SettingsStore>>) -> crate::radio::MasterLink {
+    let weak = Arc::downgrade(settings);
+    Arc::new(move |set: Option<u8>| {
+        let Some(st) = weak.upgrade() else { return 100 };
+        match set {
+            None => st.lock().map(|g| g.get().sound.volume_pct.min(100) as u8).unwrap_or(100),
+            Some(v) => update_sound_in(&st, |s| {
+                s.volume_pct = v.min(100) as u32;
+                s.muted = false;
+            })
+            .map(|s| s.volume_pct as u8)
+            .unwrap_or(v),
+        }
+    })
+}

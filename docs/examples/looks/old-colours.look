@@ -1,0 +1,5 @@
+# The old colour-only format (version 1) is still a Look: no sections, only colours.
+name = Old colours
+base = dark
+bg_top = #101820
+ring = 2

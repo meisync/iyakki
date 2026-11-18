@@ -1,0 +1,12 @@
+[package]
+name = "iyakki-extagentx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The plain data of the external agents (ids, settings, model list, status, list entries), split out of iyakki-agent for F-SPLIT-03."
+
+# serde only: no process, no file, no network, no agent code.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zeroize = "1"

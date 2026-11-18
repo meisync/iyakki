@@ -1,0 +1,77 @@
+From: IYAKKI <noreply@iyakki.invalid>
+Subject: [PATCH] aaudio: real periods, capture off by default, free the start backup
+
+* The PCM advertised period_bytes_min == period_bytes_max == one packet (one frame): periods_min == periods_max == the whole
+  ring. ALSA's plug/rate layers cannot work with a one-frame period: 24, 16, 12 and 32 kHz audio played at the wrong speed and
+  float samples at 44.1 kHz could not be set up. The ring (16640 frames) still wraps at its own size, so the buffer is fixed to
+  the whole ring and the period may be any whole divisor of it from 256 frames to a quarter of the ring (integer periods).
+  Module parameter one_frame_period=1 restores the old behaviour.
+* Capture streams (the microphones, "Bridge Loopback") are refused at open (-ENODEV) unless the capture module parameter is 1:
+  opening the loopback while another stream played hung and reset a MacBookPro16,2.
+* aaudio_pcm_start() kmalloc()ed a backup of the playback buffer and never freed it.
+
+Signed-off-by: IYAKKI
+---
+--- a/audio/pcm.c
++++ b/audio/pcm.c
+@@ -1,5 +1,20 @@
+ #include "pcm.h"
+ #include "audio.h"
++#include <linux/module.h>
++
++/* Capture (the microphones and the "Bridge Loopback") is off by default: opening it while something plays has hung
++   or reset a MacBookPro16,2. An administrator can try it: echo 1 > /sys/module/apple_bce/parameters/capture */
++static bool aaudio_capture;
++module_param_named(capture, aaudio_capture, bool, 0644);
++MODULE_PARM_DESC(capture, "Allow capture streams (microphones, loopback); off by default, they can hang the T2 (default: 0)");
++
++/* The device's ring holds buffer_bytes_max bytes and wraps there, so ALSA must use the whole ring as its buffer; the period
++   only decides how often a client is woken. Smaller than 256 frames is wasted wake-ups. Setting this to 1 brings back the
++   original one-frame period (the ring as one period count of frames), which ALSA's plug/rate layers cannot work with. */
++static bool aaudio_one_frame_period;
++module_param_named(one_frame_period, aaudio_one_frame_period, bool, 0644);
++MODULE_PARM_DESC(one_frame_period, "Advertise the original one-frame period instead of 256..4096 frame periods (default: 0)");
++#define AAUDIO_MIN_PERIOD_FRAMES 256
+ 
+ static u64 aaudio_get_alsa_fmtbit(struct aaudio_apple_description *desc)
+ {
+@@ -109,9 +124,28 @@
+ 
+ static int aaudio_pcm_open(struct snd_pcm_substream *substream)
+ {
++    struct snd_pcm_runtime *runtime = substream->runtime;
++    struct snd_pcm_hardware *hw;
+     pr_debug("aaudio_pcm_open\n");
+-    substream->runtime->hw = *aaudio_pcm_stream(substream)->alsa_hw_desc;
+-
++    if (substream->stream == SNDRV_PCM_STREAM_CAPTURE && !aaudio_capture)
++        return -ENODEV;
++    hw = aaudio_pcm_stream(substream)->alsa_hw_desc;
++    if (!hw)
++        return -ENODEV;
++    runtime->hw = *hw;
++    if (!aaudio_one_frame_period) {
++        /* a packet is one frame: the original period */
++        size_t frame = hw->period_bytes_min;
++        if (frame && hw->buffer_bytes_max / frame >= 4 * AAUDIO_MIN_PERIOD_FRAMES) {
++            runtime->hw.period_bytes_min = frame * AAUDIO_MIN_PERIOD_FRAMES;
++            runtime->hw.period_bytes_max = hw->buffer_bytes_max / 4;
++            runtime->hw.periods_min = 4;
++            runtime->hw.periods_max = (uint) (hw->buffer_bytes_max / runtime->hw.period_bytes_min);
++            /* the whole ring is the buffer (it wraps there), and the periods must divide it */
++            snd_pcm_hw_constraint_minmax(runtime, SNDRV_PCM_HW_PARAM_BUFFER_BYTES, hw->buffer_bytes_max, hw->buffer_bytes_max);
++            snd_pcm_hw_constraint_integer(runtime, SNDRV_PCM_HW_PARAM_PERIODS);
++        }
++    }
+     return 0;
+ }
+ 
+@@ -176,6 +210,8 @@
+     aaudio_cmd_start_io(sdev->a, sdev->dev_id);
+     if (back_buffer)
+         memcpy_toio(substream->runtime->dma_area, buf, s);
++    if (back_buffer)
++        kfree(buf);
+ 
+     time_end = ktime_get();
+     pr_debug("aaudio: Started the audio device in %lluns\n", ktime_to_ns(time_end - time_start));

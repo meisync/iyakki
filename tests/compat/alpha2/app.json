@@ -1,0 +1,23 @@
+{
+  "capabilities": [
+    {
+      "name": "camera.view",
+      "param": "front",
+      "why": "show the live view"
+    },
+    {
+      "name": "notify",
+      "why": "leave a note when the picture changes"
+    },
+    {
+      "name": "files.read",
+      "param": "/home/amy/Pictures",
+      "why": "open a picture you pick"
+    }
+  ],
+  "group": "Media",
+  "icon": "📷",
+  "id": "fixture-camera-notes",
+  "name": "Fixture camera notes",
+  "version": "1.2.0"
+}

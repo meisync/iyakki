@@ -1,0 +1,16 @@
+# 50 GiB on the local-path class: a folder on the node's disk (not enforced as a hard limit by local-path).
+# The data goes with the namespace (reclaim policy Delete); see README.md for the backup.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: store-data
+  namespace: iyakki-store
+  labels:
+    app.kubernetes.io/name: iyakki-store
+    app.kubernetes.io/part-of: iyakki-store
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 50Gi

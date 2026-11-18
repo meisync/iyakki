@@ -1,0 +1,9 @@
+[package]
+name = "iyakki-vt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A terminal emulator in plain Rust: VT100/ANSI parser, screen with scrollback and alternate screen, key encoding, and a pseudo-terminal session (Linux, macOS) (F-CLI-08)."
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

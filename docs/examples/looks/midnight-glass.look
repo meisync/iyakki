@@ -1,0 +1,54 @@
+# A dark Look with a glass dock on the left and a smaller, quieter top bar.
+[look]
+name = Midnight glass
+format = 2
+
+[colours]
+base = dark
+bg_top = #0b1020
+bg_bottom = #05070f
+card = #131a30
+text = #f2f4ff
+ring = 1.5
+
+[wallpaper]
+wallpaper = dusk
+
+[icons]
+icon_shape = circle
+icon_size = L
+icon_style = glass
+icon_labels = off
+
+[launcher]
+launcher = paged
+columns = 5
+density = roomy
+page_dots = on
+groups = sidebar
+island = on
+
+[dock]
+dock = left
+dock_items = [chat, browser, files, settings]
+dock_running = on
+dock_size = 64
+dock_magnify = on
+dock_autohide = off
+
+[topbar]
+topbar = on
+topbar_position = top
+topbar_items = [clock, network, needs_you, bell, settings, account, power]
+topbar_size = 28
+footer_hints = off
+
+[menu]
+menu = [home, apps, chat, settings, lock, sign_out, power]
+menu_position = left
+
+[widgets]
+widgets = [attention:L, approvals:M, vitals:S]
+
+[motion]
+motion = reduced

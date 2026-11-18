@@ -1,0 +1,1 @@
+Optional hardware firmware is not included (licence). Install it: Store -> Setup -> Hardware firmware.

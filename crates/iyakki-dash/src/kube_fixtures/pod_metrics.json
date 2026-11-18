@@ -1,0 +1,6 @@
+{"kind":"PodMetricsList","items":[
+{"metadata":{"namespace":"shop","name":"web-1"},"containers":[{"name":"web","usage":{"cpu":"250m","memory":"512Mi"}},{"name":"side","usage":{"cpu":"50m","memory":"64Mi"}}]},
+{"metadata":{"namespace":"shop","name":"api-1"},"containers":[{"name":"api","usage":{"cpu":"100m","memory":"1Gi"}}]},
+{"metadata":{"namespace":"kube-system","name":"coredns-1"},"containers":[{"name":"coredns","usage":{"cpu":"3m","memory":"20Mi"}}]},
+{"metadata":{"namespace":"default","name":"weird"},"containers":[{"name":"x","usage":{"cpu":"??","memory":"1Mi"}}]}
+]}

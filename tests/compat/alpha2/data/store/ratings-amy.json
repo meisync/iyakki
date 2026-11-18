@@ -1,0 +1,11 @@
+{
+  "ratings": {
+    "tile:camera-notes": {
+      "at": 1700000000,
+      "comment": "works",
+      "stars": 4,
+      "version": "1.2.0"
+    }
+  },
+  "schema": 1
+}

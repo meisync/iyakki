@@ -1,0 +1,12 @@
+[package]
+name = "iyakki-core-browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The core's embedded browser sessions (F-SDK-60): the real implementation of iyakki_core_api::BrowserSessions over the in-house reader engine. Judges every address through the host's guards, loads pages on a worker thread, lays the page out as an SDK display list, takes link, wheel and key input, finds text and routes downloads as prompts."
+
+[dependencies]
+iyakki-core-api = { path = "../iyakki-core-api" }
+iyakki-web = { path = "../iyakki-web" }
+# the display list writer only: no pixel toolkit, no fonts
+iyakki-ui-sdk = { path = "../iyakki-ui-sdk", default-features = false }

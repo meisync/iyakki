@@ -1,0 +1,8 @@
+[package]
+name = "iyakki-edit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "IYAKKI text editing engine: buffer with undo, selection and search; lightweight syntax highlighting; line diff with per-hunk review. No dependencies."
+
+[dependencies]

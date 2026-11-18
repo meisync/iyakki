@@ -1,0 +1,15 @@
+{
+  "backend": "native",
+  "version": "v1.30.0+k3s1",
+  "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "url": "https://example.invalid/k3s",
+  "installed_at": 1700000000,
+  "installed_by": "admin",
+  "autostart": true,
+  "registry_choice": "none",
+  "image": "",
+  "image_digest": "",
+  "restarts": 2,
+  "last_restart_reason": "synthetic",
+  "last_restart_at": 1700000100
+}

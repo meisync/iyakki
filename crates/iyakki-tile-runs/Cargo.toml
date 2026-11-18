@@ -1,0 +1,16 @@
+[package]
+name = "iyakki-tile-runs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The Runs page as a WASM tile (F-WEB-55): the list of the person's runs and one run's lines, read through the service domain `runs`. tile.wasm is the wasm32 build of src/guest.rs."
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+iyakki-tile-abi = { path = "../iyakki-tile-abi" }
+serde_json = "1"
+
+[dev-dependencies]
+iyakki-tile-host = { path = "../iyakki-tile-host" }

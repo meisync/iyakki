@@ -1,0 +1,5 @@
+//! Types moved out of `iyakki_agent::settingstools_memory` (F-SPLIT-03, scripted by dist/split/move_types.py); the agent re-exports them.
+
+
+
+pub const PROMPT_RULE: &str = "\nMEMORY (Settings -> Memory): compressed_memory_status shows the experimental compressed-memory switch (free). compressed_memory_set turns it on or off and asks first (administrators only); it is off by default, labelled experimental, and used from the next start: on uses zswap with a small swap file when the data disk has room, zram only otherwise. memory_settings_status shows the zram, compressor, swappiness, swap file and zswap choices and which of them a boot option fixes (free). memory_settings_set changes them (administrators, asks first; used from the next start, a choice fixed by a boot option is refused); zram is off, auto, or a size like 4G or 50%, swap_file is off or a size like 2G. boot_speed_status shows the two developer switches that record which files a start opens and read them ahead into memory (both off by default, not measured to help); boot_speed_set changes them (administrators, asks first, used from the next start).";

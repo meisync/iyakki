@@ -1,0 +1,22 @@
+[package]
+name = "iyakki-hw"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Real microphone capture through ALSA/PipeWire/CoreAudio/WASAPI (cpal, Apache-2.0).
+audio = ["dep:cpal"]
+# Real V4L2 camera capture (v4l crate, MIT).
+video = ["dep:v4l"]
+
+[dependencies]
+iyakki-wasm.workspace = true
+thiserror.workspace = true
+cpal = { version = "0.15", optional = true }
+v4l = { version = "0.14", optional = true }
+
+[dev-dependencies]
+iyakki-sec.workspace = true
+iyakki-vfs.workspace = true

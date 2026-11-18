@@ -1,0 +1,17 @@
+# Blueprint: a dark skin with square corners, heavy edges and tight spacing.
+[look]
+name = Blueprint
+
+[colours]
+base = dark
+
+[shape]
+shape = sharp
+edge = heavy
+
+[spacing]
+spacing = tight
+
+[effects]
+elevation = flat
+glyph_size = 16

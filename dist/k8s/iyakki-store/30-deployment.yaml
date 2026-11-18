@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iyakki-store
+  namespace: iyakki-store
+  labels:
+    app.kubernetes.io/name: iyakki-store
+    app.kubernetes.io/part-of: iyakki-store
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate        # one writer on a ReadWriteOnce volume
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: iyakki-store
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: iyakki-store
+        app.kubernetes.io/part-of: iyakki-store
+    spec:
+      automountServiceAccountToken: false
+      # a single-node k3s (this PC): no node name is pinned. The toleration lets the store start while the node reports disk-pressure
+      # (this PC's disk runs above 85%; the store has its own cap, --store-cap-mib, and never writes outside its volume).
+      tolerations:
+        - { key: node.kubernetes.io/disk-pressure, operator: Exists, effect: NoSchedule }
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: store
+          # Built FROM scratch from the static musl iyakki-store-server and imported into k3s's containerd (no registry):
+          # see docs/development/BUILD-SHARING.md section "Deploying".
+          image: localhost:5000/iyakki-store-server:bs-2
+          imagePullPolicy: IfNotPresent
+          # the server takes "--flag VALUE" (two words), not "--flag=VALUE"
+          args:
+            - store-server
+            - --data
+            - /data
+            - --listen
+            - 0.0.0.0:8080
+            - --id
+            - iyakki-builds
+            - --name
+            - IYAKKI shared builds
+            - --publish-token-file
+            - /secrets/publish-token
+            - --read-token-file
+            - /secrets/read-token
+            - --catalog-seed-file
+            - /secrets/catalog-seed
+            # a build list is accepted only when signed by this UPDATE public key (public; the private half stays on the publisher's PC)
+            - --builds-key
+            - "0f8d54a68326a10339c5c21991b1c5edb9745a2dcf721ad745ffb47cf85fa976"
+            # the root image is about 0.45 GB; one blob may be 1 GiB; the store as a whole may hold 8 GiB (the PVC is 10 GiB)
+            - --max-component-mib
+            - "1024"
+            - --store-cap-mib
+            - "8192"
+            - --disk-margin-mib
+            - "512"
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { cpu: "1", memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: secrets, mountPath: /secrets, readOnly: true }
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: store-data
+        - name: secrets
+          secret:
+            secretName: store-secrets
+            defaultMode: 0440

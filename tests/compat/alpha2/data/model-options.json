@@ -1,0 +1,10 @@
+{
+  "models": {
+    "provider-a/model-x": {
+      "max_tokens": 2048,
+      "reasoning_budget": 0,
+      "temperature": 0.5
+    }
+  },
+  "schema": 1
+}

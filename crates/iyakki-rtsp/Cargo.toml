@@ -1,0 +1,8 @@
+[package]
+name = "iyakki-rtsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "An in-house RTSP client over TCP (interleaved RTP) and an HTTP Motion-JPEG client: parsers with hard limits, Basic/Digest sign-in, MJPEG (RFC 2435) and H.264 (RFC 6184) depacketisers. No dependencies."
+
+[dependencies]

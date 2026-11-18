@@ -1,0 +1,3 @@
+#!/bin/sh
+# See whoami in this folder: a neutral host name for version banners.
+echo iyakki-build

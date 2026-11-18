@@ -1,0 +1,17 @@
+# Paper: a pale skin with soft round corners, thin edges, airy spacing and no shadow.
+[look]
+name = Paper
+
+[colours]
+base = light
+
+[shape]
+shape = round
+edge = thin
+
+[spacing]
+spacing = airy
+
+[effects]
+elevation = flat
+glass = off

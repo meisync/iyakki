@@ -1,0 +1,16 @@
+[package]
+name = "iyakki-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+iyakki-sec.workspace = true
+iyakki-vfs.workspace = true
+iyakki-ledger.workspace = true
+thiserror.workspace = true
+wasmtime.workspace = true
+
+[dev-dependencies]
+# turns the WAT text of a test guest into a binary module (the rewriter of F-WASM-14 reads binary modules only); a test-only tool
+wat = "1"

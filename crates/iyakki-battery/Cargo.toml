@@ -1,0 +1,13 @@
+[package]
+name = "iyakki-battery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Battery model and health logic, split out of iyakki-agent. Uses serde (already in the workspace).
+# (docs/development/COMPILE-SPLIT-PILOT-3.md). std only; the agent re-exports the modules under the old paths.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

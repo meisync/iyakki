@@ -1,0 +1,34 @@
+name: Feature request
+description: An idea for something IYAKKI should do
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Every feature in IYAKKI needs a chat tool and, if it changes the machine, an approval on the person's screen.
+        FEATURES.md lists what is already built and what is planned: please search it first.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: Describe the problem or the task, not the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like IYAKKI to do?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you tried or considered
+  - type: dropdown
+    id: help
+    attributes:
+      label: Would you like to help build it?
+      options:
+        - "No, just the idea"
+        - "I can test it"
+        - "I can write code or documentation"

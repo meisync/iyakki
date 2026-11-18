@@ -1,0 +1,4 @@
+old test path	new test path
+iyakki-shell::apps::usage::tests::numbers_and_axes_are_rounded_for_reading	iyakki-tile-usage::tests::numbers_and_axes_are_rounded_for_reading
+iyakki-shell::apps::usage::tests::the_ranges_switch_and_show_my_usage_or_everyones_for_administrators	iyakki-tile-usage::tests::the_ranges_switch_and_show_my_usage_or_everyones_for_administrators
+iyakki-shell::apps::usage::tests::a_person_without_the_settings_permission_only_ever_sees_their_own_usage	iyakki-tile-usage::tests::a_person_without_the_settings_permission_only_ever_sees_their_own_usage

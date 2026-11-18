@@ -1,0 +1,15 @@
+[package]
+name = "iyakki-audiodec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "IYAKKI's audio decoding helper: Ogg Vorbis written in-house (no library). The program `iyakki-audiodec` reads a stream on its standard input and writes a small header and 16-bit PCM on its standard output, so the decoder never runs inside IYAKKI's own process."
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "iyakki-audiodec"
+path = "src/main.rs"
+
+[dependencies]

@@ -1,0 +1,19 @@
+# The most direct `iyakki_agent::` uses the UI (iyakki-apps + iyakki-shell, non-test code) may have: one line per domain and per agent module.
+# Enforced by crates/iyakki-core/tests/ui_agent_uses.rs. The numbers may only fall: lower one (or delete the line at 0) when a slice moves to the core contract.
+# Re-baselined at the alpha.5 merge of build-share, dev-mode pairing and the fast loop (+6 uses written in parallel with the ratchet: chat/network/other +1/+1/+3, buildtools 3): the next slices move them onto the contract.
+# A module that is not listed is allowed no use. The measured table is UI-AGENT-USES.txt.
+
+domain settings 0
+domain vault 0
+domain accounts 0
+domain chat 0
+domain files 0
+domain network 0
+domain display 0
+domain sound 0
+domain input 0
+domain cluster 0
+domain store 0
+domain other 0
+
+

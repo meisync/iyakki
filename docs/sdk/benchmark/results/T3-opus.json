@@ -1,0 +1,18 @@
+{
+  "task": "T3",
+  "attempts": 2,
+  "seconds": 215.0,
+  "app_check_problems": 0,
+  "rules": {},
+  "accept": {
+    "passed": 3,
+    "failed": 0,
+    "first_failure": ""
+  },
+  "hidden": {
+    "passed": 4,
+    "failed": 0,
+    "first_failure": ""
+  },
+  "pass": true
+}

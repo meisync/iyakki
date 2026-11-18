@@ -1,0 +1,49 @@
+# Namespace, quota and defaults for the shared build store. Everything here lives in the namespace iyakki-store and nowhere else.
+# Remove it all with: kubectl delete namespace iyakki-store   (the data goes with the namespace)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: iyakki-store
+  labels:
+    app.kubernetes.io/part-of: iyakki-store
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: iyakki-store
+  namespace: iyakki-store
+  labels:
+    app.kubernetes.io/part-of: iyakki-store
+spec:
+  hard:
+    requests.cpu: "1"
+    requests.memory: 512Mi
+    limits.cpu: "2"
+    limits.memory: 1Gi
+    pods: "4"
+    services: "4"
+    persistentvolumeclaims: "1"
+    requests.storage: 10Gi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: iyakki-store
+  namespace: iyakki-store
+  labels:
+    app.kubernetes.io/part-of: iyakki-store
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: 500m
+        memory: 256Mi
+      defaultRequest:
+        cpu: 50m
+        memory: 64Mi
+      max:
+        cpu: "2"
+        memory: 1Gi
+    - type: PersistentVolumeClaim
+      max:
+        storage: 10Gi

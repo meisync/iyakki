@@ -1,0 +1,17 @@
+[package]
+name = "iyakki-data"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Polars (MIT) as the query engine. Without it the small in-house engine (CSV/TSV paging, sort, filter, stats) is used,
+# so the Buildroot image stays small. The desktop build enables it.
+polars = ["dep:polars"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror.workspace = true
+polars = { version = "0.55", optional = true, default-features = false, features = ["lazy", "csv", "json", "strings", "dtype-datetime", "dtype-date", "dtype-i8", "dtype-i16", "dtype-u8", "dtype-u16", "dtype-duration", "temporal", "abs", "round_series", "concat_str", "is_in", "regex"] }

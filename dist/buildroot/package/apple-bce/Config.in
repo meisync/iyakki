@@ -1,0 +1,18 @@
+config BR2_PACKAGE_APPLE_BCE
+	bool "apple-bce"
+	depends on BR2_LINUX_KERNEL
+	depends on BR2_x86_64
+	help
+	  The t2linux apple-bce kernel module for Intel Macs with the
+	  Apple T2 chip (Mac mini 2018, MacBook Pro/Air 2018-2020,
+	  iMac 2020, iMac Pro, Mac Pro 2019): the T2's internal USB
+	  devices (VHCI) and its sound card "Apple T2 Audio" (built-in
+	  speaker, headphone jack). Selected by the IYAKKI "mac" variant
+	  only (configs/iyakki_mac.fragment). Out of tree, GPL-2.0,
+	  built against the image's own kernel.
+
+	  https://github.com/t2linux/apple-bce-drv
+
+comment "apple-bce needs a Linux kernel to be built (x86_64)"
+	depends on BR2_x86_64
+	depends on !BR2_LINUX_KERNEL

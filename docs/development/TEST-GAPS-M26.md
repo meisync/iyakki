@@ -1,0 +1,331 @@
+# Test gaps, lane M26 (rows F-A.. to F-L..)
+
+Written 2026-11-12. Rows with Impl 100, Test below 100 and Manual none or passed, IDs from F-A.. up to the first area starting with M.
+Each line: ID (Test level now): the gap as the first sentence of its Notes; what would close it. The closing class was assigned from words in the Notes,
+not by reading every row: rows M26 raised from 30 to 50 are still listed because 50 is the ceiling for tests on fakes. Rows whose line says
+"needs the owner or a reviewer" name no gap that a test on the Mac could close and no hardware, so their level needs a person to judge.
+Tests added by M26 are in the lock screen group (guest, battery, drive banner, radio hold); the media player hold of F-LOCK-03 cannot be tested because the shell shares one global player.
+
+- F-CORE-08 (Test 50): Fakes; Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-CORE-09 (Test 30): Tests and fakes only; Closes with: needs a run on the real machine or screen.
+- F-CORE-13 (Test 30): Only `camera.view` of this computer's own cameras goes through the broker; Closes with: needs a run on the real machine or screen.
+- F-HW-02 (Test 30): Compiles; Closes with: needs a run on the real machine or screen.
+- F-HW-03 (Test 30): Fake sysfs only Closes with: needs a run on the real machine or screen.
+- F-HW-05 (Test 70): Drawn at six sizes in the test renderer only; Closes with: needs a run on the real machine or screen.
+- F-HW-06 (Test 30): Fakes only Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-DISP-03 (Test 30): The real backend has never run on any machine; Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-DISP-05 (Test 30): The device loop (`run_loop`: input thread with the global pointer, polling, flipping) and the real DRM backend have never run: tests use a fake card and made-up displays Closes with: needs a run on the real machine or screen.
+- F-DISP-06 (Test 30): Drawn on made-up screens; Closes with: needs a run on the real machine or screen.
+- F-DISP-08 (Test 30): Unit tests only; Closes with: needs a run on the real machine or screen.
+- F-DISP-09 (Test 70): Unit tests with fake sysfs Closes with: needs a run on the real machine or screen.
+- F-DISP-10 (Test 30): Tested with fakes (a made-up sysfs tree); Closes with: needs a run on the real machine or screen.
+- F-DISP-11 (Test 30): NOT tried on touch hardware Closes with: needs a run on the real machine or screen.
+- F-KBD-02 (Test 50): Fake mixer and settings only; Closes with: needs a run on the real machine or screen.
+- F-KBD-04 (Test 70): The radio and player answers are tested only for the idle case; Closes with: needs a run on the real machine or screen.
+- F-KBD-05 (Test 30): The card has no Sleep (see F-KBD-09) Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-KBD-18 (Test 70): Not yet seen working on the Mac mini's USB-C touch monitor, where a manual re-plug was the only thing that woke the panel (the first touch check, a software off and on of Closes with: needs a run on the real machine or screen.
+- F-A11Y-03 (Test 70): Contrast is computed from the palette colours and one real button, not from every screen of every tile Closes with: needs a run on the real machine or screen.
+- F-A11Y-04 (Test 70): Tried on raw key events and rendered frames, not on a physical keyboard or by a person who cannot use a mouse Closes with: needs a run on the real machine or screen.
+- F-A11Y-05 (Test 70): Tool tests use a fake backend; Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-AI-10 (Test 70): Fake Lemonade on loopback only (see F-AI-09) Closes with: needs a run on the real machine or screen.
+- F-ASSIST-11 (Test 50): Measured with `assistant_bench` on a live qwen3:8b: 3.3-5.6 s per question became 1.4-2.4 s and the first request went from 8.7k to 3.5k tokens (docs/ASSISTANT-ROBUSTNESS Closes with: needs a live service, cluster or model.
+- F-ASSIST-22 (Test 50): A server that sends no byte at all keeps the HTTP read blocked until the client's own timeout (the run itself moves on at once; Closes with: needs a run on the real machine or screen.
+- F-ASSIST-24 (Test 50): Only Autopilot steps are recorded (plain chat turns already have the per-session memory); Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-ASSIST-27 (Test 50): The test-name heuristic treats a capitalised or long sentence as a criterion, so a jest title written as a sentence must be listed in lower case or with a path Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-ASSIST-29 (Test 50): A question in prose that the model writes in a turn before it calls `ask_user` cannot be taken back once shown (the goal's last step is the one guarded) Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-BUG-01 (Test 50): Evidence is read-only `kubectl` output through the existing runner; Closes with: needs a live service, cluster or model.
+- F-ASSIST-19 (Test 50): Phrase tables are English only Closes with: needs a live service, cluster or model.
+- F-IDE-05 (Test 50): The repository's own FEATURES.md is unchanged and has no time columns Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-DATA-03 (Test 50): The chat shows the result as plain text in the tool card (a Markdown table), without a table block or an "Open in Data viewer" button yet 2026-11-06 retriage: a `data_ope Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-DATA-07 (Test 30): The chat is its own tile, so the context is the table the tab showed last (kept until sign-out), not an embedded chat pane beside the table; Closes with: needs a run on the real machine or screen.
+- F-DASH-02 (Test 50): Tested against recorded-style responses through a fake transport; Closes with: needs a run on the real machine or screen.
+- F-DASH-03 (Test 50): Use a user that is read-only on the server as well; Closes with: needs a run on the real machine or screen.
+- F-DASH-04 (Test 50): Tested with the scripted runner only: the command-line flags come from DuckDB's documentation and the CLI catalog entry's download name (`duckdb_cli-linux-<arch>.zip`, no Closes with: needs a run on the real machine or screen.
+- F-DASH-08 (Test 50): Run with a scripted model only; Closes with: needs a run on the real machine or screen.
+- F-DASH-11 (Test 50): Fakes only (fake kubectl, fake upstream) Closes with: needs a run on the real machine or screen.
+- F-DASH-13 (Test 50): Fakes only (fake Services, fake upstream) Closes with: needs a run on the real machine or screen.
+- F-DASH-14 (Test 50): Fakes only for the tests; Closes with: needs a run on the real machine or screen.
+- F-DASH-15 (Test 50): Tested with fake JSON answers (`dash/kube_fixtures/`) and a recording fake kubectl only Closes with: needs a run on the real machine or screen.
+- F-DASH-16 (Test 50): The seeding runs in `Env::from_services`, which no test calls (the tests call `seed_defaults` directly) Closes with: needs a run on the real machine or screen.
+- F-DASH-17 (Test 50): Tested with fake accounts, homes in a temporary folder and a fake cluster Closes with: needs a run on the real machine or screen.
+- F-DASH-18 (Test 50): Fake accounts and a fake cluster only; Closes with: needs a run on the real machine or screen.
+- F-EDIT-15 (Test 50): Tried with a stand-in model only Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-IDE-02 (Test 50): Read paths are tested against a fake executor and, in an ignored test, this machine's real k3s (read-only); Closes with: needs a live service, cluster or model.
+- F-K8S-02 (Test 50): The local registry and its k3s mirror file are set up by the person (no root helper); Closes with: needs a live service, cluster or model.
+- F-IDE-09 (Test 30): Not seen on a real screen or with real WebKit/WPE (only the fake helper and the reader); Closes with: needs a run on the real machine or screen.
+- F-IDE-13 (Test 50): Tested with fake models and fake CLIs only: no run with a real model or a live Claude Code has shown an agent following or writing notes Closes with: needs a run on the real machine or screen.
+- F-IDE-14 (Test 50): Tested with fake models; Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-IDE-17 (Test 50): The hand-off through the real shell (stash, Back) is covered by the app's request and open_item tests, not by a full shell run Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-IDE-21 (Test 50): Tested with fake runners only; Closes with: needs a run on the real machine or screen.
+- F-IDE-22 (Test 50): Shown in the inbox and by the assistant, not as a panel of the Tasks tab; Closes with: needs a run on the real machine or screen.
+- F-IDE-24 (Test 50): Drawn by the shell's own Markdown layout (the chat's): no tables, no images, no nested lists beyond what it does, links are drawn but not clickable Closes with: needs a built image or QEMU run.
+- F-EXTA-01 (Test 50): Tested only against fake CLIs: the flags are from the vendors' documentation (read 2026-10-14) and no live vendor run has been made Closes with: needs a run on the real machine or screen.
+- F-EXTA-07 (Test 50): Tested with stand-in programs only; Closes with: needs a run on the real machine or screen.
+- F-EXTA-10 (Test 30): The shape of Copilot's `config.json` (`authTokens`, `loggedInUsers`) is read leniently from one real device's report, not verified against the program Closes with: needs a run on the real machine or screen.
+- F-EXTA-11 (Test 50): Tested with fakes only; Closes with: needs a run on the real machine or screen.
+- F-EXTA-12 (Test 50): The handshake fix was checked on the device with the real Gate and Copilot's real client in offline mode (no model call); Closes with: needs a run on the real machine or screen.
+- F-EXTA-05 (Test 50): Fake CLI only (the MCP tests need python3 and skip without it); Closes with: needs a run on the real machine or screen.
+- F-K8S-06 (Test 50): Nothing was applied to a real cluster by the tests (FakeRunner); Closes with: needs a live service, cluster or model.
+- F-K8S-08 (Test 50): Tested with a fake kubectl and curl, never against a real cluster; Closes with: needs a run on the real machine or screen.
+- F-K8S-10 (Test 50): Fake docker/kubectl only; Closes with: needs a live service, cluster or model.
+- F-K8S-12 (Test 50): Tested with a fake `kubectl`; Closes with: needs a run on the real machine or screen.
+- F-K8S-15 (Test 50): Never run inside a real pod or against a real EKS/GKE kubeconfig Closes with: needs a run on the real machine or screen.
+- F-K8S-16 (Test 50): Tested with a fake runner, fake HTTP and an in-memory vault; Closes with: needs a run on the real machine or screen.
+- F-K8S-17 (Test 30): Never run against a real Gitea Closes with: needs a live service, cluster or model.
+- F-K8S-19 (Test 50): `apps/k8s_tile.rs`, `k8s_tile_ui.rs`, `iyakki-agent/src/k8sexp.rs`, docs/K8S-TILE.md Closes with: needs a run on the real machine or screen.
+- F-K8S-20 (Test 50): `ExpFeed` in `k8sexp.rs` Closes with: needs a run on the real machine or screen.
+- F-K8S-21 (Test 50): Custom resources lists the CRDs only; Closes with: needs a run on the real machine or screen.
+- F-K8S-22 (Test 50): The YAML is written by a small in-house writer from the `-o json` answer Closes with: needs a run on the real machine or screen.
+- F-K8S-23 (Test 50): Saving into the home folder (not window mode) is not covered by a test Closes with: needs a run on the real machine or screen.
+- F-K8S-25 (Test 50): Drawn only in tests so far; Closes with: needs a run on the real machine or screen.
+- F-K8S-27 (Test 50): Tested with fakes and a clock the test moves; Closes with: needs a run on the real machine or screen.
+- F-CLUSTER-02 (Test 30): Stand-in k3s and fakes only: two real k3s servers were never started together Closes with: needs a live service, cluster or model.
+- F-CLUSTER-03 (Test 50): Placed in the K8S tile's header (replacing the plain cluster list when there are several clusters), the AI IDE's Kubernetes panel header and the Store -> Setup popup of R Closes with: needs a run on the real machine or screen.
+- F-CLUSTER-04 (Test 70): The page is a panel opened from the old Dev cluster page (that page's own profile list, registry and platform-services controls are unchanged underneath it); Closes with: needs a run on the real machine or screen.
+- F-CLUSTER-05 (Test 30): Fake node JSON and a fake runner only; Closes with: needs a run on the real machine or screen.
+- F-INST-05 (Test 50): Tested on sparse image files made to look like a Windows laptop, an MBR disk and a 4096-byte-sector disk Closes with: needs a run on the real machine or screen.
+- F-INST-07 (Test 50): Tests write plain files only (the writer refuses anything else in a test build), checked with `sfdisk --verify` / `sgdisk -v` where installed Closes with: needs a built image or QEMU run.
+- F-INST-09 (Test 70): The pages are tested as a state machine and as strings; Closes with: needs a run on the real machine or screen.
+- F-INST-10 (Test 30): NOT booted: no image was built for this change Closes with: needs a built image or QEMU run.
+- F-INST-11 (Test 50): The library parts are tested; Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-LOSS-01 (Test 70): Fakes only (an `Env` over mountinfo, sysfs and probe I/O): no real device was touched Closes with: needs a run on the real machine or screen.
+- F-LOSS-02 (Test 30): Drawn from a made-up state only; Closes with: needs a run on the real machine or screen.
+- F-LOSS-03 (Test 50): Not every app's own error path is routed through these helpers (a message built from a different wording can still show a bare error); Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-LOSS-04 (Test 30): The real `mount`, `MS_MOVE` and `umount2` calls (`iyakki-core::storageloss`) have never run against a real drive Closes with: needs a run on the real machine or screen.
+- F-LOSS-05 (Test 70): Whether no-UAS would have prevented the loss is unknown (the cause of the one observed loss is not known) Closes with: needs a built image or QEMU run.
+- F-APPS-03 (Test 50): An installed tool package is offered to the model as `pkg_<name>` (a dot is not allowed in model tool names) for people whose account has a command line, personal ones fi Closes with: needs a live service, cluster or model.
+- F-APPS-05 (Test 50): Permission review, trust badges and the revocation list exist (F-APPSTORE-02, 03, 10); Closes with: needs a live service, cluster or model.
+- F-APPS-42 (Test 50): Not run against a real cluster Closes with: needs a run on the real machine or screen.
+- F-APPS-44 (Test 50): Run for real here: static x86_64 build, started on loopback, /healthz answered; Closes with: needs a live service, cluster or model.
+- F-APPS-45 (Test 50): The page engine draws a reader-style layout: no canvas, plain elements take no clicks (use button, input, select, textarea, a); Closes with: needs a run on the real machine or screen.
+- F-APPS-46 (Test 70): Tested at 1280x720, 1920x1080, 1024x600 and 800x480 Closes with: needs a run on the real machine or screen.
+- F-APPS-47 (Test 50): Tested against the real store server code on a loopback socket; Closes with: needs a live service, cluster or model.
+- F-APPS-48 (Test 30): Built and tested with a fake cluster only; Closes with: needs a live service, cluster or model.
+- F-APPS-49 (Test 30): The pushed image has not been pulled by a real containerd; Closes with: needs a run on the real machine or screen.
+- F-APPSTORE-10 (Test 70): NOT seen on bare metal yet: drawn and clicked at 1280x720, 1920x1080, 1024x600 and 800x480 in tests only Closes with: needs a run on the real machine or screen.
+- F-APPSTORE-23 (Test 50): Never run against a real catalog host or a real vendor Closes with: needs a run on the real machine or screen.
+- F-APPSTORE-24 (Test 50): Drawn and clicked at 1280x720, 1920x1080, 1024x600 and 800x480 in tests only, not seen on bare metal Closes with: needs a run on the real machine or screen.
+- F-DEV-02 (Test 70): Tested against a made-up /proc, /sys and /dev/kmsg; Closes with: needs a run on the real machine or screen.
+- F-DEV-04 (Test 50): `--display N` for a second screen is refused with a sentence (one display exists) Closes with: needs a run on the real machine or screen.
+- F-DEV-05 (Test 70): Settings are saved and validated; Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-DEV-07 (Test 70): Line mode only: there is no terminal (pty) here, as in the CLI tile; Closes with: needs a live service, cluster or model.
+- F-DEV-11 (Test 50): Tested against the made-up machine; Closes with: needs a run on the real machine or screen.
+- F-DEV-12 (Test 70): The fragments were resolved with kconfig (`verify-kernel-config.sh` on a private copy of kernel 6.12.112: every new option applied; Closes with: needs a built image or QEMU run.
+- F-DEV-13 (Test 50): Tests only; Closes with: needs a run on the real machine or screen.
+- F-DEV-14 (Test 70): Run for real after the next restart of the Mac mini Closes with: needs a run on the real machine or screen.
+- F-DRIVERS-03 (Test 70): Not seen on a real Mac or in QEMU: whether the kernel follows the symlinks for a given driver and whether `modprobe -r` succeeds are unverified Closes with: needs a built image or QEMU run.
+- F-DRIVERS-05 (Test 50): The checksum table was checked on 2026-10-22 against the raw upstream script and against the real bytes Apple serves (F-DRIVERS-29); Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-DRIVERS-07 (Test 70): NOT seen on bare metal: drawn and clicked in tests only Closes with: needs a run on the real machine or screen.
+- F-DRIVERS-09 (Test 70): Never built, never booted, and the fragment was not run through kconfig (it needs the kernel source) Closes with: needs a built image or QEMU run.
+- F-DRIVERS-10 (Test 50): Needs the owner's local build (F-DRIVERS-16); Closes with: needs a built image or QEMU run.
+- F-DRIVERS-22 (Test 50): Tested with fake trees and a recording runner Closes with: needs a built image or QEMU run.
+- F-DRIVERS-23 (Test 50): Tested against fake servers only (an in-memory fake and a local TCP socket); Closes with: needs a run on the real machine or screen.
+- F-DRIVERS-24 (Test 50): Fake runner, fake downloads and a fake 7-Zip only: no real network, no Apple files, no device Closes with: needs a built image or QEMU run.
+- F-DRIVERS-25 (Test 50): The download address and the release asset names are from memory of the project's page and were not fetched Closes with: needs a live service, cluster or model.
+- F-DRIVERS-29 (Test 30): The unpacking was run on 2026-10-22 against the real downloaded pieces (firmware sha256 240ef2e9..., all eleven sensor files), by an ignored test; Closes with: needs a built image or QEMU run.
+- F-DRIVERS-30 (Test 70): Checked on file trees made up from the pinned table and on the keep-list and strip scripts; Closes with: needs a built image or QEMU run.
+- F-DRIVERS-31 (Test 50): Fake network, fake `/sys` and a fake world only; Closes with: needs a built image or QEMU run.
+- F-DRIVERS-32 (Test 70): Fake machine and fake host (the restart is a recorded call); Closes with: needs a run on the real machine or screen.
+- F-DRIVERS-33 (Test 30): Tested on the scripts with a made-up table and folder; Closes with: needs a built image or QEMU run.
+- F-DRIVERS-41 (Test 50): Tested with a fake Apple and fake image contents; Closes with: needs a run on the real machine or screen.
+- F-DRIVERS-42 (Test 50): Verified by hand on the Mac: the files made from the real image (`IYAKKI_LIVE_FW`, ignored test) in `/lib/firmware/brcm` and `modprobe brcmfmac` gave `wlan0` (firmware `B Closes with: needs a built image or QEMU run.
+- F-DRIVERS-50 (Test 50): Fixtures only (made-up log lines in the shapes the drivers print, a fake `/sys`); Closes with: needs a built image or QEMU run.
+- F-DRIVERS-51 (Test 50): Fake network and a fake world; Closes with: needs a built image or QEMU run.
+- F-DRIVERS-53 (Test 50): Fake machine only: the card and form were not drawn at every window size or looked at on a screen, the accept-and-start path (`hardware_accept_and_start`) is not covered  Closes with: needs a built image or QEMU run.
+- F-DRIVERS-16 (Test 70): Run once end to end on the build PC against `target/buildroot-mac` (see the report in docs/MAC-HARDWARE.md section 12); Closes with: needs a built image or QEMU run.
+- F-BROW-04 (Test 70): Window mode on a development machine and the `web` image in QEMU both work (see F-BROW-43); Closes with: needs a built image or QEMU run.
+- F-BROW-06 (Test 50): Switch in Settings → Browser Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-CLI-03 (Test 30): Tried with a real k3s 1.37 (2026-10-11): in a privileged container and inside the booted x86 image under QEMU, python and shell sandboxes run as uid 65534, the system fol Closes with: needs a built image or QEMU run.
+- F-INBOX-04 (Test 50): The worker (`Hub::tick`) is not started by the service process yet and the cloud flows' `NotifySink` is not bound to `Hub` yet (plan section 8) Closes with: needs a live service, cluster or model.
+- F-INBOX-05 (Test 50): Timers run only when something calls `Hub::tick` (plan section 8) Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-INBOX-07 (Test 50): Never run over real TLS with a browser Closes with: needs a run on the real machine or screen.
+- F-INBOX-08 (Test 50): Logic is tested under node, not in a real browser: the WebSocket through the page's CSP (`connect-src 'self'`, older Safari) and phone layout still need a browser Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-CHAT-17 (Test 30): Stooq's CSV endpoint answered "page does not exist" when checked (October 2026), so Yahoo's unofficial public endpoint is tried first; Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-BROW-18 (Test 50): Measured on 20 popular sites (ignored test `probe_many`): scripts of 17 run with no error Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-BROW-26 (Test 50): Checked by eye on a rendered picture Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-BROW-29 (Test 50): Extends F-BROW-05; Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-BROW-30 (Test 50): Needed for mail, documents and social sites Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-BROW-31 (Test 50): Kept only while the vault is open (a person whose vault is locked keeps nothing) Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-BROW-37 (Test 50): No suggestions from the search engine itself (that would send each keystroke over the network), Closes with: needs a live service, cluster or model.
+- F-BROW-39 (Test 30): The panel and the keys are tested with a stand-in model; Closes with: needs a run on the real machine or screen.
+- F-BROW-42 (Test 50): Each is measured with the real-site list; Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-BROW-43 (Test 70): Tests use a pure-Rust fake helper; Closes with: needs a built image or QEMU run.
+- F-BROW-44 (Test 30): Design and threat model: `docs/BROWSER-AGENT.md` Closes with: needs a live service, cluster or model.
+- F-BROW-45 (Test 50): The sample spec passed in about 11 s in the live run (WebKitGTK, local `python3 -m http.server`), from the CLI as well Closes with: needs a live service, cluster or model.
+- F-BROW-08 (Test 50): Tried on real sites: Google (its script runs, then Google refuses), TikTok, and YouTube (its Shady DOM polyfill and the Polymer start-up run to the end without errors; Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-BROW-54 (Test 70): Tested with a fake server and fake network; Closes with: needs a run on the real machine or screen.
+- F-FILE-01 (Test 30): Tested here with a real OpenSSH `sftp` over loopback (key and password login, 3 MB transfer, escapes refused); Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-FILE-02 (Test 50): Design and limits: docs/development/REMOTE-FILES.md Closes with: needs a run on the real machine or screen.
+- F-FILE-09 (Test 30): Fake server only; Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-CAM-01 (Test 50): Never scans outside the local subnet; Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-CAM-17 (Test 50): Scripted tool calls only, not tried with a real model; Closes with: needs a run on the real machine or screen.
+- F-CAM-04 (Test 30): Network cameras only; Closes with: needs a run on the real machine or screen.
+- F-CAM-10 (Test 30): Sources read on 2026-10-18: some pages were read directly (UK, Canada, India e-Visa, China visa online rules, Singapore online size, UAE), others through a search of the  Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-CAM-12 (Test 50): Fake sysfs and fake capability bytes only; Closes with: needs a run on the real machine or screen.
+- F-CAM-13 (Test 50): Fake sysfs and fake camera only; Closes with: needs a run on the real machine or screen.
+- F-CAM-14 (Test 50): Offered-camera path tested with a registered page; Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-BOOT-08 (Test 70): Image builds; Closes with: needs a built image or QEMU run.
+- F-BOOT-13 (Test 30): Not yet seen on the Mac mini; Closes with: needs a run on the real machine or screen.
+- F-FLOW-04 (Test 30): Partial: agent steps use the configured model only (no tools, no external agent yet); Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-FLOW-05 (Test 50): Partial: the Job path is tested with a fake kubectl only; Closes with: needs a run on the real machine or screen.
+- F-FLOW-09 (Test 70): Partial: drawn and clicked only in tests, not looked at in a real window; Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-FLOW-11 (Test 50): Partial: the Store's own screen does not list or install flow templates yet (the hook and the manifest target exist) Closes with: needs a run on the real machine or screen.
+- F-FLOW-17 (Test 30): docs/FLOWS.md, docs/FLOWS-QA.md Closes with: needs a run on the real machine or screen.
+- F-FLOW-18 (Test 30): The question uses the browser consent list (INBOX Approvals); Closes with: needs a run on the real machine or screen.
+- F-FLOW-19 (Test 50): Partial: the baseline comparison needs the same size and is a pixel comparison (no layout-aware or anti-aliasing tolerance beyond the colour tolerance); Closes with: needs a run on the real machine or screen.
+- F-FLOW-20 (Test 50): Partial: whether a model can look at pictures is judged by its name (a list in `providers::model_sees_pictures`); Closes with: needs a run on the real machine or screen.
+- F-BOOT-19 (Test 70): Cause not confirmed on the Intel Mac mini yet (the owner sends the `dmesg` lines with "splash:"); Closes with: needs a built image or QEMU run.
+- F-BOOT-21 (Test 30): For the Mac mini 2018, whose HDMI port (DP-3 behind a DP->HDMI converter) was once reported disconnected until re-plugged Closes with: needs a run on the real machine or screen.
+- F-BOOT-22 (Test 70): The QEMU splash script now boots with the normal GRUB entry's command line; Closes with: needs a built image or QEMU run.
+- F-BOOT-23 (Test 70): Patch checked with `patch --dry-run` against 6.12.112, not compiled Closes with: needs a built image or QEMU run.
+- F-BOOT-24 (Test 70): QEMU (`qemu-splash-test.py --boot`, BIOS and UEFI/OVMF, 800x600 and 1920x1080, the image's kernel with a newly built iyakki appended to its initrd): GRUB menu, logo while Closes with: needs a built image or QEMU run.
+- F-BOOT-26 (Test 50): Boot screen text test: `iyakki-core::boot::tests::the_slow_steps_have_their_own_plain_boot_screen_text_in_rising_order` Closes with: needs a built image or QEMU run.
+- F-BOOT-27 (Test 30): Fake sysfs and a fake loader (counts, order, bounds); Closes with: needs a run on the real machine or screen.
+- F-BOOT-28 (Test 30): QEMU numbers measured with the real Mac root file system (docs/BOOT-SPEED.md); Closes with: needs a built image or QEMU run.
+- F-BOOT-33 (Test 70): Menu text only until an image carries it; Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-BOOT-32 (Test 30): Both causes were reproduced on a MacBookPro16,2 (2026-10-23): BusyBox `mdev` without an `/etc/mdev.conf` rule loads no driver (a USB Ethernet adapter unplugged and plugge Closes with: needs a run on the real machine or screen.
+- F-CLOUD-09 (Test 50): Triage 2026-11-11: the listener, SNI and WebSocket upgrades are F-CLOUD-11, F-CLOUD-12 and F-CLOUD-13, certificates in the vault are F-CLOUD-13; Closes with: needs a live service, cluster or model.
+- F-CLOUD-13 (Test 50): Triage 2026-11-11: the old gaps are built and tested Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-K3S-29 (Test 30): Fake runner only; Closes with: needs a run on the real machine or screen.
+- F-INST-15 (Test 30): Unit test of the choice only Closes with: needs a run on the real machine or screen.
+- F-JOBS-04 (Test 30): Tested through the real gate, not with the vendor's program: NOT tried with a real Claude Code session Closes with: needs a live service, cluster or model.
+- F-GPU-06 (Test 70): Fake root only; Closes with: needs a run on the real machine or screen.
+- F-AIHW-03 (Test 70): The key A and the tiles page's *Show all AI tools* link (administrators; Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-AIHW-04 (Test 30): Fake kubectl only; Closes with: needs a live service, cluster or model.
+- F-GIT-02 (Test 50): Alpha.2 (docs/GIT-AND-SSH.md) Closes with: needs a run on the real machine or screen.
+- F-LOCK-02 (Test 70): Checked on the Mac mini 2018 by the owner 2026-11-10 (image 1109d): Lock from the Power menu, two wrong passwords refused, the right one unlocks (the audit log shows lock Closes with: needs a run on the real machine or screen.
+- F-LOCK-03 (Test 50): M26 (2026-11-12): the guest rule, the full minutes on battery, the drive banner hold and a playing radio (fake MP3 stream) are now tested in the lock tests; Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-GIT-04 (Test 70): Alpha.2 (docs/GIT-AND-SSH.md) Closes with: needs a live service, cluster or model.
+- F-GIT-05 (Test 50): Complements F-GIT-04 (keys and tokens) Closes with: needs a run on the real machine or screen.
+- F-FW-03 (Test 30): Proved against a real kernel (7.x, a private network namespace, `nft list` decodes it, a second namespace is let in or dropped) by the ignored `tests/kernel.rs`; Closes with: needs a built image or QEMU run.
+- F-FW-04 (Test 50): Tested with a fake kernel, clock and resolver Closes with: needs a built image or QEMU run.
+- F-FW-06 (Test 50): Shared folders note not drawn on a real screen Closes with: needs a run on the real machine or screen.
+- F-FW-07 (Test 70): A page in Settings and a row in the Devices list, not a tile in the System group (a tile needs a new app entry in the permissions table) Closes with: needs a run on the real machine or screen.
+- F-FW-08 (Test 70): Read from a real kernel in a network namespace by the ignored `tests/kernel.rs`; Closes with: needs a built image or QEMU run.
+- F-FW-09 (Test 30): Boot order is proved by a source-order test, not by a boot Closes with: needs a built image or QEMU run.
+- F-FW-12 (Test 50): The rules were built and evaluated by the generator's own packet model; Closes with: needs a built image or QEMU run.
+- F-LINAPP-03 (Test 70): docs/LINUX-APPS.md sections 4 and 10 Closes with: needs a built image or QEMU run.
+- F-LINAPP-04 (Test 70): docs/LINUX-APPS.md section 7 Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-LINAPP-05 (Test 70): docs/LINUX-APPS.md section 2 Closes with: needs a run on the real machine or screen.
+- F-LINAPP-06 (Test 30): `quickinstall.rs` (Item::LinuxApps, Group::Linux) Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-LINAPP-07 (Test 50): docs/LINUX-APPS.md section 5 Closes with: needs a run on the real machine or screen.
+- F-LINWIN-01 (Test 50): Tested against an in-process fake server written from the protocol text, and once against a real TigerVNC 1.12 `Xvnc` on a development PC (handshake, ZRLE picture, resize Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-LINWIN-03 (Test 30): Install tested with a fake runner, and its packages were installed for real on a development PC (docs/LINUX-WINDOWS.md section 8) with a test-only `chown` shim: as a norm Closes with: needs a run on the real machine or screen.
+- F-LINWIN-05 (Test 50): Cleanup is tested with a fake process, and the real run left no process of the sandbox after Stop (docs/LINUX-WINDOWS.md section 8) Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-LINWIN-06 (Test 50): Tried against a fake display server; Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-DISKS-04 (Test 70): Fakes only: never run against a real device Closes with: needs a run on the real machine or screen.
+- F-DISKS-05 (Test 50): Fakes only: the tables and file systems are written into byte buffers and read back by our own readers; Closes with: needs a built image or QEMU run.
+- F-DISKS-06 (Test 30): Fakes only: the tile has not been looked at on a real screen with a real drive Closes with: needs a run on the real machine or screen.
+- F-DISKS-08 (Test 30): Tested with made-up drives, a made-up helper runner and the tile harness only: no real encrypted volume, no real `cryptsetup` or `dislocker` was run (neither is on the bu Closes with: needs a built image or QEMU run.
+- F-DEVMODE-09 (Test 30): Live patching is tested in a temporary root with fakes Closes with: needs a built image or QEMU run.
+- F-INST-14 (Test 30): The first install to the internal disk of a T2 MacBook ran on 2026-10-24 (see F-INST-03) Closes with: needs a run on the real machine or screen.
+- F-INST-16 (Test 50): Fakes only: nothing pulled or run on a cluster Closes with: needs a run on the real machine or screen.
+- F-INST-17 (Test 30): Fakes only Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-INST-18 (Test 50): Split by N1e 2026-11-12: the row is the chat tools (built; Closes with: needs a run on the real machine or screen.
+- F-INST-20 (Test 50): Administrators; Closes with: needs a run on the real machine or screen.
+- F-INST-21 (Test 50): Fakes only; Closes with: needs a run on the real machine or screen.
+- F-INST-22 (Test 50): Fakes only: nothing run on a cluster or a GPU Closes with: needs a run on the real machine or screen.
+- F-INST-23 (Test 50): Fakes only; Closes with: needs a run on the real machine or screen.
+- F-INST-24 (Test 50): Fakes only Closes with: needs a run on the real machine or screen.
+- F-INST-25 (Test 50): The item writes no ClickHouse config, so no thread or memory settings were set; Closes with: needs a run on the real machine or screen.
+- F-EXTA-14 (Test 50): Tested with generated pictures and a fake camera; Closes with: needs a run on the real machine or screen.
+- F-BOOT-35 (Test 30): Fake boot partition and data folder only: no lean install has been updated this way on a real machine Closes with: needs a built image or QEMU run.
+- F-K8S-29 (Test 30): Real local sockets for the client and the probe; Closes with: needs a run on the real machine or screen.
+- F-AI-11 (Test 30): Tested on sample lines, including the end of a download announced as `event: complete` Closes with: needs a run on the real machine or screen.
+- F-AI-15 (Test 30): Fake cluster only; Closes with: needs a run on the real machine or screen.
+- F-AI-17 (Test 50): M8: the row drawing is now covered by `jobs_ui::tests::a_quiet_running_job_is_drawn_still_and_amber_with_how_long_it_has_been_quiet_and_a_busy_one_is_not` (a job injected Closes with: needs a run on the real machine or screen.
+- F-KBD-15 (Test 70): Owner confirmed on 2026-10-24 that the Touch Bar stays lit on the T2 MacBook Closes with: needs a run on the real machine or screen.
+- F-BROW-61 (Test 70): YouTube and radio sound were confirmed on the T2 MacBook on 2026-10-24; Closes with: needs a run on the real machine or screen.
+- F-LAB-01 (Test 50): Tested with fakes and a fake camera and clock; Closes with: needs a run on the real machine or screen.
+- F-LAB-02 (Test 50): Tested with fakes and a fake camera and clock; Closes with: needs a run on the real machine or screen.
+- F-LAB-03 (Test 50): Tested with fakes and a fake camera and clock; Closes with: needs a run on the real machine or screen.
+- F-LAB-04 (Test 50): Tested with fakes and a fake camera and clock; Closes with: needs a run on the real machine or screen.
+- F-GIT-06 (Test 50): Docs: docs/GIT-TILE.md; Closes with: needs a run on the real machine or screen.
+- F-GIT-07 (Test 50): Tested with fake hosts and fake git; Closes with: needs a run on the real machine or screen.
+- F-GIT-08 (Test 50): Tested with fake hosts and fake git; Closes with: needs a run on the real machine or screen.
+- F-GIT-09 (Test 50): The last test uses a real local git repository on the build machine only Closes with: needs a run on the real machine or screen.
+- F-GIT-10 (Test 50): Tested with fake hosts and fake git; Closes with: needs a run on the real machine or screen.
+- F-BROW-62 (Test 30): Tested with a fake helper; Closes with: needs a run on the real machine or screen.
+- F-BROW-63 (Test 70): Scripts check a fake rootfs and the change detector only; Closes with: needs a built image or QEMU run.
+- F-BROW-65 (Test 50): Tested with a fake helper and by reading the sources; Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-BROW-66 (Test 50): Tested offline with fake events Closes with: needs a live service, cluster or model.
+- F-FLOW-21 (Test 50): Scripted models only; Closes with: needs a run on the real machine or screen.
+- F-FLOW-22 (Test 50): The form opens as a dialog over the conversation (a line in the conversation says what was asked), not as a card inside the transcript Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-FLOW-23 (Test 50): Not tried on the device Closes with: needs a run on the real machine or screen.
+- F-FLOW-24 (Test 50): Never looked at on the Mac mini; Closes with: needs a run on the real machine or screen.
+- F-FLOW-25 (Test 50): 2026-11-12: the INBOX note and the per-flow offer setting are built (they were the two named gaps) Closes with: needs a run on the real machine or screen.
+- F-FLOW-26 (Test 50): The message is posted when the chat has switched to the flow's thread; Closes with: needs a run on the real machine or screen.
+- F-FLOW-28 (Test 50): In memory only (a restart forgets it) Closes with: needs a run on the real machine or screen.
+- F-FLOW-30 (Test 50): The model's answers are scripted in the tests; Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-FLOW-36 (Test 50): The flow settings (Camera allowed lives there) are drawn whenever nothing is selected, with a Flow settings (s) toolbar button and the key s; Closes with: needs a run on the real machine or screen.
+- F-FLOW-37 (Test 50): Only the camera permissions use it so far: browser trust and profile and messaging channels are not on it yet (the browser still asks its own question per run) Closes with: needs a run on the real machine or screen.
+- F-FLOW-38 (Test 50): Lists come from the providers' saved lists: a provider's real model list was not read (its key is on the device); Closes with: needs a run on the real machine or screen.
+- F-BROW-67 (Test 50): Tested with the fake helper's fake://dev page at 1280x720, 1024x600, 800x480 and 480x600 Closes with: needs a run on the real machine or screen.
+- F-BROW-68 (Test 50): Tested offline with fake events Closes with: needs a run on the real machine or screen.
+- F-BROW-70 (Test 50): Tested with the fake helper and the drawn sign; Closes with: needs a run on the real machine or screen.
+- F-BROW-72 (Test 30): The files and wiring are pinned by a test and the decision table of changed.sh passes; Closes with: needs a built image or QEMU run.
+- F-GIT-11 (Test 50): Tested with a fake git; Closes with: needs a run on the real machine or screen.
+- F-GIT-12 (Test 50): Tested with fakes; Closes with: needs a run on the real machine or screen.
+- F-GIT-14 (Test 50): Tested with a fake host and fake git; Closes with: needs a run on the real machine or screen.
+- F-DEVMODE-10 (Test 70): Tested with a fake kubectl Closes with: needs a run on the real machine or screen.
+- F-DEVMODE-11 (Test 70): The shell side (capture while asked, hand-over) is tested in the shell's developer tests; Closes with: needs a run on the real machine or screen.
+- F-DEVMODE-12 (Test 70): Tested against a made-up machine Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-DEVMODE-13 (Test 70): The planning of what to fix and the environment are tested; Closes with: needs a run on the real machine or screen.
+- F-DEVMODE-14 (Test 70): The Settings buttons (keys G and t) are drawn but their test is the page's general one Closes with: needs a run on the real machine or screen.
+- F-DEVMODE-15 (Test 70): Fake firewall backend only; Closes with: needs a built image or QEMU run.
+- F-DEVMODE-16 (Test 50): No test presses the 4, 8 and 1 keys or checks the 8 hour default by name; Closes with: needs a run on the real machine or screen.
+- F-DEVMODE-17 (Test 50): M8: the Settings box is now tested on the drawn page: absent without the power scope and while developer mode is off, unticked with its wording when it can apply, ticked  Closes with: needs a run on the real machine or screen.
+- F-GIT-16 (Test 50): Tested with fakes; Closes with: needs a run on the real machine or screen.
+- F-GIT-17 (Test 50): Tested with a fake kubectl and local sockets; Closes with: needs a run on the real machine or screen.
+- F-K8S-30 (Test 50): Fake runners only Closes with: needs a run on the real machine or screen.
+- F-K8S-31 (Test 50): Fake StepEnv only; Closes with: needs a run on the real machine or screen.
+- F-GIT-19 (Test 70): Run on the Mac (M8): with a saved connection holding a token, the card names the connection and its method (never the token), the host's own connection is used when the c Closes with: needs a run on the real machine or screen.
+- F-GIT-20 (Test 50): Scripted-model test with fake file and cluster tools; Closes with: needs a run on the real machine or screen.
+- F-BROW-74 (Test 50): Tested with fakes; Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-BROW-81 (Test 50): Fakes only (a fake cluster and a fake folder); Closes with: needs a run on the real machine or screen.
+- F-BROW-82 (Test 50): Fakes only (a fake cluster and a fake folder); Closes with: needs a run on the real machine or screen.
+- F-BROW-83 (Test 50): Fakes only (a fake cluster and a fake folder); Closes with: needs a run on the real machine or screen.
+- F-BROW-84 (Test 30): Verified on the Mac 2026-11-06 with a package built by the recipe with docker on a PC (FFmpeg 6.1.5 in an alpine image pinned by digest): it installed through the review  Closes with: needs a run on the real machine or screen.
+- F-BROW-85 (Test 50): Fakes only (a fake cluster and a fake folder); Closes with: needs a run on the real machine or screen.
+- F-BROW-86 (Test 70): The script checks a fake root file system, not a built image Closes with: needs a built image or QEMU run.
+- F-BROW-87 (Test 70): The package script is cited as an existing script only (it needs a Buildroot output and was not run for this change) Closes with: needs a built image or QEMU run.
+- F-BROW-88 (Test 30): Tested with the built-in reader; Closes with: needs a run on the real machine or screen.
+- F-BROW-89 (Test 30): The Mac showed no Paste in the browser before this; Closes with: needs a run on the real machine or screen.
+- F-LDR-01 (Test 70): Host tests (55 in boot-core, 14 in uefi-sys) are not listed here because the matrix checks `crates/` only; Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-LDR-02 (Test 70): 8 QEMU/OVMF tests pass (default, your real kernel and initrd-lean, menu and hold key, broken config, rollback and waiting menu, fake Windows loader on a second disk, Secu Closes with: needs a built image or QEMU run.
+- F-LDR-03 (Test 70): Checked in QEMU/OVMF on a copy of the lean image (GRUB entry, loader started directly, splash drawn, kernel to the sign-in screen) Closes with: needs a built image or QEMU run.
+- F-LDR-05 (Test 70): Verified in QEMU with the Secure Boot firmware and throwaway keys (10 checks: signed loader and kernel boot; Closes with: needs a built image or QEMU run.
+- F-LDR-06 (Test 70): QEMU test j (a stand-in kernel writes the variable) shows confirmed starts never spend a try Closes with: needs a built image or QEMU run.
+- F-LDR-07 (Test 30): The pack builder (`iyakki-usb` `bootpack`) needed no change and has no unit test with sub-folders (the FAT fixture is flat) Closes with: needs a built image or QEMU run.
+- F-LDR-10 (Test 70): QEMU tests k and l (stand-in kernel) show the order of starts, the fall back, and the rows present or absent Closes with: needs a built image or QEMU run.
+- F-LDR-11 (Test 70): QEMU test l boots the generated menu on install media, an installed disk and an updated disk and reads the rows from the loader's log Closes with: needs a built image or QEMU run.
+- F-CONN-01 (Test 70): Real TLS on loopback against a fake tenant Closes with: needs a run on the real machine or screen.
+- F-CONN-02 (Test 30): Headless Chrome ran the page against a fake tenant (ignored test `chrome.rs`: no CSP violation, tiles drawn, click and key reached the tenant; Closes with: needs a run on the real machine or screen.
+- F-CONN-03 (Test 50): The swap-race test is not a proof Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-DOCTOR-01 (Test 50): Also checks (added 2026-10-29): connection and name lookup, developer port answering, memory and swap, camera present, firewall on, vault locked note, unfinished update,  Closes with: needs a run on the real machine or screen.
+- F-DOCTOR-02 (Test 50): Never looked at on a real screen Closes with: needs a run on the real machine or screen.
+- F-ENGLOG-01 (Test 50): Hooked into the shell's handling of the helper's log events only (`browser_full.rs`); Closes with: needs a run on the real machine or screen.
+- F-DIAGSHARE-02 (Test 50): Plan decision D5 (is "send" ever allowed) stays open: file or stick only Closes with: needs a run on the real machine or screen.
+- F-CHECKUP-01 (Test 50): Tested with made-up machines, fake recorders and files in a temporary folder Closes with: needs a run on the real machine or screen.
+- F-CHECKUP-03 (Test 50): The sign and the devices are fakes in the tests; Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-BACKUP-03 (Test 70): Tested with fake folders only; Closes with: needs a run on the real machine or screen.
+- F-DEVT-01 (Test 50): Never looked at on a real screen or with a real finger; Closes with: needs a run on the real machine or screen.
+- F-DEVT-04 (Test 50): Only 127.0.0.1 was tried; Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-BOOT-36 (Test 50): Pure decisions and source order only; Closes with: needs a run on the real machine or screen.
+- F-BOOT-37 (Test 30): Checked in QEMU (readable text with the fix, boxes without); Closes with: needs a built image or QEMU run.
+- F-BOOT-38 (Test 30): Fragment and docs only: no kernel was rebuilt or booted with it yet (the next kernel build picks it up; Closes with: needs a built image or QEMU run.
+- F-BOOT-39 (Test 70): Measured by the build-speed agent while other builds ran (orders of magnitude); Closes with: needs a built image or QEMU run.
+- F-BOOT-40 (Test 70): Checked by `dist/buildroot/test-repack-cache.sh` (shell, not a Rust test); Closes with: needs a built image or QEMU run.
+- F-HOTSPOT-01 (Test 50): Pure checks only; Closes with: needs a live service, cluster or model.
+- F-HOTSPOT-06 (Test 50): No socket and no resolver list yet; Closes with: needs a run on the real machine or screen.
+- F-HOTSPOT-08 (Test 50): Golden bytes written by hand from the standard's field order Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-HOTSPOT-09 (Test 50): Run against the real mac80211 on virtual radios (F-HOTSPOT-17): the call order is proved there; Closes with: needs a run on the real machine or screen.
+- F-HOTSPOT-10 (Test 50): Real interfaces, ioctls and the firewall socket are only proved on a machine with a cable (the Mac mini) Closes with: needs a run on the real machine or screen.
+- F-HOTSPOT-12 (Test 50): No Wi-Fi name or passphrase fields and no QR code yet (they belong to the access point step); Closes with: needs a run on the real machine or screen.
+- F-HOTSPOT-13 (Test 50): Needs the Mac mini test with a cable (steps in the work report) Closes with: needs a run on the real machine or screen.
+- F-HOTSPOT-14 (Test 50): Stored in `<data>/share/policy.json`, not in the general settings file; Closes with: Notes name no testable gap; needs the owner or a reviewer to judge the level.
+- F-HOTSPOT-17 (Test 50): Framing tests use a datagram socket pair as the kernel Closes with: needs a built image or QEMU run.
+- F-AUTH-01 (Test 50): Nothing tried on the Mac or any real screen Closes with: needs a run on the real machine or screen.
+- F-AUTH-03 (Test 50): Not tried on the Mac Closes with: needs a run on the real machine or screen.
+- F-AUTH-04 (Test 50): The scan is tested with a made-up camera only; Closes with: needs a run on the real machine or screen.
+- F-AUTH-05 (Test 50): The 60-second wipe of the clipboard is the shared secret-copy mechanism; Closes with: needs a run on the real machine or screen.

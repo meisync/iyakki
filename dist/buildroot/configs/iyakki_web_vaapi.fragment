@@ -1,0 +1,9 @@
+# OPTIONAL for the web and macweb variants (WEB_VAAPI=1; part of the consolidated web-engine rebuild): hardware video decoding through VA-API.
+# GStreamer's `va` plugin (gst-plugins-bad, LGPL) talks to libva (MIT); libva-intel-driver (the i965 driver, MIT) drives the fixed-function decoder of
+# Intel GPUs up to gen9.5 (the Haswell to Kaby Lake Macs and PCs). Newer Intel GPUs (intel-mediadriver, which also builds Mesa) and AMD (Mesa radeonsi
+# video) are NOT in this step. The decoder is the chip's, not ours; the legal note in docs/FULL-BROWSER.md ("Options for later", 1) still applies:
+# this is never part of a release image (release-profile.sh refuses WEB_VAAPI=1). The H.264 parser the va plugin needs is gst-plugins-bad "videoparsers".
+BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_VA=y
+BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_VIDEOPARSERS=y
+BR2_PACKAGE_LIBVA=y
+BR2_PACKAGE_LIBVA_INTEL_DRIVER=y

@@ -1,0 +1,382 @@
+//! Settings → Displays: who sees the page, the page without and with the shell driving the displays (a made-up card), editing
+//! the draft, Apply with the 15-second trial, Keep and Go back, Identify, the Screen features switch and the page at four sizes.
+
+use std::sync::Arc;
+
+use crate::apps::settings::{SettingsApp, Tab};
+use crate::gfx::{rgb, Gfx};
+use crate::ui::{Event, Key, R};
+use crate::apps::AppCx;
+use crate::apps::App;
+use crate::apps::tests::{cx_with_admin_store, services_in, temp_dir};
+use crate::backend_kms::Kms;
+use crate::display::kms::FakeDrm;
+use crate::display::outputs::{hub, now_ms, DisplayConfig, Placement, Request};
+
+struct Offline;
+impl iyakki_proxy::Upstream for Offline {
+    fn request(&self, _: &str, _: &str, _: &[(String, String)], _: &[u8]) -> Result<iyakki_proxy::UpstreamResponse, String> {
+        Err("offline".into())
+    }
+}
+
+fn admin(tag: &str) -> AppCx {
+    let mut cx = cx_with_admin_store(tag);
+    let d = temp_dir(&format!("{tag}-svc"));
+    cx.services = services_in(&d, Arc::new(Offline));
+    cx.services.on_login("root", "rootpass12", true);
+    cx
+}
+
+fn press(a: &mut SettingsApp, cx: &AppCx, c: char) {
+    a.handle(&Event::Key(Key::Char(c)), cx);
+}
+
+fn goto(a: &mut SettingsApp, _cx: &AppCx) {
+    a.go_to(Tab::Displays);
+}
+
+fn draw(a: &mut SettingsApp, cx: &AppCx, w: u32, h: u32) -> Gfx {
+    let mut g = Gfx::new(w, h);
+    g.clear(rgb(0, 0, 0));
+    let s = (w as f32 / 1280.0).min(h as f32 / 720.0).clamp(0.6, 3.0);
+    a.render(&mut g, R::new(0.0, 72.0, w as f32, h as f32 - 72.0), s, cx, 0);
+    g
+}
+
+fn status(a: &SettingsApp) -> String {
+    a.status().map(|s| s.0.clone()).unwrap_or_default()
+}
+
+fn card() -> Kms<FakeDrm> {
+    let edp = FakeDrm::conn(10, "eDP-1", true, &[(2560, 1600, 60), (1920, 1200, 60)], 0b011);
+    let hdmi = FakeDrm::conn(11, "HDMI-A-1", true, &[(1920, 1080, 60), (1280, 720, 60)], 0b110);
+    Kms::open(FakeDrm::new(3, vec![edp, hdmi]), DisplayConfig::default(), 4).unwrap()
+}
+
+fn publish(k: &Kms<FakeDrm>) {
+    hub().set_status(k.status(now_ms()));
+}
+
+#[test]
+fn only_administrators_have_the_page_and_it_sits_with_the_devices() {
+    let cx = admin("sd1");
+    let a = SettingsApp::new(&cx);
+    assert!(a.tabs().contains(&Tab::Displays));
+    assert_eq!(Tab::Displays.group(), "Display & sound");
+    assert_eq!(Tab::Displays.label(), "Displays");
+    let mut plain = cx_with_admin_store("sd1b");
+    plain.session.policy = iyakki_sec::policy::Role::User.template();
+    plain.session.role = iyakki_sec::policy::Role::User;
+    let b = SettingsApp::new(&plain);
+    assert!(!b.tabs().contains(&Tab::Displays));
+}
+
+#[test]
+fn without_the_shell_driving_the_displays_the_page_lists_what_is_connected_and_says_why_nothing_changes() {
+    let cx = admin("sd2");
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx);
+    hub().set_status(crate::display::outputs::Status {
+        kms: false,
+        why_not: "the shell runs in a window".into(),
+        outputs: vec![
+            crate::display::outputs::OutView { name: "eDP-1".into(), connected: true, modes: vec![(2560, 1600, 0)], current: Some((2560, 1600)), pos: (0, 0), primary: false },
+            crate::display::outputs::OutView { name: "HDMI-A-1".into(), connected: true, modes: vec![(1920, 1080, 0)], current: Some((1920, 1080)), pos: (0, 0), primary: false },
+        ],
+        ..Default::default()
+    });
+    let g = draw(&mut a, &cx, 1280, 720);
+    assert!(g.hits.iter().any(|h| h.label == "display eDP-1"));
+    press(&mut a, &cx, 'r');
+    assert!(status(&a).contains("does not drive the displays") && status(&a).contains("the shell runs in a window"), "{}", status(&a));
+    press(&mut a, &cx, 'y');
+    assert!(hub().take_requests().is_empty(), "nothing is asked of a loop that is not there");
+    // Identify still works: a number on the one picture
+    press(&mut a, &cx, 'i');
+    assert!(hub().identifying(now_ms() + 100));
+}
+
+#[test]
+fn editing_the_draft_and_applying_asks_the_display_loop_and_the_trial_can_be_kept_or_undone() {
+    let cx = admin("sd3");
+    let mut k = card();
+    publish(&k);
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx);
+    draw(&mut a, &cx, 1280, 720);
+    // select the monitor, pick another resolution, put it below, make it the main display
+    a.handle(&Event::Key(Key::Down), &cx);
+    press(&mut a, &cx, 'r');
+    assert!(status(&a).contains("HDMI-A-1: 1280x720"), "{}", status(&a));
+    press(&mut a, &cx, 'a');
+    assert!(status(&a).contains("below"), "{}", status(&a));
+    press(&mut a, &cx, 'y');
+    let reqs = hub().take_requests();
+    assert_eq!(reqs.len(), 1);
+    let Request::Apply(cfg) = reqs[0].clone() else { panic!("{reqs:?}") };
+    assert_eq!(cfg.mode_of("HDMI-A-1"), Some((1280, 720)));
+    assert_eq!(cfg.placement_of("HDMI-A-1"), Placement::Below);
+    // the loop applies it; the page shows the trial
+    let t0 = now_ms();
+    k.process_requests(reqs, t0);
+    hub().set_status(k.status(t0));
+    let g = draw(&mut a, &cx, 1280, 720);
+    let btn = a.displays_buttons();
+    assert!(btn.iter().any(|b| b.0 == "Keep") && btn.iter().any(|b| b.0 == "Go back"));
+    assert!(hub().status().trial_secs == Some(15));
+    let _ = g;
+    // keep
+    press(&mut a, &cx, 'k');
+    assert_eq!(hub().take_requests(), vec![Request::Keep]);
+    k.process_requests(vec![Request::Keep], t0 + 1000);
+    assert_eq!(k.take_kept().len(), 1);
+    hub().set_status(k.status(t0 + 1000));
+    assert!(!a.displays_buttons().iter().any(|b| b.0 == "Keep"));
+    // another try, then go back
+    press(&mut a, &cx, 'm');
+    press(&mut a, &cx, 'y');
+    let reqs = hub().take_requests();
+    k.process_requests(reqs, t0 + 2000);
+    hub().set_status(k.status(t0 + 2000));
+    assert!(k.status(t0 + 2000).notes.iter().any(|n| n.contains("Mirror needs")), "these two displays share no resolution, so mirror falls back to extend and says so");
+    press(&mut a, &cx, 'v');
+    assert_eq!(hub().take_requests(), vec![Request::Revert]);
+    k.process_requests(vec![Request::Revert], t0 + 3000);
+    assert_eq!(k.specs().len(), 2);
+    // with nothing changed Apply says so
+    hub().set_status(k.status(t0 + 3000));
+    draw(&mut a, &cx, 1280, 720);
+    press(&mut a, &cx, 'y');
+    assert!(status(&a).contains("Nothing has changed"), "{}", status(&a));
+}
+
+#[test]
+fn the_main_display_choice_is_sent_and_the_screen_features_switch_cycles_and_is_stored() {
+    let cx = admin("sd4");
+    let k = card();
+    publish(&k);
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx);
+    draw(&mut a, &cx, 1280, 720);
+    a.handle(&Event::Key(Key::Down), &cx);
+    press(&mut a, &cx, 'p');
+    press(&mut a, &cx, 'y');
+    let Request::Apply(cfg) = hub().take_requests().remove(0) else { panic!() };
+    assert_eq!(cfg.primary.as_deref(), Some("HDMI-A-1"));
+    let dir = cx.data_dir().to_path_buf();
+    assert_eq!(crate::memgate::read_switch(&dir), crate::memgate::Switch::Auto);
+    press(&mut a, &cx, 's');
+    assert_eq!(crate::memgate::read_switch(&dir), crate::memgate::Switch::On);
+    assert!(status(&a).contains("Always on"));
+    press(&mut a, &cx, 's');
+    assert_eq!(crate::memgate::read_switch(&dir), crate::memgate::Switch::Off);
+    press(&mut a, &cx, 's');
+    assert_eq!(crate::memgate::read_switch(&dir), crate::memgate::Switch::Auto);
+}
+
+#[test]
+fn the_page_draws_with_the_memory_line_the_rows_and_the_arrangement_at_four_sizes() {
+    let cx = admin("sd5");
+    let k = card();
+    publish(&k);
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx);
+    for (w, h) in [(1280u32, 720u32), (800, 480), (1920, 1080), (640, 400)] {
+        let g = draw(&mut a, &cx, w, h);
+        assert!(g.hits.iter().any(|h| h.label == "display eDP-1") && g.hits.iter().any(|h| h.label == "display HDMI-A-1"), "{w}x{h}");
+        for hit in g.hits.iter().filter(|h| h.label.starts_with("display ")) {
+            assert!(hit.rect.x >= 0.0 && hit.rect.x + hit.rect.w <= w as f32 + 0.5, "{w}x{h}: {:?}", hit.rect);
+        }
+    }
+    let (line, sw) = a.disp_gate(&cx);
+    assert!(line.starts_with("Layouts:") || line.contains("Screen features"), "{line}");
+    assert_eq!(sw, crate::memgate::Switch::Auto);
+    assert_eq!(a.hint().is_empty(), false);
+}
+
+#[test]
+fn the_page_lists_the_touch_screens_changes_their_display_and_starts_the_calibration() {
+    let _guard = crate::touchmap::SHARED_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let cx = admin("sd-touch");
+    let k = card();
+    publish(&k);
+    let dev = std::sync::Arc::new(crate::touchmap::TouchDev { key: "27c0:0859@usb-test".into(), id: "27c0:0859".into(), name: "TouchScreen".into(), usb: true, mt: true, x: (0, 32767), y: (0, 32767) });
+    let outs = crate::touchmap::outs_of_plan(k.plan());
+    crate::touchmap::refresh(&[dev.clone()], &outs, &mut Vec::new());
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx);
+    draw(&mut a, &cx, 1280, 720);
+    // matched automatically to the external display
+    let line = crate::touchmap::shared().lines()[0].clone();
+    assert_eq!((line.display.as_deref(), line.saved.clone()), (Some("HDMI-A-1"), None));
+    // t chooses the first display, again the next, again back to automatic
+    press(&mut a, &cx, 't');
+    assert_eq!(crate::touchmap::shared().saved(), &[(dev.key.clone(), "eDP-1".to_string())]);
+    press(&mut a, &cx, 't');
+    assert_eq!(crate::touchmap::shared().saved(), &[(dev.key.clone(), "HDMI-A-1".to_string())]);
+    press(&mut a, &cx, 't');
+    assert!(crate::touchmap::shared().saved().is_empty());
+    assert!(status(&a).contains("matched automatically"), "{}", status(&a));
+    // the calibration asks the first display; pressing c again stops it
+    press(&mut a, &cx, 'c');
+    assert_eq!(crate::touchmap::shared().calibrating(), Some("eDP-1"));
+    draw(&mut a, &cx, 1280, 720);
+    press(&mut a, &cx, 'c');
+    assert_eq!(crate::touchmap::shared().calibrating(), None);
+    assert!(a.displays_buttons().iter().any(|b| b.2 == 't') && a.displays_buttons().iter().any(|b| b.2 == 'c'));
+    crate::touchmap::refresh(&[], &outs, &mut Vec::new());
+}
+
+#[test]
+fn look_again_reads_the_displays_again_and_says_what_it_found() {
+    let cx = admin("sd-look");
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx);
+    assert!(a.displays_buttons().iter().any(|b| b.0 == "Look again" && b.2 == 'l'), "the page has the button");
+    // a connected display with an empty EDID and only fallback modes: the state the Mac mini was in
+    let drm = temp_dir("sd-look-drm");
+    let c = drm.join("card0-DP-1");
+    std::fs::create_dir_all(&c).unwrap();
+    std::fs::write(c.join("status"), "connected\n").unwrap();
+    std::fs::write(c.join("edid"), b"").unwrap();
+    std::fs::write(c.join("modes"), "1920x1080\n1280x720\n640x480\n").unwrap();
+    crate::display::set_drm_dir_for_tests(Some(drm.clone()));
+    press(&mut a, &cx, 'l');
+    crate::display::set_drm_dir_for_tests(None);
+    assert!(status(&a).contains("Looking at the displays again") && status(&a).contains("DP-1: no usable EDID"), "{}", status(&a));
+}
+
+#[test]
+fn the_memory_line_of_the_screen_features_is_the_fake_machines_not_this_computers() {
+    use iyakki_core_api::MemInfo;
+    use iyakki_core_fake::{Canned, FakeOs};
+    let mut cx = admin("sd-os");
+    let a = SettingsApp::new(&cx);
+    let line = |kb: u64, cx: &mut AppCx| {
+        cx.os = Arc::new(FakeOs::with(Canned { meminfo: Some(MemInfo { total_kb: kb, free_kb: kb / 2, available_kb: kb / 2, swap_total_kb: 0, swap_free_kb: 0 }), ..Canned::default() }));
+        a.disp_gate(cx).0
+    };
+    let small = line(1_000_000, &mut cx);
+    let big = line(16_000_000, &mut cx);
+    assert!(!small.is_empty() && small != big, "{small:?} / {big:?}");
+    cx.os = Arc::new(FakeOs::with(Canned { meminfo: None, ..Canned::default() }));
+    let unknown = a.disp_gate(&cx).0;
+    assert_ne!(unknown, big);
+}
+
+#[test]
+fn one_screen_drawn_through_the_framebuffer_gets_its_size_chosen_kept_per_person_and_the_shell_asked_to_drive_it() {
+    use crate::memgate::{read_switch, Switch};
+    let cx = admin("sd-single");
+    let dir = cx.data_dir().to_path_buf();
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx);
+    hub().set_status(crate::display::outputs::Status {
+        kms: false,
+        why_not: "one display is connected".into(),
+        outputs: vec![crate::display::outputs::OutView { name: "HDMI-A-1".into(), connected: true, modes: vec![(1920, 1080, 0), (1280, 720, 0), (1024, 768, 0)], current: Some((1920, 1080)), pos: (0, 0), primary: false }],
+        ..Default::default()
+    });
+    // the page tells what can be done here, at the sizes the other pages are held to
+    for (w, h, lvl) in [(360u32, 740u32, 0usize), (1280, 720, 0), (360, 740, crate::uisize::LEVELS.len() - 1)] {
+        crate::uisize::apply(Some(lvl));
+        let g = draw(&mut a, &cx, w, h);
+        // the sentence is wrapped at narrow widths: read the lines back as one text
+        let all: Vec<&str> = g.text_log.iter().map(|(_, _, t)| t.as_str()).collect();
+        assert!(all.join(" ").contains("r picks another size"), "{w}x{h}: {all:?}");
+        for (_, r, _, t) in &g.layout_log.texts {
+            assert!(r.x >= -0.5 && r.x + r.w <= w as f32 + 0.5, "{w}x{h} level {lvl}: {t:?} {r:?} runs off the side");
+        }
+    }
+    crate::uisize::apply(None);
+    // y before r: nothing chosen, nothing saved
+    press(&mut a, &cx, 'y');
+    assert!(status(&a).contains("Nothing has changed"), "{}", status(&a));
+    assert_eq!(crate::display::outputs::load(&dir, "root").mode_of("HDMI-A-1"), None);
+    // r goes through the sizes the display offers (biggest first, wrapping), nothing is saved yet
+    press(&mut a, &cx, 'r');
+    assert!(status(&a).contains("1280x720"), "{}", status(&a));
+    assert_eq!(crate::display::outputs::load(&dir, "root").mode_of("HDMI-A-1"), None);
+    assert_eq!(read_switch(&dir), Switch::Auto);
+    // y keeps it for this person and asks the shell to drive the screen
+    press(&mut a, &cx, 'y');
+    assert!(status(&a).contains("1280x720") && status(&a).contains("Always on"), "{}", status(&a));
+    assert_eq!(crate::display::outputs::load(&dir, "root").mode_of("HDMI-A-1"), Some((1280, 720)));
+    assert_eq!(crate::display::outputs::load(&dir, "amy").mode_of("HDMI-A-1"), None, "another person is untouched");
+    assert_eq!(read_switch(&dir), Switch::On);
+    let g = draw(&mut a, &cx, 1280, 720);
+    assert!(g.text_log.iter().any(|(_, _, t)| t == "Kept for the next start: 1280x720"));
+    // switched off: refused, the saved size stays
+    crate::memgate::write_switch(&dir, Switch::Off).unwrap();
+    press(&mut a, &cx, 'r');
+    press(&mut a, &cx, 'y');
+    assert!(status(&a).contains("switched off"), "{}", status(&a));
+    assert_eq!(crate::display::outputs::load(&dir, "root").mode_of("HDMI-A-1"), Some((1280, 720)));
+}
+
+#[test]
+fn external_monitors_are_looked_at_chosen_and_set_by_key_through_the_core_and_only_the_chosen_one_changes() {
+    let mut cx = admin("sd-ddc");
+    let core = Arc::new(iyakki_core_fake::FakeCore::new());
+    core.monitors_fake().set_screens(&[("DEL-A0C5-1", "DELL U2720Q", 40), ("LGD-0001-2", "LG 27", 70)]);
+    cx.core = core.clone();
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx);
+    // nothing is read until the person asks
+    let g = draw(&mut a, &cx, 1280, 720);
+    assert!(!g.text_log.iter().any(|(_, _, t)| t.contains("DELL")));
+    press(&mut a, &cx, 'u');
+    assert!(status(&a).contains("Choose a monitor"), "{}", status(&a));
+    press(&mut a, &cx, 'b');
+    assert!(status(&a).contains("Press e first"), "{}", status(&a));
+    press(&mut a, &cx, 'e');
+    assert!(status(&a).contains("2 monitor"), "{}", status(&a));
+    // b chooses the first, then the second, then none
+    press(&mut a, &cx, 'b');
+    assert!(status(&a).contains("DEL-A0C5-1"), "{}", status(&a));
+    press(&mut a, &cx, 'j');
+    assert_eq!(core.monitors_fake().percent_of("DEL-A0C5-1"), Some(30));
+    assert_eq!(core.monitors_fake().percent_of("LGD-0001-2"), Some(70), "the other monitor is untouched");
+    press(&mut a, &cx, 'u');
+    press(&mut a, &cx, 'u');
+    assert_eq!(core.monitors_fake().percent_of("DEL-A0C5-1"), Some(50));
+    press(&mut a, &cx, 'b');
+    assert!(status(&a).contains("LGD-0001-2"), "{}", status(&a));
+    press(&mut a, &cx, 'u');
+    assert_eq!(core.monitors_fake().percent_of("LGD-0001-2"), Some(80));
+    assert_eq!(core.monitors_fake().percent_of("DEL-A0C5-1"), Some(50));
+    press(&mut a, &cx, 'b');
+    assert!(status(&a).contains("No monitor is chosen"), "{}", status(&a));
+    let log = cx.audit.recent(20).join("\n");
+    assert!(log.contains("settings.display.monitor_choose DEL-A0C5-1") && log.contains("settings.display.monitor_brightness 30%"), "{log}");
+    // the lines fit at the small and the largest text size
+    press(&mut a, &cx, 'b');
+    for (w, h, lvl) in [(360u32, 740u32, 0usize), (1280, 720, 0), (360, 740, crate::uisize::LEVELS.len() - 1)] {
+        crate::uisize::apply(Some(lvl));
+        let g = draw(&mut a, &cx, w, h);
+        assert!(g.text_log.iter().any(|(_, _, t)| t.contains("DELL")), "{w}x{h}: the monitor is listed");
+        for (_, r, _, t) in &g.layout_log.texts {
+            assert!(r.x >= -0.5 && r.x + r.w <= w as f32 + 0.5, "{w}x{h} level {lvl}: {t:?} {r:?} runs off the side");
+        }
+    }
+    crate::uisize::apply(None);
+}
+
+#[test]
+fn a_person_who_is_not_an_administrator_cannot_reach_the_monitor_keys() {
+    use iyakki_core_api::Monitors as _;
+    let mut cx = admin("sd-ddc2");
+    let core = Arc::new(iyakki_core_fake::FakeCore::new());
+    core.monitors_fake().set_screens(&[("DEL-A0C5-1", "DELL U2720Q", 40)]);
+    cx.core = core.clone();
+    cx.session.role = iyakki_sec::policy::Role::User;
+    cx.session.policy = iyakki_sec::policy::Role::User.template();
+    let mut a = SettingsApp::new(&cx);
+    goto(&mut a, &cx);
+    for c in ['e', 'b', 'j'] {
+        press(&mut a, &cx, c);
+    }
+    assert_eq!(core.monitors_fake().percent_of("DEL-A0C5-1"), Some(40));
+    assert!(core.monitors_fake().list().iter().all(|m| !m.chosen));
+}

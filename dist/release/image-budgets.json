@@ -1,0 +1,39 @@
+{
+  "comment": "Per-image size and boot-time budgets (F-PKG-05). A ceiling is the figure measured and written down in docs/BOOT-SPEED.md or docs/BETA-PLAN.md plus about 10 percent room; `measured` and `source` say where the number comes from. A ceiling of null means no budget yet: the checker reports it and does not pass or fail it. Raise a ceiling only in a commit that says why.",
+  "images": {
+    "full": {
+      "label": "Full image (desktop, lean boot layout)",
+      "files": [
+        {"id": "kernel", "glob": "bzImage", "max_bytes": 15000000, "measured_bytes": 13312000, "source": "docs/BOOT-SPEED.md: kernel 12.7 MB"},
+        {"id": "initrd-full", "glob": "rootfs.cpio.zst", "max_bytes": 190000000, "measured_bytes": 181403648, "source": "docs/BOOT-SPEED.md: full initrd 173 MB zstd -19"},
+        {"id": "initrd-lean", "glob": "initrd-lean", "max_bytes": 1500000, "measured_bytes": 1258291, "source": "docs/BOOT-SPEED.md: first stage about 1.2 MB"},
+        {"id": "root-squashfs", "glob": "root.sfs", "max_bytes": 245000000, "measured_bytes": 230686720, "source": "docs/BOOT-SPEED.md: root.sfs zstd level 3 is 220 MB"}
+      ],
+      "timings": [
+        {"id": "login_wall_s", "label": "QEMU power-on to the sign-in picture, median (dist/buildroot/boot-time.py)", "max": 12.0, "measured": null, "source": "docs/BETA-PLAN.md: about 9 s to the first shell picture; not re-measured for this file"}
+      ],
+      "memory": [
+        {"id": "idle_ram_mib", "label": "RAM in use at the sign-in screen", "max": null, "measured": null, "source": "not measured yet"}
+      ]
+    },
+    "libre": {
+      "label": "Libre ISO",
+      "files": [
+        {"id": "iso", "glob": "*.iso", "max_bytes": 70000000, "measured_bytes": 66060288, "source": "FEATURES.md F-PKG-05: Libre ISO about 63 MB"}
+      ],
+      "timings": [],
+      "memory": []
+    },
+    "web": {
+      "label": "Web image (libre + the full web engine: iris, Brotli, WOFF2, WebRTC media, VA-API; the consolidated rebuild of 2026-11-13)",
+      "note": "PROPOSED by the build host: each ceiling is the figure measured on the amd-mini build (docs/BROWSER-SPEED.md, built 2026-11-13) plus about 5 percent, rounded up to a whole megabyte. The OWNER should confirm these limits (the full image is 190 MB for the initrd; the web engine alone is 119 MB, which is why this row is higher).",
+      "files": [
+        {"id": "kernel", "glob": "bzImage", "max_bytes": 14000000, "measured_bytes": 12829696, "source": "amd-mini build 2026-11-13 (M67): 12.8 MB"},
+        {"id": "initrd-full", "glob": "rootfs.cpio.zst", "max_bytes": 232000000, "measured_bytes": 220007553, "source": "amd-mini build 2026-11-13 (M67): 220.0 MB zstd"},
+        {"id": "iso", "glob": "*.iso", "max_bytes": 248000000, "measured_bytes": 235804672, "source": "amd-mini build 2026-11-13 (M67): 235.8 MB"}
+      ],
+      "timings": [],
+      "memory": []
+    }
+  }
+}

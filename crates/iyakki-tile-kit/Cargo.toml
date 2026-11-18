@@ -1,0 +1,10 @@
+[package]
+name = "iyakki-tile-kit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "What the WASM page tiles share: a palette, text clipping, buttons, a JSON call helper and the six exports of tile ABI 1 for a tile written in Rust (F-WEB-53, F-WEB-54, F-WEB-56)."
+
+[dependencies]
+iyakki-tile-abi = { path = "../iyakki-tile-abi" }
+serde_json = "1"

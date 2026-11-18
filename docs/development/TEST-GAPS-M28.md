@@ -1,0 +1,85 @@
+# Test gaps found by lane M28 (areas T to Z)
+
+Rows with Impl 100, Test below 100 and Manual none that were read in lane M28. Each gap is something a unit or fake-based test on the build host cannot close. Format: ID, gap, what would close it.
+
+- F-WASM-10: Pixel equality is proven under node and in Chrome; this Mac host has neither node nor Chrome so it could not be re-run here (the 5x7 font and grey image boxes are split to F-WASM-12). Closes with: a host with node and Chrome re-running the agent webui_tiles_js test and dist/browsertest/run_pages.py --only tiles.
+- F-VAULT-05: Secret guard is a heuristic; verified with scripted models only. Closes with: a real model run and a corpus of real secret formats (cannot be closed by a unit test: the limitation is the design).
+- F-VOICE-16: Server voice lists differ per server; Lemonade has no voice list call. Closes with: a live Lemonade and Kokoros pair on the LAN.
+- F-VOICE-18: Real microphone and Bluetooth/sound-server microphones not covered. Closes with: hardware run with a real microphone.
+- F-WEB-06: Real K3s and Docker runs are described, per-user separation is by role. Closes with: a live cluster run recorded as a dated Manual pass.
+- F-WEB-14: Stand-in listener and fake firewall only. Closes with: real browser on a real network, real nft.
+- F-WEB-15: Not seen on screen. Closes with: screen capture on hardware.
+- F-WEB-18: Real ServicesExtras only compiled. Closes with: a pod/cluster run, Safari and Firefox runs.
+- F-WEB-20: Fake accounts over real TLS; no real device/browser. Closes with: browser run on a device.
+- F-WEB-31: No folder picker for a move; not opened in a real browser. Closes with: page feature (impl) then browser run.
+- F-WEB-32: Chrome run done; remaining items are impl gaps in the note. Closes with: impl, then browser run.
+- F-WEB-33: Run call needs a running flow engine for the person. Closes with: real pod.
+- F-WEB-34: Cookie probe on a real port 8443; Safari/Firefox not run. Closes with: real browser matrix.
+- F-WEB-41: Never run with a real cluster, several pods, an ingress; no control plane writes cloud/tenants.json. Closes with: cluster plus control plane (owner decision on tenant control plane).
+- F-WEB-42: Real browser run done for phone width; no other gap testable here. Closes with: Safari/Firefox runs.
+- F-WEB-43: No ls command in the connector. Closes with: impl of ls, then tests.
+- F-WEB-44: Linux-only openat path; macOS cannot run it; no cross-space move. Closes with: Linux CI/QEMU run on a real volume claim; impl of cross-space move.
+- F-WEB-45: Needs the git program on the pod; clone race not locked. Closes with: pod run, lock impl.
+- F-WEB-46: Real FlowEnv engine not run in a test; no run log text route. Closes with: impl of the log route, real engine integration test on Linux.
+- F-WEB-47: Real Extras implementation compiles, not run; no route for team admin to pause others. Closes with: impl and an integration test with a real flow draft.
+- F-WEB-48: Date input for one-time schedules untested; scheduler is a test double. Closes with: a real scheduler plus a browser run of the date input.
+- F-TALES-02: No real sound heard. Closes with: hardware listening check.
+- F-TALES-11: Not run against a live Claude Code or Copilot CLI. Closes with: live external agents.
+- F-TALES-13: Successful image generation not tested (no image server). Closes with: live image server.
+- F-TALES-19: Indic text not on page tests; Arabic not mirrored; no real screen. Closes with: Indic fonts in the renderer, then page tests; screen check.
+- F-ZRAM-02: zswap value and hibernation are outside what fake sysfs shows. Closes with: a real kernel with zswap.
+- F-UPD-02: Needs GRUB loadenv in the image and a real boot partition. Closes with: QEMU boot with a broken bundle, then Mac.
+- F-UPD-04: Badge, Update all, rollback of package versions and metered detection are not built. Closes with: impl first.
+- F-UPD-05: Real FAT mount (SysBoot) untested. Closes with: Mac or stick run.
+- F-UPD-06: Never seen with a real stick. Closes with: screen on hardware.
+- F-UPD-07: Automatic GRUB boot counter unproven on hardware. Closes with: QEMU/Mac boot-fallback run.
+- F-UPD-08: Delta of a real build pair not measured; apply needs RAM on device. Closes with: a device run.
+- F-UPD-09: Not run against a device. Closes with: device run.
+- F-UPD-10: Nothing run on a device. Closes with: device run.
+- F-UPD-11: Running store needs rebuilding with the route; no replay protection. Closes with: store rebuilt on k3s; impl of replay protection.
+- F-UPD-12: Fakes only; real daily check against a store. Closes with: device with network.
+- F-UPD-13: No real 400 MB run, timing or memory at that size. Closes with: large-blob run on k3s store.
+- F-UPD-14: Store signs with in-cluster key, plan wanted host-held key. Closes with: impl or owner decision.
+- F-UPD-15: No apply step in this row; memory use 1.2 GB on 400 MiB base. Closes with: device run.
+- F-UPD-16: 30-second boot hook not run on a device. Closes with: device run.
+- F-UPD-18: No real boot partition, 400 MB base, store or restart. Closes with: QEMU or Mac run; Roll back impl for root pointer.
+- F-UPD-22: Reuse of 419 MB copy tested with fakes only. Closes with: device run.
+- F-UPD-23: Boot read-back not yet run on a device. Closes with: device run.
+- F-UPD-24: Not seen on a device; no signed-in person job. Closes with: device run; impl.
+- F-UPD-25: Daily background check does not look per channel. Closes with: impl, then test.
+- F-UPD-26: Not run against the store on the k3s. Closes with: k3s store run.
+- F-TALES-20: Not verified on a real screen, picture model or timings. Closes with: live picture model and screen.
+- F-TALES-21: Mac frame log not read yet; glow not repainted below 0.8 scale. Closes with: Mac frame log reading (hardware).
+- F-VOICE-21: Real card latency on the T2 not measured. Closes with: T2 hardware measurement.
+- F-VOICE-25: Real microphone not tried. Closes with: hardware microphone run.
+- F-VOICE-26: Real model quality and 30% threshold untried; no chat consent card. Closes with: live model run; impl of consent card.
+- F-VOICE-27: Scripted model only. Closes with: live model run.
+- F-VOICE-29: Real-model quality, layouts at 800x480, mouse-wheel scroll missing. Closes with: live model; impl of scroll.
+- F-VOICE-30: Real-model latency/quality not tried. Closes with: live model.
+- F-VOICE-32: Pause detector on real room noise not verified. Closes with: microphone run.
+- F-VOICE-33: No model trained on a real voice. Closes with: real recordings.
+- F-TOK-01: History and outputs of a long browsing run not measured. Closes with: a live long browsing run (tokenbudget.rs is out of bounds for this lane).
+- F-TOK-02: Budget set from measured counts, real-model effect untried. Closes with: live runs.
+- F-TOK-04: Live tests need a model server (ignored by design). Closes with: live Lemonade runs for other models.
+- F-WEBSVC-02: Throttling is in memory; no real client over a network. Closes with: network client run.
+- F-WEBSVC-03: Firewall rule not applied to a kernel; rate limits in memory. Closes with: Linux/QEMU nft run.
+- F-WEBSVC-05: Not run in a container or VM. Closes with: container/VM run.
+- F-WEBSVC-07: Flow routes ran on a fake engine only; nothing run in a cloud container or VM (the tile TLS test the note says failed now passes on the Mac). Closes with: real engine integration test on Linux; container run.
+- F-UPG-02: Beta fixtures are added when beta is tagged; flow run records and per-person tail not in the fixture set. Closes with: beta tag, then regenerate fixtures.
+- F-VPN-09: Not run behind the real redirect on a device. Closes with: device with nft redirect.
+- F-VPN-10: No real provider file inspected. Closes with: real provider files.
+- F-VPN-11: Real OsSys never run on a device or in a namespace. Closes with: Linux namespace run.
+- F-VPN-12: Not seen on a real screen; no top-bar lock. Closes with: screen; impl.
+- F-VPN-13: Approval card in the real chat not looked at. Closes with: chat run.
+- F-VPN-15: SO_MARK needs root; real redirect and VPN DNS never exercised. Closes with: root Linux run.
+- F-WEBDEV-02: Nothing yet feeds the channel from MEDIA/RADIO/TALES. Closes with: impl of feeders, then tests.
+- F-WEBDEV-03: Not tried with real microphone/browser; VOICE tile uses arecord. Closes with: impl, browser run.
+- F-WEBDEV-04: Not tried with a real camera or browser. Closes with: browser run.
+- F-WEBDEV-05: Real browser prompts unverified; role layer not consulted. Closes with: browser run; impl.
+- F-WEBDEV-06: Tiles come back but are not yet useful over the browser (depends on WEBDEV-02/03/07). Closes with: those rows.
+- F-WEBDEV-07: No real browser, speaker or latency measure. Closes with: browser and hardware.
+- F-WEBDEV-08: No real browser, camera or microphone. Closes with: browser run.
+- F-WEBDEV-09: Click within 1.5 s of switching on leaves the page capturing (known race). Closes with: fix of the race (impl), then test.
+- F-WEBDEV-10: Unit tests only. Closes with: browser run.
+- F-WEBDEV-11: Never heard on a real Mac and browser; already-started player keeps playing. Closes with: Mac run.
+- F-WEBDEV-12: Not tried with a real browser, camera or the Mac. Closes with: browser/Mac run.

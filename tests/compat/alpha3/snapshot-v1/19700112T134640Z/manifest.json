@@ -1,0 +1,39 @@
+{
+  "format": 1,
+  "id": "19700112T134640Z",
+  "created": 1000000,
+  "archive": "data.tar.zst",
+  "archive_sha256": "4f196371fd06caf0118eafafb45378958818e5cbbd9be1b125b089bb3c919494",
+  "archive_bytes": 336,
+  "items": [
+    {
+      "path": "notes",
+      "kind": "dir",
+      "size": 0,
+      "mode": 493,
+      "sha256": ""
+    },
+    {
+      "path": "notes/a.txt",
+      "kind": "file",
+      "size": 17,
+      "mode": 420,
+      "sha256": "a0b835880cd69fef09a2db21d758fe25bcfb71b8cc7c23899e4ab1ec38d2ccc2"
+    },
+    {
+      "path": "notes/b.txt",
+      "kind": "file",
+      "size": 33,
+      "mode": 420,
+      "sha256": "52f251ebcabff3f3ca155098fb465c3c1eb85633a2c20064ce7a5a2beb15e1fa"
+    },
+    {
+      "path": "top.json",
+      "kind": "file",
+      "size": 15,
+      "mode": 420,
+      "sha256": "1948a2de2094aaeb62c64398c666b846a36df279a5ef8d9e3f75b8d95526bfd3"
+    }
+  ],
+  "skipped": []
+}

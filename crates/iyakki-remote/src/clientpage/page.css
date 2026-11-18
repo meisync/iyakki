@@ -1,0 +1,44 @@
+:root { color-scheme: dark; --bg: #090b14; --card: #1e253e; --line: #3a4470; --ink: #e6e9f5; --dim: #9aa3c4; --acc: #5b7cff; --bad: #ff8a8a; --warn: #f0b429; }
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--ink); font: 16px/1.45 system-ui, "Segoe UI", Roboto, sans-serif; }
+body { padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+[hidden] { display: none !important; }
+#card { max-width: 30rem; margin: 0 auto; padding: 1.25rem 16px 2rem; }
+header { display: flex; align-items: center; justify-content: space-between; gap: .75rem; margin-bottom: .5rem; }
+h1 { margin: 0; font-size: 1.4rem; letter-spacing: .08em; }
+h2 { margin: 1rem 0 .25rem; font-size: 1.1rem; }
+.badge { padding: .15rem .5rem; border: 1px solid var(--warn); border-radius: 999px; color: var(--warn); font-size: .72rem; letter-spacing: .08em; white-space: nowrap; }
+form, #problem { background: var(--card); border-radius: 14px; padding: 1rem; margin: .75rem 0; }
+label { display: block; margin: .6rem 0 .2rem; color: var(--dim); font-size: .9rem; }
+label.check { display: flex; gap: .5rem; align-items: flex-start; line-height: 1.3; }
+label.check input { width: 1.25rem; height: 1.25rem; margin-top: .1rem; flex: none; }
+input[type=text], input[type=password], input:not([type]) { width: 100%; padding: .7rem .75rem; border-radius: 8px; border: 1px solid var(--line); background: #121730; color: inherit; font-size: 16px; }
+input:focus-visible, button:focus-visible, canvas:focus-visible { outline: 2px solid #8fa5ff; outline-offset: 2px; }
+button { min-height: 44px; padding: .55rem 1rem; border: 1px solid var(--line); border-radius: 8px; background: #121730; color: inherit; font: inherit; cursor: pointer; }
+button.primary { width: 100%; margin-top: 1rem; border-color: transparent; background: var(--acc); color: #0b0f20; font-weight: 600; }
+.row { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .75rem; }
+.row button.primary { width: auto; margin-top: 0; }
+.fine { color: var(--dim); font-size: .82rem; margin: .75rem 0 0; }
+#pmsg, #ptitle { overflow-wrap: anywhere; }
+#problem h2 { color: var(--bad); margin-top: 0; }
+#status { margin: .5rem 0; color: var(--dim); }
+
+#stage { position: fixed; inset: 0; background: #000; overflow: hidden; touch-action: none; }
+#screen { position: absolute; left: 0; top: 0; transform-origin: 0 0; touch-action: none; user-select: none; -webkit-user-select: none; outline: none; background: #000; -webkit-touch-callout: none; }
+#bar { position: fixed; left: 50%; top: calc(env(safe-area-inset-top) + 6px); transform: translateX(-50%); display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; justify-content: center; max-width: calc(100vw - 12px); padding: .25rem .4rem; border-radius: 20px; background: #000b; font-size: .85rem; opacity: .35; transition: opacity .2s; }
+#bar:hover, #bar:focus-within, #bar.on { opacity: 1; }
+#bar button { min-height: 44px; padding: .2rem .7rem; border-radius: 999px; font-size: .85rem; }
+#live { color: var(--dim); white-space: nowrap; }
+#toast { position: fixed; left: 50%; bottom: calc(env(safe-area-inset-bottom) + 14px); transform: translateX(-50%); max-width: calc(100vw - 32px); padding: .5rem .9rem; border-radius: 12px; background: #1e253eee; box-shadow: 0 4px 18px #000a; font-size: .9rem; overflow-wrap: anywhere; }
+#ime { position: fixed; left: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; resize: none; }
+@media (max-width: 480px) { #bar #live { display: none; } }
+@media (prefers-reduced-motion: reduce) { #bar { transition: none; } }
+
+#shared { position: fixed; left: 0; right: 0; top: 0; padding: calc(env(safe-area-inset-top) + 4px) 16px 4px; background: #c0262d; color: #fff; text-align: center; font-size: .85rem; font-weight: 600; z-index: 5; }
+#panel { position: fixed; left: 50%; top: calc(env(safe-area-inset-top) + 52px); transform: translateX(-50%); width: min(30rem, calc(100vw - 24px)); max-height: calc(100vh - 80px); overflow: auto; padding: .75rem 1rem 1rem; border-radius: 14px; background: var(--card); box-shadow: 0 8px 30px #000c; z-index: 4; }
+#panel h2 { margin: 0; font-size: 1.05rem; }
+#panel .phead { display: flex; justify-content: space-between; align-items: center; gap: .5rem; }
+#panel select, #panel input { width: 100%; padding: .55rem .6rem; border-radius: 8px; border: 1px solid var(--line); background: #121730; color: inherit; font-size: 16px; }
+#panel textarea { width: 100%; margin-top: .5rem; border-radius: 8px; border: 1px solid var(--line); background: #121730; color: inherit; font: inherit; }
+#panel button { margin-top: .5rem; }
+#panel #camview { width: 100%; margin-top: .5rem; border-radius: 8px; background: #000; }

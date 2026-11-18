@@ -1,0 +1,9 @@
+old test path	new test path
+iyakki-shell::apps::pdfview::tests::a_pdf_opens_shows_its_pages_and_moves_between_them	iyakki-tile-pdf::tests::a_pdf_opens_shows_its_pages_and_moves_between_them
+iyakki-shell::apps::pdfview::tests::zoom_and_fit_width_change_the_picture_size	iyakki-tile-pdf::tests::zoom_and_fit_width_change_the_picture_size
+iyakki-shell::apps::pdfview::tests::search_counts_matches_across_pages_and_steps_through_them	iyakki-tile-pdf::tests::search_counts_matches_across_pages_and_steps_through_them
+iyakki-shell::apps::pdfview::tests::copy_text_puts_the_page_text_on_the_clipboard_and_says_so	iyakki-tile-pdf::tests::copy_text_puts_the_page_text_on_the_clipboard_and_says_so
+iyakki-shell::apps::pdfview::tests::bad_files_say_what_is_wrong	iyakki-tile-pdf::tests::bad_files_say_what_is_wrong
+iyakki-shell::apps::pdfview::tests::what_cannot_be_shown_is_listed_under_the_page	iyakki-tile-pdf::tests::what_cannot_be_shown_is_listed_under_the_page
+iyakki-shell::apps::pdfview::tests::the_controls_do_not_overlap_at_the_standard_sizes	iyakki-tile-pdf::tests::the_controls_do_not_overlap_at_the_standard_sizes
+iyakki-shell::apps::pdfview::tests::the_empty_tile_lists_downloaded_pdfs	iyakki-tile-pdf::tests::the_empty_tile_lists_downloaded_pdfs

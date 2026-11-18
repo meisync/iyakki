@@ -1,0 +1,49 @@
+# RELEASE image profile (IYAKKI_IMAGE_PROFILE=release): appended LAST by build.sh, after iyakki_no_firmware.fragment.   docs/development/RELEASE-IMAGE-PROFILE.md
+# Owner decision 2026-10-27: the base ISO keeps only Apache-2.0, permissive or otherwise clearly non-violating items; everything doubtful or
+# proprietary (vendor firmware, codecs, whatever the licence gate flags) is a click-to-install download, never shipped.
+#
+# This file is the Buildroot half. The root-file-system half is dist/buildroot/board/iyakki/release-profile.sh (called by post-build.sh) and
+# the switches in repack.sh / build.sh; legal/image-rules.txt and `iyakki-relcheck release-image-check` hold the rest. A symbol set below is
+# a request: Buildroot lets a later line win, and `select` lines of other packages can still turn one back on, so the check script reads the
+# finished .config (release-image-check --config FILE) and fails if a symbol listed here is on.
+
+# ---- codecs: nothing patent-encumbered or GPL-encoded in the image
+# FFmpeg's own programs are not shipped (the person downloads ffmpeg at Store -> Setup -> Media tools). The FFmpeg LIBRARIES still get BUILT
+# when the inactive audio/video bridge is on (BR2_PACKAGE_GST1_LIBAV selects BR2_PACKAGE_FFMPEG): web-post-build.sh and release-profile.sh
+# delete them from the image and park only the LGPL plugin glue. IYAKKI_RELEASE_AV_BRIDGE=0 drops the parked plugin too.
+# BR2_PACKAGE_FFMPEG_GPL is not set
+# BR2_PACKAGE_FFMPEG_NONFREE is not set
+# BR2_PACKAGE_FFMPEG_FFMPEG is not set
+# BR2_PACKAGE_FFMPEG_FFPROBE is not set
+# BR2_PACKAGE_X264 is not set
+# BR2_PACKAGE_X265 is not set
+# BR2_PACKAGE_LIBOPENH264 is not set
+# BR2_PACKAGE_FAAD2 is not set
+# BR2_PACKAGE_FDK_AAC is not set
+# BR2_PACKAGE_GST1_PLUGINS_UGLY is not set
+# BR2_PACKAGE_GST1_PLUGINS_UGLY_PLUGIN_X264 is not set
+# BR2_PACKAGE_GST1_PLUGINS_UGLY_PLUGIN_MPEG2DEC is not set
+# BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_OPENH264 is not set
+# BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_X265 is not set
+# BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_FAAD is not set
+# BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_FDK_AAC is not set
+# BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_MPEG2ENC is not set
+
+# ---- gst-plugins-bad: only plugins whose source files state a licence
+# Buildroot marks the package licence "UNKNOWN" for two plugins: mpegpsmux (files under MPL-1.1) and mpegtsdemux. mpegpsmux is not needed and is
+# off. mpegtsdemux CANNOT be turned off: WPE WebKit's multimedia option selects it (package/wpewebkit/Config.in:93) and the web engine
+# needs it for HLS and transport streams. Its 13 plugin files and the 23 files of the mpegts library state LGPL-2.0-or-later in their
+# headers (read 2026-10-27 in target/buildroot-web/build/gst1-plugins-bad-1.24.13); legal/image-rules.txt has the reviewed `accept` row,
+# with the list of plugins that were read. A plugin added to the set below needs its sources read and that row extended.
+# BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_MPEGPSMUX is not set
+# BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_MPEGTSMUX is not set
+# BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_DVB is not set
+# BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_DVBSUBENC is not set
+# BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_DVBSUBOVERLAY is not set
+# the set that stays (BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_*): DEBUGUTILS, MPEGTSDEMUX, SUBENC, VIDEOPARSERS, GL, OPUS, WAYLAND, WPE
+# (from iyakki_web.fragment and WPE's selects); with WEB_MEDIA=1 also WEBRTC, DTLS (BSD-2-Clause), SRTP and SCTP: not reviewed for a release.
+
+# ---- anything vendor-proprietary on the Buildroot side
+# NVIDIA: the open kernel modules (BR2_PACKAGE_NVIDIA_OPEN, MIT or GPL-2.0, optional) are source-available kernel code and may stay; the GSP
+# firmware and the user-space driver are downloaded by the person (docs/GPU-K3S.md) and are not Buildroot packages.
+# Apple: no Buildroot package carries Apple files; apple-bce is GPL-2.0 kernel code (licence text: legal/extra-licences/apple-bce/).

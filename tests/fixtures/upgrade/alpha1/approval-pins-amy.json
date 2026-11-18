@@ -1,0 +1,4 @@
+[
+  "shell:ls",
+  "k8s_get:default"
+]

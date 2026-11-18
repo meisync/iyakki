@@ -1,0 +1,18 @@
+[package]
+name = "iyakki-tile-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The narrow facade a tile crate builds on: the `App` trait, `Flow`, the context `TileCx` (trait objects for only what tiles use) and
+# the plain data those traits exchange. Rule (crates/iyakki-core/tests/dependency_ratchet.rs): depends on `iyakki-uikit` and on no
+# other `iyakki-*` crate, so a tile crate never pulls in the agent. The shell implements the traits with the real services.
+
+[features]
+# the toolkit-facing part (App, Flow, TileCx); off for the headless web service, which only needs the plain data of the modules
+default = ["ui"]
+ui = ["dep:iyakki-uikit"]
+
+[dependencies]
+iyakki-uikit = { path = "../iyakki-uikit", optional = true }
+serde = { version = "1", features = ["derive"] }

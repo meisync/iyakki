@@ -1,0 +1,261 @@
+//! The fast-start ("lean boot") files are left behind when a boot volume is copied to a disk.
+//!
+//! `dist/buildroot/lean-install.sh` adds the fast-start menu entries (a block between `# BEGIN lean-boot` and `# END lean-boot`
+//! in `boot/grub/grub.cfg`, managed by `dist/buildroot/lean-sync.py`) and `boot/initrd-lean` to a stick whose data volume holds the
+//! lean tree. A new install has no lean tree and no data volume yet, so a copied block would make fast start the first entry and
+//! the first boot would wait for a data volume that does not exist. The installer therefore copies the boot volume without the
+//! block and without the lean-only files. [`LeanFree`] is the [`Editor`] that does it while the volume is cloned.
+
+use crate::fatclone::{Edit, Editor};
+
+/// The markers of the block, exactly as `lean-sync.py` writes and finds them (`B1`, `B2`).
+pub const BEGIN: &str = "# BEGIN lean-boot";
+pub const END: &str = "# END lean-boot";
+
+/// The grub.cfg without the lean block (and the one blank line after it): the same algorithm as `lean-sync.py grubstrip`.
+/// Unchanged when there is no block.
+pub fn strip_lean_block(cfg: &str) -> String {
+    let (Some(a), true) = (cfg.find(BEGIN), cfg.contains(END)) else { return cfg.to_string() };
+    let Some(e) = cfg[a..].find(END).map(|i| a + i) else { return cfg.to_string() };
+    // the block ends at the end of the line that holds the END marker
+    let mut b = cfg[e..].find('\n').map_or(cfg.len(), |i| e + i + 1);
+    if cfg[b..].starts_with('\n') {
+        b += 1;
+    }
+    format!("{}{}", &cfg[..a], &cfg[b..])
+}
+
+/// The menu text for a disk that has no lean tree: the block is removed and the default entry is the normal one, "IYAKKI".
+pub fn clean_grub_cfg(cfg: &str) -> String {
+    let mut base = strip_lean_block(cfg);
+    // The block also holds the only definition of `$iyakki_initrd` and `$iyakki_fast`, which every menu entry reads: without them GRUB starts the kernel with no RAM disk
+    // ("VFS: Unable to mount root fs", found 2026-11-14 by dist/qemu/bios-shared-disk-test.sh on a copy of the plain install image). Put the plain definitions where the block was.
+    if let Some(a) = cfg.find(BEGIN) {
+        if base.contains("$iyakki_initrd") && !base.contains("set iyakki_initrd=") && a <= base.len() && base.is_char_boundary(a) {
+            let path = cfg[a..].lines().find_map(|l| l.trim().strip_prefix("set iyakki_initrd=")).filter(|p| !p.is_empty() && !p.ends_with("-lean")).unwrap_or("/boot/initrd");
+            base.insert_str(a, &format!("set iyakki_initrd={path}\nset iyakki_fast=\"\"\nexport iyakki_initrd\nexport iyakki_fast\n\n"));
+        }
+    }
+    let first = base.lines().find_map(|l| l.trim_start().strip_prefix("menuentry \"")).and_then(|r| r.split('"').next());
+    let has_normal = base.contains("menuentry \"IYAKKI\"");
+    if first == Some("IYAKKI") || !has_normal {
+        return base;
+    }
+    // the first entry is not the normal one (the template is unexpected): name the default instead of relying on position
+    let mut done = false;
+    let mut out: Vec<String> = base
+        .lines()
+        .map(|l| {
+            if !done && l.trim_start().starts_with("set default=") {
+                done = true;
+                "set default=\"IYAKKI\"".to_string()
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+    if !done {
+        out.insert(0, "set default=\"IYAKKI\"".to_string());
+    }
+    let mut s = out.join("\n");
+    if base.ends_with('\n') {
+        s.push('\n');
+    }
+    s
+}
+
+/// Files that only the fast start uses or leaves behind (path as the volume stores it, any case).
+pub fn is_lean_only(path: &str) -> bool {
+    let p = path.to_ascii_lowercase();
+    let name = p.rsplit('/').next().unwrap_or("");
+    name.starts_with("initrd-lean") || name == "stage1.log" || name == "iyakki-lean-failed" || name.ends_with(".before-lean")
+}
+
+/// Does the volume carry its own root (`boot/root.sfs`)?
+pub fn own_root(paths: &[String]) -> bool {
+    paths.iter().any(|p| p.eq_ignore_ascii_case("/boot/root.sfs"))
+}
+
+/// What a stick leaves behind when it runs: not copied to a new disk.
+pub fn is_leftover(path: &str) -> bool {
+    let p = path.to_ascii_lowercase();
+    let name = p.rsplit('/').next().unwrap_or("");
+    name == "stage1.log" || name == "iyakki-lean-failed" || name.ends_with(".before-lean")
+}
+
+/// Does this boot volume carry anything the installer would leave out? (Only then the copy goes through the editing cloner.)
+pub fn needs_cleaning(paths: &[String], grub_cfg: Option<&str>) -> bool {
+    // a boot volume that carries its own root (`boot/root.sfs`: the image's standard fast start) is complete: its small RAM disk, its
+    // menu variables and the root belong together, and the copy keeps them all (without them the new disk would have no RAM disk at all)
+    if own_root(paths) {
+        // only the leftovers of the stick's own runs (the stage-1 log, a failure marker) stay behind
+        return paths.iter().any(|p| is_leftover(p));
+    }
+    paths.iter().any(|p| is_lean_only(p)) || grub_cfg.is_some_and(|c| c.contains(BEGIN))
+}
+
+/// The [`Editor`]: drops the lean-only files and rewrites `boot/grub/grub.cfg`.
+pub struct LeanFree {
+    pub dropped: Vec<String>,
+    pub menu_changed: bool,
+    /// The volume carries its own root: the small RAM disk and the menu stay, only the leftovers of the stick's runs are dropped.
+    pub own_root: bool,
+}
+
+impl LeanFree {
+    pub fn new() -> LeanFree {
+        LeanFree { dropped: vec![], menu_changed: false, own_root: false }
+    }
+}
+
+impl Default for LeanFree {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn is_grub_cfg(path: &str) -> bool {
+    path.eq_ignore_ascii_case("/boot/grub/grub.cfg")
+}
+
+fn is_loader_cfg(path: &str) -> bool {
+    path.eq_ignore_ascii_case("/EFI/iyakki-boot/boot.cfg")
+}
+
+impl Editor for LeanFree {
+    fn decide(&mut self, path: &str) -> Edit {
+        if (self.own_root && is_leftover(path)) || (!self.own_root && is_lean_only(path)) {
+            self.dropped.push(path.to_string());
+            Edit::Skip
+        } else if (is_grub_cfg(path) || is_loader_cfg(path)) && !self.own_root {
+            Edit::Rewrite
+        } else {
+            Edit::Keep
+        }
+    }
+
+    fn rewrite(&mut self, path: &str, data: Vec<u8>) -> Vec<u8> {
+        if is_loader_cfg(path) {
+            // the lean RAM disk is left out of the copy: the loader menu must name the full one (KI-200)
+            let Ok(text) = String::from_utf8(data.clone()) else { return data };
+            let (fixed, _) = iyakki_storage::bootcfg::fix_text(&text, &|p: &str| !p.ends_with("-lean"), false);
+            return fixed.into_bytes();
+        }
+        if !is_grub_cfg(path) {
+            return data;
+        }
+        let Ok(text) = String::from_utf8(data.clone()) else { return data };
+        let clean = clean_grub_cfg(&text);
+        self.menu_changed = clean != text;
+        clean.into_bytes()
+    }
+}
+
+/// The sample menu of the tests, for the cloner's test too.
+#[cfg(test)]
+pub(crate) fn tests_sample() -> &'static str {
+    tests::SAMPLE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shape of dist/buildroot/board/iyakki/grub.cfg after lean-install.sh (the block text is the real one).
+    pub(crate) const SAMPLE: &str = "set default=\"0\"\nset timeout=\"3\"\n\n# BEGIN lean-boot (this block is managed by dist/buildroot/lean-install.sh and lean-sync.py; the markers are how they find the block again)\ninsmod test\nif [ -f /boot/initrd-lean ]; then\n\tif [ -f $prefix/iyakki-lean-failed ]; then\n\t\tset default=\"IYAKKI\"\n\tfi\n\tmenuentry \"IYAKKI - fast start (lean boot)\" {\n\t\tlinux /boot/bzImage quiet\n\t\tinitrd /boot/initrd-lean\n\t}\nfi\n# END lean-boot\n\nmenuentry \"IYAKKI\" {\n\tlinux /boot/bzImage quiet\n\tinitrd /boot/initrd\n}\n\nmenuentry \"IYAKKI - Install to a disk\" {\n}\n";
+
+    #[test]
+    fn a_boot_volume_with_its_own_root_is_copied_whole() {
+        let own = vec!["/boot/bzImage".to_string(), "/boot/initrd-lean".to_string(), "/boot/root.sfs".to_string()];
+        assert!(!needs_cleaning(&own, Some(SAMPLE)), "the seed-root image is complete: nothing is left out");
+        let used = vec!["/boot/initrd-lean".to_string(), "/boot/root.sfs".to_string(), "/boot/stage1.log".to_string()];
+        assert!(needs_cleaning(&used, Some(SAMPLE)), "a stick that ran leaves a log behind: it is not copied");
+        let mut e = LeanFree { own_root: true, ..LeanFree::new() };
+        assert_eq!((e.decide("/boot/stage1.log"), e.decide("/boot/initrd-lean"), e.decide("/boot/grub/grub.cfg")), (Edit::Skip, Edit::Keep, Edit::Keep));
+        let addon = vec!["/boot/bzImage".to_string(), "/boot/initrd-lean".to_string()];
+        assert!(needs_cleaning(&addon, Some(SAMPLE)), "an add-on fast start (tree on the data volume) is still left out");
+    }
+
+    #[test]
+    fn the_lean_block_is_taken_out_with_the_same_markers_as_lean_sync() {
+        // the markers are the ones lean-sync.py defines (B1, B2) and the template carries
+        for f in ["../../dist/buildroot/lean-sync.py", "../../dist/buildroot/board/iyakki/grub.cfg"] {
+            if let Ok(t) = std::fs::read_to_string(f) {
+                assert!(t.contains(BEGIN) && t.contains(END), "{f}");
+            }
+        }
+        let s = strip_lean_block(SAMPLE);
+        assert!(!s.contains("lean") && !s.contains("fast start") && !s.contains("insmod test"), "{s}");
+        assert!(s.contains("menuentry \"IYAKKI\" {") && s.contains("Install to a disk"));
+        // the blank line after the block goes with it, the one before stays: nothing else changes
+        assert_eq!(s, SAMPLE.replace(&SAMPLE[SAMPLE.find(BEGIN).unwrap()..SAMPLE.find("menuentry \"IYAKKI\" {").unwrap()], ""));
+        // no block: unchanged; stripping twice changes nothing more
+        assert_eq!(strip_lean_block("menuentry \"IYAKKI\" {\n}\n"), "menuentry \"IYAKKI\" {\n}\n");
+        assert_eq!(strip_lean_block(&s), s);
+        // a begin marker without an end marker is left alone
+        assert_eq!(strip_lean_block("# BEGIN lean-boot\nx\n"), "# BEGIN lean-boot\nx\n");
+    }
+
+    #[test]
+    fn the_default_entry_of_the_cleaned_menu_is_the_normal_iyakki_entry() {
+        let c = clean_grub_cfg(SAMPLE);
+        assert!(c.starts_with("set default=\"0\""));
+        let entries: Vec<&str> = c.lines().filter_map(|l| l.strip_prefix("menuentry \"")).collect();
+        assert_eq!(entries[0], "IYAKKI\" {", "{entries:?}");
+        // a template whose first entry is not the normal one gets the default named
+        let odd = "set default=\"0\"\nmenuentry \"Other\" {\n}\nmenuentry \"IYAKKI\" {\n}\n";
+        assert!(clean_grub_cfg(odd).starts_with("set default=\"IYAKKI\"\n"));
+        let plain = "set default=\"0\"\nmenuentry \"IYAKKI\" {\n}\n";
+        assert_eq!(clean_grub_cfg(plain), plain);
+    }
+
+    #[test]
+    fn the_cleaned_menu_still_defines_the_ram_disk_its_entries_read() {
+        // the real template: every entry reads `initrd $iyakki_initrd`
+        let cfg = SAMPLE.replace("menuentry \"IYAKKI\" {\n", "menuentry \"IYAKKI\" {\n\tinitrd $iyakki_initrd\n");
+        let c = clean_grub_cfg(&cfg);
+        assert!(c.contains("$iyakki_initrd"), "the entries read the variable");
+        assert!(c.contains("set iyakki_initrd=/boot/initrd\n") && !c.contains("-lean") && !c.contains("lean-boot"), "{c}");
+        assert!(c.contains("set iyakki_fast=\"\"") && c.contains("export iyakki_initrd") && c.contains("export iyakki_fast"));
+        assert!(c.find("set iyakki_initrd=").unwrap() < c.find("menuentry \"IYAKKI\" {").unwrap(), "defined before the first entry");
+        // a menu that never had a block, or whose entries do not read the variable, is not touched
+        let plain = "set default=\"0\"\nmenuentry \"IYAKKI\" {\n\tinitrd /boot/initrd\n}\n";
+        assert_eq!(clean_grub_cfg(plain), plain);
+    }
+
+    #[test]
+    fn only_fast_start_files_are_dropped() {
+        for p in ["/boot/initrd-lean", "/BOOT/INITRD-LEAN", "/boot/initrd-lean.tmp", "/boot/stage1.log", "/boot/grub/grub.cfg.before-lean", "/boot/grub/iyakki-lean-failed"] {
+            assert!(is_lean_only(p), "{p}");
+        }
+        for p in ["/boot/initrd", "/boot/bzImage", "/boot/grub/grub.cfg", "/EFI/BOOT/BOOTX64.EFI", "/boot/grub/fonts/unicode.pf2"] {
+            assert!(!is_lean_only(p), "{p}");
+        }
+        assert!(needs_cleaning(&["/boot/stage1.log".into()], None));
+        assert!(needs_cleaning(&[], Some(SAMPLE)));
+        assert!(!needs_cleaning(&["/boot/initrd".into()], Some("menuentry \"IYAKKI\" {\n}\n")));
+    }
+
+    #[test]
+    fn the_editor_drops_files_and_rewrites_only_the_menu() {
+        let mut e = LeanFree::new();
+        assert_eq!(e.decide("/boot/initrd-lean"), Edit::Skip);
+        assert_eq!(e.decide("/boot/initrd"), Edit::Keep);
+        assert_eq!(e.decide("/boot/grub/GRUB.CFG"), Edit::Rewrite);
+        let out = e.rewrite("/boot/grub/GRUB.CFG", SAMPLE.as_bytes().to_vec());
+        assert!(e.menu_changed && !String::from_utf8(out).unwrap().contains("lean-boot"));
+        assert_eq!(e.dropped, vec!["/boot/initrd-lean".to_string()]);
+    }
+    #[test]
+    fn the_loader_menu_of_a_copy_without_the_lean_disk_names_the_full_one() {
+        let mut e = LeanFree::new();
+        assert_eq!(e.decide("/EFI/iyakki-boot/boot.cfg"), Edit::Rewrite);
+        let cfg = "entry iyakki\n  kind linux\n  kernel /boot/bzImage\n  initrd /boot/initrd-lean\n  cmdline q\n\nentry other\n  initrd /EFI/iyakki-boot/prev/initrd\n";
+        let out = String::from_utf8(e.rewrite("/EFI/iyakki-boot/boot.cfg", cfg.as_bytes().to_vec())).unwrap();
+        assert!(out.contains("initrd /boot/initrd\n") && !out.contains("initrd-lean") && out.contains("prev/initrd\n"), "{out}");
+        // a volume that keeps its own root keeps its menu as it is
+        let mut own = LeanFree::new();
+        own.own_root = true;
+        assert_eq!(own.decide("/EFI/iyakki-boot/boot.cfg"), Edit::Keep);
+    }
+}

@@ -1,0 +1,6 @@
+# Known places where what the person SEES does not yet meet the gate (checked by `cargo test -p iyakki-agent --test licence_gate`).
+# A new gap fails the test; a row whose gap is fixed must be removed. Release gate point 7 wants none left. id | reason | date
+# ---- store catalogue entries (store/builtin.rs) that show NO licence string. The CLI entries get their licence from the CLI tile only.
+# ---- driver instruction entries (store/drivers.rs) show the licence "-" because they lead to the Drivers view and ship nothing
+# ---- Quick install items whose licence text does not say "downloaded / pulled, not shipped" (qi: prefix)
+# (none: closed 2026-10-27. Every built-in store entry shows a licence, and every restricted Quick install item says it is downloaded / pulled and never shipped.)

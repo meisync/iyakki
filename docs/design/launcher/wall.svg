@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080">
+<defs>
+<linearGradient id="sky" x1="0" y1="0" x2="1" y2="1">
+<stop offset="0" stop-color="#2E5FD8"/><stop offset=".38" stop-color="#5A7FE8"/>
+<stop offset=".68" stop-color="#C97BC0"/><stop offset="1" stop-color="#F2A77E"/></linearGradient>
+<linearGradient id="r1" x1="0" y1="0" x2="1" y2="0">
+<stop offset="0" stop-color="#8FD4FF" stop-opacity=".95"/><stop offset=".5" stop-color="#C2A8FF" stop-opacity=".85"/>
+<stop offset="1" stop-color="#FFB8A0" stop-opacity=".9"/></linearGradient>
+<linearGradient id="r2" x1="0" y1="0" x2="1" y2="1">
+<stop offset="0" stop-color="#FFE3B0" stop-opacity=".9"/><stop offset="1" stop-color="#FF9BC4" stop-opacity=".75"/></linearGradient>
+<linearGradient id="r3" x1="1" y1="0" x2="0" y2="1">
+<stop offset="0" stop-color="#7CF0D8" stop-opacity=".85"/><stop offset="1" stop-color="#4C8CF5" stop-opacity=".7"/></linearGradient>
+<radialGradient id="glow" cx=".26" cy=".18" r=".6">
+<stop offset="0" stop-color="#FFFFFF" stop-opacity=".55"/><stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/></radialGradient>
+<filter id="soft"><feGaussianBlur stdDeviation="26"/></filter>
+<filter id="soft2"><feGaussianBlur stdDeviation="54"/></filter>
+</defs>
+<rect width="1920" height="1080" fill="url(#sky)"/>
+<g filter="url(#soft2)" opacity=".9">
+<path d="M-200 700 C 320 430, 700 880, 1150 560 S 1800 300, 2120 460 L 2120 1180 L -200 1180 Z" fill="url(#r3)"/>
+</g>
+<g filter="url(#soft)" opacity=".85">
+<path d="M-150 420 C 300 250, 640 560, 1020 330 S 1700 120, 2080 250" stroke="url(#r1)" stroke-width="180" fill="none" stroke-linecap="round"/>
+<path d="M-150 640 C 380 470, 720 780, 1120 540 S 1760 360, 2080 500" stroke="url(#r2)" stroke-width="120" fill="none" stroke-linecap="round" opacity=".8"/>
+<path d="M-100 880 C 420 700, 780 980, 1240 760 S 1820 620, 2080 720" stroke="url(#r1)" stroke-width="90" fill="none" stroke-linecap="round" opacity=".6"/>
+</g>
+<ellipse cx="500" cy="190" rx="620" ry="420" fill="url(#glow)"/>
+</svg>

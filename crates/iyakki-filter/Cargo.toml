@@ -1,0 +1,12 @@
+[package]
+name = "iyakki-filter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The site, address and URL filter matcher (FilterSet) and the address checks it needs: split out of iyakki-vpn so the browser headers, the SSH tunnels and the VPN use one matcher. No sockets, no dependencies beyond serde."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

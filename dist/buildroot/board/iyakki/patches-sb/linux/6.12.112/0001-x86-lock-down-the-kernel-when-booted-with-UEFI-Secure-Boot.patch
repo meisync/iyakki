@@ -1,0 +1,106 @@
+From: IYAKKI <noreply@iyakki.invalid>
+Subject: [PATCH] x86: lock down the kernel when it is booted with UEFI Secure Boot
+
+The stock kernel (6.12) knows the lockdown LSM and reads the firmware's
+Secure Boot state ("Secure boot enabled" in the log), but it does not lock
+itself down when Secure Boot is on: that step was never merged upstream, and
+distributions carry it. Without it, a Secure Boot machine would still load
+unsigned modules (MODULE_SIG_FORCE is off so that driver packs load with
+Secure Boot off) and allow /dev/mem, kexec and the like, which makes the
+signed boot chain pointless.
+
+Make the lockdown function usable from arch code (security_lock_kernel_down)
+and call it with LOCKDOWN_INTEGRITY_MAX when the EFI stub reported Secure
+Boot enabled. With Secure Boot off nothing changes.
+
+Same idea as the patch Debian, Fedora and Ubuntu carry
+("efi: Lock down the kernel at boot time if we are booted in secure boot
+mode", David Howells, Matthew Garrett); written again here against 6.12.112.
+GPL-2.0, like the files it changes. Carried by IYAKKI on every x86-64 image
+(dist/buildroot/configs/iyakki_x86_64_defconfig); not sent upstream.
+
+---
+diff --git a/arch/x86/kernel/setup.c b/arch/x86/kernel/setup.c
+--- a/arch/x86/kernel/setup.c
++++ b/arch/x86/kernel/setup.c
+@@ -11,6 +11,7 @@
+ #include <linux/crash_dump.h>
+ #include <linux/dma-map-ops.h>
+ #include <linux/efi.h>
++#include <linux/security.h>
+ #include <linux/ima.h>
+ #include <linux/init_ohci1394_dma.h>
+ #include <linux/initrd.h>
+@@ -1077,6 +1078,8 @@
+ 			break;
+ 		case efi_secureboot_mode_enabled:
+ 			pr_info("Secure boot enabled\n");
++			/* Secure Boot is on: no unsigned code in the kernel (module signatures, /dev/mem, kexec, ...) */
++			security_lock_kernel_down("UEFI Secure Boot mode", LOCKDOWN_INTEGRITY_MAX);
+ 			break;
+ 		default:
+ 			pr_info("Secure boot could not be determined\n");
+diff --git a/include/linux/security.h b/include/linux/security.h
+--- a/include/linux/security.h
++++ b/include/linux/security.h
+@@ -153,6 +153,15 @@
+ 	LOCKDOWN_CONFIDENTIALITY_MAX,
+ };
+ 
++#ifdef CONFIG_SECURITY_LOCKDOWN_LSM
++extern int security_lock_kernel_down(const char *where, enum lockdown_reason level);
++#else
++static inline int security_lock_kernel_down(const char *where, enum lockdown_reason level)
++{
++	return 0;
++}
++#endif
++
+ extern const char *const lockdown_reasons[LOCKDOWN_CONFIDENTIALITY_MAX+1];
+ extern u32 lsm_active_cnt;
+ extern const struct lsm_id *lsm_idlist[];
+diff --git a/security/lockdown/lockdown.c b/security/lockdown/lockdown.c
+--- a/security/lockdown/lockdown.c
++++ b/security/lockdown/lockdown.c
+@@ -24,7 +24,7 @@
+ /*
+  * Put the kernel into lock-down mode.
+  */
+-static int lock_kernel_down(const char *where, enum lockdown_reason level)
++int security_lock_kernel_down(const char *where, enum lockdown_reason level)
+ {
+ 	if (kernel_locked_down >= level)
+ 		return -EPERM;
+@@ -41,9 +41,9 @@
+ 		return -EINVAL;
+ 
+ 	if (strcmp(level, "integrity") == 0)
+-		lock_kernel_down("command line", LOCKDOWN_INTEGRITY_MAX);
++		security_lock_kernel_down("command line", LOCKDOWN_INTEGRITY_MAX);
+ 	else if (strcmp(level, "confidentiality") == 0)
+-		lock_kernel_down("command line", LOCKDOWN_CONFIDENTIALITY_MAX);
++		security_lock_kernel_down("command line", LOCKDOWN_CONFIDENTIALITY_MAX);
+ 	else
+ 		return -EINVAL;
+ 
+@@ -84,9 +84,9 @@
+ static int __init lockdown_lsm_init(void)
+ {
+ #if defined(CONFIG_LOCK_DOWN_KERNEL_FORCE_INTEGRITY)
+-	lock_kernel_down("Kernel configuration", LOCKDOWN_INTEGRITY_MAX);
++	security_lock_kernel_down("Kernel configuration", LOCKDOWN_INTEGRITY_MAX);
+ #elif defined(CONFIG_LOCK_DOWN_KERNEL_FORCE_CONFIDENTIALITY)
+-	lock_kernel_down("Kernel configuration", LOCKDOWN_CONFIDENTIALITY_MAX);
++	security_lock_kernel_down("Kernel configuration", LOCKDOWN_CONFIDENTIALITY_MAX);
+ #endif
+ 	security_add_hooks(lockdown_hooks, ARRAY_SIZE(lockdown_hooks),
+ 			   &lockdown_lsmid);
+@@ -140,7 +140,7 @@
+ 		const char *label = lockdown_reasons[level];
+ 
+ 		if (label && !strcmp(state, label))
+-			err = lock_kernel_down("securityfs", level);
++			err = security_lock_kernel_down("securityfs", level);
+ 	}
+ 
+ 	kfree(state);

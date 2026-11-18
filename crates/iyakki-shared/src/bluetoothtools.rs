@@ -1,0 +1,5 @@
+//! Types moved out of `iyakki_agent::bluetoothtools` (F-SPLIT-03, scripted by dist/split/move_types.py); the agent re-exports them.
+
+
+
+pub const PROMPT_RULE: &str = "\nBluetooth: bluetooth_list shows the paired keyboards, mice and game pads and whether each is connected (and, when a connection failed, why). To connect, disconnect or forget one, call bluetooth_connect, bluetooth_disconnect or bluetooth_forget: each asks the person. Pairing a new device needs the person at the device: use the pairing tools (bluetooth_scan, bluetooth_pair) or send them to Settings -> Bluetooth. Sending sound from this computer to Bluetooth headphones or speakers is not available yet: say so plainly (a phone playing through this computer is available, see the Bluetooth audio tools). A paired phone shares its internet with bluetooth_tether_connect (asks; Bluetooth tethering must be switched on in the phone, the person does that) and bluetooth_tether_disconnect (asks); bluetooth_tether_status shows whether it is up and, if not, why. Phone data may cost the person money: say that the traffic goes through the phone.";

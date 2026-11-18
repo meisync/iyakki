@@ -1,0 +1,6 @@
+# OPTIONAL (WEB_CROCUS=1 ./build.sh web|macweb): Mesa's crocus driver for Intel gen4-7 GPUs (Sandy Bridge .. Haswell: the HD 5000 of the
+# Mac mini 2014 / Macmini7,1). iris does NOT support Haswell; crocus does (Mesa 22+ removed the old i965 classic driver). Mesa 26 builds
+# crocus with its precompiled OpenCL compiler (Buildroot selects that only through iris), so build.sh appends iyakki_web_iris.fragment
+# first when this one is used: hours more and about a gigabyte. Not needed for page rendering (the helper draws through shared memory);
+# only WebGL and GStreamer GL use the GPU driver. Without it Intel GPUs fall back to llvmpipe (software). UNVERIFIED: never built.
+BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_CROCUS=y

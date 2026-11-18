@@ -1,0 +1,18 @@
+[package]
+name = "iyakki-disksx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The disk engine (listing, plans, mount, partition, format, encrypted volumes) that the UI and the agent share, split out of iyakki-agent for F-SPLIT-03."
+
+# No agent code and no Services: the engine takes a machine (`DiskEnv`) and a program runner as arguments.
+[dependencies]
+iyakki-sec.workspace = true
+iyakki-shared.workspace = true
+iyakki-storage.workspace = true
+iyakki-diskcrypt.workspace = true
+iyakki-usb = { path = "../iyakki-usb" }
+iyakki-core-api.workspace = true
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Fixture: chat</title>
+<style>body{font:16px sans-serif;margin:24px;max-width:560px}#log{height:200px;overflow:auto;border:1px solid #888;padding:8px}#box{border:1px solid #888;min-height:2em;padding:6px;margin-top:8px}</style></head>
+<body>
+<h1>Fixture chat</h1>
+<div id="log" role="log" aria-label="Conversation"><div>Hello! Ask me anything.</div></div>
+<div id="box" contenteditable="true" role="textbox" aria-label="Message"></div>
+<button id="send">Send</button>
+<script>
+function add(t) { var d = document.createElement('div'); d.textContent = t; var l = document.getElementById('log'); l.appendChild(d); l.scrollTop = l.scrollHeight; }
+document.getElementById('send').addEventListener('click', function () {
+  var b = document.getElementById('box'), t = b.textContent.trim();
+  if (!t) return;
+  add('You: ' + t); b.textContent = '';
+  setTimeout(function () { add('Bot: you said "' + t + '". The capital of France is Paris.'); }, 900);
+});
+document.getElementById('box').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); document.getElementById('send').click(); } });
+</script></body></html>

@@ -1,0 +1,84 @@
+# IYAKKI kernel fragment for Apple Silicon bare metal (M1/M2, later M3), applied on top of the linux-asahi tree's
+# own defconfig (arch/arm64/configs/asahi.config + defconfig), AFTER board/iyakki-aarch64/linux.fragment.
+# NOT BUILT, NOT BOOTED. Written from the Asahi feature tables (docs/APPLE-SILICON.md); the symbol names must be
+# checked against the pinned linux-asahi tree with  dist/asahi/verify-asahi-kernel-config.sh  (some symbols exist only there).
+
+# ---- mandatory for the SoC ----------------------------------------------------
+# Apple's MMU uses 16 KiB pages; the userspace of the image (musl, Rust) is built for 4K-or-larger pages, which is fine.
+CONFIG_ARM64_16K_PAGES=y
+CONFIG_ARCH_APPLE=y
+CONFIG_APPLE_AIC=y
+CONFIG_APPLE_DART=y
+CONFIG_APPLE_MAILBOX=y
+CONFIG_APPLE_RTKIT=y
+CONFIG_APPLE_SART=y
+CONFIG_PINCTRL_APPLE_GPIO=y
+CONFIG_I2C_APPLE=y
+CONFIG_SPI_APPLE=y
+CONFIG_ARM_APPLE_SOC_CPUFREQ=y
+CONFIG_APPLE_M1_CPU_PMU=y
+CONFIG_SERIAL_SAMSUNG=y
+CONFIG_SERIAL_SAMSUNG_CONSOLE=y
+CONFIG_PWM_APPLE=m
+
+# ---- storage and PCIe (the internal SSD is NVMe behind Apple's ANS co-processor) ----------------------------
+CONFIG_NVME_APPLE=y
+CONFIG_PCIE_APPLE=y
+CONFIG_PCI_HOST_GENERIC=y
+
+# ---- power, SMC, RTC, battery, reset ------------------------------------------------------------------------
+CONFIG_MFD_MACSMC=y
+CONFIG_GPIO_MACSMC=y
+CONFIG_RTC_DRV_MACSMC=y
+CONFIG_POWER_RESET_MACSMC=y
+CONFIG_CHARGER_MACSMC=m
+CONFIG_SPMI=y
+CONFIG_SPMI_APPLE=y
+CONFIG_MFD_SPMI_PMIC=y
+CONFIG_NVMEM_SPMI_MFD=y
+CONFIG_NVMEM_APPLE_EFUSES=y
+CONFIG_APPLE_WATCHDOG=y
+
+# ---- USB-C (Type-C port controller + PHY + DWC3), needed for a stick, keyboard and Ethernet ------------------
+CONFIG_USB_DWC3=y
+CONFIG_USB_DWC3_DUAL_ROLE=y
+CONFIG_USB_DWC3_APPLE=y
+CONFIG_PHY_APPLE_ATC=y
+CONFIG_PHY_APPLE_DPTX=m
+CONFIG_TYPEC=y
+CONFIG_TYPEC_TPS6598X=y
+CONFIG_USB_XHCI_PCI_RENESAS=m
+
+# ---- screen: the boot framebuffer m1n1 hands over, then the display controller (DCP) ----------------------
+CONFIG_DRM_SIMPLEDRM=y
+CONFIG_SYSFB_SIMPLEFB=y
+CONFIG_FB_SIMPLE=y
+CONFIG_DRM_APPLE=m
+CONFIG_BACKLIGHT_CLASS_DEVICE=y
+CONFIG_APPLE_DWI_BACKLIGHT=m
+# GPU (Honeykrisp in Mesa, Rust DRM driver): linux-asahi only; the shell needs no GPU, so keep it a module
+CONFIG_RUST=y
+CONFIG_DRM_ASAHI=m
+
+# ---- keyboard and trackpad (laptops: SPI HID; desktops: USB) -----------------------------------------------
+CONFIG_HID_APPLE=y
+CONFIG_SPI_HID_APPLE_OF=m
+CONFIG_SPI_HID_APPLE_CORE=m
+CONFIG_HID_MAGICMOUSE=m
+CONFIG_INPUT_EVDEV=y
+
+# ---- Wi-Fi, Bluetooth, audio (firmware: from the Mac's own macOS, never shipped) --------------------------------
+CONFIG_BRCMFMAC=m
+CONFIG_BRCMFMAC_PCIE=y
+CONFIG_BT_HCIBCM4377=m
+CONFIG_SND_SOC=y
+CONFIG_SND_SOC_APPLE_MCA=m
+CONFIG_SND_SOC_APPLE_MACAUDIO=m
+CONFIG_SND_SOC_CS42L84=m
+CONFIG_SND_SOC_TAS2764=m
+CONFIG_SND_SOC_TAS2770=m
+CONFIG_SND_SIMPLE_CARD=m
+
+# ---- firmware lookup: the installer leaves the extracted Apple firmware on the ESP as vendorfw/ -----------------
+CONFIG_FW_LOADER=y
+CONFIG_EXTRA_FIRMWARE_DIR="/vendorfw"

@@ -1,0 +1,8 @@
+# keep the build context small: build output, VCS data and local state never go into the image build
+target
+**/target
+.git
+.claude
+*.iso
+*.img
+crates/iyakki-gui

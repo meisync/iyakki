@@ -1,0 +1,10 @@
+{"kind":"NodeList","items":[
+{"metadata":{"name":"iyakki-dev","creationTimestamp":"2026-10-20T08:00:00Z","labels":{"node-role.kubernetes.io/control-plane":"true","node-role.kubernetes.io/master":"true","kubernetes.io/hostname":"iyakki-dev"}},
+ "spec":{},
+ "status":{"allocatable":{"cpu":"4","memory":"8000000Ki"},"nodeInfo":{"kubeletVersion":"v1.31.4+k3s1"},
+  "conditions":[{"type":"MemoryPressure","status":"False"},{"type":"DiskPressure","status":"False"},{"type":"PIDPressure","status":"False"},{"type":"Ready","status":"True","lastTransitionTime":"2026-10-28T09:00:00Z","message":"kubelet is posting ready status"}]}},
+{"metadata":{"name":"worker-2","creationTimestamp":"2026-10-25T08:00:00Z","labels":{"node-role.kubernetes.io/worker":""}},
+ "spec":{"unschedulable":true},
+ "status":{"allocatable":{"cpu":"2","memory":"4000000Ki"},"nodeInfo":{"kubeletVersion":"v1.31.4+k3s1"},
+  "conditions":[{"type":"MemoryPressure","status":"True"},{"type":"DiskPressure","status":"False"},{"type":"Ready","status":"False","lastTransitionTime":"2026-10-28T10:00:00Z","message":"Kubelet stopped posting node status."}]}}
+]}

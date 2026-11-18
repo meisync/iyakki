@@ -1,0 +1,53 @@
+IYAKKI — An OS for Agents
+Copyright 2026 IYAKKI contributors
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Except for the third-party material named in this file, the code in this repository was written for this project. Third-party Rust
+dependencies are used under their own permissive licenses (Apache-2.0, MIT,
+BSD, ISC, Unicode, Zlib, ...); `cargo deny check licenses` (config: deny.toml)
+enforces this in CI and fails on any copyleft or unknown license.
+
+The browser's JavaScript engine is QuickJS-ng (https://github.com/quickjs-ng/quickjs), used under the MIT License:
+  Copyright (c) 2017-2026 Fabrice Bellard
+  Copyright (c) 2017-2024 Charlie Gordon
+  Copyright (c) 2023-2026 Ben Noordhuis
+Its source is vendored in crates/iyakki-js/vendor/quickjs-ng-0.17.0 together with its LICENSE file. It is compiled to
+WebAssembly with the WASI SDK (LLVM, Apache-2.0 with LLVM exceptions), which links the WASI libc (wasi-libc: MIT and
+Apache-2.0 with LLVM exceptions, with parts derived from musl, MIT) into crates/iyakki-js/assets/iyakki-js.wasm.
+
+
+nanomp3 / nanomp3-core 0.2 (MIT OR Apache-2.0), a pure Rust port of minimp3 (CC0), decodes the MP3 radio streams.
+
+The text is drawn with the DejaVu fonts (DejaVu Sans, Bold and Mono), which are free to use and redistribute under the
+Bitstream Vera / DejaVu license; the license text is in crates/iyakki-shell/assets/DEJAVU-LICENSE.txt and travels with the fonts.
+Settings also offers Liberation Sans, Sans Bold and Mono (Digitized data copyright (c) 2010 Google Corporation, copyright (c) 2012 Red Hat, Inc.; SIL Open Font License 1.1, text in crates/iyakki-shell/assets/LIBERATION-LICENSE.txt).
+Hindi, Bengali, Gurmukhi, Gujarati, Tamil, Telugu, Kannada, Malayalam, Arabic and Hebrew text is drawn with Noto Sans fonts (Copyright Google Inc. / Google LLC), licensed under the SIL Open Font License 1.1; the license text is in crates/iyakki-shell/assets/NOTO-OFL-LICENSE.txt. Text shaping uses rustybuzz (MIT) and unicode-bidi (MIT or Apache-2.0).
+
+Radio stations offered as starting points were taken from the public Radio Browser directory (https://www.radio-browser.info);
+the station names and streams belong to their broadcasters, and IYAKKI only links to the public streams.
+
+Command-line tools installed from the CLI tile (kubectl, k3s, Helm, Terraform, GitHub CLI, AWS CLI, Google Cloud CLI, Azure CLI,
+Arduino CLI, esptool, espflash) and the container images used for running code (python, node, alpine) are downloaded
+from their vendors when a person asks for them. They are not part of IYAKKI and keep their own licenses.
+
+Optional full web engine (only in the separate "web" image variant, never in the default images; see docs/FULL-BROWSER.md and
+LICENSING.md item 9): WPE WebKit (LGPL-2.1+ / BSD-2-Clause), Cog (MIT), cage (MIT), wlroots (MIT), Mesa (MIT), GStreamer (LGPL-2.1+)
+and the libraries around them are separate programs and dynamically linked shared libraries started by IYAKKI, not part of it. They keep their
+own licences; the web image's legal-info/ directory carries their source and licence texts.
+
+The boot menu's larger font is built at image time from DejaVu Sans Bold (Bitstream Vera licence with the DejaVu changes, public domain
+additions; free to use, copy and redistribute, the font itself may not be sold alone): https://dejavu-fonts.github.io/License.html
+
+Linux kernel patches. dist/buildroot/board/iyakki/patches/linux/6.12.112/ holds four patches for the Linux kernel, which is GPL-2.0-only. Patch 0001 was
+written for this project. Patches 0002 (Kerem Karabay), 0003 (Aun-Ali Zaidi) and 0004 (Atharva Tiwari) are the work of those authors (upstream or the t2linux
+project) and keep their authorship and Signed-off-by lines in their headers. All four stay under the kernel's licence (GPL-2.0-only); they are applied when the
+kernel is built and are not licensed under the Apache License.
+
+Out-of-tree drivers for Apple hardware. The Mac images build apple-bce (t2linux, GPL-2.0), snd_hda_macbookpro (GPL-2.0) and facetimehd (GPL-2.0), and the images
+for PCs with an NVIDIA card build NVIDIA's open GPU kernel modules (MIT or GPL-2.0), from their upstream sources, which Buildroot downloads at image build time
+(dist/buildroot/package). Their source is not part of this repository; each keeps its own licence, and the image's legal-info/ directory carries the source and
+licence texts of what an image ships.
+
+IYAKKI's own boot loader lives in its own repository, https://github.com/meisync/iyakki-boot (MIT OR Apache-2.0), and is included here as a git submodule.
+

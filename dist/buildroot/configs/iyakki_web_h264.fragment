@@ -1,0 +1,6 @@
+# OPTIONAL, off by default: ship H.264 / AAC / MP3 decoding (FFmpeg through gst-libav).
+# These codecs are patent-encumbered in some jurisdictions. The default web variant still BUILDS gst-libav
+# (WPE's "multimedia" option selects it) but web-post-build.sh removes it from the image; this fragment is the
+# switch that keeps it. build.sh also exports IYAKKI_WEB_H264=1 for that script.
+#   WEB_H264=1 ./build.sh web      (or: ./run.sh build-web --h264)       See docs/FULL-BROWSER.md "Codec policy".
+BR2_PACKAGE_GST1_LIBAV=y

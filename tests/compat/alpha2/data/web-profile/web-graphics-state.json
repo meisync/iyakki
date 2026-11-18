@@ -1,0 +1,13 @@
+{
+  "fallbacks": [
+    {
+      "gpu": "1002:1681",
+      "reason": "synthetic",
+      "since": 1700000000
+    }
+  ],
+  "judged_boot": "boot-1",
+  "offer": true,
+  "offered_boot": "",
+  "schema": 1
+}

@@ -1,0 +1,5 @@
+# OPTIONAL: NVIDIA's open GPU kernel modules (package/nvidia-open) for the "mac" / "macweb" / "pc" kernel. Appended to the composed
+# defconfig by build.sh when IYAKKI_NVIDIA_OPEN=1. Not part of any image that was built before; a change of this switch builds the package
+# only (the kernel is the same). Nothing proprietary is added: the vendor libraries and firmware are downloaded by the installer at
+# the person's click (docs/GPU-K3S.md).
+BR2_PACKAGE_NVIDIA_OPEN=y

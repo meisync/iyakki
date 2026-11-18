@@ -1,0 +1,26 @@
+[package]
+name = "iyakki-sdk-tile"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "An SDK app (iyakki-ui-sdk) as a WASM tile (F-SDK-23): the app's display list mapped onto the tile ABI, tile events fed to the SDK host, core-backed storage and dock ports over the tile's `call`, and the wasm32 export of the SAMPLE app as the reference tile."
+
+[lib]
+# cdylib: the wasm32 build is the reference tile (src/guest.rs); on the host the crate is an ordinary library for the tests.
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+iyakki-ui-sdk = { path = "../iyakki-ui-sdk" }
+iyakki-tile-abi = { path = "../iyakki-tile-abi" }
+iyakki-tile-kit = { path = "../iyakki-tile-kit" }
+serde_json = "1"
+iyakki-app-sample = { path = "../iyakki-app-sample", optional = true }
+
+[dev-dependencies]
+iyakki-tile-host = { path = "../iyakki-tile-host" }
+iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }
+iyakki-app-sample = { path = "../iyakki-app-sample" }
+
+[features]
+# The wasm32 export of the SAMPLE app as the reference tile (src/guest.rs); off for a crate that depends on this one to export its own app.
+sample-guest = ["dep:iyakki-app-sample"]

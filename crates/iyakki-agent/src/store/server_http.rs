@@ -1,0 +1,379 @@
+//! The sockets under the private store server: one request per connection (`Connection: close`), hard limits on the head,
+//! the body and the time a client may take. Plain HTTP by default (put an ingress or a sidecar in front, docs/STORE.md section 13), or
+//! HTTPS in the process itself with `--tls-cert/--tls-key` or `--tls-self-signed-dir` ([`serve_tls`]): the same service's in-house rustls
+//! identity as the web service (`webservice::tls`), no other TLS code.
+
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use super::server::{Body, Req, Resp, StoreServer, StreamResp};
+
+const MAX_HEAD: usize = 16 * 1024;
+const MAX_CONNECTIONS: usize = 64;
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() && b[i + 1].is_ascii_hexdigit() && b[i + 2].is_ascii_hexdigit() {
+            out.push(u8::from_str_radix(&s[i + 1..i + 3], 16).unwrap_or(b'?'));
+            i += 3;
+        } else {
+            out.push(if b[i] == b'+' { b' ' } else { b[i] });
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn say(s: &str) {
+    let _ = writeln!(std::io::stdout(), "{s}");
+}
+
+fn status_text(c: u16) -> &'static str {
+    match c {
+        200 => "OK",
+        201 => "Created",
+        206 => "Partial Content",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        408 => "Request Timeout",
+        409 => "Conflict",
+        413 => "Payload Too Large",
+        422 => "Unprocessable Entity",
+        429 => "Too Many Requests",
+        416 => "Range Not Satisfiable",
+        431 => "Request Header Fields Too Large",
+        507 => "Insufficient Storage",
+        _ => "Internal Server Error",
+    }
+}
+
+fn write_resp<S: Write>(s: &mut S, r: &Resp) {
+    let mut h = format!("HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n", r.status, status_text(r.status), r.content_type, r.body.len());
+    for (k, v) in &r.headers {
+        if !v.contains(['\r', '\n']) {
+            h.push_str(&format!("{k}: {v}\r\n"));
+        }
+    }
+    h.push_str("\r\n");
+    let _ = s.write_all(h.as_bytes()).and_then(|_| s.write_all(&r.body)).and_then(|_| s.flush());
+}
+
+/// Send an answer that may be a file: the head, then the file through a small buffer.
+fn write_stream<S: Write>(s: &mut S, r: &StreamResp) {
+    let mut h = format!("HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n", r.status, status_text(r.status), r.content_type, r.len);
+    for (k, v) in &r.headers {
+        if !v.contains(['\r', '\n']) {
+            h.push_str(&format!("{k}: {v}\r\n"));
+        }
+    }
+    h.push_str("\r\n");
+    if s.write_all(h.as_bytes()).is_err() {
+        return;
+    }
+    match &r.body {
+        Body::None => {}
+        Body::Bytes(b) => {
+            let _ = s.write_all(b);
+        }
+        Body::File(f) => {
+            let mut src = f.take(r.len);
+            let mut buf = vec![0u8; super::server::BLOB_BUF];
+            loop {
+                match src.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if s.write_all(&buf[..n]).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let _ = s.flush();
+}
+
+fn fail<S: Write>(s: &mut S, code: u16, msg: &str) {
+    write_resp(s, &Resp { status: code, content_type: "application/json", body: format!("{{\"ok\":false,\"error\":{msg:?}}}").into_bytes(), headers: vec![] });
+}
+
+/// A request read from the socket: whole, or (a blob) only its head, with the body bytes already read and the length still to come.
+enum Parsed {
+    Whole(Req),
+    Blob { req: Req, early: Vec<u8>, len: u64 },
+}
+
+/// Read one request. Errors are answered on the socket and turned into `None`.
+fn read_request<S: Read + Write>(s: &mut S, max_body: usize) -> Option<Parsed> {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let head_end = loop {
+        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break i;
+        }
+        if buf.len() > MAX_HEAD {
+            fail(s, 431, "request headers too large");
+            return None;
+        }
+        match s.read(&mut chunk) {
+            Ok(0) => return None,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(_) => {
+                fail(s, 408, "timed out");
+                return None;
+            }
+        }
+    };
+    let Ok(head) = std::str::from_utf8(&buf[..head_end]) else {
+        fail(s, 400, "bad request");
+        return None;
+    };
+    let mut lines = head.split("\r\n");
+    let mut first = lines.next().unwrap_or("").split(' ');
+    let (Some(method), Some(target), Some(version), None) = (first.next(), first.next(), first.next(), first.next()) else {
+        fail(s, 400, "bad request line");
+        return None;
+    };
+    if !version.starts_with("HTTP/1.") || !target.starts_with('/') || target.contains(['\0', '\\']) {
+        fail(s, 400, "bad request");
+        return None;
+    }
+    let (raw_path, raw_query) = target.split_once('?').unwrap_or((target, ""));
+    let path = percent_decode(raw_path);
+    if path.split('/').any(|p| p == ".." || p == ".") || path.contains("//") {
+        fail(s, 400, "bad path");
+        return None;
+    }
+    let query: HashMap<String, String> = raw_query.split('&').filter(|p| !p.is_empty()).map(|p| p.split_once('=').map_or((percent_decode(p), String::new()), |(k, v)| (percent_decode(k), percent_decode(v)))).collect();
+    let mut headers = HashMap::new();
+    for l in lines {
+        if let Some((k, v)) = l.split_once(':') {
+            headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
+        }
+    }
+    if headers.contains_key("transfer-encoding") {
+        fail(s, 400, "chunked bodies are not accepted; send a Content-Length");
+        return None;
+    }
+    let len: usize = match headers.get("content-length") {
+        None => 0,
+        Some(v) => match v.parse() {
+            Ok(n) => n,
+            Err(_) => {
+                fail(s, 400, "bad Content-Length");
+                return None;
+            }
+        },
+    };
+    if path.starts_with("/v1/blobs/") && matches!(method, "PUT" | "GET" | "HEAD") {
+        let mut early = buf[head_end + 4..].to_vec();
+        early.truncate(len);
+        return Some(Parsed::Blob { req: Req { method: method.to_string(), path, query, headers, body: Vec::new() }, early, len: len as u64 });
+    }
+    if len > max_body + 1024 {
+        fail(s, 413, "the body is too large");
+        return None;
+    }
+    let mut body = buf[head_end + 4..].to_vec();
+    while body.len() < len {
+        match s.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => body.extend_from_slice(&chunk[..n]),
+            Err(_) => {
+                fail(s, 408, "timed out");
+                return None;
+            }
+        }
+    }
+    body.truncate(len);
+    Some(Parsed::Whole(Req { method: method.to_string(), path, query, headers, body }))
+}
+
+/// One request on one connection.
+fn handle_conn<S: Read + Write>(srv: &Arc<StoreServer>, s: &mut S, ip: &str) {
+    match read_request(s, srv.config().max_body) {
+        Some(Parsed::Whole(req)) => {
+            let resp = srv.handle(&req, ip);
+            write_resp(s, &resp);
+        }
+        // a blob streams: the body is never held, in either direction
+        Some(Parsed::Blob { req, early, len }) => {
+            if req.method == "PUT" {
+                let resp = {
+                    let rest = len.saturating_sub(early.len() as u64);
+                    let mut body = std::io::Cursor::new(early).chain(Read::take(&mut *s, rest));
+                    srv.blob_put(&req, len, &mut body, ip)
+                };
+                write_resp(s, &resp);
+            } else {
+                write_stream(s, &srv.blob_get(&req, ip));
+            }
+        }
+        None => {}
+    }
+}
+
+/// Serve on `listener` until `stop` is set. Returns when the listener is closed or stopped.
+pub fn serve(server: Arc<StoreServer>, listener: TcpListener, stop: Arc<AtomicBool>) {
+    serve_with(server, listener, stop, None)
+}
+
+/// The same over HTTPS: every connection is a TLS session of `cfg` (a person's own certificate or a kept self-signed one whose
+/// fingerprint the clients pin). A client that does not speak TLS gets nothing useful: the handshake fails and the socket closes.
+pub fn serve_tls(server: Arc<StoreServer>, listener: TcpListener, stop: Arc<AtomicBool>, cfg: Arc<rustls::ServerConfig>) {
+    serve_with(server, listener, stop, Some(cfg))
+}
+
+fn serve_with(server: Arc<StoreServer>, listener: TcpListener, stop: Arc<AtomicBool>, tls_cfg: Option<Arc<rustls::ServerConfig>>) {
+    let _ = listener.set_nonblocking(true);
+    let live = Arc::new(AtomicUsize::new(0));
+    while !stop.load(Ordering::Relaxed) {
+        match listener.accept() {
+            Ok((mut s, peer)) => {
+                if live.load(Ordering::Relaxed) >= MAX_CONNECTIONS {
+                    fail(&mut s, 429, "busy");
+                    continue;
+                }
+                let _ = s.set_nonblocking(false);
+                let _ = s.set_read_timeout(Some(Duration::from_secs(10)));
+                let _ = s.set_write_timeout(Some(Duration::from_secs(30)));
+                live.fetch_add(1, Ordering::Relaxed);
+                let (srv, live2, tls) = (server.clone(), live.clone(), tls_cfg.clone());
+                std::thread::spawn(move || {
+                    let ip = peer.ip().to_string();
+                    match tls {
+                        None => handle_conn(&srv, &mut s, &ip),
+                        Some(cfg) => match rustls::ServerConnection::new(cfg) {
+                            Ok(c) => {
+                                let mut t = rustls::StreamOwned::new(c, s);
+                                handle_conn(&srv, &mut t, &ip);
+                                t.conn.send_close_notify();
+                                let _ = t.flush();
+                            }
+                            Err(_) => {}
+                        },
+                    }
+                    live2.fetch_sub(1, Ordering::Relaxed);
+                });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(15)),
+            Err(_) => std::thread::sleep(Duration::from_millis(100)),
+        }
+    }
+}
+
+/// `iyakki store-server`: the command line. Returns the text to print on success.
+pub fn run_cli(args: &[String]) -> Result<(), String> {
+    let mut flags: HashMap<String, String> = HashMap::new();
+    let mut bools = Vec::new();
+    let mut pos = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.strip_prefix("--") {
+            Some(f @ ("read-only" | "require-trusted")) => bools.push(f.to_string()),
+            Some(f) => {
+                flags.insert(f.to_string(), it.next().ok_or_else(|| format!("--{f} needs a value"))?.clone());
+            }
+            None => pos.push(a.clone()),
+        }
+    }
+    let data = std::path::PathBuf::from(flags.get("data").ok_or("--data <folder> is required")?);
+    let key_text = match flags.get("catalog-seed-file") {
+        Some(f) => super::server::key_from_seed(&std::fs::read_to_string(f).map_err(|e| format!("{f}: {e}"))?)?,
+        None => {
+            let key_file = flags.get("catalog-key-file").cloned().unwrap_or_else(|| data.join("catalog.key").display().to_string());
+            std::fs::read_to_string(&key_file).map_err(|e| format!("{key_file}: {e} (make one with `iyakki pkg keygen` and mount it as a Secret)"))?
+        }
+    };
+    let mut cfg = super::server::Config::new(&data);
+    if let Some(f) = flags.get("publish-token-file") {
+        let t = std::fs::read_to_string(f).map_err(|e| format!("{f}: {e}"))?;
+        if t.trim().len() < 24 {
+            return Err("the admin token must be at least 24 characters".into());
+        }
+        cfg.admin_token_hash = Some(super::server::hash_token(&t));
+    }
+    if let Some(v) = flags.get("id") {
+        cfg.id = v.clone();
+    }
+    if let Some(v) = flags.get("name") {
+        cfg.name = v.chars().take(60).collect();
+    }
+    if let Some(v) = flags.get("max-body-mib") {
+        cfg.max_body = v.parse::<usize>().map_err(|_| "--max-body-mib is a number")?.clamp(1, 10) << 20;
+    }
+    // system components: the largest artifact (MiB) and per-component limits (`kernel=128,base=900`), the free disk kept beyond an upload
+    if let Some(v) = flags.get("max-component-mib") {
+        cfg.max_component = v.parse::<u64>().map_err(|_| "--max-component-mib is a number")?.clamp(1, 8192) << 20;
+    }
+    if let Some(v) = flags.get("component-caps") {
+        for part in v.split(',').filter(|p| !p.trim().is_empty()) {
+            let (name, mib) = part.split_once('=').ok_or("--component-caps is name=MiB,name=MiB")?;
+            cfg.component_caps.insert(name.trim().to_string(), mib.trim().parse::<u64>().map_err(|_| "--component-caps: MiB is a number")?.clamp(1, 8192) << 20);
+        }
+    }
+    if let Some(v) = flags.get("disk-margin-mib") {
+        cfg.disk_margin = v.parse::<u64>().map_err(|_| "--disk-margin-mib is a number")?.min(1 << 20) << 20;
+    }
+    if let Some(f) = flags.get("read-token-file") {
+        let t = std::fs::read_to_string(f).map_err(|e| format!("{f}: {e}"))?;
+        if t.trim().len() < 24 {
+            return Err("the read token must be at least 24 characters".into());
+        }
+        cfg.read_token_hash = Some(super::server::hash_token(&t));
+    }
+    if let Some(f) = flags.get("read-tokens-file") {
+        cfg.person_read_tokens = super::server::parse_person_tokens(&std::fs::read_to_string(f).map_err(|e| format!("{f}: {e}"))?).map_err(|e| format!("{f}: {e}"))?;
+    }
+    if let Some(v) = flags.get("builds-key") {
+        let v = v.trim().to_ascii_lowercase();
+        if v.len() != 64 || !v.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("--builds-key is the 64 hex characters of the update public key".into());
+        }
+        cfg.builds_key = Some(v);
+    }
+    if let Some(v) = flags.get("store-cap-mib") {
+        cfg.store_cap = v.parse::<u64>().map_err(|_| "--store-cap-mib is a number")?.min(1 << 24) << 20;
+    }
+    cfg.read_only = bools.iter().any(|b| b == "read-only");
+    cfg.allow_community = !bools.iter().any(|b| b == "require-trusted");
+    let server = Arc::new(super::server::StoreServer::open(cfg, &key_text)?);
+    if pos.first().map(String::as_str) == Some("publisher-add") {
+        let (id, name) = (flags.get("pub-id").ok_or("--pub-id is required")?, flags.get("pub-name").cloned().unwrap_or_default());
+        let tok = server.create_publisher(id, if name.is_empty() { id } else { &name })?;
+        say(&format!("publisher {id} token (shown once, give it to the publisher): {tok}"));
+        return Ok(());
+    }
+    let listen = flags.get("listen").cloned().unwrap_or_else(|| "0.0.0.0:8080".into());
+    // HTTPS in the process: the person's own certificate and key, or a self-signed one kept in a folder (its fingerprint is printed so
+    // clients can pin it); a half-given pair or a broken file is an error, never a silent fall back to plain HTTP.
+    let identity = match (flags.get("tls-cert"), flags.get("tls-key"), flags.get("tls-self-signed-dir")) {
+        (None, None, None) => None,
+        (Some(c), Some(k), None) => Some(crate::webservice::tls::from_files(std::path::Path::new(c), std::path::Path::new(k))?),
+        (None, None, Some(d)) => {
+            let names: Vec<String> = flags.get("tls-name").map(|n| n.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()).unwrap_or_default();
+            Some(crate::webservice::tls::self_signed(std::path::Path::new(d), &names)?)
+        }
+        _ => return Err("TLS needs --tls-cert and --tls-key together, or --tls-self-signed-dir alone".into()),
+    };
+    let l = TcpListener::bind(&listen).map_err(|e| format!("{listen}: {e}"))?;
+    say(&format!("store server {} on {listen}{}; catalog key {}; fingerprint {}", server.config().name, if identity.is_some() { " (HTTPS)" } else { "" }, server.catalog_key(), super::server::fingerprint(&server.catalog_key())));
+    match identity {
+        Some(id) => {
+            say(&format!("certificate SHA-256 {}{}", id.fingerprint, if id.self_signed { " (self-signed, made now: give clients this fingerprint or the certificate file)" } else { "" }));
+            serve_tls(server, l, Arc::new(AtomicBool::new(false)), id.config);
+        }
+        None => serve(server, l, Arc::new(AtomicBool::new(false))),
+    }
+    Ok(())
+}

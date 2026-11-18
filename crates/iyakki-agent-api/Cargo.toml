@@ -1,0 +1,26 @@
+[package]
+name = "iyakki-agent-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The generated facade of the agent's functions the UI calls (F-SPLIT-03 pass 2): traits per domain, a recording fake. Pure types only."
+
+[dependencies]
+iyakki-shared = { workspace = true }
+serde_json = "1"
+iyakki-sec = { workspace = true }
+iyakki-vpn = { path = "../iyakki-vpn" }
+iyakki-drivers = { workspace = true }
+iyakki-web = { workspace = true }
+iyakki-vt = { workspace = true }
+iyakki-cloudmode = { workspace = true }
+iyakki-core-api = { workspace = true }
+iyakki-tile-host = { path = "../iyakki-tile-host" }
+iyakki-tile-api = { path = "../iyakki-tile-api", default-features = false }
+zeroize = "1"
+iyakki-flowsx = { workspace = true }
+iyakki-flow = { workspace = true }
+iyakki-extagentx = { workspace = true }
+iyakki-proxy = { path = "../iyakki-proxy" }
+iyakki-memx = { workspace = true }
+iyakki-dash = { workspace = true }

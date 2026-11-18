@@ -1,0 +1,15 @@
+[package]
+name = "iyakki-tile-remotefiles"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The REMOTE FILES tile (an SFTP / FTPS client with saved connections). Rule (crates/iyakki-core/tests/dependency_ratchet.rs): depends on
+# `iyakki-uikit` and `iyakki-tile-api` only, never on the agent; its tests run against a fake `RemoteSource`.
+
+[dependencies]
+iyakki-uikit = { path = "../iyakki-uikit" }
+iyakki-tile-api = { path = "../iyakki-tile-api" }
+
+[dev-dependencies]
+iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }

@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>IYAKKI app preview</title><link rel="icon" href="data:,">
+<style>
+html,body{margin:0;background:#1b1f27;color:#e8e8e8;font-family:system-ui,sans-serif}
+#wrap{position:relative;display:inline-block;margin:16px}
+canvas{display:block;outline:none}
+#aria{position:absolute;left:0;top:0}
+#err{color:#ff8a80;margin:16px;white-space:pre-wrap}
+</style></head>
+<body>
+<div id="wrap"><canvas id="c" tabindex="0" aria-label="App"></canvas><div id="aria"></div></div>
+<div id="err" role="alert"></div>
+<script src="/displaylist.js"></script>
+<script>
+const D = window.IyakkiDisplayList, c = document.getElementById("c");
+const io = {
+  frame: () => fetch("/frame").then((r) => r.text()),
+  send: (lines) => fetch("/event", { method: "POST", headers: { "X-Iyakki-Preview": "1" }, body: lines.join("\n") + "\n" })
+    .then((r) => r.text().then((t) => { if (!r.ok) throw new Error(t); return t; })),
+};
+const app = D.connect({ canvas: c, ariaHost: document.getElementById("aria"), io, scale: 1,
+  onError: (m) => { document.getElementById("err").textContent = "The display list was refused: " + m; } });
+window.app = app;
+// `?engine=wasm`: the client engine module draws the list (shapes, text from the glyphs this page hands it, the accessibility tree) and
+// makes the input lines (F-SDK-29); without it the JavaScript renderer does all of that
+if (new URLSearchParams(location.search).get("engine") === "wasm") {
+  document.title += " (engine)";
+  (async () => {
+    const { IyakkiEngine } = await import("/engine.js");
+    const e = await IyakkiEngine.load(await (await fetch("/engine.wasm")).arrayBuffer());
+    const ctx = c.getContext("2d"), aria = document.getElementById("aria");
+    aria.style.pointerEvents = "none";   // the picture takes the mouse; the elements are for keyboards and screen readers
+    const S = (window.engineState = { frames: 0, left: null, error: null });
+    let scale = 1;
+    const show = (text) => {
+      const r = e.uiLoad(text, scale);
+      if (r.error) { S.error = r.error; document.getElementById("err").textContent = "The display list was refused: " + r.error; return; }
+      const done = e.uiGlyphs() || r;   // the page hands the module the glyphs it lacks; the module composes the text
+      const fb = e.uiFramebuffer();
+      c.width = fb.w; c.height = fb.h; c.style.width = fb.w / scale + "px"; c.style.height = fb.h / scale + "px";
+      ctx.putImageData(new ImageData(new Uint8ClampedArray(fb.data), fb.w, fb.h), 0, 0);
+      S.left = done.texts.length; S.frames++; S.error = null;
+      document.getElementById("err").textContent = "";
+      aria.textContent = "";
+      for (const n of r.a11y) {
+        const d = document.createElement("div");
+        d.setAttribute("role", { item: "listitem", field: "textbox", image: "img" }[n.role] || n.role); d.setAttribute("aria-label", n.name); d.tabIndex = 0;
+        d.style.cssText = "position:absolute;left:" + n.x / scale + "px;top:" + n.y / scale + "px;width:" + n.w / scale + "px;height:" + n.h / scale + "px";
+        d.onkeydown = (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); send([e.uiLine({ kind: "action", n: n.action })]); } };
+        aria.appendChild(d);
+      }
+    };
+    const send = (lines) => io.send(lines.filter(Boolean)).then(show).catch((err) => { document.getElementById("err").textContent = String(err); });
+    const at = (ev) => { const b = c.getBoundingClientRect(); return [(ev.clientX - b.left) * scale, (ev.clientY - b.top) * scale]; };
+    c.addEventListener("pointerdown", (ev) => { const [x, y] = at(ev); send([e.uiLine({ kind: "pointer", phase: "down", x, y, t: Math.round(ev.timeStamp) })]); });
+    c.addEventListener("pointerup", (ev) => { const [x, y] = at(ev); send([e.uiLine({ kind: "pointer", phase: "up", x, y, t: Math.round(ev.timeStamp) })]); });
+    // keys go to the app from anywhere on the page except from an accessibility element (it handles Enter and Space itself)
+    addEventListener("keydown", (ev) => {
+      if (ev.target && ev.target.getAttribute && ev.target.getAttribute("role")) return;
+      const names = { Enter: "enter", Backspace: "backspace", Delete: "delete", Escape: "esc", Tab: "tab", ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right" };
+      let l = null;
+      if (names[ev.key]) l = e.uiLine({ kind: "key", name: names[ev.key] });
+      else if (ev.key.length === 1 && !ev.ctrlKey && !ev.metaKey) l = e.uiLine({ kind: "key", name: "char", char: ev.key });
+      if (l) { ev.preventDefault(); send([l]); }
+    });
+    show(await io.frame());
+    window.engineReady = true;
+  })();
+} else {
+  app.start().then(() => c.focus());
+}
+</script>
+</body></html>

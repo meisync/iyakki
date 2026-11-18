@@ -1,0 +1,50 @@
+# Boot-test Job template. Rendered by run-boot-test.sh (sed on the @NAME@ markers); do not kubectl apply it as is.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: boot-test-@RUN_ID@
+  namespace: iyakki-build
+  labels:
+    app.kubernetes.io/part-of: iyakki-build
+    app.kubernetes.io/component: boot-test
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: @DEADLINE@
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: iyakki-build
+        app.kubernetes.io/component: boot-test
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: @NODE@        # the dev PC; the other nodes are NotReady and must stay untouched
+      containers:
+        - name: boot-test
+          image: @BOOT_TEST_IMAGE@
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: IMAGE, value: "/image/@IMAGE_FILE@"}
+            - {name: SECONDS, value: "@SECONDS@"}
+            - {name: RESULT_DIR, value: "/results"}
+            - {name: REQUIRE_KVM, value: "@REQUIRE_KVM@"}
+          securityContext:
+            privileged: @PRIVILEGED@          # see README.md: needed only so QEMU may open the /dev/kvm device node
+          resources:
+            requests: {cpu: "2", memory: 2Gi}
+            limits: {cpu: "3", memory: 3Gi}   # guest RAM is 2 GiB (MEM_MB) + QEMU overhead
+          volumeMounts:
+            - {name: image, mountPath: /image, readOnly: true}
+            - {name: results, mountPath: /results}
+            - {name: kvm, mountPath: /dev/kvm}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: image
+          hostPath: {path: "@IMAGE_DIR@", type: Directory}      # read-only; QEMU writes to a qcow2 overlay in /tmp
+        - name: results
+          hostPath: {path: "@RESULT_DIR@", type: Directory}     # created by run-boot-test.sh, readable by everyone
+        - name: kvm
+          hostPath: {path: /dev/kvm, type: CharDevice}
+        - name: tmp
+          emptyDir: {sizeLimit: 2Gi}

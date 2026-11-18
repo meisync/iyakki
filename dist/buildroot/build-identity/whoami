@@ -1,0 +1,4 @@
+#!/bin/sh
+# Build identity shim: the kernel and the NVIDIA module write "user@host" of the build machine into their version banners (/proc/version,
+# dmesg). Images must not carry a person's account or computer name: builds put this folder first on PATH (dist/buildroot/build.sh).
+echo iyakki

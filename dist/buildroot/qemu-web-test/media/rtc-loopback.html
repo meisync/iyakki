@@ -1,0 +1,38 @@
+<!doctype html><meta charset=utf-8><title>MEDIA-TEST rtc-loopback</title><link rel=stylesheet href=style.css>
+<h1>RTCPeerConnection loopback</h1><div id=result>running</div><video id=far autoplay muted playsinline></video>
+<script src=common.js></script>
+<script>
+// Two peers in this page, no network: pc1 sends the camera and microphone, pc2 receives them, and a data channel carries "ping".
+// Expected: both ICE states connected/completed, pc2 gets a video and an audio track, the received video has a size, getStats shows
+// inbound video frames decoded > 0 and inbound audio packets > 0 within 20 s, and the data channel echoes "ping".
+mediaTest.run('rtc-loopback', 45000, async function () {
+  if (!window.RTCPeerConnection) throw new Error('RTCPeerConnection is undefined: the engine was built without WebRTC');
+  var s = await navigator.mediaDevices.getUserMedia({ audio: true, video: { width: 640, height: 480 } });
+  var pc1 = new RTCPeerConnection(), pc2 = new RTCPeerConnection();
+  pc1.onicecandidate = function (e) { if (e.candidate) pc2.addIceCandidate(e.candidate); };
+  pc2.onicecandidate = function (e) { if (e.candidate) pc1.addIceCandidate(e.candidate); };
+  var got = [], echoed = new Promise(function (ok) {
+    pc2.ondatachannel = function (e) { e.channel.onmessage = function (m) { e.channel.send(m.data); }; };
+    var dc = pc1.createDataChannel('t'); dc.onopen = function () { dc.send('ping'); }; dc.onmessage = function (m) { ok(m.data); };
+  });
+  pc2.ontrack = function (e) { got.push(e.track.kind); if (e.track.kind === 'video') document.getElementById('far').srcObject = e.streams[0] || new MediaStream([e.track]); };
+  s.getTracks().forEach(function (t) { pc1.addTrack(t, s); });
+  await pc1.setLocalDescription(await pc1.createOffer());
+  await pc2.setRemoteDescription(pc1.localDescription);
+  await pc2.setLocalDescription(await pc2.createAnswer());
+  await pc1.setRemoteDescription(pc2.localDescription);
+  var ping = await Promise.race([echoed, new Promise(function (_, no) { setTimeout(function () { no(new Error('no data channel echo')); }, 20000); })]);
+  var ok = false, frames = 0, packets = 0, until = Date.now() + 20000;
+  while (Date.now() < until && !(frames > 0 && packets > 0)) {
+    await new Promise(function (r) { setTimeout(r, 500); });
+    (await pc2.getStats()).forEach(function (r) { if (r.type === 'inbound-rtp') { if (r.kind === 'video') frames = r.framesDecoded || 0; if (r.kind === 'audio') packets = r.packetsReceived || 0; } });
+  }
+  var st = pc1.iceConnectionState + '/' + pc2.iceConnectionState;
+  s.getTracks().forEach(function (t) { t.stop(); }); pc1.close(); pc2.close();
+  if (!/^(connected|completed)\/(connected|completed)$/.test(st)) throw new Error('ICE ' + st);
+  if (got.indexOf('video') < 0 || got.indexOf('audio') < 0) throw new Error('tracks received: ' + got);
+  if (!(frames > 0 && packets > 0)) throw new Error('video frames ' + frames + ', audio packets ' + packets);
+  if (ping !== 'ping') throw new Error('data channel said ' + ping);
+  return 'ICE ' + st + ', ' + frames + ' frames, ' + packets + ' audio packets, data channel ok';
+});
+</script>

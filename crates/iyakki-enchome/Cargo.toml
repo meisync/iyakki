@@ -1,0 +1,17 @@
+[package]
+name = "iyakki-enchome"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Encrypted per-person home folders (F-STORE-05): create, unlock at sign-in, lock, password re-wrap, recovery, migration of a plain home."
+
+# Built on the in-house IYAKVOL1 container (iyakki-volcrypt) and the shared device-mapper module (iyakki-storage::dm).
+# No new third-party dependency: serde_json and zeroize are already used by the agent and the vault.
+[dependencies]
+iyakki-volcrypt.workspace = true
+iyakki-storage.workspace = true
+iyakki-diskcrypt.workspace = true
+iyakki-sec.workspace = true
+serde_json = "1"
+zeroize = "1"
+sha2 = "0.10"
