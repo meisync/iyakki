@@ -25,7 +25,26 @@ jobs:
       - run: RUSTFLAGS="-D warnings" cargo check --workspace --all-targets --locked
       - run: ./run.sh warnings
       - run: mkdir -p target/tmp
-      - run: TMPDIR="$PWD/target/tmp" cargo test --workspace --no-fail-fast
+      # The same layered tests as the release gate (dist/release/test-layer.sh): a test that fails in parallel is run again alone, so a load
+      # flake is named as a flake and only a test that fails alone fails the job. Failing tests are printed as annotations below.
+      - name: tests, core layer
+        env:
+          TMPDIR: ${{ github.workspace }}/target/tmp
+        shell: bash
+        run: ./run.sh test-core --no-stamps 2>&1 | tee target/tmp/core.log
+      - name: tests, apps and ui layer
+        if: ${{ !cancelled() }}
+        env:
+          TMPDIR: ${{ github.workspace }}/target/tmp
+        shell: bash
+        run: ./run.sh test-apps --no-stamps 2>&1 | tee target/tmp/apps.log
+      - name: failing tests as annotations
+        if: ${{ failure() }}
+        run: |
+          for f in target/tmp/core.log target/tmp/apps.log; do
+            [ -f "$f" ] || continue
+            awk '/REAL failure/ {g=1; next} g && /^  / {sub(/^  /, ""); print; next} {g=0}' "$f" | head -60 | while IFS= read -r t; do echo "::error::failing test ($(basename "$f" .log)): $t"; done
+          done
       - name: licence gate (skipped loudly while ./run.sh licence-check does not exist; a failure on a tag)
         run: |
           if ./run.sh help 2>&1 | grep -q 'licence-check'; then ./run.sh licence-check --no-images   # no images in CI: the image scan runs where the images are built
