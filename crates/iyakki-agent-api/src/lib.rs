@@ -1,0 +1,48 @@
+//! The generated facade (see dist/split/gen_facade.py). Hand-written traits for stateful handles go next to `generated`.
+
+pub mod facets;
+pub mod facets_b0;
+pub use facets_b0::*;
+pub mod facets_b3;
+pub mod facets_s6b;
+pub use facets_s6b::*;
+pub mod facets_dev;
+pub mod facets_platform;
+pub mod facets_tasks;
+pub use facets_tasks::*;
+pub use facets_platform::*;
+pub use facets_dev::*;
+pub mod member_stores;
+pub use member_stores::*;
+pub mod chatruns;
+pub use chatruns::*;
+pub mod facets_b4;
+pub mod facets_b6;
+pub use facets_b6::*;
+pub mod facets_b7;
+pub mod facets_b8;
+pub mod facets_g;
+pub mod facets_h;
+pub use facets_h::*;
+pub use facets_b7::*;
+pub use facets_b8::*;
+pub use facets_g::*;
+pub mod facets_b5;
+pub use facets_b5::*;
+pub mod store_api;
+pub use store_api::*;
+pub use facets_b4::*;
+pub mod facets_b1;
+pub mod facets_b2;
+pub use facets_b2::*;
+pub mod pending;
+pub mod generated;
+pub use facets::*;
+pub use facets_b3::*;
+pub use generated::*;
+pub use facets_b1::*;
+
+pub mod store;
+pub use store::{ComponentReview, FakeStoreFacets, NoDrivers, NoStoreFacets, StoreCatalog, StoreComponents, StoreDriverSource, StoreDrivers, StoreFacets, StoreHub, StoreUpdates, WizardLine, MAX_DRIVER_FILE};
+pub mod facets_stores;
+pub use facets_stores::*;

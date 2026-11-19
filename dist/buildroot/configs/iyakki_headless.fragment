@@ -1,0 +1,7 @@
+# Appended to the x86_64 defconfig for the OPTIONAL "headless" variant (./build.sh headless): the IYAKKI web service as a server image
+# (F-WEBSVC-15). It adds nothing and removes nothing from Buildroot's package set on purpose: the base image already has no graphics
+# stack, browser engine, sound server or media player (those are the web and mac variants and WITH_FFMPEG), so "only the headless
+# program" is decided by build.sh, which builds iyakki-core with `--no-default-features --features headless` (no shell, no screen), and by
+# post-build.sh, which installs the cloud profile as /etc/iyakki/service.json. This file holds no settings so far: it is the place for a
+# later size cut (for example without the on-screen font files).
+# NOT BUILT OR BOOTED YET: a first image is the next step (see the notes of F-WEBSVC-15 in FEATURES.md).

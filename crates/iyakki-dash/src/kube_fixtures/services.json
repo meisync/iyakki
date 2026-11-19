@@ -1,0 +1,6 @@
+{"kind":"ServiceList","items":[
+{"metadata":{"namespace":"default","name":"kubernetes"},"spec":{"type":"ClusterIP","ports":[{"port":443}]}},
+{"metadata":{"namespace":"iyakki-store","name":"store"},"spec":{"type":"NodePort","ports":[{"port":5000,"nodePort":30301}]}},
+{"metadata":{"namespace":"shop","name":"web"},"spec":{"type":"LoadBalancer","ports":[{"port":80,"nodePort":31555}]}},
+{"metadata":{"namespace":"kube-system","name":"traefik"},"spec":{"type":"LoadBalancer","ports":[{"port":80},{"port":443}]}}
+]}

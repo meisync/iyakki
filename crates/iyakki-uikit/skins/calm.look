@@ -1,0 +1,18 @@
+# Calm: a pale skin with pill corners, regular edges and no animation at all.
+[look]
+name = Calm
+
+[colours]
+base = light
+
+[shape]
+shape = pill
+
+[spacing]
+spacing = normal
+
+[effects]
+elevation = high
+
+[motion]
+motion = reduced

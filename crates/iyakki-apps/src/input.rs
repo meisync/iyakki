@@ -1,0 +1,2219 @@
+//! Linux evdev input: keyboards and mice read straight from `/dev/input/event*`.
+//! The pure parts (parsing, key translation, pointer state) are unit tested without devices.
+
+use crate::safeclamp::SafeClamp;
+use std::os::fd::{AsRawFd, RawFd};
+
+use crate::ui::{Event, Key, Nav};
+
+pub const EV_SYN: u16 = 0;
+pub const EV_KEY: u16 = 1;
+pub const EV_REL: u16 = 2;
+pub const EV_ABS: u16 = 3;
+const REL_X: u16 = 0;
+const REL_Y: u16 = 1;
+const REL_WHEEL: u16 = 8;
+/// A wheel's fractions of a click (120 to the click); a wheel that has it sends both, and only this one is used.
+const REL_WHEEL_HI_RES: u16 = 11;
+const ABS_X: u16 = 0;
+const ABS_Y: u16 = 1;
+const ABS_MT_SLOT: u16 = 0x2f;
+const ABS_MT_POSITION_X: u16 = 0x35;
+const ABS_MT_POSITION_Y: u16 = 0x36;
+const ABS_MT_TRACKING_ID: u16 = 0x39;
+const SYN_REPORT: u16 = 0;
+const BTN_LEFT: u16 = 0x110;
+const BTN_RIGHT: u16 = 0x111;
+const BTN_TOUCH: u16 = 0x14a;
+const BTN_TOOL_FINGER: u16 = 0x145;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Raw {
+    pub typ: u16,
+    pub code: u16,
+    pub value: i32,
+}
+
+#[cfg(target_os = "linux")]
+use libc::input_event as InputEvent;
+
+/// macOS has no evdev and `libc` has no `input_event` there; the record is the kernel's 64-bit layout so the parser (and its
+/// tests) build everywhere.
+#[cfg(not(target_os = "linux"))]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct InputEvent {
+    time: libc::timeval,
+    type_: u16,
+    code: u16,
+    value: i32,
+}
+
+/// Parse a buffer of `struct input_event` records (layout of the running platform).
+pub fn parse_events(buf: &[u8]) -> Vec<Raw> {
+    let sz = std::mem::size_of::<InputEvent>();
+    buf.chunks_exact(sz)
+        .map(|c| {
+            // SAFETY: `c` is exactly size_of::<input_event>() bytes; input_event is plain old data.
+            let ev: InputEvent = unsafe { std::ptr::read_unaligned(c.as_ptr().cast()) };
+            Raw { typ: ev.type_, code: ev.code, value: ev.value }
+        })
+        .collect()
+}
+
+/// US-layout translation of an evdev key code.
+static ALT_PASSTHROUGH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A tile that shows another computer's program (the Linux window) asks to get Alt+key as [`Key::Alt`]; every other tile ignores Alt as before.
+pub fn set_alt_passthrough(on: bool) {
+    ALT_PASSTHROUGH.store(on, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn alt_passthrough() -> bool {
+    ALT_PASSTHROUGH.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// A typed character with Alt held (and neither Ctrl nor Super) becomes `Key::Alt` when asked for; anything else stays as it is.
+pub fn alt_key(k: Key, ctrl: bool, alt: bool, meta: bool, wanted: bool) -> Key {
+    match k {
+        Key::Char(c) if wanted && alt && !ctrl && !meta && c.is_ascii_graphic() => Key::Alt(c),
+        other => other,
+    }
+}
+
+pub fn translate(code: u16, shift: bool, caps: bool) -> Option<Key> {
+    const ROW_NUM: &str = "1234567890-=";
+    const ROW_NUM_S: &str = "!@#$%^&*()_+";
+    const ROW_Q: &str = "qwertyuiop[]";
+    const ROW_Q_S: &str = "QWERTYUIOP{}";
+    const ROW_A: &str = "asdfghjkl;'";
+    const ROW_A_S: &str = "ASDFGHJKL:\"";
+    const ROW_Z: &str = "zxcvbnm,./";
+    const ROW_Z_S: &str = "ZXCVBNM<>?";
+    let pick = |row: &str, row_s: &str, i: usize, letters: bool| -> Option<Key> {
+        let (a, b) = (row.chars().nth(i)?, row_s.chars().nth(i)?);
+        let upper = if letters { shift ^ caps } else { shift };
+        Some(Key::Char(if upper { b } else { a }))
+    };
+    Some(match code {
+        2..=13 => return pick(ROW_NUM, ROW_NUM_S, (code - 2) as usize, false),
+        16..=27 => return pick(ROW_Q, ROW_Q_S, (code - 16) as usize, true),
+        30..=40 => return pick(ROW_A, ROW_A_S, (code - 30) as usize, true),
+        44..=53 => return pick(ROW_Z, ROW_Z_S, (code - 44) as usize, true),
+        41 => Key::Char(if shift { '~' } else { '`' }),
+        43 => Key::Char(if shift { '|' } else { '\\' }),
+        57 => Key::Char(' '),
+        28 | 96 => Key::Enter,
+        14 => Key::Backspace,
+        15 => if shift { Key::BackTab } else { Key::Tab },
+        1 => Key::Esc,
+        111 => Key::Delete,
+        103 => Key::Up,
+        108 => Key::Down,
+        105 => Key::Left,
+        106 => Key::Right,
+        102 => Key::Home,
+        107 => Key::End,
+        104 => Key::PageUp,
+        109 => Key::PageDown,
+        59..=68 => Key::F((code - 58) as u8),
+        87 => Key::F(11),
+        88 | 99 => Key::F(12),
+        _ => return None,
+    })
+}
+
+/// Turns raw events from all devices into UI events, tracking modifiers and the pointer.
+/// The start key of the Gemini voice assistant as modifiers (meta, ctrl, alt, shift) and the key's name (`V`, `F9`), or none while it is off.
+static VOICE_CHORD: std::sync::Mutex<Option<((bool, bool, bool, bool), String)>> = std::sync::Mutex::new(None);
+
+/// The shell sets the chord from the settings every few seconds (`None`: the assistant is off, the key does nothing).
+pub fn set_voice_chord(name: Option<&str>) {
+    let parsed = name.and_then(|n| crate::agent().geminilive_valid_shortcut(n).ok()).map(|n| {
+        let parts: Vec<&str> = n.split('+').collect();
+        let (mods, key) = parts.split_at(parts.len() - 1);
+        let has = |m: &str| mods.contains(&m);
+        ((has("Super"), has("Ctrl"), has("Alt"), has("Shift")), key[0].to_string())
+    });
+    *VOICE_CHORD.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = parsed;
+}
+
+fn voice_chord_hit(code: u16, meta: bool, ctrl: bool, alt: bool, shift: bool) -> bool {
+    let g = VOICE_CHORD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some((mods, key)) = g.as_ref() else { return false };
+    if *mods != (meta, ctrl, alt, shift) {
+        return false;
+    }
+    // the Mac profile keeps Command+letter for its own shortcuts (copy, paste, ...)
+    if mods.0 && !mods.1 && !mods.2 && crate::inputprofile::resolved() == iyakki_shared::inputprofile::Resolved::Mac {
+        return false;
+    }
+    match translate(code, false, false) {
+        Some(Key::Char(c)) => c.to_ascii_uppercase().to_string() == *key,
+        Some(Key::F(n)) => format!("F{n}") == *key,
+        _ => false,
+    }
+}
+
+pub struct InputState {
+    shift: bool,
+    ctrl: bool,
+    alt: bool,
+    /// The Windows / Command key (Meta), tracked for the Mac input profile (`inputprofile.rs`).
+    meta: bool,
+    /// A Control+click made a right click (Mac profile): the release that follows is not a click.
+    ctrl_click: bool,
+    /// The last scroll came from a touchpad (true) or a wheel, for the live row of Settings.
+    scroll_from_pad: bool,
+    caps: bool,
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    /// Per-device absolute ranges are applied by the caller via `abs_x`/`abs_y` scaling.
+    abs: (i32, i32),
+    /// Multi-touch slot the kernel is reporting for; only the first finger (slot 0) drives the pointer.
+    slot: i32,
+    /// A finger touched down in this frame: the tap is delivered at the end of the frame (`SYN_REPORT`),
+    /// when the position of the touch is known (the button event can arrive before the coordinates).
+    pending_touch: bool,
+    /// Touchpad gesture state (one pad at a time; a second pad shares it).
+    pad: crate::touchpad::Touchpad,
+    /// Touch screens, each with its own slots and the display its touch started on (`touchscreen.rs`).
+    touches: crate::touchscreen::Touches,
+    started: std::time::Instant,
+    /// Sticky keys and slow keys (`iyakki_uikit::access`), fed from the options the shell applies.
+    sticky: crate::access::StickyKeys,
+    slow: crate::access::SlowKeys,
+    /// Tests only: sticky and slow keys of this state alone, whatever the shell applied to the process.
+    opts: Option<(bool, u32)>,
+    /// Wheel and trackpad movement becomes smooth pixel steps here (`scrolleng.rs`); [`InputState::scroll_tick`] hands them out.
+    scroll: crate::scrolleng::ScrollEngine,
+    /// The wheel movement of the frame being read (legacy clicks, and the hi-res units a newer wheel sends with them).
+    wheel_legacy: i32,
+    wheel_hires: i32,
+    /// The part of a pointer step (hundredths of a pixel) that [`scale_rel`] has not paid out yet, per axis.
+    rel_rem: (i32, i32),
+    /// Tests only: a mouse speed of this state alone, whatever the process has.
+    mouse_pct: Option<u32>,
+    /// A clock for tests (milliseconds); the real one when `None`.
+    fake_ms: Option<u64>,
+    /// The earliest time of the next scroll step.
+    scroll_due: Option<u64>,
+}
+
+impl InputState {
+    pub fn new(w: u32, h: u32) -> InputState {
+        InputState { shift: false, ctrl: false, alt: false, meta: false, ctrl_click: false, scroll_from_pad: false, caps: false, x: w as i32 / 2, y: h as i32 / 2, w: w as i32, h: h as i32, abs: (0, 0), slot: 0, pending_touch: false, pad: crate::touchpad::Touchpad::new(), touches: Default::default(), started: std::time::Instant::now(), sticky: Default::default(), slow: Default::default(), opts: None, scroll: crate::scrolleng::ScrollEngine::new(), wheel_legacy: 0, wheel_hires: 0, rel_rem: (0, 0), mouse_pct: None, fake_ms: None, scroll_due: None }
+    }
+
+    fn now_ms(&self) -> u64 {
+        self.fake_ms.unwrap_or_else(|| self.started.elapsed().as_millis() as u64)
+    }
+
+    /// The scroll steps due now, as [`Event::ScrollPx`] (none while nothing scrolls). Call it from the input loop at least every
+    /// few milliseconds; it makes a step at most every [`crate::scrolleng::FRAME_MS`], so a scroll in progress asks for about 60
+    /// pictures a second and the shell is back at its low rate as soon as it settles.
+    pub fn scroll_tick(&mut self) -> Vec<Event> {
+        if crate::scrolleng::take_bound() {
+            self.scroll.bound();
+        }
+        if !self.scroll.wants_frames() {
+            return Vec::new();
+        }
+        let now = self.now_ms();
+        if self.scroll_due.is_some_and(|t| now < t) {
+            return Vec::new();
+        }
+        self.scroll_due = Some(now + crate::scrolleng::FRAME_MS);
+        match self.scroll.tick(now, crate::scrolleng::raw()) {
+            0 => Vec::new(),
+            px => {
+                crate::inputprofile::note_scroll(px, self.scroll_from_pad);
+                vec![Event::ScrollPx(px)]
+            }
+        }
+    }
+
+    /// Use a clock set by hand (tests of other modules; milliseconds).
+    #[cfg(test)]
+    pub(crate) fn fake_clock(&mut self, ms: u64) {
+        self.fake_ms = Some(ms);
+    }
+
+    /// True while a scroll is going on (the caller keeps its loop quick).
+    pub fn scrolling(&self) -> bool {
+        self.scroll.wants_frames()
+    }
+
+    /// An event from a touchpad (see `touchpad.rs`): pointer movement, taps, scrolling and the physical click. The clock is the
+    /// real one; tests use [`InputState::feed_pad_at`].
+    pub fn feed_pad(&mut self, r: Raw, range: &crate::touchpad::PadRange) -> Vec<Event> {
+        let now = self.started.elapsed().as_millis() as u64;
+        self.feed_pad_at(r, range, now)
+    }
+
+    pub fn feed_pad_at(&mut self, r: Raw, range: &crate::touchpad::PadRange, now_ms: u64) -> Vec<Event> {
+        use crate::touchpad::PadOut;
+        let cfg = pad_config();
+        let scfg = crate::scrolleng::config();
+        // a finger landing stops whatever momentum is going
+        if (r.typ == EV_ABS && r.code == ABS_MT_TRACKING_ID && r.value >= 0) || (r.typ == EV_KEY && r.code == BTN_TOUCH && r.value == 1) {
+            self.scroll.touch();
+        }
+        let mut out = Vec::new();
+        for o in self.pad.feed(r, now_ms, range, &cfg, self.w) {
+            match o {
+                PadOut::Move(dx, dy) => {
+                    self.x += dx;
+                    self.y += dy;
+                    self.clamp();
+                    out.push(Event::MouseMove(self.x, self.y));
+                }
+                // Control+click is a right click in the Mac profile
+                PadOut::LeftDown if self.ctrl && crate::inputprofile::resolved() == iyakki_shared::inputprofile::Resolved::Mac => {
+                    self.ctrl_click = true;
+                    out.push(Event::MouseRight(self.x, self.y));
+                }
+                PadOut::LeftUp if std::mem::take(&mut self.ctrl_click) => {}
+                PadOut::LeftDown => out.push(Event::MouseDown(self.x, self.y)),
+                PadOut::LeftUp => out.push(Event::MouseUp(self.x, self.y)),
+                PadOut::RightClick => out.push(Event::MouseRight(self.x, self.y)),
+                PadOut::Scroll(d) => {
+                    self.scroll_from_pad = true;
+                    self.scroll.pad(d, now_ms, &scfg)
+                }
+                PadOut::ScrollEnd => self.scroll.pad_end(now_ms, &scfg),
+                PadOut::Swipe { back } => out.push(Event::Swipe { back, at: None }),
+            }
+        }
+        out
+    }
+
+    fn clamp(&mut self) {
+        self.x = self.x.clamp_safe(0, self.w - 1);
+        self.y = self.y.clamp_safe(0, self.h - 1);
+    }
+
+    /// An event of a touch screen, mapped onto the display rectangle `target` of the desktop (`None`: no display owns it).
+    /// Positions come out as desktop positions; the pointer follows the finger.
+    pub fn feed_touch(&mut self, r: Raw, dev: &crate::touchmap::TouchDev, target: Option<&crate::touchmap::OutRect>) -> crate::touchscreen::TouchOut {
+        let out = self.touches.feed(r, dev, target);
+        for e in &out.events {
+            if let Event::MouseMove(x, y) | Event::MouseDown(x, y) | Event::MouseUp(x, y) = e {
+                (self.x, self.y) = (*x, *y);
+            }
+        }
+        out
+    }
+
+    /// [`InputState::feed_touch`] for a single picture: the device covers the whole screen.
+    pub fn feed_touch_full(&mut self, r: Raw, dev: &crate::touchmap::TouchDev) -> Vec<Event> {
+        let whole = crate::touchmap::OutRect { name: String::new(), x: 0, y: 0, w: self.w, h: self.h, internal: false, rot: crate::touchmap::Rot::R0 };
+        self.feed_touch(r, dev, Some(&whole)).events
+    }
+
+    /// A touch screen was unplugged: a finger still on it is lifted.
+    pub fn touch_gone(&mut self, key: &str) -> Vec<Event> {
+        self.touches.gone(key)
+    }
+
+    /// The touch screens held now are `now`, the ones held a moment ago `before`: whatever state a screen that left, or came back under
+    /// the same key, left behind is dropped (a contact that never lifted would else keep every later touch from being taken; a USB-C
+    /// monitor resets its USB hub when its display link renegotiates, and its touch panel comes back as a new device). `added` are the
+    /// keys of the devices opened since.
+    pub fn touch_devices_changed(&mut self, before: &[String], now: &[String], added: &[String]) -> Vec<Event> {
+        let mut out = Vec::new();
+        for k in before.iter().filter(|k| !now.contains(k)).chain(added.iter()) {
+            out.extend(self.touch_gone(k));
+        }
+        out
+    }
+
+    /// `abs_max` is the device's (max_x, max_y) when it is an absolute pointer (tablet, QEMU usb-tablet).
+    /// The input profile's view of a key press. True when it took the key (the events, if any, are in `out`).
+
+    /// Is the modifier of the lock and sign-out chords (Control+Command+L locks, Control+Command+Q signs out) held? In the Mac profile either Alt or Meta counts: whether the Apple
+    /// driver's Option/Command swap really reaches this keyboard cannot be known for sure (the saved setting says yes, a Bluetooth or T2
+    /// keyboard may not obey it), and Control+Option+Q or L means nothing else. In the PC profile Control+Windows+Q locks too, so a Mac
+    /// keyboard that was not recognised as Apple's (Automatic picks the PC profile) still has the chord it was told about.
+    fn lock_chord_mod(&self) -> bool {
+        if crate::inputprofile::resolved() == iyakki_shared::inputprofile::Resolved::Mac {
+            self.meta || self.alt
+        } else {
+            self.meta
+        }
+    }
+
+    fn profile_key(&mut self, code: u16, first: bool, out: &mut Vec<Event>) -> bool {
+        use iyakki_shared::inputprofile as ip;
+        let mac = crate::inputprofile::resolved() == ip::Resolved::Mac;
+        let swap = crate::inputprofile::swap_in_effect();
+        // in the Mac profile the keys are named by their print: the driver's swap is undone here, so it never swaps twice
+        let (command, option) = if mac {
+            let (a, m) = (self.alt, self.meta);
+            if swap { (a, m) } else { (m, a) }
+        } else {
+            (false, false)
+        };
+        let held = ip::Held { command, option, control: self.ctrl, shift: self.shift };
+        match crate::inputprofile::on_press(code, held, first) {
+            Some(evs) => {
+                out.extend(evs);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// One raw event in, UI events out. Slow keys and sticky keys (Settings, Accessibility) stand between the keyboard and the rest.
+    pub fn feed(&mut self, r: Raw, abs_max: Option<(i32, i32)>) -> Vec<Event> {
+        let (sticky, slow) = self.opts.unwrap_or_else(|| (crate::access::sticky_enabled(), crate::access::slow_ms()));
+        self.sticky.set_enabled(sticky);
+        self.slow.set_delay(slow);
+        if r.typ == EV_KEY && r.code < 0x100 && modifier_of(r.code).is_none() && self.slow.delay() > 0 {
+            let now = self.now_ms();
+            let mut out = Vec::new();
+            for v in self.slow.filter(r.code, r.value, now) {
+                out.extend(self.feed_sticky(Raw { value: v, ..r }, abs_max));
+            }
+            return out;
+        }
+        self.feed_sticky(r, abs_max)
+    }
+
+    /// Sticky keys: a modifier let go stays on for the next key (pure state in `StickyKeys`); with the option off this is `feed_one`.
+    fn feed_sticky(&mut self, r: Raw, abs_max: Option<(i32, i32)>) -> Vec<Event> {
+        if !self.sticky.enabled() {
+            return self.feed_one(r, abs_max);
+        }
+        if r.typ == EV_KEY {
+            if let Some(m) = modifier_of(r.code) {
+                if r.value != 2 {
+                    self.sticky.modifier(m, r.value != 0);
+                    self.take_sticky_mods();
+                }
+                return Vec::new();
+            }
+        }
+        let pressed = r.typ == EV_KEY && r.value == 1 && (r.code < 0x100 || r.code == BTN_LEFT || r.code == BTN_RIGHT);
+        let out = self.feed_one(r, abs_max);
+        if pressed {
+            self.sticky.key_used();
+            self.take_sticky_mods();
+        }
+        out
+    }
+
+    fn take_sticky_mods(&mut self) {
+        let m = self.sticky.mods();
+        (self.shift, self.ctrl, self.alt, self.meta) = (m.shift, m.ctrl, m.alt, m.meta);
+        crate::ui::set_shift_held(self.shift);
+    }
+
+    /// Latched modifiers wait for the next key (the shell can show a mark).
+    pub fn sticky_latched(&self) -> bool {
+        self.sticky.any_latched()
+    }
+
+    fn feed_one(&mut self, r: Raw, abs_max: Option<(i32, i32)>) -> Vec<Event> {
+        let mut out = Vec::new();
+        match r.typ {
+            EV_KEY => match r.code {
+                42 | 54 => {
+                    self.shift = r.value != 0;
+                    // a Shift+click extends a text selection: the shell reads this while it handles the press
+                    crate::ui::set_shift_held(self.shift);
+                }
+                29 | 97 => self.ctrl = r.value != 0,
+                125 | 126 => self.meta = r.value != 0,
+                56 | 100 => {
+                    self.alt = r.value != 0;
+                    if r.value == 1 {
+                        crate::fnkeys::note_seen(r.code); // Settings -> Keyboard still finds the code of this key
+                    }
+                }
+                BTN_RIGHT if r.value == 1 => out.push(Event::MouseRight(self.x, self.y)),
+                58 if r.value == 1 => self.caps = !self.caps,
+                // an absolute pointer (a touch monitor's mouse-like interface, a tablet) sends the button before the new position in
+                // the same frame: the click is made at the end of the frame, where the finger is, not where the last one was
+                BTN_LEFT if r.value == 1 && abs_max.is_some() => self.pending_touch = true,
+                // Mac profile: Control+click is a right click (the release after it is not a click)
+                BTN_LEFT if r.value == 1 && self.ctrl && crate::inputprofile::resolved() == iyakki_shared::inputprofile::Resolved::Mac => {
+                    self.ctrl_click = true;
+                    out.push(Event::MouseRight(self.x, self.y));
+                }
+                BTN_LEFT if r.value == 0 && std::mem::take(&mut self.ctrl_click) => {}
+                BTN_LEFT if r.value == 1 => out.push(Event::MouseDown(self.x, self.y)),
+                BTN_LEFT if r.value == 0 => out.push(Event::MouseUp(self.x, self.y)),
+                BTN_TOUCH if r.value == 1 => self.pending_touch = true,
+                BTN_TOUCH if r.value == 0 => out.push(Event::MouseUp(self.x, self.y)),
+                // media, volume, brightness and other Fn keys: the shell acts on them before any app sees a key
+                c if r.value != 2 && crate::fnkeys::fn_key(c).is_some() => {
+                    if let Some(fk) = crate::fnkeys::fn_key(c) {
+                        if r.value == 1 {
+                            crate::fnkeys::note_seen(c);
+                        }
+                        out.push(Event::Fn(fk, r.value != 0));
+                    }
+                }
+                // Super+Alt chords of accessibility (S reader on/off, Right/Left walk, Enter press, R say again): the shell takes them
+                c if self.meta && self.alt && !self.ctrl && r.value == 1 && access_chord(c).is_some() => {
+                    if let Some(k) = access_chord(c) {
+                        out.push(Event::Fn(k, true));
+                        out.push(Event::Fn(k, false));
+                    }
+                }
+                // Desktop views: Ctrl+Alt+Super+1..9 jumps to view N (before the Ctrl+Alt digits, which apply a pane layout)
+                c if self.ctrl && self.alt && self.meta && r.value == 1 && (2..=10).contains(&c) => {
+                    out.push(Event::Layout(crate::panes::LayoutKey::View((c - 1) as u8)));
+                }
+                // Desktop views, Mac-style: Control+Command+Left / Right (Command is Super; Alt held makes it a pane snap instead)
+                105 | 106 if self.ctrl && self.meta && !self.alt && !self.shift && r.value == 1 => {
+                    out.push(Event::Layout(crate::panes::LayoutKey::ViewStep { back: r.code == 105, mac: true }));
+                }
+                // Ctrl+Alt chords for panes and displays (arrows, 0-9, Tab, M): the shell takes them, no app sees a key
+                c if self.ctrl && self.alt && (r.value == 1 || r.value == 2) && crate::panes::chord_from_evdev(c, self.shift).is_some() => {
+                    if let Some(k) = crate::panes::chord_from_evdev(c, self.shift) {
+                        out.push(Event::Layout(k));
+                    }
+                }
+                // Control+Command+Q (as on a Mac) asks to sign out, Control+Command+L (the owner's habit, next to Super+L) locks the screen,
+                // in the Mac profile; Control+Option does the same (the Option/Command swap may or may not reach the keyboard). In the PC
+                // profile Control+Windows+Q signs out and Control+Windows+L locks (Super+L below). Command+L alone stays the browser's
+                16 if self.ctrl && r.value == 1 && self.lock_chord_mod() => {
+                    out.push(Event::Fn(crate::fnkeys::FnKey::SignOut, true));
+                    out.push(Event::Fn(crate::fnkeys::FnKey::SignOut, false));
+                }
+                38 if self.ctrl && r.value == 1 && self.lock_chord_mod() => {
+                    out.push(Event::Fn(crate::fnkeys::FnKey::Lock, true));
+                    out.push(Event::Fn(crate::fnkeys::FnKey::Lock, false));
+                }
+                // Control+Command+S (Mac profile) or Control+Windows+S starts the screen saver now
+                31 if self.ctrl && r.value == 1 && self.lock_chord_mod() => {
+                    out.push(Event::Fn(crate::fnkeys::FnKey::Saver, true));
+                    out.push(Event::Fn(crate::fnkeys::FnKey::Saver, false));
+                }
+                // the Gemini voice assistant's start key (EXPERIMENTAL; Super+V by default, set in Settings): the shell starts or ends a session
+                c if r.value == 1 && voice_chord_hit(c, self.meta, self.ctrl, self.alt, self.shift) => {
+                    out.push(Event::Fn(crate::fnkeys::FnKey::VoiceAssist, true));
+                    out.push(Event::Fn(crate::fnkeys::FnKey::VoiceAssist, false));
+                }
+                // Super+L locks the screen (a PC keyboard; the Mac profile keeps Command+L for the browser's address bar)
+                38 if self.meta && r.value == 1 && crate::inputprofile::resolved() != iyakki_shared::inputprofile::Resolved::Mac => {
+                    out.push(Event::Fn(crate::fnkeys::FnKey::Lock, true));
+                    out.push(Event::Fn(crate::fnkeys::FnKey::Lock, false));
+                }
+                // the input profile: Command shortcuts and Option word jumps of the Mac profile, and the live "last key" row
+                c if (r.value == 1 || r.value == 2) && self.profile_key(c, r.value == 1, &mut out) => {}
+                c if r.value == 1 || r.value == 2 => {
+                    if translate(c, self.shift, self.caps).is_none() && r.value == 1 && c < 0x100 {
+                        crate::fnkeys::note_seen(c); // for Settings -> Keyboard: finding the code of a key
+                    }
+                    if let Some(k) = translate(c, self.shift, self.caps) {
+                        // arrows/Home/End/Page with Shift or Ctrl carry their modifiers (selection, word jumps)
+                        let nav = match k {
+                            Key::Left => Some(Nav::Left),
+                            Key::Right => Some(Nav::Right),
+                            Key::Up => Some(Nav::Up),
+                            Key::Down => Some(Nav::Down),
+                            Key::Home => Some(Nav::Home),
+                            Key::End => Some(Nav::End),
+                            Key::PageUp => Some(Nav::PageUp),
+                            Key::PageDown => Some(Nav::PageDown),
+                            _ => None,
+                        };
+                        if let (Some(nav), true) = (nav, self.shift || self.ctrl) {
+                            out.push(Event::Key(Key::Nav { nav, shift: self.shift, ctrl: self.ctrl }));
+                            return out;
+                        }
+                        // Ctrl+letter becomes a shortcut; Shift makes the letter uppercase (Ctrl+Shift+V)
+                        out.push(Event::Key(match k {
+                            Key::Char(ch) if self.ctrl && ch.is_ascii_alphabetic() => Key::Ctrl(if self.shift { ch.to_ascii_uppercase() } else { ch.to_ascii_lowercase() }),
+                            other => alt_key(other, self.ctrl, self.alt, self.meta, alt_passthrough()),
+                        }));
+                    }
+                }
+                _ => {}
+            },
+            EV_REL => match r.code {
+                REL_X => {
+                    let pct = self.mouse_pct.unwrap_or_else(mouse_speed_pct);
+                    self.x = self.x.saturating_add(scale_rel(r.value, pct, &mut self.rel_rem.0));
+                    self.clamp();
+                    out.push(Event::MouseMove(self.x, self.y));
+                }
+                REL_Y => {
+                    let pct = self.mouse_pct.unwrap_or_else(mouse_speed_pct);
+                    self.y = self.y.saturating_add(scale_rel(r.value, pct, &mut self.rel_rem.1));
+                    self.clamp();
+                    out.push(Event::MouseMove(self.x, self.y));
+                }
+                // read at the end of the frame: a wheel with fractions sends the click and its 120 units together
+                REL_WHEEL => self.wheel_legacy += r.value,
+                REL_WHEEL_HI_RES => self.wheel_hires += r.value,
+                _ => {}
+            },
+            EV_SYN if r.code == SYN_REPORT => {
+                let (legacy, hires) = (std::mem::take(&mut self.wheel_legacy), std::mem::take(&mut self.wheel_hires));
+                // Control and the wheel zoom (as in other browsers): the app gets Control with + or -, up is bigger; the page does not scroll
+                if self.ctrl && !self.alt && !self.meta && (hires != 0 || legacy != 0) {
+                    let units = if hires != 0 { hires } else { legacy * 120 };
+                    let steps = ((units.unsigned_abs() + 119) / 120).clamp(1, 3);
+                    for _ in 0..steps {
+                        out.push(Event::Key(Key::Ctrl(if units > 0 { '+' } else { '-' })));
+                    }
+                    return out;
+                }
+                match (hires, legacy) {
+                    (0, 0) => {}
+                    (0, clicks) => {
+                        self.scroll_from_pad = false;
+                        self.scroll.wheel(clicks * 120, &crate::scrolleng::config())
+                    }
+                    (units, _) => {
+                        self.scroll_from_pad = false;
+                        self.scroll.wheel(units, &crate::scrolleng::config())
+                    }
+                }
+                if std::mem::take(&mut self.pending_touch) {
+                    out.push(Event::MouseDown(self.x, self.y));
+                }
+            }
+            EV_ABS => {
+                if r.code == ABS_MT_SLOT {
+                    self.slot = r.value;
+                    return out;
+                }
+                if r.code == ABS_MT_TRACKING_ID && self.slot == 0 && r.value >= 0 {
+                    self.pending_touch = true; // a new contact (some panels send no BTN_TOUCH)
+                    return out;
+                }
+                if r.code == ABS_MT_TRACKING_ID && self.slot == 0 && r.value < 0 {
+                    out.push(Event::MouseUp(self.x, self.y)); // the finger lifted
+                    return out;
+                }
+                if let Some((mx, my)) = abs_max {
+                    match r.code {
+                        ABS_X => self.abs.0 = (r.value as i64 * (self.w - 1) as i64 / mx.max(1) as i64) as i32,
+                        ABS_Y => self.abs.1 = (r.value as i64 * (self.h - 1) as i64 / my.max(1) as i64) as i32,
+                        ABS_MT_POSITION_X if self.slot == 0 => self.abs.0 = (r.value as i64 * (self.w - 1) as i64 / mx.max(1) as i64) as i32,
+                        ABS_MT_POSITION_Y if self.slot == 0 => self.abs.1 = (r.value as i64 * (self.h - 1) as i64 / my.max(1) as i64) as i32,
+                        _ => return out,
+                    }
+                    (self.x, self.y) = self.abs;
+                    self.clamp();
+                    out.push(Event::MouseMove(self.x, self.y));
+                }
+            }
+            _ => {}
+        }
+        out
+    }
+}
+
+// ------------------------------------------------------------------ touchpad settings (Settings -> Keyboard)
+
+static PAD_TAP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static PAD_3F: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Three-finger drag for every touchpad (takes effect with the next event).
+pub fn request_three_finger_drag(on: bool) {
+    PAD_3F.store(on, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Tap to click for every touchpad (takes effect with the next event). Scrolling choices: [`crate::scrolleng::request_config`].
+pub fn request_touchpad(tap_to_click: bool) {
+    use std::sync::atomic::Ordering::SeqCst;
+    PAD_TAP.store(tap_to_click, SeqCst);
+}
+
+pub fn pad_config() -> crate::touchpad::PadConfig {
+    use std::sync::atomic::Ordering::SeqCst;
+    let drag = PAD_3F.load(SeqCst);
+    let (on, fingers) = home_swipe();
+    crate::touchpad::PadConfig { tap_to_click: PAD_TAP.load(SeqCst), speed_pct: PAD_SPEED.load(SeqCst), three_finger_drag: drag, swipe_fingers: swipe_fingers_for(on, fingers, drag) }
+}
+
+/// The fingers the pad swipes with: none when the swipe is off; three fingers drag when that is chosen, so the swipe is not theirs then.
+pub fn swipe_fingers_for(on: bool, fingers: u8, three_finger_drag: bool) -> u8 {
+    if !on || (fingers == 3 && three_finger_drag) {
+        0
+    } else {
+        fingers
+    }
+}
+
+thread_local! {
+    static SWIPE_THREAD: std::cell::Cell<Option<(bool, u8)>> = const { std::cell::Cell::new(None) };
+}
+
+/// Tests only: the swipe choices of this thread alone, whatever other threads (other tests, a login) have applied to the process.
+pub fn home_swipe_for_this_thread(v: Option<(bool, u8)>) {
+    SWIPE_THREAD.with(|c| c.set(v));
+}
+
+static SWIPE_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static SWIPE_FINGERS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(3);
+
+/// The Home swipe between groups: on or off, and the fingers (2 or 3) of a touchpad swipe (takes effect with the next event).
+pub fn request_home_swipe(on: bool, fingers: u8) {
+    use std::sync::atomic::Ordering::SeqCst;
+    SWIPE_ON.store(on, SeqCst);
+    SWIPE_FINGERS.store(if fingers == 2 { 2 } else { 3 }, SeqCst);
+}
+
+/// (on, fingers) as last requested; the shell asks it too, for the one-finger swipe of a touch screen.
+pub fn home_swipe() -> (bool, u8) {
+    use std::sync::atomic::Ordering::SeqCst;
+    SWIPE_THREAD.with(|c| c.get()).unwrap_or_else(|| (SWIPE_ON.load(SeqCst), SWIPE_FINGERS.load(SeqCst)))
+}
+
+// ------------------------------------------------------------------ pointer speed (Settings -> Keyboard)
+
+static MOUSE_SPEED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(100);
+static PAD_SPEED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(100);
+
+/// The pointer speeds in percent for a mouse (relative device) and for a touchpad (takes effect with the next event).
+pub fn request_pointer_speed(mouse_pct: u32, pad_pct: u32) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let (lo, hi) = iyakki_shared::keyboard::POINTER_SPEED_RANGE;
+    MOUSE_SPEED.store(mouse_pct.clamp_safe(lo, hi), SeqCst);
+    PAD_SPEED.store(pad_pct.clamp_safe(lo, hi), SeqCst);
+}
+
+/// The speed a mouse moves at now, in percent.
+pub fn mouse_speed_pct() -> u32 {
+    MOUSE_SPEED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// One axis of relative motion scaled by `pct` percent. `rem` carries the part of a step that did not make a whole pixel (in
+/// hundredths of a pixel), so slow motion at 50 % or 30 % is delayed and not lost. Truncation is towards zero, so a movement and its
+/// opposite are symmetric; the arithmetic is 64-bit and the result is clamped to `i32`, so nothing overflows.
+pub fn scale_rel(delta: i32, pct: u32, rem: &mut i32) -> i32 {
+    let total = delta as i64 * pct as i64 + *rem as i64;
+    *rem = (total % 100) as i32;
+    (total / 100).clamp_safe(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
+// ------------------------------------------------------------------ device access
+
+fn ioc_read(nr: u32, size: u32) -> libc::c_ulong {
+    ((2u32 << 30) | (size << 16) | ((b'E' as u32) << 8) | nr) as libc::c_ulong
+}
+
+fn has_bit(bits: &[u8], n: u16) -> bool {
+    bits.get(n as usize / 8).is_some_and(|b| b & (1 << (n % 8)) != 0)
+}
+
+pub struct Device {
+    file: std::fs::File,
+    pub path: String,
+    /// `Some((max_x, max_y))` for absolute pointers.
+    pub abs_max: Option<(i32, i32)>,
+    /// A typing keyboard (key repeat settings apply to these).
+    pub is_keyboard: bool,
+    /// `Some` for a touchpad (multi-touch, finger tools, not a touch screen): its events go to `InputState::feed_pad`.
+    pub pad: Option<crate::touchpad::PadRange>,
+    /// `Some` for a touch screen or digitizer: its positions are mapped onto the display it belongs to (`touchmap.rs`).
+    pub touch: Option<std::sync::Arc<crate::touchmap::TouchDev>>,
+    /// Fingers use it: a touch screen, or the mouse-like interface many touch monitors add (named "...TouchScreen", absolute, BTN_LEFT):
+    /// a press on it opens the on-screen keyboard (`osk.rs`) for a text field, however the positions are mapped.
+    pub finger: bool,
+    /// The device has delivered at least one event since it was opened. A touch screen that never speaks leaves the word to the
+    /// monitor's mouse-like interface (`mouse_like_muted`).
+    pub spoke: bool,
+}
+
+impl Device {
+    pub fn fd(&self) -> RawFd {
+        self.file.as_raw_fd()
+    }
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct AbsInfo {
+    value: i32,
+    min: i32,
+    max: i32,
+    fuzz: i32,
+    flat: i32,
+    res: i32,
+}
+
+/// Has multi-touch position axes.
+fn is_multitouch(fd: RawFd) -> bool {
+    let mut x = AbsInfo::default();
+    // SAFETY: EVIOCGABS fills one input_absinfo.
+    unsafe { libc::ioctl(fd, ioc_read(0x40 + ABS_MT_POSITION_X as u32, std::mem::size_of::<AbsInfo>() as u32) as _, &mut x as *mut AbsInfo) >= 0 }
+}
+
+/// EVIOCGPROP: INPUT_PROP_DIRECT (bit 1) marks a touch screen, whose finger position is the pointer.
+fn is_direct(fd: RawFd) -> bool {
+    let mut props = [0u8; 4];
+    // SAFETY: EVIOCGPROP writes at most `len` bytes into our buffer.
+    let r = unsafe { libc::ioctl(fd, ioc_read(0x09, props.len() as u32) as _, props.as_mut_ptr()) };
+    r >= 0 && has_bit(&props, 1)
+}
+
+/// EVIOCGNAME: the device's name as the kernel shows it.
+fn device_name(fd: RawFd) -> String {
+    let mut buf = [0u8; 256];
+    // SAFETY: EVIOCGNAME writes at most `len` bytes (a NUL-terminated name) into our buffer.
+    let r = unsafe { libc::ioctl(fd, ioc_read(0x06, buf.len() as u32) as _, buf.as_mut_ptr()) };
+    if r <= 0 {
+        return String::new();
+    }
+    let n = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+    String::from_utf8_lossy(&buf[..n]).into_owned()
+}
+
+/// EVIOCGID: (bus type, vendor, product); bus 3 is USB.
+fn device_id(fd: RawFd) -> (u16, u16, u16) {
+    let mut id = [0u16; 4];
+    // SAFETY: EVIOCGID fills one input_id (four u16).
+    let r = unsafe { libc::ioctl(fd, ioc_read(0x02, 8) as _, id.as_mut_ptr()) };
+    if r < 0 {
+        (0, 0, 0)
+    } else {
+        (id[0], id[1], id[2])
+    }
+}
+
+/// EVIOCGPHYS: the port path the device hangs on ("usb-0000:00:14.0-3.3/input0"), empty when it has none.
+fn device_phys(fd: RawFd) -> String {
+    let mut buf = [0u8; 128];
+    // SAFETY: EVIOCGPHYS writes at most `len` bytes (a NUL-terminated string) into our buffer.
+    let r = unsafe { libc::ioctl(fd, ioc_read(0x07, buf.len() as u32) as _, buf.as_mut_ptr()) };
+    if r <= 0 {
+        return String::new();
+    }
+    let n = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+    String::from_utf8_lossy(&buf[..n]).into_owned()
+}
+
+/// A touch panel of the Touch Bar: its finger positions belong to the bar (`touchbar_host.rs`), not to the pointer of the main screen.
+pub struct BarNode {
+    pub path: String,
+    pub file: std::fs::File,
+    /// The position axis along the long side (ABS_MT_POSITION_X or _Y) and its range.
+    pub axis: u16,
+    pub min: i32,
+    pub max: i32,
+}
+
+impl BarNode {
+    pub fn fd(&self) -> RawFd {
+        self.file.as_raw_fd()
+    }
+}
+
+/// Open one event node when it is a multi-touch panel named like the Touch Bar. The long axis is the one with the bigger range (the
+/// panel is built like the display, 2170 along the bar and 60 across).
+pub fn open_touchbar_node(path: &str) -> Option<BarNode> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(path).ok()?;
+    let fd = file.as_raw_fd();
+    if !crate::touchbar::is_touchbar_name(&device_name(fd)) {
+        return None;
+    }
+    let (mut x, mut y) = (AbsInfo::default(), AbsInfo::default());
+    // SAFETY: EVIOCGABS fills one input_absinfo.
+    let (rx, ry) = unsafe {
+        (
+            libc::ioctl(fd, ioc_read(0x40 + ABS_MT_POSITION_X as u32, std::mem::size_of::<AbsInfo>() as u32) as _, &mut x as *mut AbsInfo),
+            libc::ioctl(fd, ioc_read(0x40 + ABS_MT_POSITION_Y as u32, std::mem::size_of::<AbsInfo>() as u32) as _, &mut y as *mut AbsInfo),
+        )
+    };
+    if rx < 0 || ry < 0 || x.max <= x.min || y.max <= y.min {
+        return None;
+    }
+    let (axis, a) = if (x.max - x.min) >= (y.max - y.min) { (ABS_MT_POSITION_X, x) } else { (ABS_MT_POSITION_Y, y) };
+    Some(BarNode { path: path.into(), file, axis, min: a.min, max: a.max })
+}
+
+/// The event nodes of `/dev/input` (sorted).
+pub fn event_nodes() -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir("/dev/input") else { return Vec::new() };
+    let mut v: Vec<String> = rd.flatten().map(|e| e.path().display().to_string()).filter(|p| p.contains("/event")).collect();
+    v.sort();
+    v
+}
+
+/// Read what is waiting on a Touch Bar node (never blocks). `Err` when the node is gone.
+pub fn read_touchbar_node(n: &BarNode) -> Result<Vec<Raw>, ()> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    let mut buf = [0u8; 24 * 64];
+    loop {
+        match (&n.file).read(&mut buf) {
+            Ok(0) => return Err(()),
+            Ok(k) => out.extend(parse_events(&buf[..k])),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(out),
+            Err(_) => return Err(()),
+        }
+    }
+}
+
+fn open_device(path: &str) -> Option<Device> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(path).ok()?;
+    let fd = file.as_raw_fd();
+    let mut key_bits = [0u8; 96];
+    // SAFETY: EVIOCGBIT(EV_KEY) writes at most `len` bytes into our buffer.
+    let r = unsafe { libc::ioctl(fd, ioc_read(0x20 + EV_KEY as u32, key_bits.len() as u32) as _, key_bits.as_mut_ptr()) };
+    if r < 0 {
+        return None;
+    }
+    let is_keyboard = has_bit(&key_bits, 30) && has_bit(&key_bits, 28); // KEY_A and KEY_ENTER
+    // the Touch Bar's touch panel is the bar's own: never a pointer on the main screen (its keys node has no positions and stays)
+    if !is_keyboard && is_multitouch(fd) && crate::touchbar::is_touchbar_name(&device_name(fd)) {
+        return None;
+    }
+    let is_touchpad = has_bit(&key_bits, BTN_TOOL_FINGER) && !is_direct(fd); // a touch screen (INPUT_PROP_DIRECT) is not a pad
+    let mut abs = AbsInfo::default();
+    let mut abs_y = AbsInfo::default();
+    // SAFETY: EVIOCGABS fills one input_absinfo.
+    let (rx, ry) = unsafe {
+        (
+            libc::ioctl(fd, ioc_read(0x40 + ABS_X as u32, std::mem::size_of::<AbsInfo>() as u32) as _, &mut abs as *mut AbsInfo),
+            libc::ioctl(fd, ioc_read(0x40 + ABS_Y as u32, std::mem::size_of::<AbsInfo>() as u32) as _, &mut abs_y as *mut AbsInfo),
+        )
+    };
+    // many touch monitors report only the multi-touch axes
+    let (mut mt_x, mut mt_y) = (AbsInfo::default(), AbsInfo::default());
+    // SAFETY: as above, for the multi-touch position axes.
+    let (mrx, mry) = unsafe {
+        (
+            libc::ioctl(fd, ioc_read(0x40 + ABS_MT_POSITION_X as u32, std::mem::size_of::<AbsInfo>() as u32) as _, &mut mt_x as *mut AbsInfo),
+            libc::ioctl(fd, ioc_read(0x40 + ABS_MT_POSITION_Y as u32, std::mem::size_of::<AbsInfo>() as u32) as _, &mut mt_y as *mut AbsInfo),
+        )
+    };
+    let abs_max = if rx >= 0 && ry >= 0 && abs.max > 0 && !is_touchpad {
+        Some((abs.max, abs_y.max))
+    } else if mrx >= 0 && mry >= 0 && mt_x.max > 0 && mt_y.max > 0 && !is_touchpad {
+        Some((mt_x.max, mt_y.max))
+    } else {
+        None
+    };
+    // a multi-touch touchpad (Apple SPI, I2C and USB pads): gestures in touchpad.rs
+    if is_touchpad && !is_keyboard && mrx >= 0 && mry >= 0 && mt_x.max > mt_x.min && mt_y.max > mt_y.min {
+        let mut major = AbsInfo::default();
+        // SAFETY: as above, for ABS_MT_TOUCH_MAJOR (0x30).
+        let rm = unsafe { libc::ioctl(fd, ioc_read(0x40 + 0x30, std::mem::size_of::<AbsInfo>() as u32) as _, &mut major as *mut AbsInfo) };
+        let pad = crate::touchpad::PadRange { x_min: mt_x.min, x_max: mt_x.max, y_min: mt_y.min, y_max: mt_y.max, major_max: if rm >= 0 { major.max } else { 0 } };
+        return Some(Device { file, path: path.into(), abs_max: None, is_keyboard: false, pad: Some(pad), touch: None, finger: false, spoke: false });
+    }
+    let has_btn = has_bit(&key_bits, BTN_LEFT) || has_bit(&key_bits, BTN_TOUCH);
+    let mut rel_bits = [0u8; 4];
+    // SAFETY: as above, for EV_REL.
+    unsafe { libc::ioctl(fd, ioc_read(0x20 + EV_REL as u32, rel_bits.len() as u32) as _, rel_bits.as_mut_ptr()) };
+    let is_mouse = has_bit(&rel_bits, REL_X) && has_btn;
+    if is_touchpad && !is_keyboard {
+        return None;
+    }
+    // volume and media keys often sit on a node of their own ("Consumer Control", "Video Bus", "Power Button")
+    let has_fn_keys = crate::fnkeys::KEYS.iter().any(|i| has_bit(&key_bits, i.code));
+    if is_keyboard || is_mouse || abs_max.is_some() || has_fn_keys {
+        // a touch screen or digitizer (INPUT_PROP_DIRECT or BTN_TOUCH) belongs to one display; a tablet pointer spans the desktop
+        let touch = if abs_max.is_some() && !is_keyboard && (is_direct(fd) || has_bit(&key_bits, BTN_TOUCH)) {
+            let mt = mrx >= 0 && mry >= 0 && mt_x.max > mt_x.min && mt_y.max > mt_y.min;
+            let (x, y) = if mt { ((mt_x.min, mt_x.max), (mt_y.min, mt_y.max)) } else { ((abs.min, abs.max), (abs_y.min, abs_y.max)) };
+            let (bus, vendor, product) = device_id(fd);
+            let phys = device_phys(fd);
+            let id = format!("{vendor:04x}:{product:04x}");
+            let key = format!("{id}@{}", if phys.is_empty() { path.to_string() } else { phys });
+            Some(std::sync::Arc::new(crate::touchmap::TouchDev { key, id, name: device_name(fd), usb: bus == 3, mt, x, y }))
+        } else {
+            None
+        };
+        let name = device_name(fd);
+        let lower = name.to_ascii_lowercase();
+        let finger = !is_keyboard && (touch.is_some() || (abs_max.is_some() && (lower.contains("touch") || lower.contains("digitizer"))));
+        if finger {
+            log::info!("input: {name} ({path}) takes fingers: its presses open the on-screen keyboard for a text field{}", if touch.is_some() { "" } else { " (a mouse-like touch interface)" });
+        }
+        Some(Device { file, path: path.into(), abs_max, is_keyboard, pad: None, touch, finger, spoke: false })
+    } else {
+        None
+    }
+}
+
+/// Which modifier an evdev key code is.
+fn modifier_of(code: u16) -> Option<crate::access::Modifier> {
+    use crate::access::Modifier as M;
+    match code {
+        42 | 54 => Some(M::Shift),
+        29 | 97 => Some(M::Ctrl),
+        56 | 100 => Some(M::Alt),
+        125 | 126 => Some(M::Meta),
+        _ => None,
+    }
+}
+
+/// The accessibility chord a key code makes with Super+Alt held.
+fn access_chord(code: u16) -> Option<crate::fnkeys::FnKey> {
+    use crate::fnkeys::FnKey as K;
+    match code {
+        31 => Some(K::ScreenReader),
+        106 | 108 => Some(K::AccessNext),
+        105 | 103 => Some(K::AccessPrev),
+        28 => Some(K::AccessActivate),
+        19 => Some(K::AccessRepeat),
+        _ => None,
+    }
+}
+
+// ------------------------------------------------------------------ key repeat (Settings -> Keyboard)
+
+static REPEAT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static REPEAT_GEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Ask for a key repeat of `delay_ms` before the first repeat and `period_ms` between repeats on every keyboard (the input
+/// thread applies it, also to keyboards plugged in later). 0, 0 = leave the kernel's own.
+pub fn request_repeat(delay_ms: u32, period_ms: u32) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let v = ((delay_ms as u64) << 32) | period_ms as u64;
+    if REPEAT.swap(v, SeqCst) != v {
+        REPEAT_GEN.fetch_add(1, SeqCst);
+    }
+}
+
+/// The requested (delay, period) in milliseconds, if any.
+pub fn current_repeat() -> Option<(u32, u32)> {
+    let v = REPEAT.load(std::sync::atomic::Ordering::SeqCst);
+    (v != 0).then_some(((v >> 32) as u32, v as u32))
+}
+
+/// EVIOCSREP: `_IOW('E', 0x03, unsigned int[2])`.
+const EVIOCSREP: libc::c_ulong = ((1u32 << 30) | (8 << 16) | ((b'E' as u32) << 8) | 3) as libc::c_ulong;
+
+fn set_repeat(path: &str, delay_ms: u32, period_ms: u32) -> bool {
+    // the ioctl wants the device open for writing
+    let Ok(f) = std::fs::OpenOptions::new().read(true).write(true).open(path) else { return false };
+    let vals = [delay_ms, period_ms];
+    // SAFETY: EVIOCSREP reads two unsigned ints from our array.
+    unsafe { libc::ioctl(f.as_raw_fd(), EVIOCSREP as _, vals.as_ptr()) >= 0 }
+}
+
+/// Applies the requested key repeat to the keyboards when it changes or a keyboard appears.
+pub struct RepeatApplier {
+    gen: u32,
+    devices: usize,
+}
+
+impl Default for RepeatApplier {
+    fn default() -> Self {
+        RepeatApplier { gen: u32::MAX, devices: 0 }
+    }
+}
+
+impl RepeatApplier {
+    pub fn tick(&mut self, devs: &[Device]) {
+        let gen = REPEAT_GEN.load(std::sync::atomic::Ordering::SeqCst);
+        if gen == self.gen && devs.len() == self.devices {
+            return;
+        }
+        (self.gen, self.devices) = (gen, devs.len());
+        if let Some((d, p)) = current_repeat() {
+            for dev in devs.iter().filter(|d| d.is_keyboard) {
+                if !set_repeat(&dev.path, d, p) {
+                    log::warn!("input: could not set the key repeat of {}", dev.path);
+                }
+            }
+        }
+    }
+}
+
+/// Opens the node of every touch screen again when the touch recovery asked for it (`iyakki_agent::touchrecover`, first step of its
+/// ladder). `seen` is the generation already handled by the caller (start it at the current one). Returns how many were reopened.
+pub fn apply_reopen(devs: &mut [Device], seen: &mut u64) -> usize {
+    use std::os::unix::fs::OpenOptionsExt;
+    let gen = crate::agent().touchrecover_reopen_generation();
+    if gen == *seen {
+        return 0;
+    }
+    *seen = gen;
+    let mut n = 0;
+    for d in devs.iter_mut().filter(|d| d.touch.is_some()) {
+        match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(&d.path) {
+            Ok(f) => {
+                d.file = f;
+                n += 1;
+            }
+            Err(e) => log::info!("input: touch node {} could not be opened again: {e}", d.path),
+        }
+    }
+    log::info!("input: touch recovery: {n} touch node(s) opened again");
+    n
+}
+
+/// Open every usable keyboard/mouse not already open.
+pub fn scan_devices(open: &mut Vec<Device>) {
+    let Ok(rd) = std::fs::read_dir("/dev/input") else { return };
+    let mut paths: Vec<String> = rd.flatten().map(|e| e.path().display().to_string()).filter(|p| p.contains("/event")).collect();
+    paths.sort();
+    for p in paths {
+        if open.iter().any(|d| d.path == p) {
+            continue;
+        }
+        if let Some(d) = open_device(&p) {
+            open.push(d);
+        }
+    }
+}
+
+/// Scans for input devices on a thread of its own (twice a second) and hands over the ones it finds. Opening an event device the kernel is still
+/// setting up can block for seconds at boot (5.3 s seen on a Mac mini 2018): a screen that animates must not wait for it.
+pub struct BackgroundScan {
+    found: std::sync::Arc<std::sync::Mutex<Vec<Device>>>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl BackgroundScan {
+    pub fn start() -> BackgroundScan {
+        use std::sync::atomic::Ordering::Relaxed;
+        let found = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (f, s) = (found.clone(), stop.clone());
+        let _ = std::thread::Builder::new().name("iyakki-input-scan".into()).spawn(move || {
+            // path -> the node's inode: a node the kernel made again under the same name (a driver that binds a second time, as
+            // hid-multitouch does for a touch monitor) is another device and is opened again
+            let mut seen: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+            let ino = |p: &str| {
+                use std::os::unix::fs::MetadataExt;
+                std::fs::metadata(p).map(|m| m.ino()).unwrap_or(0)
+            };
+            while !s.load(Relaxed) {
+                // a node that is gone is forgotten: the kernel reuses `event15` for the next device plugged in
+                seen.retain(|p, i| std::path::Path::new(p).exists() && ino(p) == *i);
+                // only nodes not already handed over are opened: a device in use is never opened a second time
+                let mut fresh: Vec<Device> = Vec::new();
+                for p in event_nodes() {
+                    if s.load(Relaxed) {
+                        break;
+                    }
+                    if seen.contains_key(&p) {
+                        continue;
+                    }
+                    if let Some(d) = open_device(&p) {
+                        let i = ino(&p);
+                        seen.insert(p, i);
+                        fresh.push(d);
+                    }
+                }
+                if !fresh.is_empty() {
+                    f.lock().unwrap_or_else(|p| p.into_inner()).extend(fresh);
+                }
+                // every half second: a touch monitor that resets its USB hub when the display link renegotiates (a USB-C monitor) is back
+                // within that, and its replacement is opened without the 2 s wait this used to have
+                for _ in 0..5 {
+                    if s.load(Relaxed) {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
+        });
+        BackgroundScan { found, stop }
+    }
+
+    /// Move the devices found since the last call into `into` (never waits: when the scan thread holds the list, next time).
+    pub fn take_into(&self, into: &mut Vec<Device>) {
+        if let Ok(mut g) = self.found.try_lock() {
+            into.append(&mut g);
+        }
+    }
+}
+
+impl Drop for BackgroundScan {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// One event with its device's absolute range (tablets), pad range (touchpads) and touch screen description.
+pub type Polled = (Raw, Option<(i32, i32)>, Option<crate::touchpad::PadRange>, Option<std::sync::Arc<crate::touchmap::TouchDev>>);
+
+/// Wait up to `timeout_ms` for input, then read everything available. Dead devices are dropped.
+/// Each event comes with its device's absolute range (tablets) and pad range (touchpads).
+/// A finger came down: a new multi-touch contact, or the touch or left button pressed.
+fn is_finger_down(r: &Raw) -> bool {
+    (r.typ == EV_ABS && r.code == ABS_MT_TRACKING_ID && r.value >= 0) || (r.typ == EV_KEY && (r.code == BTN_TOUCH || r.code == BTN_LEFT) && r.value == 1)
+}
+
+/// Whether a finger device's events are dropped as an echo: the mouse-like interface of a touch monitor (`finger` without a touch
+/// mapping) is muted only while a multi-touch device is present AND has spoken. A multi-touch device that never spoke leaves the
+/// word to the mouse-like interface; touch devices themselves are never muted.
+pub fn mouse_like_muted(finger: bool, is_touch: bool, touch_spoke: bool) -> bool {
+    finger && !is_touch && touch_spoke
+}
+
+/// The first fingers of a boot are written to the log (which device, what it said, whether the shell used it), so a touch screen that
+/// does nothing can be told apart from one whose events never arrive. Capped so a long session does not fill the log.
+fn log_finger_events(path: &str, evs: &[Raw], echo: bool) {
+    static LOGGED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    const MAX: u32 = 40;
+    for r in evs {
+        let down = is_finger_down(r);
+        let up = (r.typ == EV_ABS && r.code == ABS_MT_TRACKING_ID && r.value < 0) || (r.typ == EV_KEY && (r.code == BTN_TOUCH || r.code == BTN_LEFT) && r.value == 0);
+        if !(down || up) {
+            continue;
+        }
+        if LOGGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= MAX {
+            return;
+        }
+        log::info!("input: finger {} on {path} (type {} code {} value {}){}", if down { "down" } else { "up" }, r.typ, r.code, r.value, if echo { " - ignored, the multi-touch interface speaks" } else { "" });
+    }
+}
+
+pub fn poll_devices(devs: &mut Vec<Device>, timeout_ms: i32) -> Vec<Polled> {
+    let mut out = Vec::new();
+    if devs.is_empty() {
+        std::thread::sleep(std::time::Duration::from_millis(timeout_ms.max(0) as u64));
+        return out;
+    }
+    let mut fds: Vec<libc::pollfd> = devs.iter().map(|d| libc::pollfd { fd: d.fd(), events: libc::POLLIN, revents: 0 }).collect();
+    // SAFETY: `fds` is a valid array of pollfd for the duration of the call.
+    unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout_ms) };
+    let mut dead = Vec::new();
+    // the mouse-like interface of a touch monitor repeats what its multi-touch interface says: while the touch device speaks, only it is
+    // heard. A touch device that has never spoken is a controller left in mouse mode (the Mac mini's wch.cn panel after a cold boot:
+    // its multi-touch interface is silent and only the mouse-like one reports), so then the mouse-like interface is the touch screen.
+    let has_touch = devs.iter().any(|d| d.touch.is_some());
+    let touch_spoke = devs.iter().any(|d| d.touch.is_some() && d.spoke);
+    let echo: Vec<bool> = devs.iter().map(|d| mouse_like_muted(d.finger, d.touch.is_some(), touch_spoke)).collect();
+    for (i, pf) in fds.iter().enumerate() {
+        if pf.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+            dead.push(i);
+            continue;
+        }
+        if pf.revents & libc::POLLIN != 0 {
+            use std::io::Read;
+            let mut buf = [0u8; 24 * 64];
+            while let Ok(n) = (&devs[i].file).read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                let evs = parse_events(&buf[..n]);
+                if !devs[i].spoke {
+                    devs[i].spoke = true;
+                    if devs[i].finger && devs[i].touch.is_none() && has_touch && !touch_spoke {
+                        log::info!("input: {}: the multi-touch interface has not spoken since it was opened; this mouse-like interface speaks for the touch screen (controller in mouse mode)", devs[i].path);
+                    }
+                }
+                if echo[i] {
+                    continue; // read (so it does not wake us again), not used
+                }
+                if devs[i].finger && evs.iter().any(is_finger_down) {
+                    crate::osk::note_touch();
+                }
+                if devs[i].finger {
+                    log_finger_events(&devs[i].path, &evs, echo[i]);
+                    if devs[i].touch.is_none() {
+                        // the recovery ladder counts these too: a panel heard through its mouse-like interface is not a silent one
+                        for _ in &evs {
+                            crate::agent().touchrecover_note_event();
+                        }
+                    }
+                }
+                out.extend(evs.into_iter().map(|r| (r, devs[i].abs_max, devs[i].pad, devs[i].touch.clone())));
+            }
+        }
+    }
+    for i in dead.into_iter().rev() {
+        devs.remove(i);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- pointer speed
+
+    fn scaled(deltas: &[i32], pct: u32) -> (i32, i32) {
+        let mut rem = 0;
+        let sum = deltas.iter().map(|d| scale_rel(*d, pct, &mut rem)).sum();
+        (sum, rem)
+    }
+
+    #[test]
+    fn scale_rel_halves_doubles_and_leaves_100_alone() {
+        assert_eq!(scaled(&[10], 50), (5, 0));
+        assert_eq!(scaled(&[10], 200), (20, 0));
+        assert_eq!(scaled(&[7, -3, 120, -250], 100), (-126, 0));
+        assert_eq!(scaled(&[0, 0], 25), (0, 0));
+    }
+
+    #[test]
+    fn scale_rel_carries_odd_steps_so_slow_motion_is_not_lost() {
+        // one count at 50 % pays out every second step
+        let mut rem = 0;
+        let out: Vec<i32> = (0..6).map(|_| scale_rel(1, 50, &mut rem)).collect();
+        assert_eq!(out, vec![0, 1, 0, 1, 0, 1]);
+        // 25 %: one pixel for four counts; 1000 counts give exactly 250
+        assert_eq!(scaled(&vec![1; 1000], 25), (250, 0));
+        // 75 % of 1000 single counts
+        assert_eq!(scaled(&vec![1; 1000], 75), (750, 0));
+        // 33 % of 100 counts: 33 pixels, the rest is still owed
+        let (sum, rem) = scaled(&vec![1; 100], 33);
+        assert_eq!((sum, rem), (33, 0));
+        // 125 % of 3 counts is 3.75: three now, 0.75 carried
+        assert_eq!(scaled(&[3], 125), (3, 75));
+    }
+
+    #[test]
+    fn scale_rel_is_symmetric_for_negative_deltas_and_never_overflows() {
+        for pct in [25u32, 33, 50, 75, 100, 125, 200, 300] {
+            for d in [1i32, 2, 3, 7, 10, 99, 1000] {
+                let (mut a, mut b) = (0, 0);
+                assert_eq!(scale_rel(d, pct, &mut a), -scale_rel(-d, pct, &mut b), "pct {pct} delta {d}");
+                assert_eq!(a, -b, "the carried part is mirrored too");
+            }
+        }
+        let mut rem = 0;
+        assert_eq!(scale_rel(i32::MAX, 300, &mut rem), i32::MAX);
+        let mut rem = 0;
+        assert_eq!(scale_rel(i32::MIN, 300, &mut rem), i32::MIN);
+        let mut rem = 0;
+        assert_eq!(scale_rel(i32::MAX, 25, &mut rem), i32::MAX / 4);
+    }
+
+    #[test]
+    fn a_mouse_moves_by_the_chosen_speed_and_the_pointer_stays_on_the_screen() {
+        let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+        let rel = |st: &mut InputState, code: u16, v: i32| st.feed(Raw { typ: EV_REL, code, value: v }, None);
+        let mut st = InputState::new(1920, 1080);
+        st.mouse_pct = Some(200);
+        let (x0, y0) = (st.x, st.y);
+        assert_eq!(rel(&mut st, REL_X, 10), vec![Event::MouseMove(x0 + 20, y0)]);
+        assert_eq!(rel(&mut st, REL_Y, -4), vec![Event::MouseMove(x0 + 20, y0 - 8)]);
+        st.mouse_pct = Some(50);
+        let (x1, _) = (st.x, st.y);
+        rel(&mut st, REL_X, 1);
+        assert_eq!(st.x, x1, "half a pixel is carried, not moved");
+        rel(&mut st, REL_X, 1);
+        assert_eq!(st.x, x1 + 1, "and paid out with the next count");
+        st.mouse_pct = Some(300);
+        rel(&mut st, REL_X, i32::MAX);
+        assert_eq!(st.x, 1919, "far past the edge stays on the screen");
+        // the process-wide choice is clamped and read back
+        request_pointer_speed(5000, 1);
+        assert_eq!((mouse_speed_pct(), pad_config().speed_pct), (300, 25));
+        request_pointer_speed(100, 100);
+        assert_eq!((mouse_speed_pct(), pad_config().speed_pct), (100, 100));
+    }
+
+    fn touch_dev() -> crate::touchmap::TouchDev {
+        crate::touchmap::TouchDev { key: "27c0:0859@usb-1/input0".into(), id: "27c0:0859".into(), name: "TouchScreen".into(), usb: true, mt: true, x: (0, 4095), y: (0, 4095) }
+    }
+
+    fn touch(st: &mut InputState, evs: &[(u16, u16, i32)]) -> Vec<Event> {
+        let d = touch_dev();
+        evs.iter().flat_map(|(t, c, v)| st.feed_touch_full(Raw { typ: *t, code: *c, value: *v }, &d)).collect()
+    }
+
+    fn downs(evs: &[Event]) -> usize {
+        evs.iter().filter(|e| matches!(e, Event::MouseDown(..))).count()
+    }
+
+    #[test]
+    fn a_contact_that_never_lifted_keeps_later_touches_out_until_the_device_change_is_noticed() {
+        let mut st = InputState::new(1920, 1080);
+        let contact = [(EV_ABS, ABS_MT_TRACKING_ID, 7), (EV_ABS, 0x35, 100), (EV_ABS, 0x36, 100), (EV_SYN, SYN_REPORT, 0)];
+        assert_eq!(downs(&touch(&mut st, &contact)), 1, "the first contact is a press");
+        // the monitor's hub resets; the contact was never lifted. A later finger (a new device, the same key) is not taken
+        assert_eq!(downs(&touch(&mut st, &[(EV_ABS, ABS_MT_TRACKING_ID, 8), (EV_ABS, 0x35, 2000), (EV_ABS, 0x36, 2000), (EV_SYN, SYN_REPORT, 0)])), 0, "the stuck contact owns the pointer");
+        // the shell notices the device went and came back: the state is dropped and the stuck finger lifted
+        let k = vec![touch_dev().key];
+        let evs = st.touch_devices_changed(&k, &k, &k);
+        assert!(evs.iter().any(|e| matches!(e, Event::MouseUp(..))), "the stuck finger is lifted");
+        assert_eq!(downs(&touch(&mut st, &[(EV_ABS, ABS_MT_TRACKING_ID, 9), (EV_ABS, 0x35, 2000), (EV_ABS, 0x36, 2000), (EV_SYN, SYN_REPORT, 0)])), 1, "the next touch is a press again");
+    }
+
+    #[test]
+    fn a_device_that_left_is_forgotten_and_one_that_stayed_is_left_alone() {
+        let mut st = InputState::new(1920, 1080);
+        touch(&mut st, &[(EV_ABS, ABS_MT_TRACKING_ID, 1), (EV_ABS, 0x35, 100), (EV_ABS, 0x36, 100), (EV_SYN, SYN_REPORT, 0)]);
+        let k = vec![touch_dev().key];
+        assert!(st.touch_devices_changed(&k, &k, &[]).is_empty(), "still there, nothing new: nothing changes");
+        let evs = st.touch_devices_changed(&k, &[], &[]);
+        assert!(evs.iter().any(|e| matches!(e, Event::MouseUp(..))), "gone: lifted");
+    }
+
+    fn abs_frame(st: &mut InputState, abs: Option<(i32, i32)>, evs: &[(u16, u16, i32)]) -> Vec<Event> {
+        let mut out = Vec::new();
+        for (t, c, v) in evs {
+            out.extend(st.feed(Raw { typ: *t, code: *c, value: *v }, abs));
+        }
+        out
+    }
+
+    #[test]
+    fn a_touch_monitors_button_before_its_position_clicks_where_the_finger_is() {
+        let mut st = InputState::new(1920, 1080);
+        let abs = Some((4095, 4095));
+        // the first touch, near the top left
+        let a = abs_frame(&mut st, abs, &[(EV_KEY, BTN_LEFT, 1), (EV_ABS, ABS_X, 400), (EV_ABS, ABS_Y, 400), (EV_SYN, SYN_REPORT, 0)]);
+        let down = a.iter().find_map(|e| if let Event::MouseDown(x, y) = e { Some((*x, *y)) } else { None }).expect("a press");
+        assert!(down.0 < 300 && down.1 < 200, "at the first finger: {down:?}");
+        abs_frame(&mut st, abs, &[(EV_KEY, BTN_LEFT, 0), (EV_SYN, SYN_REPORT, 0)]);
+        // the second touch, far away: the press is there, not at the first place
+        let b = abs_frame(&mut st, abs, &[(EV_KEY, BTN_LEFT, 1), (EV_ABS, ABS_X, 3600), (EV_ABS, ABS_Y, 3500), (EV_SYN, SYN_REPORT, 0)]);
+        let down = b.iter().find_map(|e| if let Event::MouseDown(x, y) = e { Some((*x, *y)) } else { None }).expect("a press");
+        assert!(down.0 > 1500 && down.1 > 800, "at the second finger, not the first: {down:?}");
+        // a mouse (no absolute range) still clicks at once, as before
+        let mut st = InputState::new(1920, 1080);
+        let c = abs_frame(&mut st, None, &[(EV_KEY, BTN_LEFT, 1)]);
+        assert!(matches!(c.as_slice(), [Event::MouseDown(..)]), "{c:?}");
+    }
+
+    #[test]
+    fn a_finger_coming_down_is_told_from_the_rest_of_a_touch_frame() {
+        let raw = |typ, code, value| Raw { typ, code, value };
+        assert!(is_finger_down(&raw(EV_ABS, ABS_MT_TRACKING_ID, 5)), "a new multi-touch contact");
+        assert!(!is_finger_down(&raw(EV_ABS, ABS_MT_TRACKING_ID, -1)), "lifting is not pressing");
+        assert!(is_finger_down(&raw(EV_KEY, BTN_TOUCH, 1)) && is_finger_down(&raw(EV_KEY, BTN_LEFT, 1)), "the touch or left button of a touch monitor's mouse-like interface");
+        assert!(!is_finger_down(&raw(EV_KEY, BTN_LEFT, 0)) && !is_finger_down(&raw(EV_REL, 0, 3)));
+    }
+
+    /// KI-077: the Mac mini's wch.cn panel comes out of a cold boot in mouse mode: its multi-touch interface is listed but silent and
+    /// only the mouse-like interface reports. The mouse-like interface is muted only once a multi-touch device has actually spoken.
+    #[test]
+    fn mouse_like_interface_speaks_until_the_touch_device_does() {
+        // both present, touch device silent so far: the mouse-like interface is heard
+        assert!(!mouse_like_muted(true, false, false), "controller in mouse mode: the mouse-like interface is the touch screen");
+        // the touch device has spoken: the mouse-like interface is an echo
+        assert!(mouse_like_muted(true, false, true), "with a speaking multi-touch interface the mouse-like one is an echo");
+        // touch devices and ordinary pointers are never muted
+        assert!(!mouse_like_muted(true, true, true) && !mouse_like_muted(true, true, false));
+        assert!(!mouse_like_muted(false, false, true), "a mouse is not an echo of anything");
+    }
+
+    #[test]
+    fn the_background_scan_never_makes_the_caller_wait_and_stops_when_dropped() {
+        let t = std::time::Instant::now();
+        let scan = BackgroundScan::start();
+        let mut devs = Vec::new();
+        scan.take_into(&mut devs); // returns at once, whatever the scan thread is doing
+        assert!(t.elapsed() < std::time::Duration::from_millis(200), "starting and taking must not wait for the scan");
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        scan.take_into(&mut devs); // what was found (maybe nothing on a build machine) arrives without waiting
+        let stop = scan.stop.clone();
+        drop(scan);
+        assert!(stop.load(std::sync::atomic::Ordering::Relaxed), "dropping the handle tells the scan thread to stop");
+    }
+
+    #[test]
+    fn key_translation_with_shift_and_caps() {
+        assert_eq!(translate(30, false, false), Some(Key::Char('a')));
+        assert_eq!(translate(30, true, false), Some(Key::Char('A')));
+        assert_eq!(translate(30, false, true), Some(Key::Char('A')));
+        assert_eq!(translate(30, true, true), Some(Key::Char('a')));
+        assert_eq!(translate(2, true, true), Some(Key::Char('!')), "caps lock does not shift digits");
+        assert_eq!(translate(2, false, false), Some(Key::Char('1')));
+        assert_eq!(translate(11, false, false), Some(Key::Char('0')));
+        assert_eq!(translate(53, false, false), Some(Key::Char('/')));
+        assert_eq!(translate(53, true, false), Some(Key::Char('?')));
+        assert_eq!(translate(57, false, false), Some(Key::Char(' ')));
+        assert_eq!(translate(28, false, false), Some(Key::Enter));
+        assert_eq!(translate(15, true, false), Some(Key::BackTab));
+        assert_eq!(translate(1, false, false), Some(Key::Esc));
+        assert_eq!(translate(999, false, false), None);
+        // every printable row code maps to a char
+        for c in (2..=13).chain(16..=27).chain(30..=40).chain(44..=53).chain([41, 43, 57]) {
+            assert!(matches!(translate(c, false, false), Some(Key::Char(_))), "code {c}");
+        }
+    }
+
+    fn press(st: &mut InputState, code: u16) -> Vec<Event> {
+        let mut v = st.feed(Raw { typ: EV_KEY, code, value: 1 }, None);
+        st.feed(Raw { typ: EV_KEY, code, value: 0 }, None);
+        v.drain(..).collect()
+    }
+
+    #[test]
+    fn modifiers_are_tracked_across_events() {
+        let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+        let mut st = InputState::new(800, 600);
+        st.feed(Raw { typ: EV_KEY, code: 42, value: 1 }, None); // shift down
+        assert_eq!(press(&mut st, 35), vec![Event::Key(Key::Char('H'))]);
+        st.feed(Raw { typ: EV_KEY, code: 42, value: 0 }, None); // shift up
+        assert_eq!(press(&mut st, 35), vec![Event::Key(Key::Char('h'))]);
+        press(&mut st, 58); // caps on
+        assert_eq!(press(&mut st, 35), vec![Event::Key(Key::Char('H'))]);
+        // key release produces nothing; autorepeat (value 2) does
+        assert!(st.feed(Raw { typ: EV_KEY, code: 35, value: 0 }, None).is_empty());
+        assert_eq!(st.feed(Raw { typ: EV_KEY, code: 35, value: 2 }, None), vec![Event::Key(Key::Char('H'))]);
+    }
+
+    #[test]
+    fn ctrl_shortcuts_and_right_click() {
+        let mut st = InputState::new(800, 600);
+        let down = |st: &mut InputState, code: u16| st.feed(Raw { typ: EV_KEY, code, value: 1 }, None);
+        let up = |st: &mut InputState, code: u16| st.feed(Raw { typ: EV_KEY, code, value: 0 }, None);
+        down(&mut st, 29); // left ctrl
+        assert_eq!(down(&mut st, 47), vec![Event::Key(Key::Ctrl('v'))]); // KEY_V
+        up(&mut st, 47);
+        down(&mut st, 42); // shift too
+        assert_eq!(down(&mut st, 47), vec![Event::Key(Key::Ctrl('V'))], "Ctrl+Shift+V");
+        up(&mut st, 47);
+        up(&mut st, 42);
+        assert_eq!(down(&mut st, 30), vec![Event::Key(Key::Ctrl('a'))]);
+        assert_eq!(down(&mut st, 28), vec![Event::Key(Key::Enter)], "non-letters are unaffected by Ctrl");
+        up(&mut st, 29);
+        assert_eq!(down(&mut st, 47), vec![Event::Key(Key::Char('v'))], "plain v after Ctrl is released");
+        assert_eq!(st.feed(Raw { typ: EV_KEY, code: BTN_RIGHT, value: 1 }, None), vec![Event::MouseRight(400, 300)]);
+        // right Ctrl works as well
+        down(&mut st, 97);
+        assert_eq!(down(&mut st, 46), vec![Event::Key(Key::Ctrl('c'))]);
+    }
+
+    #[test]
+    fn ctrl_alt_chords_become_layout_events_and_nothing_else_changes() {
+        use crate::panes::{LayoutKey, Side};
+        let mut st = InputState::new(800, 600);
+        let down = |st: &mut InputState, code: u16| st.feed(Raw { typ: EV_KEY, code, value: 1 }, None);
+        let up = |st: &mut InputState, code: u16| st.feed(Raw { typ: EV_KEY, code, value: 0 }, None);
+        // Alt alone or Ctrl alone: the keys behave as before
+        down(&mut st, 56);
+        assert_eq!(down(&mut st, 105), vec![Event::Key(Key::Left)], "Alt+Left is a plain Left for the apps");
+        up(&mut st, 105);
+        down(&mut st, 29);
+        assert_eq!(down(&mut st, 105), vec![Event::Layout(LayoutKey::Snap(Side::Left))]);
+        up(&mut st, 105);
+        assert_eq!(down(&mut st, 106), vec![Event::Layout(LayoutKey::Snap(Side::Right))]);
+        up(&mut st, 106);
+        assert_eq!(down(&mut st, 103), vec![Event::Layout(LayoutKey::Snap(Side::Up))]);
+        assert_eq!(down(&mut st, 108), vec![Event::Layout(LayoutKey::Snap(Side::Down))]);
+        assert_eq!(down(&mut st, 3), vec![Event::Layout(LayoutKey::Apply(2))], "Ctrl+Alt+2");
+        assert_eq!(down(&mut st, 10), vec![Event::Layout(LayoutKey::Apply(9))]);
+        assert_eq!(down(&mut st, 11), vec![Event::Layout(LayoutKey::Picker)], "Ctrl+Alt+0");
+        assert_eq!(down(&mut st, 15), vec![Event::Layout(LayoutKey::Cycle { back: false })]);
+        assert_eq!(down(&mut st, 50), vec![Event::Layout(LayoutKey::NextDisplay)]);
+        down(&mut st, 42);
+        assert_eq!(down(&mut st, 105), vec![Event::Layout(LayoutKey::Nudge(Side::Left))]);
+        assert_eq!(down(&mut st, 15), vec![Event::Layout(LayoutKey::Cycle { back: true })]);
+        up(&mut st, 42);
+        // a Ctrl+Alt key that is no chord still reaches the apps as a Ctrl shortcut
+        assert_eq!(down(&mut st, 47), vec![Event::Key(Key::Ctrl('v'))]);
+        up(&mut st, 56);
+        up(&mut st, 29);
+        // right Alt works too, and releasing it ends the chords
+        down(&mut st, 29);
+        down(&mut st, 100);
+        assert_eq!(down(&mut st, 4), vec![Event::Layout(LayoutKey::Apply(3))]);
+        up(&mut st, 100);
+        assert_eq!(down(&mut st, 4), vec![Event::Key(Key::Char('3'))], "Ctrl+3 without Alt is not a chord");
+    }
+
+    #[test]
+    fn desktop_view_chords_become_layout_events_and_the_pane_and_lock_chords_are_unchanged() {
+        use crate::panes::LayoutKey;
+        let mut st = InputState::new(800, 600);
+        let down = |st: &mut InputState, code: u16| st.feed(Raw { typ: EV_KEY, code, value: 1 }, None);
+        let up = |st: &mut InputState, code: u16| st.feed(Raw { typ: EV_KEY, code, value: 0 }, None);
+        // Ctrl+Alt+PageUp / PageDown: browser-style previous and next
+        down(&mut st, 29);
+        down(&mut st, 56);
+        assert_eq!(down(&mut st, 104), vec![Event::Layout(LayoutKey::ViewStep { back: true, mac: false })]);
+        assert_eq!(down(&mut st, 109), vec![Event::Layout(LayoutKey::ViewStep { back: false, mac: false })]);
+        // Ctrl+Alt+Super+1..9 jumps; Ctrl+Alt+digit alone is still a pane layout
+        assert_eq!(down(&mut st, 3), vec![Event::Layout(LayoutKey::Apply(2))]);
+        down(&mut st, 125);
+        assert_eq!(down(&mut st, 2), vec![Event::Layout(LayoutKey::View(1))]);
+        assert_eq!(down(&mut st, 10), vec![Event::Layout(LayoutKey::View(9))]);
+        assert_eq!(down(&mut st, 11), vec![Event::Layout(LayoutKey::Picker)], "Ctrl+Alt+Super+0 is no jump key");
+        up(&mut st, 125);
+        up(&mut st, 56);
+        // Control+Command+Left / Right: Mac-style; Alt held makes it a pane snap, Shift is left alone
+        down(&mut st, 125);
+        assert_eq!(down(&mut st, 105), vec![Event::Layout(LayoutKey::ViewStep { back: true, mac: true })]);
+        assert_eq!(down(&mut st, 106), vec![Event::Layout(LayoutKey::ViewStep { back: false, mac: true })]);
+        // the sign-out chord (Q) and the lock chord (L) are not view keys
+        assert_eq!(down(&mut st, 16), vec![Event::Fn(crate::fnkeys::FnKey::SignOut, true), Event::Fn(crate::fnkeys::FnKey::SignOut, false)]);
+        assert_eq!(down(&mut st, 38), vec![Event::Fn(crate::fnkeys::FnKey::Lock, true), Event::Fn(crate::fnkeys::FnKey::Lock, false)]);
+        up(&mut st, 125);
+        up(&mut st, 29);
+        // Super+Left alone and Ctrl+Left alone are not view keys
+        down(&mut st, 125);
+        assert!(!down(&mut st, 105).iter().any(|e| matches!(e, Event::Layout(_))));
+        up(&mut st, 125);
+        down(&mut st, 29);
+        assert!(!down(&mut st, 105).iter().any(|e| matches!(e, Event::Layout(_))));
+    }
+
+    #[test]
+    fn the_gemini_voice_start_key_is_a_chord_only_while_the_assistant_is_on_and_follows_the_setting() {
+        let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+        // the chord is process wide: this test sets it and puts it back
+        let down = |st: &mut InputState, code: u16| st.feed(Raw { typ: EV_KEY, code, value: 1 }, None);
+        let up = |st: &mut InputState, code: u16| st.feed(Raw { typ: EV_KEY, code, value: 0 }, None);
+        let voice = vec![Event::Fn(crate::fnkeys::FnKey::VoiceAssist, true), Event::Fn(crate::fnkeys::FnKey::VoiceAssist, false)];
+        let mut st = InputState::new(100, 50);
+        set_voice_chord(None);
+        down(&mut st, 125);
+        assert!(!down(&mut st, 47).contains(&voice[0]), "off: Super+V is an ordinary key");
+        up(&mut st, 47);
+        set_voice_chord(Some("Super+V"));
+        assert_eq!(down(&mut st, 47), voice, "Super+V");
+        up(&mut st, 47);
+        assert!(!down(&mut st, 34).contains(&voice[0]), "Super+G is not it");
+        up(&mut st, 34);
+        up(&mut st, 125);
+        assert!(!down(&mut st, 47).contains(&voice[0]), "V alone is not it");
+        up(&mut st, 47);
+        set_voice_chord(Some("Ctrl+Alt+G"));
+        down(&mut st, 29);
+        down(&mut st, 56);
+        assert_eq!(down(&mut st, 34), voice, "a changed name is followed");
+        set_voice_chord(Some("Esc"));
+        up(&mut st, 34);
+        assert!(!down(&mut st, 34).contains(&voice[0]), "a name that is not a valid shortcut disables it");
+        set_voice_chord(None);
+    }
+
+    #[test]
+    fn relative_pointer_clamps_and_clicks() {
+        let mut st = InputState::new(100, 50);
+        assert_eq!((st.x, st.y), (50, 25));
+        st.feed(Raw { typ: EV_REL, code: 0, value: 500 }, None);
+        st.feed(Raw { typ: EV_REL, code: 1, value: -500 }, None);
+        assert_eq!((st.x, st.y), (99, 0));
+        let ev = st.feed(Raw { typ: EV_KEY, code: BTN_LEFT, value: 1 }, None);
+        assert_eq!(ev, vec![Event::MouseDown(99, 0)]);
+        // the wheel is read at the end of the frame and handed out as pixel steps (see `scroll_tick`)
+        assert!(st.feed(Raw { typ: EV_REL, code: 8, value: 1 }, None).is_empty());
+    }
+
+    #[test]
+    fn absolute_pointer_scales_to_screen() {
+        let mut st = InputState::new(1280, 720);
+        let max = Some((32767, 32767));
+        st.feed(Raw { typ: EV_ABS, code: 0, value: 32767 }, max);
+        st.feed(Raw { typ: EV_ABS, code: 1, value: 16383 }, max);
+        assert_eq!((st.x, st.y), (1279, 359));
+        // devices that are not absolute pointers are ignored for ABS events
+        assert!(st.feed(Raw { typ: EV_ABS, code: 0, value: 5 }, None).is_empty());
+    }
+
+    fn frame(st: &mut InputState, raws: &[(u16, u16, i32)], max: Option<(i32, i32)>) -> Vec<Event> {
+        raws.iter().flat_map(|(t, c, v)| st.feed(Raw { typ: *t, code: *c, value: *v }, max)).collect()
+    }
+
+    #[test]
+    fn a_tap_lands_where_the_finger_is_even_if_the_button_event_comes_first() {
+        let mut st = InputState::new(1920, 1080);
+        let max = Some((4095, 4095));
+        // button first, coordinates after, then the end-of-frame marker
+        let ev = frame(&mut st, &[(EV_KEY, BTN_TOUCH, 1), (EV_ABS, ABS_X, 4095), (EV_ABS, ABS_Y, 0), (EV_SYN, SYN_REPORT, 0)], max);
+        assert_eq!(ev.last(), Some(&Event::MouseDown(1919, 0)), "{ev:?}");
+        assert_eq!(ev.iter().filter(|e| matches!(e, Event::MouseDown(..))).count(), 1);
+        // lifting and tapping elsewhere
+        frame(&mut st, &[(EV_KEY, BTN_TOUCH, 0), (EV_SYN, SYN_REPORT, 0)], max);
+        let ev = frame(&mut st, &[(EV_ABS, ABS_X, 0), (EV_ABS, ABS_Y, 4095), (EV_KEY, BTN_TOUCH, 1), (EV_SYN, SYN_REPORT, 0)], max);
+        assert_eq!(ev.last(), Some(&Event::MouseDown(0, 1079)));
+        // a mouse button still acts immediately
+        assert_eq!(st.feed(Raw { typ: EV_KEY, code: BTN_LEFT, value: 1 }, None), vec![Event::MouseDown(0, 1079)]);
+    }
+
+    #[test]
+    fn multi_touch_only_panels_work_and_only_the_first_finger_drives_the_pointer() {
+        let mut st = InputState::new(3840, 2160);
+        let max = Some((32767, 32767));
+        let ev = frame(&mut st, &[(EV_ABS, ABS_MT_SLOT, 0), (EV_ABS, ABS_MT_TRACKING_ID, 7), (EV_ABS, ABS_MT_POSITION_X, 16383), (EV_ABS, ABS_MT_POSITION_Y, 8191), (EV_SYN, SYN_REPORT, 0)], max);
+        assert_eq!(ev.last(), Some(&Event::MouseDown(1919, 539)), "a new contact is a tap even without BTN_TOUCH: {ev:?}");
+        // a second finger in slot 1 does not move the pointer or tap
+        let ev = frame(&mut st, &[(EV_ABS, ABS_MT_SLOT, 1), (EV_ABS, ABS_MT_TRACKING_ID, 8), (EV_ABS, ABS_MT_POSITION_X, 0), (EV_ABS, ABS_MT_POSITION_Y, 0), (EV_SYN, SYN_REPORT, 0)], max);
+        assert!(ev.is_empty(), "{ev:?}");
+        assert_eq!((st.x, st.y), (1919, 539));
+        // back to slot 0: dragging moves the pointer; releasing (tracking id -1) is not a tap but ends the press
+        let ev = frame(&mut st, &[(EV_ABS, ABS_MT_SLOT, 0), (EV_ABS, ABS_MT_POSITION_X, 32767), (EV_ABS, ABS_MT_TRACKING_ID, -1), (EV_SYN, SYN_REPORT, 0)], max);
+        assert_eq!(ev, vec![Event::MouseMove(3839, 539), Event::MouseUp(3839, 539)]);
+        assert_eq!(st.feed(Raw { typ: EV_KEY, code: BTN_LEFT, value: 0 }, None), vec![Event::MouseUp(3839, 539)], "releasing the button ends the press");
+        // a panel that reports both axis sets taps once
+        let ev = frame(&mut st, &[(EV_KEY, BTN_TOUCH, 1), (EV_ABS, ABS_MT_TRACKING_ID, 9), (EV_ABS, ABS_X, 0), (EV_ABS, ABS_MT_POSITION_X, 0), (EV_SYN, SYN_REPORT, 0)], max);
+        assert_eq!(ev.iter().filter(|e| matches!(e, Event::MouseDown(..))).count(), 1, "{ev:?}");
+    }
+
+    #[test]
+    fn a_touchpad_swipe_moves_the_pointer_a_tap_clicks_and_the_old_paths_are_untouched() {
+        let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+        use crate::touchpad::PadRange;
+        const PAD: PadRange = PadRange { x_min: -5087, x_max: 8270, y_min: -182, y_max: 6749, major_max: 5000 };
+        let mut st = InputState::new(1920, 1080);
+        let (x0, y0) = (st.x, st.y);
+        let t = std::cell::Cell::new(1000u64);
+        let mut ev = Vec::new();
+        let frame = |st: &mut InputState, ms: u64, x: i32, y: i32, ev: &mut Vec<Event>| {
+            t.set(t.get() + ms);
+            for (c, v) in [(ABS_MT_SLOT, 0), (ABS_MT_TRACKING_ID, 4), (ABS_MT_POSITION_X, x), (ABS_MT_POSITION_Y, y), (0x30, 700)] {
+                ev.extend(st.feed_pad_at(Raw { typ: EV_ABS, code: c, value: v }, &PAD, t.get()));
+            }
+            ev.extend(st.feed_pad_at(Raw { typ: EV_SYN, code: SYN_REPORT, value: 0 }, &PAD, t.get()));
+        };
+        frame(&mut st, 0, 0, 3000, &mut ev);
+        for i in 1..=8 {
+            frame(&mut st, 16, i * 400, 3000, &mut ev);
+        }
+        assert!(ev.iter().any(|e| matches!(e, Event::MouseMove(..))));
+        assert!(st.x > x0 + 100 && st.y == y0, "moved right only: ({}, {})", st.x, st.y);
+        ev.clear();
+        // lift, then a tap
+        for (c, v) in [(ABS_MT_SLOT, 0), (ABS_MT_TRACKING_ID, -1)] {
+            st.feed_pad_at(Raw { typ: EV_ABS, code: c, value: v }, &PAD, t.get() + 16);
+        }
+        st.feed_pad_at(Raw { typ: EV_SYN, code: SYN_REPORT, value: 0 }, &PAD, t.get() + 16);
+        t.set(t.get() + 500);
+        frame(&mut st, 0, 100, 100, &mut ev);
+        frame(&mut st, 60, 100, 100, &mut ev);
+        for (c, v) in [(ABS_MT_SLOT, 0), (ABS_MT_TRACKING_ID, -1)] {
+            ev.extend(st.feed_pad_at(Raw { typ: EV_ABS, code: c, value: v }, &PAD, t.get() + 40));
+        }
+        ev.extend(st.feed_pad_at(Raw { typ: EV_SYN, code: SYN_REPORT, value: 0 }, &PAD, t.get() + 40));
+        let (x, y) = (st.x, st.y);
+        assert_eq!(ev, vec![Event::MouseDown(x, y), Event::MouseUp(x, y)]);
+        // the physical button and a mouse wheel keep working through the old path
+        assert_eq!(st.feed_pad_at(Raw { typ: EV_KEY, code: BTN_LEFT, value: 1 }, &PAD, t.get() + 50), vec![Event::MouseDown(x, y)]);
+        crate::scrolleng::request_config(crate::scrolleng::ScrollConfig::default());
+        st.fake_ms = Some(0);
+        st.feed(Raw { typ: EV_REL, code: REL_WHEEL, value: 1 }, None);
+        st.feed(Raw { typ: EV_SYN, code: SYN_REPORT, value: 0 }, None);
+        assert!(st.scroll_tick().iter().any(|e| matches!(e, Event::ScrollPx(p) if *p > 0)), "a wheel click scrolls up");
+        // the settings the Keyboard page writes
+        request_touchpad(false);
+        assert!(!pad_config().tap_to_click);
+        request_touchpad(true);
+    }
+
+    // ---- scrolling: raw wheel and trackpad events become the engine's pixel steps
+
+    fn px_total(ev: &[Event]) -> i32 {
+        ev.iter().map(|e| if let Event::ScrollPx(p) = e { *p } else { 0 }).sum()
+    }
+
+    /// Run `scroll_tick` every 4 ms (the input loop's pace) from `t0` for `ms`, returning the steps and how many there were.
+    fn tick_for(st: &mut InputState, t0: u64, ms: u64) -> (Vec<Event>, usize) {
+        let mut all = Vec::new();
+        let mut t = t0;
+        while t < t0 + ms {
+            st.fake_ms = Some(t);
+            all.extend(st.scroll_tick());
+            t += 4;
+        }
+        let n = all.len();
+        (all, n)
+    }
+
+    fn rel(st: &mut InputState, code: u16, value: i32) {
+        st.feed(Raw { typ: EV_REL, code, value }, None);
+    }
+    fn syn(st: &mut InputState) {
+        st.feed(Raw { typ: EV_SYN, code: SYN_REPORT, value: 0 }, None);
+    }
+
+    #[test]
+    fn control_and_the_wheel_zoom_instead_of_scrolling() {
+        let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+        crate::scrolleng::request_config(crate::scrolleng::ScrollConfig::default());
+        let mut st = InputState::new(800, 600);
+        st.fake_ms = Some(0);
+        st.ctrl = true;
+        rel(&mut st, REL_WHEEL, 1);
+        let ev = st.feed(Raw { typ: EV_SYN, code: SYN_REPORT, value: 0 }, None);
+        assert_eq!(ev, vec![Event::Key(Key::Ctrl('+'))], "away from the person is bigger");
+        rel(&mut st, REL_WHEEL, -2);
+        let ev = st.feed(Raw { typ: EV_SYN, code: SYN_REPORT, value: 0 }, None);
+        assert_eq!(ev, vec![Event::Key(Key::Ctrl('-')), Event::Key(Key::Ctrl('-'))]);
+        assert!(st.scroll_tick().is_empty(), "nothing scrolled");
+        // without Control the same wheel scrolls
+        st.ctrl = false;
+        rel(&mut st, REL_WHEEL, 1);
+        syn(&mut st);
+        assert!(!st.scroll_tick().is_empty());
+    }
+
+    #[test]
+    fn a_hi_res_wheel_is_counted_once_not_twice_and_a_plain_wheel_still_works() {
+        let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+        crate::scrolleng::request_config(crate::scrolleng::ScrollConfig::default());
+        crate::scrolleng::set_raw(false);
+        // a hi-res wheel sends the click (1) and its 120 units in one frame, in either order
+        for hires_first in [false, true] {
+            let mut st = InputState::new(800, 600);
+            st.fake_ms = Some(0);
+            if hires_first {
+                rel(&mut st, REL_WHEEL_HI_RES, 120);
+                rel(&mut st, REL_WHEEL, 1);
+            } else {
+                rel(&mut st, REL_WHEEL, 1);
+                rel(&mut st, REL_WHEEL_HI_RES, 120);
+            }
+            syn(&mut st);
+            let (ev, _) = tick_for(&mut st, 0, 600);
+            assert_eq!(px_total(&ev), 54, "one click = three lines, not six (hires first: {hires_first})");
+        }
+        // fractions of a click add up across frames
+        let mut st = InputState::new(800, 600);
+        for i in 0..15 {
+            st.fake_ms = Some(i * 8);
+            rel(&mut st, REL_WHEEL_HI_RES, 8);
+            syn(&mut st);
+        }
+        let (ev, _) = tick_for(&mut st, 120, 600);
+        assert_eq!(px_total(&ev), 54);
+        // a wheel without hi-res: whole clicks, away from the person = up (positive)
+        let mut st = InputState::new(800, 600);
+        st.fake_ms = Some(0);
+        rel(&mut st, REL_WHEEL, -2);
+        syn(&mut st);
+        assert_eq!(px_total(&tick_for(&mut st, 0, 600).0), -108);
+    }
+
+    #[test]
+    fn a_scroll_asks_for_about_sixty_steps_a_second_and_stops_when_it_settles() {
+        let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+        crate::scrolleng::request_config(crate::scrolleng::ScrollConfig::default());
+        crate::scrolleng::set_raw(false);
+        let mut st = InputState::new(800, 600);
+        st.fake_ms = Some(0);
+        assert!(!st.scrolling() && st.scroll_tick().is_empty(), "idle: nothing is asked of the shell");
+        rel(&mut st, REL_WHEEL, 5);
+        syn(&mut st);
+        assert!(st.scrolling());
+        let (ev, steps) = tick_for(&mut st, 0, 200);
+        assert!(steps >= 8 && steps <= 13, "about one step per 16 ms over 200 ms: {steps}");
+        let (rest, _) = tick_for(&mut st, 200, 800);
+        assert!(!st.scrolling(), "settled: the loop and the shell go back to their low rate");
+        assert!(tick_for(&mut st, 1000, 200).1 == 0, "and nothing more is sent");
+        assert_eq!(px_total(&ev) + px_total(&rest), 270);
+    }
+
+    #[test]
+    fn two_finger_travel_is_sent_with_the_chosen_direction_and_momentum_follows_the_lift() {
+        let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+        use crate::touchpad::PadRange;
+        const PAD: PadRange = PadRange { x_min: -5087, x_max: 8270, y_min: -182, y_max: 6749, major_max: 5000 };
+        let keep = crate::scrolleng::config();
+        let run = |natural: bool, momentum: bool| {
+            crate::scrolleng::request_config(crate::scrolleng::ScrollConfig { pad_natural: natural, momentum, ..Default::default() });
+            crate::scrolleng::set_raw(false);
+            let mut st = InputState::new(1920, 1080);
+            let mut t = 1000u64;
+            let mut steps = Vec::new();
+            let frame = |st: &mut InputState, t: &mut u64, dy: i32, lift: bool, steps: &mut Vec<Event>| {
+                *t += 16;
+                st.fake_ms = Some(*t);
+                for slot in 0..2 {
+                    for (c, v) in [(ABS_MT_SLOT, slot), (ABS_MT_TRACKING_ID, if lift { -1 } else { 10 + slot }), (ABS_MT_POSITION_X, 1000 + slot * 2000), (ABS_MT_POSITION_Y, 3000 + dy), (0x30, 600)] {
+                        if lift && c != ABS_MT_SLOT && c != ABS_MT_TRACKING_ID {
+                            continue;
+                        }
+                        st.feed_pad_at(Raw { typ: EV_ABS, code: c, value: v }, &PAD, *t);
+                    }
+                }
+                steps.extend(st.feed_pad_at(Raw { typ: EV_SYN, code: SYN_REPORT, value: 0 }, &PAD, *t));
+                steps.extend(st.scroll_tick());
+            };
+            frame(&mut st, &mut t, 0, false, &mut steps);
+            frame(&mut st, &mut t, 0, false, &mut steps);
+            frame(&mut st, &mut t, 0, false, &mut steps);
+            for i in 1..=12 {
+                frame(&mut st, &mut t, i * 120, false, &mut steps);
+            }
+            let during = px_total(&steps);
+            assert!(steps.iter().all(|e| !matches!(e, Event::MouseMove(..))), "two fingers never move the pointer");
+            frame(&mut st, &mut t, 0, true, &mut steps);
+            let at_lift = px_total(&steps);
+            let mut after = 0;
+            for _ in 0..200 {
+                t += 16;
+                st.fake_ms = Some(t);
+                after += px_total(&st.scroll_tick());
+            }
+            (during, at_lift - during, after, st.scrolling())
+        };
+        let (down, _, coast, still) = run(true, true);
+        assert!(down > 0, "natural: fingers down = content follows = scrolls up (positive): {down}");
+        assert!(coast.abs() > 50 && coast > 0 && !still, "momentum carries on the same way and ends: {coast}");
+        let (down, _, coast, _) = run(false, true);
+        assert!(down < 0 && coast < 0, "traditional trackpad: the other way");
+        let (_, _, coast, _) = run(true, false);
+        assert_eq!(coast, 0, "no momentum when it is off");
+        crate::scrolleng::request_config(keep);
+    }
+
+    #[test]
+    fn a_new_touch_stops_the_coasting() {
+        let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+        use crate::touchpad::PadRange;
+        const PAD: PadRange = PadRange { x_min: -5087, x_max: 8270, y_min: -182, y_max: 6749, major_max: 5000 };
+        crate::scrolleng::request_config(crate::scrolleng::ScrollConfig::default());
+        crate::scrolleng::set_raw(false);
+        let mut st = InputState::new(1920, 1080);
+        // a fling already in the engine
+        st.scroll.pad(0.01, 1000, &crate::scrolleng::ScrollConfig::default());
+        for i in 0..8 {
+            st.scroll.pad(0.01, 1016 + i * 16, &crate::scrolleng::ScrollConfig::default());
+        }
+        st.scroll.pad_end(1150, &crate::scrolleng::ScrollConfig::default());
+        st.fake_ms = Some(1200);
+        st.scroll_tick(); // the last trackpad movement goes out; what is left is the coasting
+        assert!(st.scrolling(), "coasting");
+        for (c, v) in [(ABS_MT_SLOT, 0), (ABS_MT_TRACKING_ID, 3), (ABS_MT_POSITION_X, 100), (ABS_MT_POSITION_Y, 100), (0x30, 600)] {
+            st.feed_pad_at(Raw { typ: EV_ABS, code: c, value: v }, &PAD, 1200);
+        }
+        st.feed_pad_at(Raw { typ: EV_SYN, code: SYN_REPORT, value: 0 }, &PAD, 1200);
+        assert!(!st.scrolling(), "a finger landing stops the momentum at once");
+    }
+
+    #[test]
+    fn the_end_of_a_list_stops_momentum_through_the_shared_flag() {
+        let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+        crate::scrolleng::request_config(crate::scrolleng::ScrollConfig::default());
+        let mut st = InputState::new(800, 600);
+        st.fake_ms = Some(0);
+        rel(&mut st, REL_WHEEL, -10);
+        syn(&mut st);
+        assert!(st.scrolling());
+        crate::scrolleng::note_bound(); // a tile that reached its end says so
+        st.fake_ms = Some(16);
+        assert!(st.scroll_tick().is_empty() && !st.scrolling());
+    }
+
+    #[test]
+    fn parses_raw_input_event_records() {
+        let sz = std::mem::size_of::<InputEvent>();
+        let mut buf = vec![0u8; sz * 2];
+        for (i, (t, c, v)) in [(EV_KEY, 30u16, 1i32), (EV_REL, 0, -7)].iter().enumerate() {
+            let ev = InputEvent { time: libc::timeval { tv_sec: 1, tv_usec: 2 }, type_: *t, code: *c, value: *v };
+            // SAFETY: writing a POD struct into a byte buffer of sufficient size.
+            unsafe { std::ptr::write_unaligned(buf[i * sz..].as_mut_ptr().cast(), ev) };
+        }
+        assert_eq!(parse_events(&buf), vec![Raw { typ: EV_KEY, code: 30, value: 1 }, Raw { typ: EV_REL, code: 0, value: -7 }]);
+        assert!(parse_events(&buf[..sz - 1]).is_empty(), "partial records are ignored");
+    }
+
+    #[test]
+    fn missing_device_directory_is_not_fatal() {
+        let mut v = Vec::new();
+        scan_devices(&mut v); // works (possibly empty) whether or not /dev/input exists
+        let _ = poll_devices(&mut v, 1);
+    }
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+    use iyakki_agent::keyboard::KeyboardSettings;
+
+    fn press(st: &mut InputState, code: u16) -> Vec<Event> {
+        let a = st.feed(Raw { typ: EV_KEY, code, value: 1 }, None);
+        st.feed(Raw { typ: EV_KEY, code, value: 0 }, None);
+        a
+    }
+    fn hold(st: &mut InputState, code: u16, on: bool) {
+        st.feed(Raw { typ: EV_KEY, code, value: on as i32 }, None);
+    }
+    fn profile(p: &str, swap: Option<bool>, apple: bool) {
+        let devs = if apple { "I: Bus=0003 Vendor=05ac Product=027b Version=0111\nN: Name=\"Apple Inc. Apple Internal Keyboard / Trackpad\"\nH: Handlers=kbd event2\n\n" } else { "" };
+        crate::inputprofile::refresh_from(&KeyboardSettings { profile: p.into(), swap_opt_cmd: swap, ..Default::default() }, devs);
+    }
+
+    #[test]
+    fn mac_profile_command_is_the_shortcut_key_and_pc_is_unchanged() {
+        let mut st = InputState::new(100, 100);
+        profile("mac", None, true);
+        hold(&mut st, 125, true); // left Command (Meta)
+        assert_eq!(press(&mut st, 46), vec![Event::Key(Key::Ctrl('c'))]);
+        assert_eq!(press(&mut st, 47), vec![Event::Key(Key::Ctrl('v'))]);
+        assert_eq!(press(&mut st, 16), vec![], "Command+Q does nothing");
+        assert_eq!(press(&mut st, 105), vec![Event::Key(Key::Home)]);
+        hold(&mut st, 125, false);
+        assert_eq!(press(&mut st, 46), vec![Event::Key(Key::Char('c'))], "plain c after Command is released");
+        hold(&mut st, 29, true);
+        assert_eq!(press(&mut st, 46), vec![Event::Key(Key::Ctrl('c'))], "Control+C stays Control+C");
+        hold(&mut st, 29, false);
+        hold(&mut st, 56, true); // Option
+        assert_eq!(press(&mut st, 105), vec![Event::Key(Key::Nav { nav: Nav::Left, shift: false, ctrl: true })]);
+        hold(&mut st, 56, false);
+        profile("pc", None, true);
+        hold(&mut st, 125, true);
+        assert_eq!(press(&mut st, 46), vec![Event::Key(Key::Char('c'))], "the Windows key does nothing in the PC profile");
+    }
+
+    #[test]
+    fn super_plus_l_locks_the_screen_on_a_pc_keyboard_and_command_l_stays_the_browsers() {
+        let lock = vec![Event::Fn(crate::fnkeys::FnKey::Lock, true), Event::Fn(crate::fnkeys::FnKey::Lock, false)];
+        let mut st = InputState::new(100, 100);
+        profile("pc", None, false);
+        assert_eq!(press(&mut st, 38), vec![Event::Key(Key::Char('l'))], "a plain l is a letter");
+        hold(&mut st, 125, true);
+        assert_eq!(press(&mut st, 38), lock, "Super+L");
+        hold(&mut st, 125, false);
+        assert_eq!(press(&mut st, 38), vec![Event::Key(Key::Char('l'))], "and only while Super is held");
+        profile("mac", None, true);
+        hold(&mut st, 125, true);
+        assert_ne!(press(&mut st, 38), lock, "Command+L is the browser's address bar in the Mac profile");
+        hold(&mut st, 125, false);
+        profile("pc", None, false);
+    }
+
+    #[test]
+    fn control_windows_s_and_control_command_s_start_the_screen_saver_and_plain_s_does_not() {
+        let saver = vec![Event::Fn(crate::fnkeys::FnKey::Saver, true), Event::Fn(crate::fnkeys::FnKey::Saver, false)];
+        for (prof, modkey) in [("pc", 125u16), ("mac", 125)] {
+            let mut st = InputState::new(100, 100);
+            profile(prof, None, prof == "mac");
+            assert_ne!(press(&mut st, 31), saver, "{prof}: S alone is a letter");
+            hold(&mut st, modkey, true);
+            assert_ne!(press(&mut st, 31), saver, "{prof}: Super/Command+S alone is not the chord");
+            hold(&mut st, 29, true);
+            assert_eq!(press(&mut st, 31), saver, "{prof}: Control + Super/Command + S");
+            hold(&mut st, 29, false);
+            hold(&mut st, modkey, false);
+        }
+        profile("pc", None, false);
+    }
+
+    #[test]
+    fn control_command_q_signs_out_and_control_command_l_locks_in_the_mac_profile() {
+        let lock = vec![Event::Fn(crate::fnkeys::FnKey::Lock, true), Event::Fn(crate::fnkeys::FnKey::Lock, false)];
+        let out = vec![Event::Fn(crate::fnkeys::FnKey::SignOut, true), Event::Fn(crate::fnkeys::FnKey::SignOut, false)];
+        let mut st = InputState::new(100, 100);
+        profile("mac", None, true);
+        hold(&mut st, 125, true); // Command alone: Q does nothing, as before
+        assert_eq!(press(&mut st, 16), vec![], "Command+Q does nothing");
+        hold(&mut st, 29, true); // and Control with it asks to sign out
+        assert_eq!(press(&mut st, 16), out, "Control+Command+Q signs out");
+        assert_eq!(press(&mut st, 38), lock, "Control+Command+L locks");
+        hold(&mut st, 29, false);
+        assert_ne!(press(&mut st, 38), lock, "Command+L alone is still the browser's address bar");
+        hold(&mut st, 125, false);
+        hold(&mut st, 29, true);
+        assert_eq!(press(&mut st, 16), vec![Event::Key(Key::Ctrl('q'))], "Control+Q alone is still Control+Q");
+        hold(&mut st, 29, false);
+        // the PC profile has Super+L; Control+Windows+Q signs out there (a Mac keyboard that was not recognised as Apple's is a PC
+        // keyboard to Automatic), but Control+Alt+Q does not
+        profile("pc", None, false);
+        hold(&mut st, 125, true);
+        hold(&mut st, 29, true);
+        assert_eq!(press(&mut st, 16), out);
+        hold(&mut st, 125, false);
+        hold(&mut st, 56, true);
+        assert_ne!(press(&mut st, 16), out);
+        hold(&mut st, 56, false);
+        hold(&mut st, 29, false);
+        // with the driver's swap of Command and Option, the key printed Command arrives as Alt
+        profile("mac", Some(true), true);
+        hold(&mut st, 56, true);
+        hold(&mut st, 29, true);
+        assert_eq!(press(&mut st, 16), out, "the swapped Command key");
+        assert_eq!(press(&mut st, 38), lock, "the swapped Command key locks");
+        hold(&mut st, 29, false);
+        hold(&mut st, 56, false);
+        profile("pc", None, false);
+    }
+
+    /// The raw stream a Mac keyboard really sends: scan-code (EV_MSC) and sync events around every key, Command and Control on either
+    /// side, the saved swap setting agreeing or not with what the driver does, and an unrecognised keyboard under Automatic.
+    #[test]
+    fn control_command_q_signs_out_and_l_locks_for_every_way_a_keyboard_reaches_the_shell() {
+        let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+        let lock = vec![Event::Fn(crate::fnkeys::FnKey::Lock, true), Event::Fn(crate::fnkeys::FnKey::Lock, false)];
+        let out = vec![Event::Fn(crate::fnkeys::FnKey::SignOut, true), Event::Fn(crate::fnkeys::FnKey::SignOut, false)];
+        const EV_MSC: u16 = 4;
+        let send = |st: &mut InputState, code: u16, value: i32| -> Vec<Event> {
+            let mut out = st.feed(Raw { typ: EV_MSC, code: 4, value: 0x70000 + code as i32 }, None);
+            out.extend(st.feed(Raw { typ: EV_KEY, code, value }, None));
+            out.extend(st.feed(Raw { typ: EV_SYN, code: 0, value: 0 }, None));
+            out
+        };
+        // (choice, saved swap, Apple keyboard listed)
+        for (choice, swap, apple) in [("mac", None, true), ("mac", Some(true), true), ("mac", Some(false), true), ("", None, true), ("", None, false), ("pc", None, false)] {
+            for cmd in [125u16, 126, 56, 100] {
+                // the Mac profile takes Command or Option for the chords; the PC profile only the Windows key (Alt there is Alt)
+                let mac = choice == "mac" || (choice.is_empty() && apple);
+                let expect = mac || cmd == 125 || cmd == 126;
+                for ctl in [29u16, 97] {
+                    for (code, want) in [(16u16, &out), (38, &lock)] {
+                        let mut st = InputState::new(100, 100);
+                        profile(choice, swap, apple);
+                        send(&mut st, ctl, 1);
+                        send(&mut st, cmd, 1);
+                        let first = send(&mut st, code, 1);
+                        let repeat = send(&mut st, code, 2);
+                        send(&mut st, code, 0);
+                        send(&mut st, cmd, 0);
+                        send(&mut st, ctl, 0);
+                        let what = format!("choice {choice:?} swap {swap:?} apple {apple} cmd {cmd} ctrl {ctl} key {code}");
+                        assert_eq!(&first == want, expect, "{what}: {first:?}");
+                        if code == 16 {
+                            assert!(!first.contains(&Event::Fn(crate::fnkeys::FnKey::Lock, true)), "{what}: Q never locks");
+                        } else {
+                            assert!(!first.contains(&Event::Fn(crate::fnkeys::FnKey::SignOut, true)), "{what}: L never signs out");
+                        }
+                        assert!(!repeat.iter().any(|e| matches!(e, Event::Fn(crate::fnkeys::FnKey::Lock | crate::fnkeys::FnKey::SignOut, true))), "{what}: a held key does not act again");
+                    }
+                }
+            }
+        }
+        profile("pc", None, false);
+    }
+
+    #[test]
+    fn with_the_driver_swap_on_the_key_printed_command_is_still_command() {
+        let mut st = InputState::new(100, 100);
+        profile("mac", Some(true), true);
+        hold(&mut st, 56, true); // the kernel sends Alt for the swapped Command
+        assert_eq!(press(&mut st, 46), vec![Event::Key(Key::Ctrl('c'))]);
+        hold(&mut st, 56, false);
+        hold(&mut st, 125, true); // and Meta for the Option key: a word jump, not a shortcut
+        assert_eq!(press(&mut st, 46), vec![Event::Key(Key::Char('c'))]);
+        // a PC keyboard: the saved swap is not in effect, Meta is Command
+        profile("mac", Some(true), false);
+        assert_eq!(press(&mut st, 46), vec![Event::Key(Key::Ctrl('c'))]);
+    }
+
+    #[test]
+    fn control_click_is_a_right_click_only_in_the_mac_profile() {
+        let mut st = InputState::new(100, 100);
+        profile("mac", None, true);
+        hold(&mut st, 29, true);
+        let d = st.feed(Raw { typ: EV_KEY, code: BTN_LEFT, value: 1 }, None);
+        let u = st.feed(Raw { typ: EV_KEY, code: BTN_LEFT, value: 0 }, None);
+        assert!(matches!(d.as_slice(), [Event::MouseRight(..)]) && u.is_empty(), "{d:?} {u:?}");
+        profile("pc", None, true);
+        let d = st.feed(Raw { typ: EV_KEY, code: BTN_LEFT, value: 1 }, None);
+        assert!(matches!(d.as_slice(), [Event::MouseDown(..)]), "{d:?}");
+    }
+
+    // ---- accessibility: the Super+Alt chords, sticky keys and slow keys at the input layer
+
+    fn key(st: &mut InputState, code: u16, value: i32) -> Vec<Event> {
+        st.feed(Raw { typ: EV_KEY, code, value }, None)
+    }
+
+    fn tap(st: &mut InputState, code: u16) -> Vec<Event> {
+        let mut out = key(st, code, 1);
+        out.extend(key(st, code, 0));
+        out
+    }
+
+    #[test]
+    fn super_alt_chords_make_the_accessibility_keys_and_nothing_else_does() {
+        use crate::fnkeys::FnKey as K;
+        let mut st = InputState::new(800, 600);
+        key(&mut st, 125, 1); // Super
+        key(&mut st, 56, 1); // Alt
+        assert_eq!(key(&mut st, 31, 1), vec![Event::Fn(K::ScreenReader, true), Event::Fn(K::ScreenReader, false)], "S");
+        key(&mut st, 31, 0);
+        assert_eq!(key(&mut st, 106, 1)[0], Event::Fn(K::AccessNext, true), "Right");
+        assert_eq!(key(&mut st, 105, 1)[0], Event::Fn(K::AccessPrev, true), "Left");
+        assert_eq!(key(&mut st, 28, 1)[0], Event::Fn(K::AccessActivate, true), "Enter");
+        assert_eq!(key(&mut st, 19, 1)[0], Event::Fn(K::AccessRepeat, true), "R");
+        // Ctrl as well makes it a pane chord, not an accessibility key; Super alone and Alt alone are not chords
+        key(&mut st, 29, 1);
+        assert!(!key(&mut st, 31, 1).iter().any(|e| matches!(e, Event::Fn(K::ScreenReader, _))));
+        key(&mut st, 29, 0);
+        key(&mut st, 125, 0);
+        assert!(!key(&mut st, 31, 1).iter().any(|e| matches!(e, Event::Fn(..))), "Alt+S alone is a plain key");
+    }
+
+    #[test]
+    fn sticky_keys_let_the_chord_be_typed_one_key_at_a_time_and_capitals_with_one_finger() {
+        use crate::fnkeys::FnKey as K;
+        let mut st = InputState::new(800, 600);
+        st.opts = Some((true, 0));
+        assert!(tap(&mut st, 125).is_empty() && tap(&mut st, 56).is_empty(), "the modifiers say nothing by themselves");
+        assert!(st.sticky_latched());
+        let e = tap(&mut st, 31);
+        assert!(e.contains(&Event::Fn(K::ScreenReader, true)), "Super, Alt, S one after the other: {e:?}");
+        assert!(!st.sticky_latched(), "spent by the key");
+        // Shift then a: a capital; then a: small again
+        tap(&mut st, 42);
+        assert_eq!(tap(&mut st, 30), vec![Event::Key(Key::Char('A'))]);
+        assert_eq!(tap(&mut st, 30), vec![Event::Key(Key::Char('a'))]);
+        // Ctrl then s is Ctrl+S
+        tap(&mut st, 29);
+        assert_eq!(tap(&mut st, 31), vec![Event::Key(Key::Ctrl('s'))]);
+        // held in the ordinary way still works, and is not latched afterwards
+        key(&mut st, 42, 1);
+        assert_eq!(key(&mut st, 30, 1), vec![Event::Key(Key::Char('A'))]);
+        key(&mut st, 30, 0);
+        key(&mut st, 42, 0);
+        assert_eq!(tap(&mut st, 30), vec![Event::Key(Key::Char('a'))]);
+        // with the option off, a tapped Shift does nothing to the next key
+        st.opts = Some((false, 0));
+        tap(&mut st, 42);
+        assert_eq!(tap(&mut st, 30), vec![Event::Key(Key::Char('a'))]);
+    }
+
+    #[test]
+    fn slow_keys_drop_a_brush_and_accept_a_held_key_but_never_slow_the_modifiers_or_the_mouse() {
+        let mut st = InputState::new(800, 600);
+        st.opts = Some((false, 500));
+        st.fake_clock(1000);
+        assert!(key(&mut st, 30, 1).is_empty());
+        st.fake_clock(1200);
+        assert!(key(&mut st, 30, 0).is_empty(), "a brush of 200 ms is nothing");
+        st.fake_clock(2000);
+        key(&mut st, 30, 1);
+        st.fake_clock(2600);
+        assert_eq!(key(&mut st, 30, 0), vec![Event::Key(Key::Char('a'))], "held 600 ms counts, once");
+        // a modifier is not delayed: Shift (no wait) then a held key
+        key(&mut st, 42, 1);
+        st.fake_clock(3000);
+        key(&mut st, 30, 1);
+        st.fake_clock(3600);
+        assert_eq!(key(&mut st, 30, 0), vec![Event::Key(Key::Char('A'))]);
+        key(&mut st, 42, 0);
+        // the mouse button is not a key
+        assert!(matches!(key(&mut st, BTN_LEFT, 1).as_slice(), [Event::MouseDown(..)]));
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod swipe_tests {
+    use super::*;
+    use crate::touchpad::PadRange;
+    const PAD: PadRange = PadRange { x_min: -5087, x_max: 8270, y_min: -182, y_max: 6749, major_max: 5000 };
+
+    fn three_finger_swipe(st: &mut InputState, dx: i32, dy: i32) -> Vec<Event> {
+        let mut t = 1000u64;
+        let mut ev = Vec::new();
+        let mut frame = |st: &mut InputState, ms: u64, mx: i32, my: i32| {
+            t += ms;
+            for s in 0..3 {
+                for (c, v) in [(ABS_MT_SLOT, s), (ABS_MT_TRACKING_ID, s + 1), (ABS_MT_POSITION_X, 1000 + 900 * s + mx), (ABS_MT_POSITION_Y, 3000 + my), (0x30, 600)] {
+                    ev.extend(st.feed_pad_at(Raw { typ: EV_ABS, code: c, value: v }, &PAD, t));
+                }
+            }
+            ev.extend(st.feed_pad_at(Raw { typ: EV_SYN, code: SYN_REPORT, value: 0 }, &PAD, t));
+        };
+        frame(st, 0, 0, 0);
+        frame(st, 50, 0, 0);
+        for i in 1..=10 {
+            frame(st, 16, dx * i / 10, dy * i / 10);
+        }
+        ev
+    }
+
+    #[test]
+    fn the_pad_turns_a_swipe_into_an_event_and_the_setting_and_three_finger_drag_decide() {
+        let _shared = iyakki_testkit::lock(iyakki_testkit::names::INPUT); // flaky: the process-wide state below is shared with the other tests of this run
+        home_swipe_for_this_thread(Some((true, 3)));
+        let ev = three_finger_swipe(&mut InputState::new(1920, 1080), 4000, 0);
+        assert_eq!(ev.iter().filter(|e| matches!(e, Event::Swipe { back: true, at: None })).count(), 1, "{ev:?}");
+        home_swipe_for_this_thread(Some((false, 3)));
+        assert!(!three_finger_swipe(&mut InputState::new(1920, 1080), 4000, 0).iter().any(|e| matches!(e, Event::Swipe { .. })), "off");
+        home_swipe_for_this_thread(None);
+        assert_eq!(swipe_fingers_for(true, 3, false), 3);
+        assert_eq!(swipe_fingers_for(true, 3, true), 0, "three fingers drag when that is chosen");
+        assert_eq!(swipe_fingers_for(true, 2, true), 2, "two fingers still swipe beside the drag");
+        assert_eq!(swipe_fingers_for(false, 2, false), 0);
+    }
+}

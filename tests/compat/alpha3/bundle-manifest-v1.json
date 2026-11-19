@@ -1,0 +1,88 @@
+{
+  "id": "kit",
+  "name": "Kit",
+  "version": "1.2.0",
+  "manifest_version": 1,
+  "requires": {
+    "core_interface": ">=0.1 <1",
+    "capabilities_needed": [
+      "notify"
+    ]
+  },
+  "contents": [
+    {
+      "id": "helper",
+      "kind": "skill",
+      "file": "skills/helper.md",
+      "title": "Helper skill"
+    },
+    {
+      "id": "dark",
+      "kind": "theme",
+      "file": "themes/dark.json"
+    },
+    {
+      "id": "future-thing",
+      "kind": "hologram",
+      "file": "holo/h.bin",
+      "optional": true
+    }
+  ],
+  "wizards": [
+    {
+      "id": "setup",
+      "trigger": {
+        "on": "on_install"
+      },
+      "steps": [
+        {
+          "kind": "form",
+          "id": "who",
+          "title": "Who",
+          "fields": [
+            {
+              "id": "name",
+              "label": "Name",
+              "kind": "text",
+              "required": true
+            },
+            {
+              "id": "token",
+              "label": "Token",
+              "kind": "secret"
+            }
+          ]
+        },
+        {
+          "kind": "check",
+          "id": "net",
+          "title": "Server reachable",
+          "check": "net.reach",
+          "param": "example.com:443"
+        },
+        {
+          "kind": "summary",
+          "id": "done",
+          "title": "Ready",
+          "text": "All set."
+        }
+      ]
+    }
+  ],
+  "a_field_a_later_release_might_add": {
+    "x": [
+      1,
+      2
+    ]
+  },
+  "capabilities": [
+    {
+      "name": "notify",
+      "why": "tell you when it is done"
+    },
+    {
+      "name": "net.connect",
+      "why": "check the server in the setup"
+    }
+  ]
+}

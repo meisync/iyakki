@@ -1,0 +1,25 @@
+#!/bin/sh
+# Checks an installed (or just unpacked) audio and video add-on: every FFmpeg library the browser engine's bridge plugin needs is
+# there as a plain file (the same test crates/iyakki-agent/src/avaddon.rs makes before it activates the add-on).
+#   iyakki-av-check                 check the folder this script belongs to
+#   iyakki-av-check <addon-folder>  check another folder (the one that holds lib/ and av-addon-abi)
+#   iyakki-av-check --version       one line, for the installer
+# The list of sonames is the image's /usr/share/iyakki/av-addon-abi when there is one, else the copy in the add-on.
+set -eu
+HERE="$(cd "$(dirname "$0")/.." && pwd)"
+case "${1:-}" in
+  --version) sed -n 's/^FFmpeg version: */ffmpeg-libs /p' "$HERE/NOTICE" | head -n1; exit 0 ;;
+  "") if [ -f "$HERE/av-addon-abi" ]; then ROOT="$HERE"; else ROOT=/var/lib/iyakki/addons/ffmpeg; fi ;;   # inside the add-on, or the installed one
+  *) ROOT="$1" ;;
+esac
+ABI=/usr/share/iyakki/av-addon-abi
+[ -f "$ABI" ] || ABI="$ROOT/av-addon-abi"
+bad=0; n=0
+for s in $(sed 's/#.*//' "$ABI" | grep -E '^lib[A-Za-z0-9_.+-]+\.so' ); do
+  n=$((n+1))
+  if [ -f "$ROOT/lib/$s" ] && [ ! -L "$ROOT/lib/$s" ]; then echo "ok      $s"; else echo "MISSING $s"; bad=$((bad+1)); fi
+done
+for f in COPYING.LGPLv2.1 NOTICE SOURCE-OFFER.txt; do
+  if [ -f "$ROOT/$f" ]; then :; else echo "MISSING $f"; bad=$((bad+1)); fi
+done
+if [ "$bad" = 0 ]; then echo "add-on complete: $n libraries from $ABI"; else echo "add-on INCOMPLETE: $bad problem(s)"; exit 1; fi

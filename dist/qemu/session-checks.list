@@ -1,0 +1,75 @@
+# The named checks of dist/qemu/session-checks.py, one boot for all of them. Format: name | rows it proves (comma separated) | what it looks at.
+# Each name is a function check_<name> in session_checks_defs.py and a test of the same name in crates/iyakki-core/tests/qemu_session.rs.
+# A row is raised to Test 70 only when its check printed PASS in a run (see docs/development/QEMU-TESTS.md).
+profile: ram
+dev_doctor | F-DOCTOR-03 | `iyakki dev doctor` over the real developer-mode channel answers with the running system's report; the offline `iyakki doctor` says it cannot see that part
+dev_info_compat | F-CORE-19 | `iyakki dev info` prints the compat report: core, contract and client protocol versions, the paired computer as a peer, the deprecated names list
+coldplug_extra_pass | F-BOOT-27 | the real boot log shows the repeated coldplug pass loading aliases that appeared after the first batch of drivers
+components_record | F-UPD-16 | components-installed.json on the booted image holds facts that agree with the running kernel, program and release file
+private_store_roundtrip | F-APPS-44 | the private store server program starts on loopback, answers /healthz, serves a signed catalog, takes a published package and lists it
+pkg_trust_levels | F-APPSTORE-02 | `iyakki pkg verify` on the real image gives Unsigned, Community, Trusted, Verified and Revoked for the matching key set-ups
+device_name | F-NAME-03 | the stable device name, its mDNS firewall rule for private networks only, the announced developer service and the startup row
+dev_approval_banner | F-DEV-13 | a pending shell request shows as a DEV banner on the Home screen (read with `dev state`) and is answered on the guest's own screen
+a11y_labels | F-A11Y-01 | the running shell's own clickable regions all carry an accessible name (the `dev state` buttons of the screen)
+auth_tile | F-AUTH-01,F-AUTH-04,F-AUTH-05 | the AUTH tile adds a code by typing, shows the RFC 6238 value with a countdown, makes, renames and deletes groups, asks before deleting a code
+devtools_tile | F-DEVT-01,F-DEVT-04 | the DEV TOOLS tile lists thirteen tools, formats JSON, checks ports and pings 127.0.0.1 through the real screen
+home_layout_page | F-SHELL-34 | Settings, Home layout: a group is made, renamed, gets a tile moved into it, the delete card counts the tiles, built-in groups refuse rename, delete and reorder
+move_tile_keys | F-SHELL-31 | `m` on Home lists the groups, a pick moves the tile with a notice and Undo, `u` puts it back
+desktop_views | F-VIEW-01 | Settings, Desktop views: a view is made, one from a template, renamed, moved and deleted
+theme_switch | F-SHELL-41 | Settings, Account: Light, High contrast and Dark are applied at once and measured on the real screen
+power_key_card | F-KBD-05 | QEMU's ACPI power button opens the Lock, Restart, Sleep, Power off, Cancel card on Home
+flows_templates_and_runs | F-FLOW-11,F-FLOW-24,F-FLOW-23 | FLOWS lists the templates, makes the health check flow, runs it, Esc steps back, d deletes after a question
+firewall_presets | F-FW-06 | Settings, Firewall, Advanced, Presets: the form of on/off choices; turning one on and Save changes the rules in force
+router_page | F-ROUTER-07 | Settings, Model router: the page with registry, strategy, budget, latest run; the on/off switch
+shared_folders | F-SHARE-06,F-SHARE-08,F-SHARE-12 | a folder is shared with a secret link, fetched with wget, the firewall question, Stop all, /proc refused
+system_update_page | F-UPD-06,F-UPD-25,F-UPD-04 | Settings, System update: installed line, Channel cycle, How often, Check for updates, Roll back with nothing kept
+model_host_scan | F-MODELHOST-03 | Settings, Models, Scan this network: nothing before the click, the guest's /24 only, nothing added
+screen_saver_idle | F-SCRN-02 | the saver's preview on the real display: pure black with the IYAKKI logo, ending by itself
+checkup_steps | F-CHECKUP-01,F-CHECKUP-03 | the CHECK-UP tile runs its steps on the guest: network Pass, keyboard Pass on three real keys, missing hardware Skipped with a plain note, camera and microphone only on their own button
+store_installed_lifecycle | F-APPSTORE-24,F-APPS-05 | STORE: a developer-installed skill is listed, the details page of an official one, rating, Turn off, Remove after a question
+browser_engine_pages | F-BROW-29,F-BROW-42,F-BROW-08 | the Browser tile on pages served by the guest: ::before content, script run, canvas and SVG pixels, the per-site scripts switch
+browser_devtools_panel | F-BROW-67 | F12 opens the Developer tools panel in the Browser tile, Esc and Close close it
+browser_devtools_honest | F-BROW-74 | on a reader page the panel says plainly that no page probe reported
+browser_short_words | F-BROW-37 | the address bar's own short word is added and used
+panes_and_chords | F-SHELL-37,F-SHELL-38,F-SHELL-39 | the LAYOUT list with the memory gate line, two panes side by side, Ctrl+Alt+Right and Left through the QEMU keyboard, an app in the right pane
+media_samples | F-MEDIA-01,F-MEDIA-03 | the MEDIA tile scans the built-in samples, plays one through the kernel's sound card (ALSA stream RUNNING), stops, narrows the list by a search
+store_setup_recommended | F-SETUP-03 | Store, Setup: the machine line, the no-GPU hiding, k3s recommended, the Recommended filter
+config_daily_check | F-UPD-12 | the store.daily_check setting through `dev config` (scope granted on the screen) and what the System update page says
+
+app_events_connectivity | F-SDK-195 | SAMPLE Events: link down and up through the QEMU monitor, the Network line and the lines without (late)
+app_events_late_after_away | F-SDK-188,F-SDK-190 | the link changes while SAMPLE is closed: the lines arrive (late), no inbox note
+app_events_settings_switch | F-SDK-192 | Settings, App events: the registration is listed, its switch off stops the events
+app_events_flow_and_settings | F-SDK-199 | a setting changed through dev config shows in SAMPLE's settings line
+
+app_events_waits_while_away | F-SDK-190 | an event that happens while SAMPLE is closed waits (Settings, App events counts it) and arrives when SAMPLE opens
+app_events_lock | F-SDK-196 | the screen lock and unlock reach SAMPLE as a session event
+
+app_events_foreground | F-SDK-188,F-SDK-209 | SAMPLE goes to the back for Settings and comes to the front again: the Heard log says app lifecycle foreground or background
+app_events_volume | F-SDK-197,F-SDK-209 | a hot-plugged disk is mounted and unmounted in the guest: SAMPLE's Heard log says volume mounted, then unmounted
+app_events_usb | F-SDK-203,F-SDK-209 | a USB mouse plugged into the guest through the QEMU monitor and taken out: the Heard log says usb added, then usb removed
+
+app_events_permissions | F-SDK-218 | Settings, App events, Take its permission away: SAMPLE gets app.permissions (needs the cand4 image)
+
+browser_data_protection | F-VAULT-06 | Settings, Browser: protect, reset and stop protecting the browser data through the page
+
+profile: data
+editor_run_wasm | F-EDIT-16 | the EDIT tile runs a .wat file with F5 in the sandbox and shows the result under the text
+doctor_share_preview | F-DIAGSHARE-02 | DOCTOR, Share diagnostics shows what will be saved, saves it with mode 600, redacted
+dev_patch_delta | F-UPD-09 | dev patch: a delta pack against the file on the device, a wrong old version refused, applied live after the approval on the screen, removed
+
+dev_patch_same_id_delta | F-UPD-09 | KI-999 on an image with the fix: a delta with the id of a live patch is refused and the live patch stays (skipped on older images)
+
+app_events_survive_restart | F-SDK-190 | the registration file stays and an event that waited arrives after a hard restart of the guest (data volume)
+
+profile: clock
+clock_floor_lifted | F-CLOCK-01 | a virtual hardware clock at 2024-01-01 is lifted at the start of boot to the image's date
+
+profile: idle
+screen_saver_idle_timer | F-SCRN-01 | one minute of real idle time, developer mode switched off in the guest: the saver starts (pure black, logo), a key wakes it
+
+profile: full
+k8s_real_cluster | F-K8S-19,F-K8S-20,F-K8S-23,F-K8S-12 | k3s installed by the Store's own click (guest internet) and started from Settings; the K8S tile on the real cluster: namespaces with counts, a pod, its logs
+system_tile_pods | F-SYS-06,F-SYS-07,F-SYS-08 | SYSTEM tile on the running cluster: pods named in Processes, grouped by service with request and limit, what is it busy with shows the log tail
+quick_install_registry | F-INST-25,F-INST-21,F-SETUP-19,F-INST-19 | Store, Setup, Data: the in-cluster registry installed by the click (guest internet), limits and volume policy, the answer on the service, Remove with the data question
+quick_install_gitea | F-K8S-30 | Store, Setup, Coding agents: Gitea installed by the click, ClusterIP only, answers on 127.0.0.1:3300
+k3s_popup_stop_start | F-SETUP-09 | the k3s popup: Stop, then Start

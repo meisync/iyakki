@@ -1,0 +1,15 @@
+Origin: Debian
+Label: Debian
+Suite: stable
+Version: 13.1
+Codename: trixie
+Date: Sat, 09 Aug 2025 09:49:14 UTC
+Valid-Until: Sat, 16 Aug 2025 09:49:14 UTC
+Architectures: amd64 arm64
+Components: main contrib
+Description: Test fixture shaped like a Debian Release file
+SHA256:
+ 1111111111111111111111111111111111111111111111111111111111111111 1234 main/binary-amd64/Packages.xz
+ 2222222222222222222222222222222222222222222222222222222222222222 99 main/binary-arm64/Packages.xz
+SHA512:
+ 33 5 main/binary-amd64/Packages.xz

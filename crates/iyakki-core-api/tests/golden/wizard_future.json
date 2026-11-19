@@ -1,0 +1,17 @@
+[
+  {
+    "wizard_version": 1,
+    "id": "future-things",
+    "title": "Made for a later IYAKKI",
+    "future_hint": {"a": 1},
+    "trigger": {"on": "on_install", "when_idle": true},
+    "steps": [
+      {"kind": "form", "id": "one", "color": "teal", "fields": [
+        {"id": "when", "label": "When", "kind": "time-of-day", "layout": "wide", "rules": [{"rule": "before", "value": "22:00", "tone": "soft"}]}
+      ]},
+      {"kind": "ask-the-model", "id": "two", "prompt": "what next", "tools": ["a", "b"]},
+      {"kind": "check", "id": "three", "check": "gpu.present"},
+      {"kind": "summary", "id": "four", "text": "done", "confetti": true}
+    ]
+  }
+]

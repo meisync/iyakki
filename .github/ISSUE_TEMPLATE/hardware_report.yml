@@ -1,0 +1,53 @@
+name: Hardware report
+description: Tell us how IYAKKI ran (or did not run) on your machine
+labels: ["hardware"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Reports like this are the most useful thing a tester can send. docs/TESTED-HARDWARE.md lists what is known.
+        Please do not post serial numbers, MAC addresses or addresses of your network.
+  - type: input
+    id: version
+    attributes:
+      label: IYAKKI version and image
+      description: For example 0.1.0-alpha.6, the install image on a USB SSD.
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Machine model
+      description: Maker, model, year; CPU and graphics if you know them.
+    validations:
+      required: true
+  - type: dropdown
+    id: boot
+    attributes:
+      label: Did it boot to the sign-in screen?
+      options:
+        - "Yes, with Secure Boot off"
+        - "Yes, with Secure Boot on and the project's key enrolled"
+        - "Only with a special boot entry (safe graphics, compatible USB mode...)"
+        - "No"
+    validations:
+      required: true
+  - type: textarea
+    id: worked
+    attributes:
+      label: What worked
+      description: Keyboard, mouse, touch, display, sound, Wi-Fi, Bluetooth, camera, suspend, battery, anything else you tried.
+    validations:
+      required: true
+  - type: textarea
+    id: failed
+    attributes:
+      label: What did not work, and what you did not try
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: Hardware report
+      description: Output of `iyakki hwreport`, or paste the Hardware section of a Share diagnostics file. Read it first.
+      render: text

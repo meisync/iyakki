@@ -1,0 +1,9 @@
+{
+  "name": "__NAME__",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "description": "Echo the text back. Replace with what your tool does.",
+  "schema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+  "capabilities": [],
+  "budget": {"fuel": 10000000, "memory_mb": 8, "seconds": 5}
+}

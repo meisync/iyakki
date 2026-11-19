@@ -1,0 +1,11 @@
+old test path	new test path
+iyakki-agent::xz::tests::every_branch_filter_xz_writes_round_trips_through_our_decoder	iyakki-archive::xz::tests::every_branch_filter_xz_writes_round_trips_through_our_decoder
+iyakki-agent::xz::tests::hostile_filter_lists_are_refused_plainly_and_a_good_one_works	iyakki-archive::xz::tests::hostile_filter_lists_are_refused_plainly_and_a_good_one_works
+iyakki-agent::archive::tests::a_zstd_compressed_tar_is_unpacked_while_it_is_decompressed_and_checked_like_the_others	iyakki-archive::archive::a_zstd_compressed_tar_is_unpacked_while_it_is_decompressed_and_checked_like_the_others
+iyakki-agent::archive::tests::a_tar_gz_is_unpacked_with_folders_modes_and_safe_links	iyakki-archive::archive::a_tar_gz_is_unpacked_with_folders_modes_and_safe_links
+iyakki-agent::archive::tests::archives_cannot_write_or_link_outside_their_folder	iyakki-archive::archive::archives_cannot_write_or_link_outside_their_folder
+iyakki-agent::archive::tests::a_zip_is_unpacked_stored_or_deflated_with_modes_and_links_and_damage_is_reported	iyakki-archive::archive::a_zip_is_unpacked_stored_or_deflated_with_modes_and_links_and_damage_is_reported
+iyakki-agent::archive::tests::a_decompression_bomb_is_stopped_at_its_limit	iyakki-archive::archive::a_decompression_bomb_is_stopped_at_its_limit
+iyakki-agent::xz::tests::unpacks_a_small_file	iyakki-archive::xz::tests::unpacks_a_small_file
+iyakki-agent::xz::tests::md5_known_values	iyakki-archive::xz::tests::md5_known_values
+iyakki-agent::xz::tests::reads_the_vendors_md5_file	iyakki-archive::xz::tests::reads_the_vendors_md5_file

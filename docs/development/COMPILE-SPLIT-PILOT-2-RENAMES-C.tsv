@@ -1,0 +1,3 @@
+old test path	new test path
+iyakki-agent::disks_unlock_tests::luks1_luks2_and_bitlocker_headers_are_recognised_with_their_ids	iyakki-diskcrypt::tests::luks1_luks2_and_bitlocker_headers_are_recognised_with_their_ids
+iyakki-agent::disks_unlock_tests::hostile_and_truncated_headers_are_flagged_never_trusted_and_never_panic	iyakki-diskcrypt::tests::hostile_and_truncated_headers_are_flagged_never_trusted_and_never_panic

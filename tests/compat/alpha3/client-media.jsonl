@@ -1,0 +1,21 @@
+{"dir":"c","msg":{"client":"compat-fixture","min_v":1,"needed":[],"offered":["audio.out","clipboard.text","camera.frames","client.camera","client.microphone"],"t":"hello","v":1}}
+{"dir":"s","msg":{"caps":["audio.out","clipboard.text","camera.frames","client.camera","client.microphone"],"challenge":"00112233445566778899aabbccddeeff","max_message":65536,"t":"hello_ok","tile":64,"v":1}}
+{"dir":"c","msg":{"side":null,"t":"audio_open"}}
+{"dir":"s","msg":{"channels":2,"chunk_ms":20,"rate":48000,"side":"client","t":"audio_ok"}}
+{"dir":"c","msg":{"side":"both","t":"audio_open"}}
+{"dir":"s","msg":{"t":"audio_flush"}}
+{"dir":"c","msg":{"t":"audio_close"}}
+{"dir":"s","msg":{"reason":"closed","t":"audio_closed"}}
+{"dir":"c","msg":{"confirmed":true,"t":"clipboard_put","text":"hello"}}
+{"dir":"s","msg":{"t":"clipboard_ok"}}
+{"dir":"c","msg":{"confirmed":true,"t":"clipboard_get"}}
+{"dir":"s","msg":{"t":"clipboard_text","text":"from the machine"}}
+{"dir":"c","msg":{"t":"camera_open","unit":"usb:video0"}}
+{"dir":"s","msg":{"fps":5,"t":"camera_ok","unit":"usb:video0"}}
+{"dir":"s","msg":{"reason":"in_use: Recorder","t":"camera_closed","unit":"usb:video0"}}
+{"dir":"c","msg":{"t":"camera_close","unit":"usb:video0"}}
+{"dir":"c","msg":{"kind":"camera","t":"offer_open"}}
+{"dir":"s","msg":{"kind":"camera","source":"Fixture laptop camera","t":"offer_ok"}}
+{"dir":"c","msg":{"kind":"camera","t":"offer_close"}}
+{"dir":"s","msg":{"kind":"camera","reason":"closed","t":"offer_closed"}}
+{"dir":"s","msg":{"code":"in_use","message":"in use by Recorder","t":"media_err","what":"camera"}}

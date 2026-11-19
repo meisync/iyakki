@@ -1,0 +1,15 @@
+[package]
+name = "iyakki-app-sample"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# SAMPLE: the first app written only against the UI SDK (docs/development/UI-SDK.md). It depends on `iyakki-ui-sdk` and nothing else from
+# IYAKKI, so the same source runs in the desktop shell (through the adapter in `iyakki-apps`), as a recorded display list in a browser, and
+# in tests. Its notes live in memory unless it is given a storage port (`SampleApp::with_storage`); as a WASM tile the port is the core's.
+
+[dependencies]
+iyakki-ui-sdk = { path = "../iyakki-ui-sdk" }
+
+[dev-dependencies]
+iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }

@@ -1,0 +1,12 @@
+{
+  "title_prefix": "MEDIA-TEST ",
+  "pages": {
+    "enumerate.html":    { "name": "enumerate",    "mock": "PASS 3 audio, 2 video: Mock audio device 1 / Mock video device 1", "real": "PASS >= 1 audio, >= 1 video with labels", "needs_answer": ["microphone", "camera"] },
+    "gum-audio.html":    { "name": "gum-audio",    "mock": "PASS Mock audio device 1, peak > 0.001", "real": "PASS label of the headset, peak > 0.001", "needs_answer": ["microphone"] },
+    "gum-video.html":    { "name": "gum-video",    "mock": "PASS 640x480 (or 1280x720), >= 10 frames in 5 s", "real": "PASS webcam size, >= 10 frames in 5 s", "needs_answer": ["camera"] },
+    "rtc-loopback.html": { "name": "rtc-loopback", "mock": "PASS ICE connected/connected, frames > 0, audio packets > 0, data channel ok", "real": "same", "needs_answer": ["microphone", "camera"], "needs": "WEB_MEDIA=1 with WebRTC" },
+    "display.html": { "name": "display",    "mock": "PASS Mock screen device 1 1920x1080", "real": "PASS screen size (needs the portal and PipeWire feeder: not in the image yet)", "needs_answer": ["screen"] }
+  },
+  "denied_variant": "append ?expect=denied (or &expect=denied): PASS then means the browser answered NotAllowedError (Block, Not now, or an insecure page)",
+  "insecure_page": "open the same page as http://10.0.2.2:PORT/media/enumerate.html: FAIL 'navigator.mediaDevices is undefined' is the expected, correct result"
+}

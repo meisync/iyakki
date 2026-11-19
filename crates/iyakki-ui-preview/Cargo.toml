@@ -1,0 +1,14 @@
+[package]
+name = "iyakki-ui-preview"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The browser preview of an SDK app (docs/development/UI-SDK.md): a small loopback HTTP server that gives a browser the display list of the
+# app and applies the input the browser sends back. It is a developer tool for looking at an app in a tab (and the test of the browser
+# renderer); it listens on 127.0.0.1 only. It does not reach the machine for the app: the app only has the ports of the SDK.
+
+[dependencies]
+iyakki-ui-sdk = { path = "../iyakki-ui-sdk" }
+iyakki-app-sample = { path = "../iyakki-app-sample" }
+iyakki-client-engine = { path = "../iyakki-client-engine" }

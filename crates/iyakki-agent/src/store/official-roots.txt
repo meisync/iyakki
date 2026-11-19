@@ -1,0 +1,7 @@
+# The IYAKKI root keys this build trusts, one per line:  <id> <ed25519 public key, 64 hex characters> <valid from, unix seconds> <valid until>
+# Anything signed by one of these (or certified by one) is shown as Official / Verified.
+#
+# EMPTY ON PURPOSE. The official root key has not been generated yet (docs/STORE.md, section 10: who holds it and where).
+# Until it is listed here only the items compiled into this image are Official; nothing from the network can be.
+# Generate one offline with `iyakki pkg keygen iyakki-root`, keep the private half off every networked machine,
+# then add its public half here:   root-2027 <public key hex> 1798761600 1893456000

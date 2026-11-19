@@ -1,0 +1,6 @@
+# copied from the iyakki-media-bridge repository by sync-bridge.sh; sha256 of each file as copied
+8c7b98d1725affb316c87024cb292a96df12a2b2288066346bcf4262112e4f9f  versions.map
+33bfcba70f59a56b473031aa26398c3966b88eba3039b46bcbc7da4afcffdf1d  recipe/build.sh
+29edec52241f2f71d696f633b801c44c29fdb64a5186cddcb9840a8b12715f5a  recipe/configure-args.txt
+aed8ce8d6a5ea31702c21689935a2a8f1bd1a0e6604203a1aad49b19613580d0  recipe/files/iyakki-av-check
+recipe-hash 223bb193650f1c87516137561b63b6e33ef3cfc5d36790517ae236ae23637153

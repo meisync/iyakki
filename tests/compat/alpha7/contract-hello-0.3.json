@@ -1,0 +1,91 @@
+{
+  "contract": {
+    "major": 0,
+    "minor": 3
+  },
+  "oldest_minor": 1,
+  "machine": "box",
+  "build": "alpha.7",
+  "domains": [
+    {
+      "domain": "settings",
+      "since_minor": 1,
+      "calls": [
+        "schema",
+        "get",
+        "set",
+        "watch"
+      ],
+      "events": [
+        "changed"
+      ]
+    },
+    {
+      "domain": "vault",
+      "since_minor": 1,
+      "calls": [
+        "status",
+        "unlock",
+        "lock",
+        "use_secret"
+      ],
+      "events": []
+    },
+    {
+      "domain": "flows",
+      "since_minor": 1,
+      "calls": [
+        "list",
+        "status",
+        "events",
+        "start",
+        "stop",
+        "approve"
+      ],
+      "events": [
+        "started",
+        "step",
+        "approval_needed",
+        "approval_answered",
+        "frame",
+        "finished"
+      ]
+    },
+    {
+      "domain": "appevents",
+      "since_minor": 3,
+      "calls": [
+        "register",
+        "events"
+      ],
+      "events": [
+        "app"
+      ]
+    },
+    {
+      "domain": "consent",
+      "since_minor": 1,
+      "calls": [
+        "pending",
+        "answer"
+      ],
+      "events": [
+        "asked",
+        "answered",
+        "expired"
+      ]
+    }
+  ],
+  "capabilities": {
+    "audio": false,
+    "display": false,
+    "camera": false,
+    "keyboard": false,
+    "battery": false,
+    "bluetooth": false
+  },
+  "rate_limit": {
+    "calls": 120,
+    "per_ms": 60000
+  }
+}

@@ -1,0 +1,5 @@
+//! Types moved out of `iyakki_agent::settingstools_views` (F-SPLIT-03, scripted by dist/split/move_types.py); the agent re-exports them.
+
+
+
+pub const PROMPT_RULE: &str = "\nDESKTOP VIEWS (Settings -> Desktop views): views_list shows the person's views and views_templates_list the templates (both free). views_make (a name, or a template: work, media, monitoring), views_rename, views_delete, views_lock (a locked view asks for the person's password when they switch to it), views_keys (step keys, whether the lock returns to the first view, whether each view's window layout is remembered, and the apps that keep one window), views_switch, views_template_save (the person's own template: a name and 1 to 6 app ids) and views_template_delete each ask first; views_make also takes one of the person's own templates by name. A view is named by its number or its name. views_switch to a locked view shows the lock screen; you never get past it.";

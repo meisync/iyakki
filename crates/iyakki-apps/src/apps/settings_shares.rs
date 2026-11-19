@@ -1,0 +1,466 @@
+//! Settings -> Shared folders: share a folder of yours over HTTP on the local network (browse and download, optionally
+//! upload), or serve it as a small website. Everything is off until a share is made here, read-only until uploads are
+//! switched on, and stops at sign-out. The rules and the server are in `iyakki_agent::{sharedfolder, sharedsite}`; the model
+//! is explained in `docs/SHARED-FOLDERS.md`.
+
+use std::sync::Arc;
+
+use iyakki_shared::sharedfolder::{Access, Draft, Mode, ShareInfo, EXPIRIES};
+use iyakki_agent_api::SharedFolderMgr;
+use iyakki_shared::sharedfolder as sf;
+
+use super::*;
+
+/// What the page keeps between frames.
+#[derive(Default)]
+pub(super) struct SharePanel {
+    first: usize,
+    fit: usize,
+    /// Show the QR code of the chosen share's first address.
+    qr: bool,
+    /// A folder asked for by "Share this folder..." in the IDE; the form opens with it on the next frame.
+    pub(super) pending: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum ShareForm {
+    New,
+    Edit(String),
+    Delete(String),
+}
+
+const MODES: [&str; 2] = ["Files: browse and download", "Website: serve index.html (no list)"];
+/// The two plain-words lines about passwords on the Shared folders page (kept in constants so a test can read them).
+pub(super) const PASSWORD_HINT_TOP: &str = "A secret link is the safest choice here: anyone who has the link can open it, nobody else. A password is sent in clear over plain HTTP, so someone on the same network could read it. 'Anyone on the local network' needs no link or password.";
+pub(super) const PASSWORD_HINT_ROW: &str = "Visitors type any name and the password. The page is not encrypted, so use this only on a network you trust.";
+const ACCESSES: [&str; 4] = ["Secret link (recommended)", "Password (sent in clear over HTTP)", "Anyone on the local network", "This machine only"];
+const UPLOADS: [&str; 4] = ["Read only", "Visitors may upload new files", "Uploads and new folders", "Uploads, folders and replacing files"];
+
+fn lan_options() -> Vec<String> {
+    let mut v = vec!["all network interfaces".to_string()];
+    v.extend(crate::agent().host_probe().lan_addresses());
+    v
+}
+
+/// The one-line rule at the top of the form (owner rule 2026-11-06; the manager enforces it with `sharedfolder::Scope`).
+pub(super) const FOLDER_RULE_HINT: &str = "Administrators can map any folder; everyone else only folders in their own home.";
+
+/// The form for a share. `d` has the values to start from.
+pub(super) fn share_form(d: &Draft, edit: bool) -> Form {
+    let lan = lan_options();
+    let lan_refs: Vec<&str> = lan.iter().map(String::as_str).collect();
+    let bind = lan.iter().position(|a| *a == d.bind).unwrap_or(0);
+    let exp: Vec<&str> = EXPIRIES.iter().map(|(l, _)| *l).collect();
+    let up = if !d.upload {
+        0
+    } else if d.overwrite {
+        3
+    } else if d.mkdir {
+        2
+    } else {
+        1
+    };
+    Form::new(if edit { "Edit shared folder" } else { "Share a folder on the network" })
+        .with_note(FOLDER_RULE_HINT)
+        .text("Name", &d.name, "shown to visitors; letters, digits, space - _ .")
+        .path("Folder", &d.folder, "full path of the folder, for example one in your home folder", crate::filepicker::PathKind::Folder, &[])
+        .choice("Show it as", &MODES, if d.mode == Mode::Website { 1 } else { 0 })
+        .choice("Who can open it", &ACCESSES, match d.access {
+            Access::Token => 0,
+            Access::Password => 1,
+            Access::Open => 2,
+            Access::Local => 3,
+        })
+        .secret("Password (password mode only)", if edit { "8 or more characters; leave empty to keep the current one" } else { "8 or more characters" })
+        .text("Type OPEN to confirm", if d.access == Access::Open { "OPEN" } else { "" }, "only when you chose 'Anyone on the local network': then everyone on this network can see these files")
+        .choice("Visitors may", &UPLOADS, up)
+        .text("Largest upload (MB)", &if d.max_upload_mb == 0 { "25".to_string() } else { d.max_upload_mb.to_string() }, "1 to 512; uploads are kept in memory while they arrive")
+        .choice("Hidden files (.name)", &["stay hidden", "are shown"], usize::from(d.show_hidden))
+        .choice("Stops after", &exp, EXPIRIES.iter().position(|(_, s)| *s == d.expiry_secs).unwrap_or(1))
+        .choice("Listen on", &lan_refs, bind)
+        .text("Port", &if d.port == 0 { String::new() } else { d.port.to_string() }, "empty: the next free one from 8081; it stays the same for this share")
+        .choice("After I sign out", &["it stops", "it starts again when I sign in"], usize::from(d.keep_running))
+}
+
+/// Read the form back (the checks that need the file system happen in `Shares::create`).
+pub(super) fn draft_of_form(f: &Form) -> Result<Draft, String> {
+    let lan = lan_options();
+    let access = match f.choice_idx(3) {
+        0 => Access::Token,
+        1 => Access::Password,
+        2 => Access::Open,
+        _ => Access::Local,
+    };
+    let up = f.choice_idx(6);
+    let port = match f.value(11).trim() {
+        "" => 0,
+        t => t.parse::<u16>().map_err(|_| "The port is a number from 1024 to 65535.".to_string())?,
+    };
+    let mb = f.value(7).trim().parse::<u64>().map_err(|_| "The largest upload is a whole number of megabytes (1 to 512).".to_string())?;
+    if !(1..=512).contains(&mb) {
+        return Err("The largest upload is a whole number of megabytes (1 to 512).".into());
+    }
+    Ok(Draft {
+        name: f.value(0).trim().to_string(),
+        folder: f.value(1).trim().to_string(),
+        mode: if f.choice_idx(2) == 1 { Mode::Website } else { Mode::Files },
+        access,
+        password: f.raw(4),
+        confirm_open: f.value(5).trim() == "OPEN",
+        upload: up >= 1,
+        mkdir: up >= 2,
+        overwrite: up >= 3,
+        max_upload_mb: mb,
+        show_hidden: f.choice_idx(8) == 1,
+        expiry_secs: EXPIRIES.get(f.choice_idx(9)).map_or(86400, |(_, s)| *s),
+        bind: if f.choice_idx(10) == 0 { "all".into() } else { lan.get(f.choice_idx(10)).cloned().unwrap_or_else(|| "all".into()) },
+        port,
+        keep_running: f.choice_idx(12) == 1,
+    })
+}
+
+fn left_text(secs: i64) -> String {
+    match secs {
+        s if s >= 86400 => format!("{} d {} h left", s / 86400, s % 86400 / 3600),
+        s if s >= 3600 => format!("{} h {} min left", s / 3600, s % 3600 / 60),
+        s => format!("{} min left", s.max(60) / 60),
+    }
+}
+
+/// One line about who may open a share, for the list and the docs of the page.
+pub(super) fn who(i: &ShareInfo) -> String {
+    let c = &i.cfg;
+    format!("{} · {}{}", c.access.label(), if c.mode == Mode::Website { "website" } else if c.upload { "files, uploads on" } else { "files, read only" }, if c.show_hidden { " · hidden files shown" } else { "" })
+}
+
+impl SettingsApp {
+    pub(super) fn shares(cx: &AppCx) -> Arc<dyn SharedFolderMgr> {
+        let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+        let a2 = user.clone();
+        let admin = cx.session.role == iyakki_sec::policy::Role::Admin;
+        crate::agent().host_probe().shared_folders(cx.data_dir(), &user, admin, &cx.session.policy, Arc::new(move |e, d| audit.record(&a2, e, d)))
+    }
+
+    pub(super) fn shares_rows(cx: &AppCx) -> Vec<ShareInfo> {
+        let m = Self::shares(cx);
+        m.tick();
+        m.list()
+    }
+
+    pub(super) fn shares_len(cx: &AppCx) -> usize {
+        Self::shares_rows(cx).len()
+    }
+
+    pub(super) fn shares_buttons(&self) -> Vec<Btn> {
+        vec![("New share…", ACCENT, 'n'), ("Receive a package", TEXT, 'r'), ("Start/Stop", TEXT, 's'), ("Copy link", TEXT, 'c'), ("QR", TEXT, 'q'), ("Edit", TEXT, 'e'), ("New secret", TEXT, 't'), ("Delete", ERR, 'd'), ("Stop all", ERR, 'x'), ("Media server", TEXT, 'm'), ("Firewall", TEXT, 'f')]
+    }
+
+    /// Open the form for a new share with `folder` filled in ("Share this folder…" in the IDE and EDIT).
+    pub(super) fn shares_new_for(&mut self, folder: &str) {
+        let d = Draft { folder: folder.to_string(), name: std::path::Path::new(folder).file_name().map(|n| n.to_string_lossy().chars().filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.')).collect::<String>()).unwrap_or_default(), mode: if std::path::Path::new(folder).join("index.html").is_file() { Mode::Website } else { Mode::Files }, access: Access::Token, expiry_secs: 86400, max_upload_mb: 25, bind: "all".into(), ..Default::default() };
+        self.open_form(FormKind::Share(ShareForm::New), share_form(&d, false));
+    }
+
+    pub(super) fn handle_shares(&mut self, k: &Key, cx: &AppCx) {
+        let rows = Self::shares_rows(cx);
+        let sel = self.sel[self.tab].min(rows.len().saturating_sub(1));
+        let m = Self::shares(cx);
+        match k {
+            Key::Up => self.move_sel(-1, rows.len()),
+            Key::Down => self.move_sel(1, rows.len()),
+            Key::Char('n') => {
+                let home = cx.core.file_scope().home_root(&cx.session.user, cx.data_dir());
+                self.shares_new_for(&home.to_string_lossy());
+            }
+            Key::Char('s') | Key::Enter => match rows.get(sel) {
+                Some(i) if i.running => {
+                    m.stop(&i.cfg.id);
+                    self.ok(format!("Stopped sharing {}.", i.cfg.name));
+                }
+                Some(i) => match m.start(&i.cfg.id) {
+                    Ok(()) => {
+                        self.ok(format!("{} is shared now.", i.cfg.name));
+                        // other devices reach a share only if the firewall lets them in: ask, with the consequences in plain words, instead of leaving
+                        // the person to find Settings -> Firewall (the change is kept at once: it only opens)
+                        let blocked = i.cfg.access != Access::Local && cx.session.policy.manage_settings && self.fw.writable && super::firewall_page::share_blocked_note(i.cfg.port).is_some();
+                        if blocked {
+                            self.modal = Some(Modal::Confirm(
+                                ConfirmKind::ShareOpenFirewall,
+                                format!("{} is shared, but the firewall blocks other devices from reaching it (port {}). Open the firewall for shared folders on your local network? Only devices on your own network (not the internet) can then reach your shares. Press y to open it, or any other key to leave it closed.", i.cfg.name, i.cfg.port),
+                            ));
+                        }
+                    }
+                    Err(e) => self.fail(e),
+                },
+                None => self.fail("Make a share first (n)."),
+            },
+            Key::Char('c') => match rows.get(sel).and_then(|i| i.urls.first().map(|u| (i, u.clone()))) {
+                Some((i, u)) => {
+                    crate::ui::clipboard::copy(&u);
+                    self.ok(format!("Copied the link of {}{}.", i.cfg.name, if i.running { "" } else { " (it is stopped: press s to start it)" }));
+                }
+                None => self.fail("Choose a share first (Up/Down)."),
+            },
+            Key::Char('q') => {
+                self.shares.qr = !self.shares.qr;
+            }
+            Key::Char('e') => match rows.get(sel) {
+                Some(i) => self.open_form(FormKind::Share(ShareForm::Edit(i.cfg.id.clone())), share_form(&sf::draft_of(&i.cfg), true)),
+                None => self.fail("Choose a share first (Up/Down)."),
+            },
+            Key::Char('t') => match rows.get(sel) {
+                Some(i) if i.cfg.access == Access::Token => match m.new_token(&i.cfg.id) {
+                    Ok(()) => self.ok("The link has a new secret; the old address stopped working. Copy the new link (c)."),
+                    Err(e) => self.fail(e),
+                },
+                Some(_) => self.fail("Only a share with a secret link has a secret to change."),
+                None => self.fail("Choose a share first (Up/Down)."),
+            },
+            Key::Char('d') | Key::Delete => match rows.get(sel) {
+                Some(i) => {
+                    let f = Form::new(&format!("Delete the share {}", i.cfg.name)).text("Type DELETE to stop and remove it (your files are not touched)", "", "DELETE");
+                    self.open_form(FormKind::Share(ShareForm::Delete(i.cfg.id.clone())), f);
+                }
+                None => self.fail("Choose a share first (Up/Down)."),
+            },
+            Key::Char('r') => self.shares_package_drop(cx),
+            Key::Char('f') => self.fw_open_shares(cx),
+            Key::Char('m') => self.media_server_toggle(cx),
+            Key::Char('x') => {
+                let n = crate::agent().host_probe().shares_running_total();
+                if n == 0 {
+                    self.ok("Nothing was being shared.");
+                } else {
+                    self.modal = Some(Modal::Confirm(ConfirmKind::ShareStopAll, format!("Stop all {n} running share(s)? People who are downloading right now are cut off. Press y to stop them, or any other key to keep sharing.")));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `m`: the media server (UPnP/DLNA) of the person's shared folders. Off at once; on asks first, because every player on the local
+    /// network can then list and play the files without a password. The same switch is the chat tool `media_server_set`.
+    fn media_server_toggle(&mut self, cx: &AppCx) {
+        if cx.agent.upnp_serve_status_for(&cx.session.user).is_some() {
+            let was = cx.agent.upnp_serve_stop_user(&cx.session.user);
+            cx.audit.record(&cx.session.user, "settings.media_server", "off");
+            self.ok(if was { "The media server is off. Players can no longer see or play your files." } else { "The media server was already off." });
+            return;
+        }
+        let n = cx.agent.upnp_serve_share_folders(cx.data_dir(), &cx.session.user).len();
+        if n == 0 {
+            self.fail("There is no folder shared as Files to offer: make a share first (n). Websites and package drops are not offered.");
+            return;
+        }
+        self.modal = Some(Modal::Confirm(ConfirmKind::MediaServerOn, format!("Switch the media server on? TVs, phones and speakers on your local network will be able to list and play the audio and video files in {n} shared folder(s), without a password. Hidden files are not offered. It stops when you sign out. Press y to switch it on, or any other key to keep it off.")));
+    }
+
+    pub(super) fn media_server_start(&mut self, cx: &AppCx) {
+        let (audit, user) = (cx.audit.clone(), cx.session.user.clone());
+        let log: Arc<dyn Fn(&str, &str) + Send + Sync> = Arc::new(move |ev, d| audit.record(&user, ev, d));
+        match cx.agent.helpers_b4().upnp_start_for(cx.data_dir(), &cx.session.user, log) {
+            Ok(m) => {
+                cx.audit.record(&cx.session.user, "settings.media_server", "on");
+                self.ok(m);
+            }
+            Err(e) => self.fail(e),
+        }
+    }
+
+    /// The band at the top of the page: whether the media server is on, and who follows it for changes. Returns the height used.
+    fn render_media_band(&self, g: &mut Gfx, a: R, y: f32, s: f32, cx: &AppCx) -> f32 {
+        let on = cx.agent.upnp_serve_status_for(&cx.session.user);
+        let mut h = 0.0;
+        let (txt, col) = match on {
+            Some((port, n)) => (format!("Media server: on (port {port}, {n} audio and video files). m switches it off."), OK),
+            None => ("Media server: off. m offers the audio and video of your shared folders to TVs and players on this network.".to_string(), DIM),
+        };
+        for l in g.wrap(13.0 * s, &txt, Face::Bold, a.w).iter().take(2) {
+            g.text(a.x, y + h, 13.0 * s, col, l, Face::Bold);
+            h += 18.0 * s;
+        }
+        if on.is_some() {
+            let (text, list) = cx.agent.helpers_b4().upnp_subscribers(&cx.session.user);
+            for l in g.wrap(12.0 * s, &text, Face::Sans, a.w).iter().take(2) {
+                g.text(a.x, y + h, 12.0 * s, MUTED, l, Face::Sans);
+                h += 16.0 * s;
+            }
+            for sub in list.iter().take(4) {
+                g.text(a.x + 12.0 * s, y + h, 12.0 * s, MUTED, &format!("{} follows {} ({} min left)", sub.0, sub.1, (sub.2 + 59) / 60), Face::Sans);
+                h += 16.0 * s;
+            }
+        }
+        h + 6.0 * s
+    }
+
+    pub(super) fn shares_stop_all(&mut self) {
+        let n = crate::agent().host_probe().shares_stop_everything();
+        self.ok(if n == 0 { "Nothing was being shared.".to_string() } else { format!("Stopped {n} share(s). Nothing is shared now.") });
+    }
+
+    /// "Receive a package": a ten-minute share of the local packages folder that takes only the audio and video add-on package, behind a password shown here once.
+    /// For sending the file from another computer: the file lands where the add-on installer looks; nothing is installed until an administrator reads the review.
+    fn shares_package_drop(&mut self, cx: &AppCx) {
+        if !self.admin(cx) {
+            return;
+        }
+        let m = Self::shares(cx);
+        let folder = cx.data_dir().join("local").join("packages");
+        if let Err(e) = std::fs::create_dir_all(&folder) {
+            return self.fail(format!("Could not make the packages folder: {e}"));
+        }
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o750));
+        }
+        let password = crate::agent().host_probe().random_hex(6);
+        let id = match m.create_package_drop(&folder, &password) {
+            Ok(id) => id,
+            Err(e) => return self.fail(e),
+        };
+        if let Err(e) = m.start(&id) {
+            return self.fail(e);
+        }
+        cx.audit.record(&cx.session.user, "share.package_drop", &id);
+        let info = Self::shares_rows(cx).into_iter().find(|i| i.cfg.id == id);
+        let (url, port) = info.map(|i| (i.urls.first().cloned().unwrap_or_default(), i.cfg.port)).unwrap_or_default();
+        let how = format!("curl -T ffmpeg-libs-....tar.gz -u iyakki:{password} {}", url.trim_end_matches('/'));
+        crate::ui::clipboard::copy(&how);
+        self.ok(format!("Ready for 10 minutes. From the other computer: {how}   (copied). Then open Store → Setup → Browser audio and video to install it."));
+        let blocked = self.fw.writable && super::firewall_page::share_blocked_note(port).is_some();
+        if blocked {
+            self.modal = Some(Modal::Confirm(
+                ConfirmKind::ShareOpenFirewall,
+                format!("The package drop is on, but the firewall blocks other computers from reaching it (port {port}). Open the firewall for shared folders on your local network? Press y to open it, or any other key to leave it closed."),
+            ));
+        }
+    }
+
+    pub(super) fn shares_submit(&mut self, cx: &AppCx, kind: &ShareForm, form: &mut Form) -> Result<String, String> {
+        let m = Self::shares(cx);
+        match kind {
+            ShareForm::New => {
+                let d = draft_of_form(form)?;
+                let id = m.create(&d)?;
+                let c = m.get(&id);
+                Ok(format!("Made the share {}. It is stopped: choose it and press s to start sharing{}.", d.name, c.map(|c| format!(" (port {})", c.port)).unwrap_or_default()))
+            }
+            ShareForm::Edit(id) => {
+                let d = draft_of_form(form)?;
+                m.update(id, &d)?;
+                Ok(format!("Saved {}.", d.name))
+            }
+            ShareForm::Delete(id) => {
+                if form.value(0).trim() != "DELETE" {
+                    return Err("Type DELETE exactly to remove the share.".into());
+                }
+                m.delete(id)?;
+                Ok("The share is removed.".into())
+            }
+        }
+    }
+
+    pub(super) fn render_shares(&mut self, g: &mut Gfx, a: R, s: f32, cx: &AppCx) {
+        if let Some(f) = self.shares.pending.take() {
+            self.shares_new_for(&f);
+        }
+        let rows = Self::shares_rows(cx);
+        let mut y = a.y;
+        let running = rows.iter().filter(|r| r.running).count();
+        for (l, col) in [
+            ("Share a folder of yours with other devices on this network: browse and download, or serve a small website. Nothing is shared until you make a share and start it; it is read-only unless you allow uploads; everything stops when you sign out.", MUTED),
+            (PASSWORD_HINT_TOP, MUTED),
+        ] {
+            for w in g.wrap(13.0 * s, l, Face::Sans, a.w) {
+                g.text(a.x, y, 13.0 * s, col, &w, Face::Sans);
+                y += 18.0 * s;
+            }
+            y += 4.0 * s;
+        }
+        y += self.render_media_band(g, a, y, s, cx);
+        if running > 0 {
+            g.text(a.x, y, 13.0 * s, rgb(255, 196, 94), &format!("{running} share(s) running now. 'Stop all sharing' (x) closes them at once."), Face::Bold);
+            y += 22.0 * s;
+        }
+        if rows.is_empty() {
+            g.text(a.x, y + 6.0 * s, 14.0 * s, DIM, "No shares yet. Press n to share a folder.", Face::Sans);
+            return;
+        }
+        let sel = self.sel[self.tab].min(rows.len() - 1);
+        let detail_h = 150.0 * s;
+        let rh = 60.0 * s;
+        let room = (a.y + a.h - detail_h - y - 8.0 * s).max(rh);
+        let fit = ((room / rh) as usize).max(1);
+        self.shares.fit = fit;
+        if sel < self.shares.first {
+            self.shares.first = sel;
+        } else if sel >= self.shares.first + fit {
+            self.shares.first = sel + 1 - fit;
+        }
+        let first = self.shares.first.min(rows.len().saturating_sub(fit));
+        self.shares.first = first;
+        for (i, r) in rows.iter().enumerate().skip(first).take(fit) {
+            let mut chips: Vec<(&str, [u8; 4])> = vec![];
+            chips.push(if r.running { ("running", OK) } else { ("stopped", DIM) });
+            if r.cfg.access == Access::Open {
+                chips.push(("open to all", ERR));
+            }
+            let exp = match (r.running, r.left) {
+                (true, Some(l)) => left_text(l),
+                _ => EXPIRIES.iter().find(|(_, s)| *s == r.cfg.expiry_secs).map_or(String::new(), |(l, _)| if r.cfg.expiry_secs == 0 { "no end".to_string() } else { format!("stops after {l}") }),
+            };
+            row(g, &mut self.tip, i, a.x, y, a.w, rh - 6.0 * s, s, i == sel, &format!("{}  :{}", r.cfg.name, r.cfg.port), &format!("{} · {} · {} · {} visitor(s)", r.cfg.folder, who(r), exp, r.clients), &chips);
+            y += rh;
+        }
+        if rows.len() > fit {
+            g.text(a.x + a.w - 120.0 * s, a.y + a.h - detail_h - 6.0 * s, 11.0 * s, DIM, &format!("{}-{} of {}", first + 1, (first + fit).min(rows.len()), rows.len()), Face::Sans);
+        }
+        // the chosen share: every address it answers to, why it might not run, and the QR code
+        let r = &rows[sel];
+        let top = a.y + a.h - detail_h;
+        g.rect(a.x, top - 4.0 * s, a.w, 1.0, [255, 255, 255, 24]);
+        let qr = if self.shares.qr { r.urls.first().and_then(|u| iyakki_qr::qr::encode(u.as_bytes())) } else { None };
+        let qr_px = qr.as_ref().map_or(0.0, |q| (q.size as f32 + 4.0) * 3.0 * s);
+        let tw = a.w - qr_px - 16.0 * s;
+        g.text(a.x, top + 4.0 * s, 13.0 * s, TEXT, &format!("Addresses of {} (type one into a browser on another device)", r.cfg.name), Face::Bold);
+        // the firewall blocks incoming connections unless allowed: say so when it would keep other devices out of this share
+        let fw_note = if r.running && r.cfg.access != Access::Local { super::firewall_page::share_blocked_note(r.cfg.port) } else { None };
+        let mut ty = top + 24.0 * s;
+        for u in r.urls.iter().take(4) {
+            for l in g.wrap(12.0 * s, u, Face::Mono, tw).iter().take(2) {
+                g.text(a.x, ty, 12.0 * s, if r.running { OK } else { DIM }, l, Face::Mono);
+                ty += 16.0 * s;
+            }
+        }
+        if let Some(e) = &r.error {
+            for l in g.wrap(12.0 * s, e, Face::Sans, tw).iter().take(2) {
+                g.text(a.x, ty, 12.0 * s, ERR, l, Face::Sans);
+                ty += 16.0 * s;
+            }
+        } else if let Some(n) = fw_note {
+            for l in g.wrap(12.0 * s, &n, Face::Sans, tw).iter().take(3) {
+                g.text(a.x, ty, 12.0 * s, rgb(255, 196, 94), l, Face::Sans);
+                ty += 16.0 * s;
+            }
+        } else if r.cfg.access == Access::Password {
+            for l in g.wrap(12.0 * s, PASSWORD_HINT_ROW, Face::Sans, tw).iter().take(3) {
+                g.text(a.x, ty, 12.0 * s, MUTED, l, Face::Sans);
+                ty += 16.0 * s;
+            }
+        }
+        if let Some(q) = &qr {
+            let m = 3.0 * s;
+            let (qx, qy) = (a.x + a.w - qr_px + 2.0 * m, top + 2.0 * s);
+            g.rect(qx - 2.0 * m, qy - 2.0 * m, (q.size as f32 + 4.0) * m, (q.size as f32 + 4.0) * m, [255, 255, 255, 255]);
+            for yy in 0..q.size {
+                for xx in 0..q.size {
+                    if q.get(xx, yy) {
+                        g.rect(qx + xx as f32 * m, qy + yy as f32 * m, m, m, [0, 0, 0, 255]);
+                    }
+                }
+            }
+        } else {
+            g.text(a.x, top + detail_h - 26.0 * s, 12.0 * s, MUTED, "c copies the link · q shows a QR code to scan with a phone", Face::Sans);
+        }
+    }
+}

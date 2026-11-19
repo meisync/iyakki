@@ -1,0 +1,4 @@
+{"h":490000,"user":"amy","provider":"ollama","model":"llama3.2:3b","input":1200,"output":340,"calls":6}
+{"h":490001,"user":"amy","provider":"openai","model":"text-embedding-3-small","input":800,"output":0,"calls":9,"src":"app:notes","cat":"embed","errors":2,"ms":910,"est":true}
+{"h":490002,"user":"bob","provider":"piper","model":"voice-a","input":40,"output":0,"calls":3,"src":"mcp:calendar","cat":"tts"}
+{"h":490003,"user":"amy","provider":"ollama","model":"qwen3:32b","input":10,"output":20,"calls":1,"cache_read":5}

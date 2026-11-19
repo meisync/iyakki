@@ -1,0 +1,35 @@
+#!/bin/bash
+# rcargo WORKTREE_DIR CARGO_ARGS...   run cargo for a worktree on the Linux build host: sync the source, build and test there, stream the output back.
+# Each worktree gets its own remote folder and its own target folder (no stale-artifact clashes, no lock queue, no PC disk use).
+set -u
+# settings (one file per person, never in the repository): LINUX_BUILD_HOST=user@host   LINUX_BUILD_DISK=$DISK   (see dist/buildhost/README.md)
+[ -f "${IYAKKI_BUILDHOSTS_ENV:-$HOME/.config/iyakki/buildhosts.env}" ] && . "${IYAKKI_BUILDHOSTS_ENV:-$HOME/.config/iyakki/buildhosts.env}"
+HOST=${LINUX_BUILD_HOST:?set LINUX_BUILD_HOST in ~/.config/iyakki/buildhosts.env}
+DISK=${LINUX_BUILD_DISK:-$DISK}
+RUSER=${HOST%@*}
+# rcargo --retire WORKTREE_DIR: the worktree is finished: remove its source copy and target folder on the build host (and stop test processes still running from them)
+if [ "${1:-}" = "--retire" ]; then
+  n=$(basename "$(cd "${2:?worktree dir}" && pwd)")
+  case "$n" in ""|*/*|.|..) echo "rcargo: bad name" >&2; exit 2;; esac
+  ssh -o BatchMode=yes -o ConnectTimeout=10 $HOST "pkill -u \$(id -u) -f "[${DISK:1:1}]${DISK:2}/target/$n/" ; pkill -u \$(id -u) -f "[${DISK:1:1}]${DISK:2}/src/$n/" ; true" >/dev/null 2>&1; sleep 1
+  ssh -o BatchMode=yes -o ConnectTimeout=10 $HOST "rm -rf $DISK/src/$n $DISK/target/$n; echo retired $n"
+  exit 0
+fi
+dir=$(cd "${1:?worktree dir}" && pwd); shift
+name=$(basename "$dir")
+remote=$DISK/src/$name
+target=$DISK/target/$name
+# disk guard (2026-11-18: the build host reached 95% because every worktree keeps its own target folder): refuse to build above 85% disk use; cleaning is done by a person
+ssh -o BatchMode=yes -o ConnectTimeout=10 $HOST 'u=$(df --output=pcent $DISK | tail -1 | tr -dc 0-9); r=$(df --output=pcent / | tail -1 | tr -dc 0-9); [ "$u" -lt 85 ] && [ "$r" -lt 85 ]' || { echo "rcargo: build host disk is above 85% (or unreachable): clean its target folders first (see docs/BUILD-PRACTICE.md)" >&2; exit 96; }
+ssh -o BatchMode=yes -o ConnectTimeout=10 $HOST 'findmnt -n -t btrfs $DISK >/dev/null' || { echo "rcargo: $DISK (compressed build disk) is not mounted on the build host: mount it (sudo mount $DISK) before building" >&2; exit 95; }
+ssh -o BatchMode=yes -o ConnectTimeout=10 $HOST "mkdir -p $remote $target" || exit 97
+# source only (no target, no .git: the remote keeps its own throwaway git so tools that read the index work); the sibling iyakki-boot folder travels along
+rsync -a --delete -e "ssh -o BatchMode=yes" --exclude 'target' --exclude '/.git' --exclude '.kube' "$dir"/ $HOST:$remote/ || exit 98
+# a worktree has an empty iyakki-boot (git submodule): take the main tree's, so the tests that read its scripts can run
+main=$(cd "$(git -C "$dir" rev-parse --git-common-dir)/.." && pwd)
+if [ -z "$(ls -A "$dir/iyakki-boot" 2>/dev/null)" ] && [ -n "$(ls -A $main/iyakki-boot 2>/dev/null)" ]; then rsync -a -e "ssh -o BatchMode=yes" --exclude '/target' --exclude '/.git' $main/iyakki-boot/ $HOST:$remote/iyakki-boot/ || exit 99; fi
+q=$(printf ' %q' "$@")
+# after every run: stop the test processes this build left behind and delete this build's scratch folders (2026-11-18, owner: the build host must not leak files)
+cleanup() { ssh -o BatchMode=yes -o ConnectTimeout=10 $HOST "pkill -u \$(id -u) -f "[${DISK:1:1}]${DISK:2}/target/$name/tmp"; true" >/dev/null 2>&1; sleep 1; ssh -o BatchMode=yes -o ConnectTimeout=10 $HOST "rm -rf $target/tmp $target/tmp-priv" >/dev/null 2>&1; }
+trap cleanup EXIT
+ssh -o BatchMode=yes $HOST "mkdir -p $target/tmp; export IYAKKI_CHROME_FLAGS=--no-sandbox TMPDIR=$target/tmp PATH=\$HOME/.cargo/bin:\$PATH CARGO_TARGET_DIR=$target CARGO_INCREMENTAL=\${CARGO_INCREMENTAL:-0}; cd $remote && { [ -d .git ] || git init -q; git add -A >/dev/null 2>&1; git -c user.name=r -c user.email=r@r commit -qm sync --allow-empty >/dev/null 2>&1; }; if command -v bwrap >/dev/null 2>&1 && mkdir -p $target/tmp-priv; then mkdir -p $target/empty-ssh-d; bwrap --dev-bind / / --bind $target/tmp-priv /tmp --ro-bind $target/empty-ssh-d /etc/ssh/ssh_config.d cargo$q; else cargo$q; fi"

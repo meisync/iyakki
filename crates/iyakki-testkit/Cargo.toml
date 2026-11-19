@@ -1,0 +1,10 @@
+[package]
+name = "iyakki-testkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Test support only (docs/development/FLAKY-TESTS.md): named resource locks that work across threads and processes, reserved ports,
+# wall-clock waits, gated stub children and a manual clock. Used as a dev-dependency; no crate ships it. std plus libc (flock).
+[dependencies]
+libc = "0.2"

@@ -1,0 +1,15 @@
+# Tests that need Linux
+
+Feature work and unit tests run on the Macs (`~/iyakki-work/bin/mcargo`, aarch64 macOS). The AMD Linux host (`rcargo`) is for builds and the green gate, and for the tests below, which cannot compile or run on macOS. One line each: test or target, then the reason.
+
+- `iyakki-core` integration tests (`boundary`, `dependency_ratchet`, `ui_agent_uses`, `layer_split`, `feature_matrix`, `release_version`, ...): the `iyakki-core` library does not compile on macOS (`SYS_memfd_create` is not in `libc` there). They take under a minute once built.
+- `iyakki-agent/tests/vpn_kernel.rs`: needs `setns`, `CLONE_NEWNET` and `NfSocket`. Check `iyakki-agent` with `--lib` on the Mac.
+- QEMU session checks (`./run.sh test-qemu`): need QEMU, KVM and the images.
+- Tests using `bwrap`, `procfs`/`sysfs` readers or the kernel: Linux only.
+- `iyakki-apps` `apps::platform_services::tests::*` (5 of 25: the registry, build and remove flows): they run fake kubectl and git programs that need Linux; they pass with rcargo.
+- `iyakki-apps` `apps::story::tests::the_story_is_spoken_in_order_while_it_is_written_and_the_page_follows_along` and `apps::story::tests::play_pause_stop_and_replay_end_the_speaker_process`: need the Linux sound player process (time out on macOS; pass with rcargo).
+- `iyakki-apps` `apps::ide_tests::ide_a_project_file_cannot_point_the_cluster_view_at_a_kubeconfig_outside_the_scope` and `apps::ide_tests::ctrl_shift_u_runs_the_tests_and_ctrl_shift_i_says_why_deploy_is_off_without_a_cluster`: fail on macOS (paths and the host tools of the sandbox), pass with rcargo.
+- `iyakki-apps` `apps::cli::conn_tests::the_ssh_entry_of_the_clis_tab_shows_what_is_on_the_machine_and_how_to_get_it_and_cannot_be_downloaded` and `apps::platform_services::tests::without_a_registry_the_review_says_why_and_one_click_creates_it_then_the_deploy_continues`: look for `ssh` and the registry tools on the host (macOS has other ones); pass with rcargo.
+- `iyakki-apps` `apps::browser::tests::a_heavy_site_gets_the_needs_the_full_engine_banner_only_without_the_engine`, `apps::browser::tests::emptying_the_readers_cache_tells_the_full_engine_to_empty_its_own_before_the_next_page`, `apps::flows_tests::a_run_with_browser_steps_shows_its_session_live_its_pictures_and_a_report_that_can_be_saved`: need the web engine path of the Linux host; pass with rcargo. (`ide_tests::browser_tests::clicks_on_the_toolbar_...` passes alone but failed once in a parallel run with them: shared engine state.)
+- `iyakki-apps` `apps::chat::assist_tests::starting_a_run_does_not_wait_for_the_context` and `apps::chat::tests::replies_are_read_aloud_when_enabled_and_can_be_stopped`: timing and the speaker process of the Linux host; pass with rcargo.
+- `iyakki-apps` `apps::platform_services::tests::*` (build_now_asks_first..., a_failed_build_stops..., a_missing_server_program_is_a_card..., removing_asks_for_the_namespace...) and `iyakki-shell` `shell::ctx_tests::over_a_text_field_it_offers_cut_copy_paste_and_select_all_enabled_by_what_applies`: fail on macOS (host tools, clipboard), pass with rcargo.

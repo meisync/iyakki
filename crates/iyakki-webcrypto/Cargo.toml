@@ -1,0 +1,15 @@
+[package]
+name = "iyakki-webcrypto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# In-house protocol cryptography for browser Web Push (RFC 8291, RFC 8292), WebAuthn passkeys and Matrix Olm/Megolm.
+# Primitives only from crates already in the tree (ring, sha2, aes, x25519-dalek, ed25519-dalek); the P-256 key agreement for a
+# fixed private key, HKDF, CBC, CBOR and base64 are written here.
+[dependencies]
+ring = "0.17"
+sha2 = "0.10"
+aes = "0.8"
+x25519-dalek = { version = "3", default-features = false, features = ["zeroize"] }
+ed25519-dalek = { version = "3", default-features = false, features = ["zeroize"] }

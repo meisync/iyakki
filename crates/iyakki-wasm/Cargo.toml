@@ -1,0 +1,15 @@
+[package]
+name = "iyakki-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+iyakki-sec.workspace = true
+iyakki-vfs.workspace = true
+iyakki-ledger.workspace = true
+thiserror.workspace = true
+wasmtime.workspace = true
+# turns the WAT text of a guest into a binary module when its session is made (the rewriter of F-WASM-14 and F-WASM-15 reads binary
+# modules only); the crate Wasmtime itself reads text with
+wat = "1"

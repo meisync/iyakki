@@ -1,0 +1,24 @@
+[package]
+name = "iyakki-ui-bin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The program `iyakki-ui` (F-SPLIT-03): the shell and the apps as their own file, started and supervised by the core. It reaches the core over the local UI socket; the in-process mode (feature `in-process`) runs the shell with the real services in this program, for the tests and the QEMU or desktop window."
+
+[[bin]]
+name = "iyakki-ui"
+path = "src/main.rs"
+
+[features]
+default = []
+# the shell with the real agent linked in (the whole program, as `iyakki shell`): off in the small ui-layer build
+in-process = ["dep:iyakki-shell", "dep:iyakki-compose", "dep:iyakki-core", "dep:libc"]
+
+[dependencies]
+iyakki-ui-client = { path = "../iyakki-ui-client" }
+iyakki-ui-rpc = { path = "../iyakki-ui-rpc" }
+serde_json = "1"
+iyakki-shell = { path = "../iyakki-shell", optional = true }
+iyakki-compose = { path = "../iyakki-compose", optional = true }
+iyakki-core = { path = "../iyakki-core", default-features = false, features = ["shell"], optional = true }
+libc = { version = "0.2", optional = true }

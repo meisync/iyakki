@@ -1,0 +1,38 @@
+name: pages
+# Builds the static site (python3 dist/site/build-site.py, then the check) and deploys site/ to GitHub Pages.
+# Runs on pushes to release/** branches and by hand. The site has no script and loads nothing from another site.
+# TODO(pin): the actions below are pinned by major tag, like ci.yml, because a full commit SHA could not be verified offline
+# when this file was written. Replace each tag with its full commit SHA (look it up on the action's releases page) before relying on it.
+on:
+  push:
+    branches: ['release/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install pillow numpy
+      - run: python3 dist/site/build-site.py
+      - run: python3 dist/site/check-site.py
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with: { path: site }
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

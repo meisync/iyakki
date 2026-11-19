@@ -1,0 +1,5 @@
+iyakki-webview-helper -- licence record kept by IYAKKI
+
+This is IYAKKI's own program (dist/webview/wpe-helper in this repository), built by the Buildroot package dist/buildroot/package/iyakki-webview-helper.
+It is Apache-2.0 like the rest of the project; the package recipe has no LICENSE_FILES, so legal-collect.sh copies the project's LICENSE
+(this folder's LICENSE) into legal-info/licenses/ for it. Recorded 2026-10-27.

@@ -1,0 +1,18 @@
+[package]
+name = "iyakki-flowsx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The pure parts of FLOWS that the UI and the agent share (ask-form model, programs, remote targets, machines, failure book, hook records), split out of iyakki-agent for F-SPLIT-03."
+
+# No agent code, no Services, no network: files, serde, the typed secret and the engine's model.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+zeroize = "1"
+iyakki-flow.workspace = true
+iyakki-sec.workspace = true
+iyakki-shared.workspace = true
+iyakki-proxy = { path = "../iyakki-proxy" }
+log.workspace = true

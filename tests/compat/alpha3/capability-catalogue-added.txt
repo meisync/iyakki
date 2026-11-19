@@ -1,0 +1,3 @@
+clipboard.client	None	No	true
+client.camera.offer	None	No	true
+client.microphone.offer	None	No	true

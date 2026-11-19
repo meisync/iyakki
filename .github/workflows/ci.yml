@@ -1,0 +1,57 @@
+name: ci
+# Public repository: Actions run free, so the checks run on every push to main and on every pull request, on release tags, weekly and by hand.
+# pull_request only (never pull_request_target); read-only token, no secrets, GitHub-hosted runners only.
+on:
+  schedule:
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: x86_64-unknown-linux-musl }
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev pkg-config musl-tools
+      - run: RUSTFLAGS="-D warnings" cargo check --workspace --all-targets --locked
+      - run: ./run.sh warnings
+      - run: mkdir -p target/tmp
+      - run: TMPDIR="$PWD/target/tmp" cargo test --workspace --no-fail-fast
+      - name: licence gate (skipped loudly while ./run.sh licence-check does not exist; a failure on a tag)
+        run: |
+          if ./run.sh help 2>&1 | grep -q 'licence-check'; then ./run.sh licence-check --no-images   # no images in CI: the image scan runs where the images are built
+          else
+            echo "::warning::SKIPPED: ./run.sh licence-check does not exist yet; the licence gate did NOT run"
+            case "$GITHUB_REF" in refs/tags/*) echo "FAIL: release run without the licence gate"; exit 1;; esac
+          fi
+      - run: cargo build --release --target x86_64-unknown-linux-musl -p iyakki-core
+      - run: cargo build -p iyakki-hw --features audio,video
+  licenses:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with: { command: check licenses sources, arguments: --all-features }
+  gui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cd crates/iyakki-gui && cargo build
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with: { command: check licenses sources, manifest-path: crates/iyakki-gui/Cargo.toml }
+  kernel-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y flex bison libelf-dev libssl-dev bc
+      - run: dist/buildroot/verify-kernel-config.sh

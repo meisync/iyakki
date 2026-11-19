@@ -1,0 +1,20 @@
+[package]
+name = "iyakki-compose"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The composition root: the one crate that names both the agent and the UI. It builds the real agent handles and installs them for the apps and the shell."
+
+[dependencies]
+iyakki-agent.workspace = true
+iyakki-agent-api.workspace = true
+iyakki-apps = { path = "../iyakki-apps" }
+iyakki-shell = { path = "../iyakki-shell" }
+iyakki-core-api.workspace = true
+iyakki-proxy = { path = "../iyakki-proxy" }
+iyakki-ui-client = { path = "../iyakki-ui-client" }
+iyakki-ui-rpc = { path = "../iyakki-ui-rpc" }
+
+[dev-dependencies]
+iyakki-sec.workspace = true
+iyakki-shared.workspace = true

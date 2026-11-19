@@ -1,0 +1,7 @@
+iyakki-display-list 2 300 120
+rect 0 0 300 120 101521ff
+blur 10 10 280 60 16
+rrect 10 10 280 60 12 1c1f28c8
+textx 20 20 15 e8ebf2ff regular liberation 0.04 1 Total%201%2C234.50
+text 20 60 12 9aa3b5ff regular Plain
+hit 10 10 280 60 1 button Card

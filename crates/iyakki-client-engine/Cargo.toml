@@ -1,0 +1,30 @@
+[package]
+name = "iyakki-client-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The IYAKKI client engine, picture mode (docs/development/CLIENT-SPLIT-DESIGN.md step 4): speaks the client session protocol, decodes the tile stream into an RGBA framebuffer and turns input into messages. Builds natively for tests and for wasm32-unknown-unknown for the browser page. EXPERIMENTAL."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+iyakki-core-api = { path = "../iyakki-core-api", default-features = false }
+# the display list reader (version 1) and its types, without the pixel toolkit: no fonts, no rasteriser (F-SDK-22)
+iyakki-ui-sdk = { path = "../iyakki-ui-sdk", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+miniz_oxide = "0.8"
+# the fallback key for a browser without Ed25519 in WebCrypto (the same crate and settings as iyakki-link; the seed comes from the page)
+ed25519-dalek = { version = "3", default-features = false, features = ["zeroize"] }
+
+[dev-dependencies]
+# the pixel side, to compare the engine's drawing with the device's canvas and the input lines with the session reader
+iyakki-ui-sdk = { path = "../iyakki-ui-sdk" }
+iyakki-app-sample = { path = "../iyakki-app-sample" }
+iyakki-uikit = { path = "../iyakki-uikit" }
+sha2 = "0.10"
+iyakki-link.workspace = true
+# a core's browser session, to draw the frame it gives (F-SDK-64)
+iyakki-core-fake = { path = "../iyakki-core-fake" }

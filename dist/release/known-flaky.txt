@@ -1,0 +1,3 @@
+# Tests known to fail only when run in parallel (and pass alone). The gate tolerates ONLY the names listed here; any other flaky test fails it.
+# One exact test name per line, each with a KNOWN-ISSUES entry. The list may only shrink: fix the cause, then delete the line.
+# EMPTY since 2026-11-18 (owner order: no flaky test is tolerated; the cure is docs/development/FLAKY-TESTS.md and crates/iyakki-testkit). The mechanism stays; do not add a name here, fix the test.

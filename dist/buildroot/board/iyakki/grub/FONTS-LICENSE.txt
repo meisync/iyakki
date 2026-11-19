@@ -1,0 +1,12 @@
+Fonts of the IYAKKI boot menu (GRUB)                                                  recorded 2026-10-27
+
+iyakki-menu.pf2 and iyakki-term.pf2
+  Made at image build time by grub-mkfont (GRUB, GPL-3.0-or-later; the tool is not shipped) from two files that are in the IYAKKI
+  repository: DejaVuSans-Bold.ttf and DejaVuSansMono.ttf (crates/iyakki-shell/assets). The Latin range only is converted (U+0020-U+024F
+  and U+00A0-U+00FF). Licence: the Bitstream Vera Fonts licence with the DejaVu public-domain changes; the full text is at the end of this
+  file. The converted fonts keep the name "DejaVu ..."; the Vera licence only forbids the names "Bitstream" and "Vera" for modified fonts.
+
+No other font is shipped in the boot loader (GRUB's unicode.pf2 was dropped on 2026-11-06). Characters outside the Latin range show
+GRUB's own missing-character box in the boot menu.
+
+Nothing here is an IYAKKI-made font. Apache-2.0 does not apply to these files.

@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Fixture: sign in and ship</title>
+<style>body{font:16px sans-serif;margin:24px;max-width:560px}label{display:block;margin-top:12px}input,select,button{font-size:16px;padding:6px;margin-top:4px}[hidden]{display:none}.err{color:#b00}</style></head>
+<body>
+<h1>Fixture shop</h1>
+<form id="login">
+  <h2>Sign in</h2>
+  <label for="email">Email</label><input id="email" type="email" required>
+  <label for="pw">Password</label><input id="pw" type="password" required>
+  <button type="submit" id="go">Sign in</button>
+  <p id="who" role="status"></p>
+</form>
+<form id="ship" hidden novalidate>
+  <h2>Shipping</h2>
+  <label for="country">Country</label>
+  <select id="country"><option value="">Choose...</option><option value="us">United States</option><option value="in">India</option></select>
+  <div id="statebox" hidden><label for="state">State</label><input id="state" required><span id="state-err" class="err" role="alert"></span></div>
+  <label for="zip">ZIP code</label><input id="zip" required>
+  <button type="submit" id="next">Continue</button>
+</form>
+<h2 id="done" hidden>Order step 2: Payment</h2>
+<script>
+document.getElementById('login').addEventListener('submit', function (e) {
+  e.preventDefault();
+  var email = document.getElementById('email').value;
+  document.getElementById('who').textContent = 'Signed in as ' + email;
+  document.getElementById('ship').hidden = false;
+});
+var country = document.getElementById('country');
+country.addEventListener('change', function () {
+  var box = document.getElementById('statebox');
+  if (country.value === 'us') { setTimeout(function () { box.hidden = false; }, 400); } else { box.hidden = true; }
+});
+document.getElementById('ship').addEventListener('submit', function (e) {
+  e.preventDefault();
+  var st = document.getElementById('state');
+  if (!document.getElementById('statebox').hidden && !st.value) { document.getElementById('state-err').textContent = 'Please enter your state'; return; }
+  document.getElementById('done').hidden = false;
+});
+</script></body></html>

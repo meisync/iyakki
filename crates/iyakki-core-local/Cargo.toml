@@ -1,0 +1,25 @@
+[package]
+name = "iyakki-core-local"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The IYAKKI core API on this machine: reads /proc and /sys for the tiles (UI/OS split, step 5). No dependency but the core API."
+
+[dependencies]
+iyakki-core-api = { path = "../iyakki-core-api" }
+iyakki-devctl = { path = "../iyakki-devctl" }
+iyakki-hwinfo = { path = "../iyakki-hwinfo" }
+libc = "0.2"
+iyakki-fw.workspace = true
+iyakki-vpn = { path = "../iyakki-vpn" }
+thiserror.workspace = true
+log.workspace = true
+serde_json = "1"
+iyakki-zram.workspace = true
+iyakki-drivers.workspace = true
+iyakki-storage.workspace = true
+iyakki-netscan.workspace = true
+
+[features]
+# the made-up machine of the sysinfo tests, for the tests of crates that read through it
+test-support = []

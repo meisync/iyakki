@@ -1,0 +1,140 @@
+//! What the service needs from the rest of IYAKKI, as traits. The supervisor supplies [`real`](super::real) implementations over
+//! the machine's `Services`; tests supply fakes. No handler names a kernel crate, a shell type or a device.
+
+use crate::agent::Tools;
+use crate::chat::ChatBackend;
+use crate::runs::RunStore;
+use iyakki_core_api::{ApiError, ApiResult, AuditSink, Authenticator, Principal};
+use serde_json::Value;
+use std::sync::Arc;
+
+/// Builds the person's full tool set (the profile filter is applied on top, by name).
+pub trait ToolSource: Send + Sync {
+    fn tools_for(&self, p: &Principal) -> Arc<dyn Tools>;
+}
+
+/// The smaller services: models, flows, data, readiness.
+pub trait Extras: Send + Sync {
+    /// Ready to serve: the data directory is writable and the services started.
+    fn ready(&self) -> Result<(), String>;
+    /// `{provider, model}` objects; never keys or addresses.
+    fn models(&self, p: &Principal) -> Vec<Value>;
+    /// A backend that uses the named model instead of the machine's current chat model (the pair must be one `models` lists).
+    fn backend_for(&self, p: &Principal, provider: &str, model: &str) -> ApiResult<Arc<dyn ChatBackend>>;
+    fn flows(&self, p: &Principal) -> ApiResult<Vec<Value>>;
+    fn flow_export(&self, p: &Principal, id: &str) -> ApiResult<Value>;
+    /// Start a run of one of the person's own flows (the published version, or the draft); returns the run id. Questions in the run wait
+    /// for the person's own approval; nothing here can approve them.
+    fn flow_run(&self, _p: &Principal, _id: &str, _draft: bool, _inputs: &Value) -> ApiResult<String> {
+        Err(ApiError::Unsupported("this machine does not run flows".into()))
+    }
+    /// The runs of one of the person's flows, newest first (summaries; secrets already redacted).
+    fn flow_runs(&self, _p: &Principal, _id: &str) -> ApiResult<Vec<Value>> {
+        Err(ApiError::Unsupported("this machine does not run flows".into()))
+    }
+    /// One run of one of the person's flows: summary and the state of each step.
+    fn flow_run_get(&self, _p: &Principal, _id: &str, _run: &str) -> ApiResult<Value> {
+        Err(ApiError::Unsupported("this machine does not run flows".into()))
+    }
+    /// Bring a flow (the JSON `flows_get` gives) in as a SAFE DRAFT of the person's own: not production, nothing auto-published, its
+    /// triggers off, a free id when the id is taken. Returns `{id, name}`.
+    fn flow_import(&self, _p: &Principal, _flow: &Value) -> ApiResult<Value> {
+        Err(ApiError::Unsupported("this machine does not run flows".into()))
+    }
+    /// What is wrong with a flow of the person's (by id), or with a flow given as JSON before it is imported: `[{node, level, message}]`.
+    fn flow_validate(&self, _p: &Principal, _id: Option<&str>, _flow: Option<&Value>) -> ApiResult<Vec<Value>> {
+        Err(ApiError::Unsupported("this machine does not run flows".into()))
+    }
+    /// Answer ONE step of one of the person's own runs that waits for a person (an approval step): the person's own authenticated call,
+    /// never a model's text. Refused when the run is not theirs, the step is not waiting, or it was already answered.
+    fn flow_run_decide(&self, _p: &Principal, _id: &str, _run: &str, _node: &str, _approved: bool) -> ApiResult<()> {
+        Err(ApiError::Unsupported("this machine does not run flows".into()))
+    }
+    /// Stop one run of one of the person's flows.
+    fn flow_run_stop(&self, _p: &Principal, _id: &str, _run: &str) -> ApiResult<()> {
+        Err(ApiError::Unsupported("this machine does not run flows".into()))
+    }
+    /// The timed triggers of the person's own flows: `{flow, name, published, trigger, next, paused}`.
+    fn schedules(&self, _p: &Principal) -> ApiResult<Vec<Value>> {
+        Err(ApiError::Unsupported("this machine does not run schedules".into()))
+    }
+    /// Put (add or replace by id) a timed trigger on the person's flow; returns `{active, trigger, next}`.
+    fn schedule_save(&self, _p: &Principal, _flow: &str, _trigger: &Value) -> ApiResult<Value> {
+        Err(ApiError::Unsupported("this machine does not run schedules".into()))
+    }
+    /// Remove one trigger; returns `{removed, timed_left, active}`.
+    fn schedule_delete(&self, _p: &Principal, _flow: &str, _trigger: &str) -> ApiResult<Value> {
+        Err(ApiError::Unsupported("this machine does not run schedules".into()))
+    }
+    fn schedule_pause(&self, _p: &Principal, _flow: &str, _paused: bool) -> ApiResult<Value> {
+        Err(ApiError::Unsupported("this machine does not run schedules".into()))
+    }
+    /// A webhook request (`/hooks/<id>/<token>`): the gate decides and starts the run as the hook's owner. `None`: this machine has no
+    /// webhooks (the endpoint then does not exist: 404).
+    fn hook_serve(&self, _auth: &dyn Authenticator, _audit: &dyn AuditSink, _rq: &crate::flows::webhook::HookRequest) -> Option<crate::flows::webhook::Answer> {
+        None
+    }
+    /// The paired computer a developer key belongs to and the account it acts as: `(computer, account)`. `None`: no such key (or this
+    /// machine has no developer mode). Programs sign in to the service with such a key (`POST /api/v1/login`, signed).
+    fn paired_program(&self, _key_hex: &str) -> Option<(String, String)> {
+        None
+    }
+    /// The `api:*` scopes an administrator granted a paired computer, read afresh at every request of its programs.
+    fn program_scopes(&self, _computer: &str) -> Vec<String> {
+        Vec::new()
+    }
+    /// One data tool inside the person's own jail (`data_open`, `data_describe`, `data_query`).
+    fn data_call(&self, p: &Principal, tool: &str, args: &Value) -> ApiResult<String>;
+    /// The signed-in person's session moved from one tenant to another (`from` and `to` are tenant ids). Lock whatever the machine kept
+    /// unlocked for them (their vault) so the next tenant starts locked. The default keeps nothing, so there is nothing to lock.
+    fn tenant_switched(&self, _p: &Principal, _from: &str, _to: &str) {}
+    /// Cloud profile only: start the tenant's background services (the scheduler) with nobody signed in. `stop` ends them.
+    fn background_start(&self, _auth: Arc<dyn Authenticator>, _audit: Arc<dyn AuditSink>, _stop: Arc<std::sync::atomic::AtomicBool>) {}
+    /// Wait for what `background_start` started to finish (the stop flag is already set).
+    fn background_stop(&self) {}
+    /// "Serve this desktop to browsers" (Settings -> Remote access): the switch, the port and what the listener reports.
+    /// Unsupported where there is no desktop to serve (a cloud pod).
+    /// The person's home folder as a tile may read it (`home.list`, `home.read`): the core's `Files` facet. The default has no file browser.
+    fn files(&self) -> Arc<dyn iyakki_core_api::Files> {
+        Arc::new(iyakki_core_api::NoFiles)
+    }
+    /// The embedded browser sessions a tile may use (`browser.*`). The default has none.
+    fn browser(&self) -> Arc<dyn iyakki_core_api::BrowserSessions> {
+        Arc::new(iyakki_core_api::browsersession::NoBrowser)
+    }
+    /// The bytes of a file in the person's own home folder, at most `max` (a picture a tile asks for with `pictures.load`). The default has none.
+    fn home_bytes(&self, _user: &str, _path: &str, _max: usize) -> Result<Vec<u8>, String> {
+        Err("there is no file browser here".into())
+    }
+    /// The embedded assistant a tile may use (`assistant.*`). The default has none.
+    fn assistant(&self) -> Arc<dyn iyakki_core_api::Assistant> {
+        Arc::new(iyakki_core_api::NoAssistant)
+    }
+    /// The camera views a tile may use (`cameras.*`). The default has none.
+    fn cameras(&self) -> Arc<dyn iyakki_core_api::Cameras> {
+        Arc::new(iyakki_core_api::NoCameras)
+    }
+    /// The core's app events as a tile may hear them (`appevents:<name>` entries of its manifest, tile ABI 3). The default has none.
+    fn app_events(&self) -> Arc<dyn iyakki_core_api::AppEvents> {
+        Arc::new(iyakki_core_api::NoAppEvents)
+    }
+    /// A tile sets the status of its own icon (`dock.status`). The default keeps nothing.
+    fn set_tile_status(&self, _p: &Principal, _tile: &str, _badge: Option<u32>, _line: &str) {}
+    fn web_access(&self, _p: &Principal) -> ApiResult<Value> {
+        Err(ApiError::Unsupported("this machine has no desktop to serve to browsers".into()))
+    }
+    /// Switch it on or off and/or choose the port (`Some(0)`: the default). Returns what changed, as the audit line says it.
+    fn set_web_access(&self, _p: &Principal, _on: Option<bool>, _port: Option<u16>) -> ApiResult<Vec<(String, String)>> {
+        Err(ApiError::Unsupported("this machine has no desktop to serve to browsers".into()))
+    }
+}
+
+pub struct Deps {
+    pub auth: Arc<dyn Authenticator>,
+    pub audit: Arc<dyn AuditSink>,
+    pub store: Arc<RunStore>,
+    pub chat: Arc<dyn ChatBackend>,
+    pub tools: Arc<dyn ToolSource>,
+    pub extras: Arc<dyn Extras>,
+    pub system_prompt: String,
+}

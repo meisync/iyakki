@@ -1,0 +1,9 @@
+[package]
+name = "iyakki-clock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Wall-clock, zones, calendar and time-format helpers, split out of iyakki-agent.
+# (docs/development/COMPILE-SPLIT-PILOT-3.md). std only; the agent re-exports the modules under the old paths.
+[dependencies]

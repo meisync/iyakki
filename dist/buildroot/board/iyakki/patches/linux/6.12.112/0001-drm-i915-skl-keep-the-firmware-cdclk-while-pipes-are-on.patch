@@ -1,0 +1,46 @@
+From: IYAKKI <noreply@iyakki.invalid>
+Subject: [PATCH] drm/i915/skl: do not lower the firmware's CDCLK while pipes are on
+
+On Skylake, Kaby Lake and Coffee Lake (display version 9, not Broxton or
+Gemini Lake) a CDCLK change can only be made with every pipe off. At the
+first atomic commit after the boot-time hardware readout, i915 computes
+the lowest CDCLK the current modes need and, when that is lower than the
+clock the firmware left running, does a full modeset of every pipe just
+to lower it ("Full modeset due to CDCLK change"). The screen the firmware
+lit goes dark; on a Mac mini 2018 the on-board DP->HDMI converter then
+stopped answering AUX during link training and the monitor lost the
+signal for many seconds.
+
+Keep the running CDCLK when it already satisfies the minimum and uses the
+same VCO. Raising it still works as before; with no active pipes the
+normal computation applies. Cost: CDCLK may stay higher than needed
+while pipes are on (a little power).
+
+Carried by IYAKKI for the optional Mac image variant only
+(dist/buildroot/configs/iyakki_mac.fragment); not sent upstream.
+Applies to Linux 6.12.112.
+---
+--- a/drivers/gpu/drm/i915/display/intel_cdclk.c
++++ b/drivers/gpu/drm/i915/display/intel_cdclk.c
+@@ -3070,6 +3070,21 @@
+ 
+ 	cdclk = skl_calc_cdclk(min_cdclk, vco);
+ 
++	/*
++	 * Keep a higher CDCLK that is already running (the firmware's, at the
++	 * first commit after the boot-time hardware readout) instead of
++	 * lowering it: on SKL/KBL/CFL a CDCLK change needs every pipe off, so
++	 * lowering it turns off the screen the firmware lit. Seen on a Mac mini
++	 * 2018 (Coffee Lake): "Full modeset due to CDCLK change" at i915 load,
++	 * after which its DP->HDMI converter failed link training. The clock
++	 * can still go up when a mode needs more; it only stops going down
++	 * while pipes are active, at the cost of a little power.
++	 */
++	if (cdclk_state->active_pipes && vco == cdclk_state->logical.vco &&
++	    cdclk_state->logical.cdclk > cdclk &&
++	    skl_calc_cdclk(cdclk_state->logical.cdclk, vco) == cdclk_state->logical.cdclk)
++		cdclk = cdclk_state->logical.cdclk;
++
+ 	cdclk_state->logical.vco = vco;
+ 	cdclk_state->logical.cdclk = cdclk;
+ 	cdclk_state->logical.voltage_level =

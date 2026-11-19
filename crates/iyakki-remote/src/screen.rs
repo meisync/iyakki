@@ -1,0 +1,737 @@
+//! The shell as something a browser can look at: one shell per signed-in person, drawn into a picture of the size of their
+//! window, with only the changed part of the picture sent when something changes.
+
+use crate::input::Input;
+use iyakki_shell::accounts::AccountError;
+use iyakki_shell::gfx::Gfx;
+use iyakki_shell::shell::{Shell, ShellEnv};
+use iyakki_shell::ui::Event;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// A piece of the picture, as a PNG, and where it goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Frame {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+    pub png: Vec<u8>,
+}
+
+impl Frame {
+    /// The message sent to the page: four little-endian u16 (x, y, width, height) and then the PNG.
+    pub fn to_message(&self) -> Vec<u8> {
+        let mut m = Vec::with_capacity(8 + self.png.len());
+        for v in [self.x, self.y, self.w, self.h] {
+            m.extend_from_slice(&(v as u16).to_le_bytes());
+        }
+        m.extend_from_slice(&self.png);
+        m
+    }
+}
+
+/// The whole picture, as RGBA (protocol version 2 codes the difference to what the page has itself).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pixels {
+    pub w: u32,
+    pub h: u32,
+    pub rgba: Vec<u8>,
+}
+
+/// What the web server needs from a person's screen (a fake one stands in for it in the server's tests).
+pub trait Screen: Send {
+    fn user(&self) -> String;
+    fn input(&mut self, i: Input);
+    /// Someone is (or no longer is) looking: the picture is only drawn and sent while they are.
+    fn viewing(&mut self, on: bool);
+    /// Do whatever is due (the shell's tick, drawing) and return the part of the picture that changed.
+    fn step(&mut self) -> Option<Frame>;
+    /// Text the person copied inside IYAKKI, for the page to put on their clipboard.
+    fn take_copy(&mut self) -> Option<String>;
+    /// True once when the shell wants the text on the person's clipboard (the context menu's Paste, the clipboard history).
+    fn take_clip_request(&mut self) -> bool {
+        false
+    }
+    /// Messages for the page's speech synthesis (browser voice), JSON text, oldest first.
+    fn take_speech(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+    /// The mouse pointer's CSS name when it changed since last asked (`pointer`, `text`, `default`...).
+    fn take_cursor(&mut self) -> Option<&'static str> {
+        None
+    }
+    /// Protocol version 2: from now on deliver whole pictures through [`Screen::take_pixels`] (and nothing through
+    /// [`Screen::step`]), or go back to PNG pieces.
+    fn set_stream(&mut self, _on: bool) {}
+    /// Protocol version 2: the connection can take a picture now. It is delivered as soon as something changed (or after a
+    /// moment of stillness), once per call; nothing is produced or queued without it.
+    fn arm(&mut self) {}
+    fn take_pixels(&mut self) -> Option<Pixels> {
+        None
+    }
+    /// The browser hardware of this person (clipboard items, sound, microphone, camera), when the screen has any.
+    fn media(&self) -> Option<Arc<iyakki_agent::browsermedia::BrowserMedia>> {
+        None
+    }
+    /// A clipboard item (PNG or HTML) for the page to put on the browser's clipboard: a binary message, already tagged.
+    fn take_rich_copy(&mut self) -> Option<Vec<u8>> {
+        None
+    }
+    /// The person signed out.
+    fn finished(&self) -> bool;
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum LoginError {
+    /// Wrong name or password (one answer for both).
+    Invalid,
+    /// Too many wrong tries; seconds to wait.
+    Throttled(u64),
+    Other(String),
+}
+
+/// Checks a person's name and password and hands over their screen.
+pub trait Gate: Send + Sync {
+    fn login(&self, user: &str, password: &str) -> Result<Box<dyn Screen>, LoginError>;
+
+    /// Device sign-in (`devicekeys.rs`): the Ed25519 public keys enrolled for `user` (none: unknown account, or no key). The default has none.
+    fn device_keys(&self, _user: &str) -> Vec<[u8; 32]> {
+        Vec::new()
+    }
+
+    /// The screen of `user` after their device key was verified. The default refuses.
+    fn login_key(&self, _user: &str) -> Result<Box<dyn Screen>, LoginError> {
+        Err(LoginError::Other("sign-in with a device key is not set up here".into()))
+    }
+
+    /// Enrol a public key (an `ssh-ed25519` line or hex) for the signed-in `user`; returns its fingerprint.
+    fn enroll_device_key(&self, _user: &str, _key: &str) -> Result<String, String> {
+        Err("device keys are not set up here".into())
+    }
+
+    /// Revoke one of `user`'s keys by fingerprint. True when there was one.
+    fn revoke_device_key(&self, _user: &str, _fingerprint: &str) -> Result<bool, String> {
+        Err("device keys are not set up here".into())
+    }
+
+    /// The fingerprints of `user`'s enrolled keys.
+    fn list_device_keys(&self, _user: &str) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Where the sign-in nonces are remembered across restarts (none: in memory only).
+    fn replay_file(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+
+    /// The experimental session endpoint for clients (`/client/ws`, `/connect`). The default has none: both routes are 404.
+    fn client_endpoint(&self) -> Option<&crate::clientsession::ClientEndpoint> {
+        None
+    }
+
+    /// The web service's API (`/api/v1/...`) for the page at `/ui/`, answered on this same server. The default has none (404).
+    fn api(&self) -> Option<&iyakki_agent::webservice::embed::Embedded> {
+        None
+    }
+}
+
+pub struct ShellGate {
+    env: ShellEnv,
+    keys: Option<Arc<crate::devicekeys::DeviceKeys>>,
+    api: Option<iyakki_agent::webservice::embed::Embedded>,
+    client: Option<crate::clientsession::ClientEndpoint>,
+}
+
+/// What a client's calls do in the shell: the person must still be an account of this machine (the role rules grow with the catalogue),
+/// and an allowed call returns nothing yet (the capabilities are served by their own services as they join the broker).
+struct ShellCalls(ShellEnv);
+
+impl crate::clientsession::CallHandler for ShellCalls {
+    fn role_allows(&self, person: &str, _capability: &str) -> bool {
+        let mut store = self.0.store.lock().unwrap_or_else(|e| e.into_inner());
+        store.refresh();
+        store.get(person).is_some()
+    }
+    fn perform(&self, _person: &str, _capability: &str, _unit: Option<&str>) -> Result<String, String> {
+        Ok(String::new())
+    }
+}
+
+impl ShellGate {
+    pub fn new(env: ShellEnv) -> ShellGate {
+        let api = crate::api::embedded(&env);
+        ShellGate { env, keys: None, api, client: None }
+    }
+
+    /// Turn on device-key sign-in with these enrolled keys (a session opened by a key has no password, so the vault stays locked).
+    /// A gate with the device keys kept in `<dir>/device-keys` (a damaged file is moved aside and said in the log, never overwritten), so
+    /// the web front end signs in with a key from the first start.
+    pub fn with_key_store(env: ShellEnv, dir: &std::path::Path) -> ShellGate {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let mut gate = ShellGate::new(env);
+        gate.client = Some(gate.client_endpoint_for(dir));
+        match crate::devicekeys::DeviceKeys::open_or_aside(dir.join("device-keys"), now) {
+            Ok((keys, aside)) => {
+                if let Some(a) = aside {
+                    log::warn!("web: the device key file was not understood and was moved to {}; enrol the keys again", a.display());
+                }
+                gate.with_device_keys(Arc::new(keys))
+            }
+            Err(e) => {
+                log::warn!("web: device keys are off: {e}");
+                gate
+            }
+        }
+    }
+
+    /// The session endpoint for clients, kept in `<dir>/client`. It answers only while Settings has switched it on.
+    fn client_endpoint_for(&self, dir: &std::path::Path) -> crate::clientsession::ClientEndpoint {
+        // the media half (sound, clipboard, the client's own devices), EXPERIMENTAL: a hard ask opens the shell's approval card for the person the
+        // device is signed in as (`DeviceCard`; no answer in time is a refusal), the machine's cameras come from the shell's hub, and the sound goes
+        // to a client only for the person the machine's sound belongs to (`iyakki_shell::soundowner`, set when someone signs in)
+        let card: Arc<dyn iyakki_agent::accessbroker::broker::CardAsk> = Arc::new(iyakki_agent::clientmedia::DeviceCard::new(iyakki_agent::services::Services::from_handle(&self.env.services)));
+        let media = Arc::new(iyakki_agent::clientmedia::MediaHost::shared(Some(card)).with_cameras(iyakki_shell::apps::cameras::client_feed(&self.env.services.b4(), self.env.services.dir(), &self.env.audit, &self.env.store)));
+        let (broker, _log) = iyakki_agent::accessbroker::local(dir, Some(media.card()));
+        let audit = self.env.audit.clone();
+        crate::clientsession::ClientEndpoint::new(dir, broker, Arc::new(ShellCalls(self.env.share())), Arc::new(move |user: &str, action: &str, detail: &str| audit.record(user, action, detail))).with_media(media)
+    }
+
+    pub fn with_device_keys(mut self, keys: Arc<crate::devicekeys::DeviceKeys>) -> ShellGate {
+        self.keys = Some(keys);
+        self
+    }
+}
+
+impl Gate for ShellGate {
+    fn replay_file(&self) -> Option<std::path::PathBuf> {
+        self.keys.as_ref().and_then(|k| k.path()).map(|p| p.with_file_name("device-keys.replay"))
+    }
+
+    fn api(&self) -> Option<&iyakki_agent::webservice::embed::Embedded> {
+        self.api.as_ref()
+    }
+
+    fn client_endpoint(&self) -> Option<&crate::clientsession::ClientEndpoint> {
+        self.client.as_ref()
+    }
+
+    fn device_keys(&self, user: &str) -> Vec<[u8; 32]> {
+        self.keys.as_ref().map(|k| k.keys_of(user)).unwrap_or_default()
+    }
+
+    fn login_key(&self, user: &str) -> Result<Box<dyn Screen>, LoginError> {
+        let session = {
+            let mut store = self.env.store.lock().map_err(|_| LoginError::Other("accounts are busy".into()))?;
+            store.refresh();
+            // an account removed since the key was enrolled has no sign-in; the same answer as a wrong key
+            let u = store.get(user).ok_or(LoginError::Invalid)?;
+            iyakki_shell::accounts::Session { user: u.name.clone(), role: u.role, policy: u.policy() }
+        };
+        self.env.audit.record(&session.user, "login.web.key", session.role.name());
+        let screen = ShellScreen::spawn(self.env.share(), session, String::new()).map_err(|e| LoginError::Other(e.to_string()))?;
+        Ok(Box::new(screen))
+    }
+
+    fn enroll_device_key(&self, user: &str, key: &str) -> Result<String, String> {
+        let keys = self.keys.as_ref().ok_or("device keys are not set up here")?;
+        let fp = keys.enroll(user, key)?;
+        self.env.audit.record(user, "devicekey.enroll", &fp);
+        Ok(fp)
+    }
+
+    fn revoke_device_key(&self, user: &str, fp: &str) -> Result<bool, String> {
+        let keys = self.keys.as_ref().ok_or("device keys are not set up here")?;
+        let r = keys.revoke(user, fp)?;
+        if r {
+            self.env.audit.record(user, "devicekey.revoke", fp);
+        }
+        Ok(r)
+    }
+
+    fn list_device_keys(&self, user: &str) -> Vec<String> {
+        self.keys.as_ref().map(|k| k.fingerprints(user)).unwrap_or_default()
+    }
+
+    fn login(&self, user: &str, password: &str) -> Result<Box<dyn Screen>, LoginError> {
+        let mut store = self.env.store.lock().map_err(|_| LoginError::Other("accounts are busy".into()))?;
+        store.refresh();
+        if store.is_empty() {
+            return Err(LoginError::Other("This machine has no accounts yet. On the machine run: iyakki user add NAME --role admin".into()));
+        }
+        let r = store.authenticate(user.trim(), password);
+        drop(store);
+        match r {
+            Ok(session) => {
+                self.env.audit.record(&session.user, "login.web", session.role.name());
+                let screen = ShellScreen::spawn(self.env.share(), session, password.to_string()).map_err(|e| LoginError::Other(e.to_string()))?;
+                Ok(Box::new(screen))
+            }
+            Err(AccountError::Throttled(s)) => Err(LoginError::Throttled(s)),
+            Err(AccountError::InvalidCredentials) => {
+                let shown: String = user.chars().filter(|c| c.is_ascii_graphic()).take(32).collect();
+                self.env.audit.record("-", "login.failed", &format!("web {shown}"));
+                Err(LoginError::Invalid)
+            }
+            Err(e) => Err(LoginError::Other(e.to_string())),
+        }
+    }
+}
+
+enum Cmd {
+    In(Input),
+    Viewing(bool),
+    Stream(bool),
+    Arm,
+}
+
+enum Out {
+    Frame(Frame),
+    Pixels(Pixels),
+    Copy(String),
+    Cursor(&'static str),
+    /// The shell wants the text on the person's clipboard (the page reads it and sends it back as a paste).
+    ReadClip,
+    /// A picture the shell copied, as a tagged binary message for the page.
+    Rich(Vec<u8>),
+}
+
+/// A person's shell, living on a thread of its own (a shell is not something that can move between threads) and kept
+/// running while nobody looks, so alarms and background work carry on.
+pub struct ShellScreen {
+    tx: std::sync::mpsc::Sender<Cmd>,
+    rx: std::sync::mpsc::Receiver<Out>,
+    user: String,
+    done: Arc<AtomicBool>,
+    copied: Option<String>,
+    cursor: Option<&'static str>,
+    read_clip: bool,
+    pixels: Option<Pixels>,
+    /// Messages for the page's speech synthesis; a channel of its own so a slow page never makes one get lost like a frame.
+    speech: std::sync::mpsc::Receiver<String>,
+    media: Arc<iyakki_agent::browsermedia::BrowserMedia>,
+    rich: Option<Vec<u8>>,
+}
+
+impl ShellScreen {
+    pub fn spawn(env: ShellEnv, session: iyakki_shell::accounts::Session, password: String) -> std::io::Result<ShellScreen> {
+        let (tx, cmds) = std::sync::mpsc::channel::<Cmd>();
+        let (out, rx) = std::sync::mpsc::sync_channel::<Out>(4);
+        let (speech_tx, speech) = std::sync::mpsc::channel::<String>();
+        let done = Arc::new(AtomicBool::new(false));
+        let user = session.user.clone();
+        // the browser's clipboard, sound, microphone and camera for this person; the shell and the tiles find it by name
+        let audit = env.audit.clone();
+        let who = user.clone();
+        // the tenant switch (`IYAKKI_BROWSER_MEDIA=allow|deny`; unset or anything else is deny, on a desktop as in a pod: the owner
+        // decision of 2026-11-06) and the person's role decide (`iyakki-sec` media policy, default deny)
+        let tenant = tenant_media_policy(std::env::var("IYAKKI_BROWSER_MEDIA").ok().as_deref());
+        let policy = iyakki_agent::tenantconfig::enforce::media_policy_for_tenant(iyakki_agent::browsermedia::Policy::from_sec(&tenant, &user, session.role), &user, session.role);
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        let media = iyakki_agent::browsermedia::BrowserMedia::new(policy, Arc::new(move |a, d| audit.record(&who, a, d)), Some(iyakki_agent::browsermedia::session_dir(&runtime, &user)));
+        iyakki_agent::browsermedia::register(&user, media.clone());
+        let unregister = user.clone();
+        let flag = done.clone();
+        // the shell and the renderer are stack hungry, as on the console
+        std::thread::Builder::new().name("iyakki-web-shell".into()).stack_size(32 * 1024 * 1024).spawn(move || {
+            let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut shell = Shell::new(env);
+                shell.set_remote(true); // a browser session never gets the login screen's power button
+                shell.sign_in_checked(session, &password);
+                drop(password);
+                shell_loop(shell, cmds, out, speech_tx, &flag);
+            }));
+            if run.is_err() {
+                log::error!("web: a person's shell crashed; their session ends");
+            }
+            iyakki_agent::browsermedia::unregister(&unregister);
+            flag.store(true, Ordering::Relaxed);
+        })?;
+        Ok(ShellScreen { tx, rx, user, done, copied: None, cursor: None, read_clip: false, pixels: None, speech, media, rich: None })
+    }
+}
+
+/// The tenant switch for browser media: only an explicit `allow` turns it on; unset, empty or unknown text is deny.
+fn tenant_media_policy(setting: Option<&str>) -> iyakki_sec::media::MediaPolicy {
+    iyakki_sec::media::MediaPolicy::from_setting(setting)
+}
+
+/// The CSS cursor name for a pointer shape.
+fn css_cursor(p: iyakki_shell::ui::Pointer) -> &'static str {
+    use iyakki_shell::ui::Pointer;
+    match p {
+        Pointer::Default => "default",
+        Pointer::Hand => "pointer",
+        Pointer::Text => "text",
+        Pointer::Wait => "progress",
+        Pointer::Crosshair => "crosshair",
+        Pointer::Move => "move",
+        Pointer::NotAllowed => "not-allowed",
+        Pointer::ResizeH => "ew-resize",
+        Pointer::ResizeV => "ns-resize",
+        Pointer::Grab => "grab",
+        Pointer::Help => "help",
+        Pointer::Hidden => "none",
+    }
+}
+
+fn shell_loop(mut shell: Shell, cmds: std::sync::mpsc::Receiver<Cmd>, out: std::sync::mpsc::SyncSender<Out>, speech: std::sync::mpsc::Sender<String>, done: &AtomicBool) {
+    let voice = iyakki_agent::hostvoice::HostVoice::current();
+    let mut gfx = Gfx::new(1280, 720);
+    let mut last: Vec<u8> = Vec::new();
+    let (mut need_full, mut dirty, mut viewing) = (true, true, false);
+    // protocol version 2: whole pictures, only when the connection has armed us
+    let (mut stream, mut armed) = (false, false);
+    let (mut last_tick, mut last_render) = (Instant::now(), Instant::now());
+    let mut last_cursor = "default";
+    loop {
+        let wait = Duration::from_millis(33).saturating_sub(last_tick.elapsed()).max(Duration::from_millis(1));
+        let mut next = match cmds.recv_timeout(wait) {
+            Ok(c) => Some(c),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        while let Some(c) = next {
+            match c {
+                Cmd::In(Input::Event(e)) => {
+                    shell.handle(&e);
+                    dirty |= shell.take_stale();
+                }
+                Cmd::In(Input::Size(w, h)) => {
+                    if (w, h) != (gfx.width(), gfx.height()) {
+                        gfx.resize(w, h);
+                        last.clear();
+                    }
+                    need_full = true;
+                    dirty = true;
+                }
+                Cmd::In(Input::Shift(on)) => iyakki_shell::ui::set_shift_held(on),
+                Cmd::In(Input::Speech(e)) => voice.event(e),
+                // the connection answers these itself; they never reach the shell
+                Cmd::In(Input::Hello { .. } | Input::Ack(_) | Input::Quality { .. } | Input::Ping { .. } | Input::Media { .. } | Input::AudioOut(_) | Input::Sink(_)) => {}
+                Cmd::In(Input::Rich { kind, bytes }) => take_rich(kind, &bytes),
+                Cmd::In(Input::Full) => {
+                    need_full = true;
+                    dirty = true;
+                }
+                Cmd::Stream(on) => {
+                    stream = on;
+                    armed = false;
+                    dirty = true;
+                }
+                Cmd::Arm => armed = stream,
+                Cmd::Viewing(v) => {
+                    // the page is the person's speaker only while it is connected: it announces what it can do on connecting
+                    if v {
+                        voice.connect(iyakki_agent::hostvoice::Front::Browser);
+                    } else {
+                        voice.disconnect();
+                    }
+                    viewing = v;
+                    armed &= v;
+                    need_full |= v;
+                    dirty |= v;
+                }
+            }
+            next = cmds.try_recv().ok();
+        }
+        if last_tick.elapsed() >= Duration::from_millis(33) {
+            last_tick = Instant::now();
+            shell.handle(&Event::Tick);
+            // an app with live pictures (the browser's full engine) asks for a redraw on the heartbeat
+            dirty |= shell.take_stale();
+        }
+        for m in voice.take_outgoing() {
+            let _ = speech.send(m.encode());
+        }
+        if shell.session().is_none() {
+            break;
+        }
+        if viewing {
+            let c = css_cursor(shell.pointer());
+            if c != last_cursor && out.try_send(Out::Cursor(c)).is_ok() {
+                last_cursor = c;
+            }
+            if shell.take_host_paste_request() {
+                let _ = out.try_send(Out::ReadClip);
+            }
+            if let Some((w, h, rgba)) = iyakki_shell::ui::clipboard::take_host_image() {
+                if let Some(msg) = rich_image_message(w, h, rgba) {
+                    let _ = out.try_send(Out::Rich(msg));
+                }
+            }
+            if let Some(t) = shell.take_host_copy() {
+                if out.try_send(Out::Copy(t)).is_err() {
+                    log::debug!("web: a copied text was dropped (the page is slow)");
+                }
+            }
+            if stream {
+                if armed && (dirty || last_render.elapsed() >= Duration::from_millis(500)) {
+                    dirty = false;
+                    last_render = Instant::now();
+                    shell.render(&mut gfx);
+                    let p = Pixels { w: gfx.width(), h: gfx.height(), rgba: gfx.rgba().to_vec() };
+                    if out.try_send(Out::Pixels(p)).is_ok() {
+                        armed = false;
+                    } else {
+                        dirty = true;
+                    }
+                }
+            } else if dirty || last_render.elapsed() >= Duration::from_millis(150) {
+                dirty = false;
+                last_render = Instant::now();
+                shell.render(&mut gfx);
+                let (w, h) = (gfx.width() as usize, gfx.height() as usize);
+                let rect = if need_full { Some((0, 0, w, h)) } else { changed_rect(&last, gfx.rgba(), w, h) };
+                if let Some(rect) = rect {
+                    if let Some(f) = encode_region(gfx.rgba(), w, rect) {
+                        match out.try_send(Out::Frame(f)) {
+                            Ok(()) => {
+                                need_full = false;
+                                last = gfx.rgba().to_vec();
+                            }
+                            // the page has not caught up: send everything fresh once it has
+                            Err(_) => {
+                                need_full = true;
+                                dirty = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    done.store(true, Ordering::Relaxed);
+}
+
+/// A clipboard item from the page into the shell's own clipboard history (on the shell's thread, where that history lives).
+fn take_rich(kind: iyakki_agent::browsermedia::ClipKind, bytes: &[u8]) {
+    use iyakki_agent::browsermedia::{BrowserMedia, ClipKind};
+    use iyakki_shell::ui::clipboard;
+    match kind {
+        ClipKind::Html => {
+            let text: String = BrowserMedia::html_as_text(&String::from_utf8_lossy(bytes)).chars().take(clipboard::MAX_BYTES).collect();
+            if !text.is_empty() {
+                clipboard::remember(&text);
+            }
+        }
+        ClipKind::Image => {
+            if let Ok(pm) = tiny_skia::Pixmap::decode_png(bytes) {
+                if pm.width() <= 4096 && pm.height() <= 4096 {
+                    let mut rgba = pm.data().to_vec();
+                    // the shell keeps straight (not premultiplied) pixels
+                    for p in rgba.chunks_exact_mut(4) {
+                        let a = p[3] as u32;
+                        if a > 0 && a < 255 {
+                            for c in &mut p[..3] {
+                                *c = ((*c as u32 * 255 + a / 2) / a).min(255) as u8;
+                            }
+                        }
+                    }
+                    clipboard::remember_image(pm.width(), pm.height(), rgba);
+                }
+            }
+        }
+    }
+}
+
+/// A picture the shell copied, as the tagged PNG message for the page (`None` when it is not a sane picture or too big).
+pub fn rich_image_message(w: u32, h: u32, rgba: Vec<u8>) -> Option<Vec<u8>> {
+    let mut data = rgba;
+    for p in data.chunks_exact_mut(4) {
+        let a = p[3] as u32;
+        for c in &mut p[..3] {
+            *c = ((*c as u32 * a + 127) / 255) as u8;
+        }
+    }
+    let png = tiny_skia::Pixmap::from_vec(data, tiny_skia::IntSize::from_wh(w, h)?)?.encode_png().ok()?;
+    iyakki_agent::browsermedia::BrowserMedia::clip_out(iyakki_agent::browsermedia::ClipKind::Image, &png)
+}
+
+/// The smallest rectangle holding every pixel that differs, or `None` when the pictures are the same.
+pub fn changed_rect(old: &[u8], new: &[u8], w: usize, h: usize) -> Option<(usize, usize, usize, usize)> {
+    if old.len() != new.len() || new.len() != w * h * 4 {
+        return Some((0, 0, w, h));
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0usize, 0usize);
+    for y in 0..h {
+        let (a, b) = (&old[y * w * 4..(y + 1) * w * 4], &new[y * w * 4..(y + 1) * w * 4]);
+        if a == b {
+            continue;
+        }
+        let first = a.chunks(4).zip(b.chunks(4)).position(|(p, q)| p != q).unwrap_or(0);
+        let last = a.chunks(4).zip(b.chunks(4)).rposition(|(p, q)| p != q).unwrap_or(first);
+        x0 = x0.min(first);
+        x1 = x1.max(last + 1);
+        y0 = y0.min(y);
+        y1 = y1.max(y + 1);
+    }
+    (x1 > x0 && y1 > y0).then(|| (x0, y0, x1 - x0, y1 - y0))
+}
+
+pub fn encode_region(data: &[u8], w: usize, rect: (usize, usize, usize, usize)) -> Option<Frame> {
+    let (x, y, rw, rh) = rect;
+    let mut part = Vec::with_capacity(rw * rh * 4);
+    for row in y..y + rh {
+        part.extend_from_slice(&data[(row * w + x) * 4..(row * w + x + rw) * 4]);
+    }
+    let pm = tiny_skia::Pixmap::from_vec(part, tiny_skia::IntSize::from_wh(rw as u32, rh as u32)?)?;
+    Some(Frame { x: x as u32, y: y as u32, w: rw as u32, h: rh as u32, png: pm.encode_png().ok()? })
+}
+
+impl Screen for ShellScreen {
+    fn user(&self) -> String {
+        self.user.clone()
+    }
+
+    fn input(&mut self, i: Input) {
+        let _ = self.tx.send(Cmd::In(i));
+    }
+
+    fn viewing(&mut self, on: bool) {
+        let _ = self.tx.send(Cmd::Viewing(on));
+        if !on {
+            while self.rx.try_recv().is_ok() {}
+        }
+    }
+
+    fn take_speech(&mut self) -> Vec<String> {
+        let mut v = Vec::new();
+        while let Ok(m) = self.speech.try_recv() {
+            v.push(m);
+        }
+        v
+    }
+
+    fn set_stream(&mut self, on: bool) {
+        let _ = self.tx.send(Cmd::Stream(on));
+    }
+
+    fn arm(&mut self) {
+        let _ = self.tx.send(Cmd::Arm);
+    }
+
+    fn take_pixels(&mut self) -> Option<Pixels> {
+        self.pixels.take()
+    }
+
+    fn step(&mut self) -> Option<Frame> {
+        // wait a moment for the next piece so the server's loop is not a busy one
+        match self.rx.recv_timeout(Duration::from_millis(10)) {
+            Ok(Out::Frame(f)) => Some(f),
+            Ok(Out::Pixels(p)) => {
+                self.pixels = Some(p);
+                None
+            }
+            Ok(Out::Copy(t)) => {
+                self.copied = Some(t);
+                None
+            }
+            Ok(Out::Cursor(c)) => {
+                self.cursor = Some(c);
+                None
+            }
+            Ok(Out::ReadClip) => {
+                self.read_clip = true;
+                None
+            }
+            Ok(Out::Rich(m)) => {
+                self.rich = Some(m);
+                None
+            }
+            Err(_) => None,
+        }
+    }
+
+    fn take_copy(&mut self) -> Option<String> {
+        self.copied.take()
+    }
+
+    fn take_cursor(&mut self) -> Option<&'static str> {
+        self.cursor.take()
+    }
+
+    fn take_clip_request(&mut self) -> bool {
+        std::mem::take(&mut self.read_clip)
+    }
+
+    fn media(&self) -> Option<Arc<iyakki_agent::browsermedia::BrowserMedia>> {
+        Some(self.media.clone())
+    }
+
+    fn take_rich_copy(&mut self) -> Option<Vec<u8>> {
+        self.rich.take()
+    }
+
+    fn finished(&self) -> bool {
+        self.done.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browser_media_is_denied_unless_the_setting_says_allow() {
+        use iyakki_sec::media::Device;
+        use iyakki_sec::policy::Role;
+        for setting in [None, Some(""), Some("deny"), Some("yes"), Some("ALLOW?")] {
+            let p = tenant_media_policy(setting);
+            for d in Device::ALL {
+                assert!(!p.allows("alice", Role::Admin, d), "{setting:?} must deny {d:?}");
+            }
+        }
+        assert!(tenant_media_policy(Some(" allow ")).allows("alice", Role::Admin, Device::Mic));
+    }
+
+    #[test]
+    fn only_the_changed_part_of_the_picture_is_found() {
+        let (w, h) = (10, 8);
+        let a = vec![0u8; w * h * 4];
+        assert_eq!(changed_rect(&a, &a, w, h), None);
+        let mut b = a.clone();
+        for (x, y) in [(2usize, 3usize), (6, 5)] {
+            b[(y * w + x) * 4] = 255;
+        }
+        assert_eq!(changed_rect(&a, &b, w, h), Some((2, 3, 5, 3)));
+        assert_eq!(changed_rect(&[], &b, w, h), Some((0, 0, w, h)), "no earlier picture means all of it");
+    }
+
+    #[test]
+    fn pictures_and_html_from_the_page_reach_the_clipboard_history_and_pictures_go_back_as_png() {
+        use iyakki_agent::browsermedia::{ClipKind, OUT_CLIP_IMAGE};
+        use iyakki_shell::ui::clipboard;
+        let png = tiny_skia::Pixmap::from_vec(vec![10, 20, 30, 255, 40, 50, 60, 255], tiny_skia::IntSize::from_wh(2, 1).unwrap()).unwrap().encode_png().unwrap();
+        clipboard::clear();
+        take_rich(ClipKind::Image, &png);
+        assert_eq!(clipboard::latest_image(), Some((2, 1, vec![10, 20, 30, 255, 40, 50, 60, 255])));
+        assert!(clipboard::take_host_image().is_none(), "a picture from the page is not sent back to it");
+        take_rich(ClipKind::Image, b"\x89PNG garbage");
+        take_rich(ClipKind::Html, b"<p>Hello <b>there</b></p>");
+        assert_eq!(clipboard::latest().as_deref(), Some("Hello there"));
+        clipboard::copy_image(2, 1, vec![1, 2, 3, 255, 4, 5, 6, 255]);
+        let (w, h, rgba) = clipboard::take_host_image().expect("a picture copied in the shell");
+        let m = rich_image_message(w, h, rgba).expect("message");
+        assert_eq!(m[0], OUT_CLIP_IMAGE);
+        assert_eq!(&m[1..9], b"\x89PNG\r\n\x1a\n");
+        assert!(rich_image_message(0, 0, vec![]).is_none());
+    }
+
+    #[test]
+    fn a_region_is_cut_out_and_encoded_as_png() {
+        let (w, h) = (6usize, 4usize);
+        let mut d = vec![0u8; w * h * 4];
+        for i in 0..w * h {
+            d[i * 4 + 3] = 255;
+            d[i * 4] = (i * 9) as u8;
+        }
+        let f = encode_region(&d, w, (1, 1, 3, 2)).expect("frame");
+        assert_eq!((f.x, f.y, f.w, f.h), (1, 1, 3, 2));
+        assert_eq!(&f.png[..8], b"\x89PNG\r\n\x1a\n");
+        let msg = f.to_message();
+        assert_eq!(&msg[..8], &[1, 0, 1, 0, 3, 0, 2, 0]);
+        assert_eq!(&msg[8..], &f.png[..]);
+    }
+}

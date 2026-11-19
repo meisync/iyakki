@@ -1,0 +1,3 @@
+//! The system-prompt text of the camtrust chat tools (kept here so the UI crates can name it; the tools are in `iyakki-agent`).
+
+pub const PROMPT_RULE: &str = "\nENCRYPTED CAMERAS: camera_trust_status lists the cameras (rtsps:// or https:// addresses) whose certificate is trusted and the ones waiting for an answer, with the fingerprint the person can compare with the camera's own page (free). camera_trust_set approves the waiting certificate of one camera (approve) or forgets the saved trust (forget); it asks every time. You cannot name a fingerprint: only the one the camera showed can be approved.";

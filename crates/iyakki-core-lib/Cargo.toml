@@ -1,0 +1,13 @@
+[package]
+name = "iyakki-core-lib"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The iyakki-core shared library's C interface (F-CORE-27): the interface version and the contract's hello, plain data only. See docs/development/C-INTERFACE-RULES.md."
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+iyakki-core-api = { path = "../iyakki-core-api" }
+serde_json = "1"

@@ -1,0 +1,58 @@
+# IYAKKI edge DaemonSet for K3s / Kubernetes: one supervisor per node, joined into a LAN swarm.
+# Build + load the image first:  docker build -f dist/Dockerfile -t iyakki:0.1.0 .   (then push or `k3s ctr images import`)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: iyakki
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: iyakki
+  namespace: iyakki
+  labels:
+    app.kubernetes.io/name: iyakki
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: iyakki
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: iyakki
+    spec:
+      # mDNS peer discovery is link-local multicast, so the pod must share the node's network namespace.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      terminationGracePeriodSeconds: 10
+      tolerations:
+        - operator: Exists          # run on every node, including control-plane
+      containers:
+        - name: iyakki
+          image: iyakki:0.1.0
+          imagePullPolicy: IfNotPresent
+          args: ["serve", "--swarm"]
+          env:
+            - name: IYAKKI_LOG
+              value: info
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi

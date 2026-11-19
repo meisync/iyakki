@@ -1,0 +1,26 @@
+{
+  "id": "whoami",
+  "name": "whoami request echo (example)",
+  "example": true,
+  "description": "EXAMPLE. A very small web service that prints the request it receives (name, headers, address). Useful to test networking and ports.",
+  "kind": "container",
+  "image": "docker.io/traefik/whoami:v1.10@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "command": [],
+  "ports": [
+    {
+      "name": "http",
+      "port": 8080
+    }
+  ],
+  "env": [
+    {
+      "name": "WHOAMI_PORT_NUMBER",
+      "value": "8080"
+    }
+  ],
+  "volumes": [],
+  "licence": "Apache-2.0",
+  "homepage": "https://github.com/traefik/whoami",
+  "memory_mb": 32,
+  "cpu_milli": 100
+}

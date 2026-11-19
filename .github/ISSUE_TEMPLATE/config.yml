@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or idea
+    url: https://github.com/OWNER/REPO/discussions
+    about: PLACEHOLDER (replace OWNER/REPO with the public repository when it exists). Questions and ideas go to Discussions.
+  - name: Security problem
+    url: https://github.com/OWNER/REPO/security/policy
+    about: PLACEHOLDER (replace OWNER/REPO). Do not open a public issue for a security problem; read SECURITY.md.

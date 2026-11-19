@@ -1,0 +1,21 @@
+# Added with iyakki_web_av_addon.fragment (build.sh, WEB_AV_ADDON=1 and not WITH_FFMPEG=1): FFmpeg is built here ONLY to make the
+# shared libraries that the person-installed audio and video add-on (store item ffmpeg-libs, docs/development/AV-ADDON-BUILD.md) is made of,
+# and to give gst-libav its headers. The image itself carries none of it (web-post-build.sh removes every library and program).
+# LGPL-2.1+ only: Buildroot passes --disable-gpl --disable-nonfree --disable-version3 (BR2_PACKAGE_FFMPEG_GPL and _NONFREE stay unset,
+# so there is no libpostproc, no x264, no x265, no fdk-aac). Only the decoders TikTok-style pages need: H.264, AAC, MP3.
+# No encoders, no muxers, no network protocols but "file"; HEVC is off.
+BR2_PACKAGE_FFMPEG=y
+BR2_PACKAGE_FFMPEG_SWSCALE=y
+BR2_PACKAGE_FFMPEG_ENCODERS=""
+BR2_PACKAGE_FFMPEG_DECODERS="h264 aac aac_latm mp3 mp3float"
+BR2_PACKAGE_FFMPEG_MUXERS=""
+BR2_PACKAGE_FFMPEG_DEMUXERS="mov aac mp3"
+BR2_PACKAGE_FFMPEG_PARSERS="h264 aac aac_latm mpegaudio"
+BR2_PACKAGE_FFMPEG_BSFS="all"
+BR2_PACKAGE_FFMPEG_PROTOCOLS="file"
+BR2_PACKAGE_FFMPEG_FILTERS="null anull format aformat scale yadif buffer buffersink abuffer abuffersink"
+# no devices, and no optional libraries linked in (the later --disable-* wins over the ones Buildroot adds because a package is in the
+# image): the add-on's libraries need nothing but musl, zlib is the only extra and the image has it.
+# BR2_PACKAGE_FFMPEG_INDEVS is not set
+# BR2_PACKAGE_FFMPEG_OUTDEVS is not set
+BR2_PACKAGE_FFMPEG_EXTRACONF="--disable-network --disable-libvpx --disable-libopus --disable-openssl --disable-gnutls --disable-libdrm --disable-bzlib --disable-iconv --disable-libxml2 --disable-libvorbis --disable-libdav1d --disable-fontconfig --disable-libharfbuzz --disable-vaapi --disable-vdpau --disable-hwaccels --disable-avdevice --disable-debug"

@@ -1,0 +1,20 @@
+Opus reference-decoder material in the tree (for the owner to decide on, 2026-11-16)
+
+What: crates/iyakki-audiodec/src/opus_tables.rs holds constant TABLES (data only, no code): the CELT band edges (eband5ms), the bit
+allocation table (band_allocation), the band size logarithms (logN400), the pulse cost cache and its index and the allocation caps
+(cache_bits50, cache_index50, cache_caps50) and the coarse energy probability models (e_prob_model). They were copied by a script from the
+reference decoder source that RFC 6716 itself carries (Appendix A, base64 tarball), files celt/static_modes_float.h, celt/modes.c and
+celt/quant_bands.c.
+
+Licence of that source: the 3-clause BSD licence printed in the tarball's COPYING (Copyright 1994-2011 IETF Trust, Xiph.Org, Skype
+Limited, Octasic, Jean-Marc Valin, Timothy B. Terriberry, CSIRO, Gregory Maxwell, Mark Borgerding, Erik de Castro Lopo). Redistribution in
+source form must keep the copyright notice, the conditions and the disclaimer; in binary form they must be reproduced in the
+documentation; the names of the contributors may not be used to endorse. It is permissive, so the Apache-only rule for the base is not
+broken in the sense of the licence class, but the notice duty applies if the tables stay.
+
+What is NOT derived: no code from the reference decoder is in the tree. The algorithm notes read while planning the CELT decoder (range
+decoder arithmetic, the allocation search, the pulse enumeration) were read from the same source; the Rust decoder (opus_celt.rs) was not
+written yet when this note was made, so nothing of it exists to record. If the owner prefers, the tables can be regenerated from the RFC
+prose where it gives them, or the work can wait.
+
+Owner decision 2026-11-16: accepted (BSD-3-Clause is compatible with Apache-2.0 with attribution). Entry added to legal/assets.txt and THIRD-PARTY-NOTICES.md, licence text in legal/extra-licences/opus-reference/.

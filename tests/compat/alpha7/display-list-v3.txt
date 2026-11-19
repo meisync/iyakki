@@ -1,0 +1,8 @@
+iyakki-display-list 3 300 120
+rect 0 0 300 120 101521ff
+layer 0.5
+path 3b82f6ff ffffffff 2 M10:10;L60:10;Q80:10:80:30;C80:50:60:60:40:60;Z
+endlayer
+path - ffffffff 1.5 M100:20;L140:60
+textc 20 90 15 e8ebf2ff regular default 0 0 9,9,9 e%CC%81xy
+hit 10 10 280 60 1 button Card

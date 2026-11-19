@@ -1,0 +1,10 @@
+[package]
+name = "iyakki-lint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Deploy-file and Dockerfile lint rules (pure text), split out of iyakki-agent.
+# (docs/development/COMPILE-SPLIT-PILOT-3.md). std only; the agent re-exports the modules under the old paths.
+[dependencies]
+serde_json = "1"

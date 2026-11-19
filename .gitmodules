@@ -1,0 +1,3 @@
+[submodule "iyakki-boot"]
+	path = iyakki-boot
+	url = https://github.com/meisync/iyakki-boot.git

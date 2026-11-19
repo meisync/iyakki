@@ -1,0 +1,24 @@
+# A light Look: a plain list, flat icons, the bar at the bottom and no dock.
+[look]
+name = Paper list
+
+[colours]
+base = light
+
+[icons]
+icon_shape = rounded
+icon_size = 40
+icon_style = flat
+
+[launcher]
+launcher = list
+density = compact
+groups = none
+island = off
+
+[dock]
+dock = off
+
+[topbar]
+topbar_position = bottom
+topbar_items = [clock, battery, needs_you, bell, settings, account, power]

@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-2.0
+# Kbuild file of the snd-hda-macbookpro package (IYAKKI): the module is built from the kernel's own patch_cs8409 files
+# (copied from the kernel tree by snd-hda-macbookpro.mk) with the three diffs of davidjo/snd_hda_macbookpro applied. Replaces the
+# upstream Makefile, which wants CONFIG_SND_HDA_CODEC_CS8409 (not set in the IYAKKI kernel: the in-tree CS8409 driver is not built).
+#   -DAPPLE_PINSENSE_FIXUP -DAPPLE_CODECS -DCONFIG_SND_HDA_RECONFIG=1   the flags of upstream's Makefile
+#   -Wno-empty-body   upstream's debug macros expand to an empty "if" body (kernel builds turn that into an error)
+ccflags-y += -DAPPLE_PINSENSE_FIXUP -DAPPLE_CODECS -DCONFIG_SND_HDA_RECONFIG=1 -Wno-unused-variable -Wno-unused-function -Wno-empty-body
+#   -DMYSOUNDDEBUG   the upstream's own verbose trace (path dumps, node lists) while the Apple path is being brought up; drop once sound works
+ccflags-y += -DMYSOUNDDEBUG
+ccflags-y += -I$(src) -I$(srctree)/sound/pci/hda
+snd-hda-codec-cs8409-y := patch_cs8409.o patch_cs8409-tables.o
+obj-m += snd-hda-codec-cs8409.o

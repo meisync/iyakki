@@ -1,0 +1,5 @@
+{"kind":"NodeMetricsList","items":[
+{"metadata":{"name":"iyakki-dev"},"usage":{"cpu":"1000000000n","memory":"2000000Ki"}},
+{"metadata":{"name":"worker-2"},"usage":{"cpu":"500m","memory":"1000000Ki"}},
+{"metadata":{"name":"broken"},"usage":{"cpu":"lots","memory":"1Gi"}}
+]}

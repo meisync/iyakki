@@ -1,0 +1,23 @@
+{
+  "views": [
+    {
+      "id": 1,
+      "name": "Main",
+      "locked": false,
+      "tiles": []
+    },
+    {
+      "id": 2,
+      "name": "Media",
+      "locked": false,
+      "tiles": [
+        "media",
+        "radio"
+      ]
+    }
+  ],
+  "active": 1,
+  "key_set": "both",
+  "reset_on_lock": false,
+  "next_id": 3
+}

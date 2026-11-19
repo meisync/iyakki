@@ -1,0 +1,6 @@
+# Compressed kernel modules (F-PKG-11). Applied ONLY for a build that sets IYAKKI_MODULE_COMPRESS=1 (post-build.sh gzips the signed
+# modules and runs depmod). Needs a kernel rebuild and a boot test before it is on by default.
+CONFIG_MODULE_COMPRESS=y
+CONFIG_MODULE_COMPRESS_GZIP=y
+# CONFIG_MODULE_COMPRESS_NONE is not set
+CONFIG_MODULE_DECOMPRESS=y

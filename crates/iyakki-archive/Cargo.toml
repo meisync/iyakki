@@ -1,0 +1,15 @@
+[package]
+name = "iyakki-archive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# tar/zip readers and the in-house xz decoder, split out of iyakki-agent.
+# (docs/development/COMPILE-SPLIT-PILOT-3.md). std only; the agent re-exports the modules under the old paths.
+[features]
+# exposes `archive::tests` (tar and zip builders used by the agent's tests)
+testing = []
+
+[dependencies]
+miniz_oxide = "0.8"
+ruzstd = "0.9"

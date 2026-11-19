@@ -1,0 +1,7 @@
+# The version map: for every IYAKKI version, what the add-on is built from.
+# One line per entry, whitespace-separated, fields in this order:
+#   IYAKKI_VERSION  FFMPEG_VERSION  FFMPEG_SOURCE_SHA256  BUILDER_IMAGE_WITH_DIGEST  SONAMES(comma separated)
+# IYAKKI_VERSION may end in .* (any version with that prefix). The first matching line wins.
+# An entry is removed when its source or builder image is no longer available; CHANGELOG.md announces that first.
+# The FFmpeg source is downloaded from https://ffmpeg.org/releases/ffmpeg-<FFMPEG_VERSION>.tar.xz at the person's request, and checked against the hash.
+0.1.0-alpha.*  6.1.5  05fbe9db1f5452a3605bb1d9bf91da9d4bb08162891692e4f172b58c49109412  docker.io/library/alpine@sha256:1e42bbe2508154c9126d48c2b8a75420c3544343bf86fd041fb7527e017a4b4a  libavcodec.so.60,libavformat.so.60,libavutil.so.58,libavfilter.so.9,libswresample.so.4,libswscale.so.7

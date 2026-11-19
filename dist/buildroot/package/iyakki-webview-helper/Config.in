@@ -1,0 +1,13 @@
+config BR2_PACKAGE_IYAKKI_WEBVIEW_HELPER
+	bool "iyakki-webview-helper"
+	depends on BR2_PACKAGE_WPEWEBKIT
+	depends on BR2_PACKAGE_WPEBACKEND_FDO
+	depends on BR2_PACKAGE_WAYLAND
+	help
+	  The web engine helper of the IYAKKI "web" image variant: WPE
+	  WebKit rendered offscreen (libwpe + WPEBackend-fdo, shared memory
+	  pictures) and driven by the IYAKKI shell over the protocol of
+	  docs/WEBVIEW-PROTOCOL.md. Installed as
+	  /usr/libexec/iyakki/webview-helper.
+
+	  Source: dist/webview/wpe-helper of this repository.

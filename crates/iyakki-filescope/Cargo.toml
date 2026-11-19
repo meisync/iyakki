@@ -1,0 +1,11 @@
+[package]
+name = "iyakki-filescope"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The folders a person's pickers and tools stay inside, and the checks against them: pure data and logic (split out of iyakki-agent for F-SPLIT-03)."
+
+[dependencies]
+iyakki-sec = { workspace = true }
+iyakki-vfs = { workspace = true }
+serde = { version = "1", features = ["derive"] }

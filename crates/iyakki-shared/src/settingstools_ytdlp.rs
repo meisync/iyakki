@@ -1,0 +1,3 @@
+//! The system-prompt text of the ytdlp chat tools (kept here so the UI crates can name it; the tools are in `iyakki-agent`).
+
+pub const PROMPT_RULE: &str = "\nVIDEO-SITE EXTRACTOR (optional, a third-party program that IYAKKI never ships): ytdlp_status says whether it is installed and whether its pinned checksum exists (free). ytdlp_install downloads it from its vendor after the person approves, checks its SHA-256 against the pin and refuses without a pin (asks). media_download_site downloads ONE video from a public https page into the person's own folder and asks every time; it is not for private or login pages.";

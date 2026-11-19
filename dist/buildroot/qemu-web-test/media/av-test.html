@@ -1,0 +1,18 @@
+<!doctype html><meta charset="utf-8"><title>H.264 + AAC test</title>
+<style>body{background:#101820;color:#dde;font:16px sans-serif;margin:16px}video{background:#000;border:2px solid #4b5a9a}pre{white-space:pre-wrap}</style>
+<h2>H.264 + AAC (the audio and video add-on)</h2>
+<video id="v" width="320" height="240" muted autoplay playsinline loop src="av-test.mp4"></video>
+<p><button id="b" autofocus style="font-size:20px">Play (press Enter)</button></p>
+<pre id="s">starting</pre>
+<script>
+// Reports to the test server (GET /report?...): the codec answers, the element's events, and PASS when the video really plays frames.
+var v=document.getElementById('v'),s=document.getElementById('s'),events=[],t0=performance.now(),done=false;
+['loadedmetadata','canplay','playing','timeupdate','error','stalled','emptied'].forEach(function(n){v.addEventListener(n,function(){if(events[events.length-1]!==n)events.push(n)})});
+function state(){var q=v.getVideoPlaybackQuality?v.getVideoPlaybackQuality():{};
+  var o={test:'av',h264:v.canPlayType('video/mp4; codecs="avc1.42E01E"'),aac:v.canPlayType('audio/mp4; codecs="mp4a.40.2"'),events:events.join(','),t:+v.currentTime.toFixed(2),
+  rs:v.readyState,vw:v.videoWidth,err:v.error?v.error.code+':'+v.error.message:null,decoded:q.totalVideoFrames||0,paused:v.paused};
+  o.result=(events.indexOf('playing')>=0&&o.t>0.5&&o.decoded>5)?'PASS playing':(v.error?'FAIL error':'waiting');return o}
+function report(){var o=state();s.textContent=JSON.stringify(o,null,1);fetch('/report?'+encodeURIComponent(JSON.stringify(o))).catch(function(){})}
+document.getElementById('b').onclick=function(){fetch('/report?'+encodeURIComponent('av button pressed')).catch(function(){});v.play().then(function(){fetch('/report?'+encodeURIComponent('av play() resolved'))},function(e){fetch('/report?'+encodeURIComponent('av play() after click rejected: '+e))})};
+setInterval(report,2000);v.play().catch(function(e){s.textContent='play() rejected: '+e;fetch('/report?'+encodeURIComponent('av play() rejected: '+e))});
+</script>

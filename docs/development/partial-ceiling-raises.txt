@@ -1,0 +1,451 @@
+# Rows that may raise the partial ceiling (docs/development/partial-ceiling.txt), one `F-ID reason` per line.
+# A new feature row that starts out partial, or a `done` row honestly demoted because a change needs a new manual test, is listed here with
+# its reason, and the ceiling is raised by the number of newly listed ids in the same commit. Never list a row to hide a gap.
+F-CHAT-02 2026-11-12 new row: the chat tools for desktop views, notifications, screen saver, apps access, keyboard, time and more (unit-tested, not yet tried by a model)
+F-NET-06 2026-11-12 demoted from done: the Wi-Fi row now names the Broadcom 4360 card without a driver (KI-094); to re-check on the Mac mini 2014
+F-CLI-08 2026-11-12 planned -> partial: terminal engine and pseudo-terminal session built and tested; the tile that draws it is still open
+F-BROW-94 2026-11-12 planned -> partial: streamed downloads and file uploads are built and tested on fakes; a real server and a screen look are still to do
+F-BROW-96 2026-11-12 planned -> partial: name/address fill and sign-in removal built and tested on fixture pages; real sites not tried
+F-BROW-97 2026-11-12 planned -> partial: text-only zoom and Ctrl+wheel built and tested; a real mouse and screen not tried
+F-FW-13 2026-11-12 new row: VPN networks count as the local network (built and tested on fakes; a live tunnel with the real kernel table not tried)
+F-FLOW-14 2026-11-12 planned -> partial: Thrift over HTTP JSON built and tested against a scripted host; no real Thrift server tried
+F-MEDIA-02 2026-11-12 planned -> partial: UPnP/DLNA protocol half built and tested; no socket, no player tried
+F-WEBSVC-06 2026-11-12 planned -> partial: api scope families and the per-computer store built and tested; sign-in with a paired key, enforcement and Settings still open
+F-MSG-07 2026-11-12 moved from planned: the inbound mirror, its tools and the background round are built and unit-tested against a fake homeserver; no real homeserver or model has used it and the m key on the Notifications page awaits a look on a screen
+F-FILE-06 2026-11-12 moved from planned: the Settings controls, cards and fingerprint copy are built and tested with a fake firewall; the screen was not looked at and the real firewall opening was not tried from the page
+F-BOOT-30 2026-11-12 planner and controller built and unit-tested; the recording, the Linux advisor and the shell call remain
+F-BOOT-31 2026-11-12 setting, plan and gate arithmetic built; the Settings switch, boot step and a real-machine run remain
+F-PKG-05 2026-11-12 checker and budget file built; the ceilings come from documents, not yet from measured build outputs, and idle RAM has no ceiling
+F-INST-13 2026-11-12 planner and save/verify side built on image files; the --bios option, the write step and a BIOS boot test remain
+F-LINAPP-13 2026-11-12 policy, rule set and commands built; the Linux step, the page switch and a chat tool remain
+F-SCRN-05 2026-11-12 slideshow, starfield and the start-now chord built; video keep-awake and multi-display backlight remain, and the screens need eyes
+F-TOK-04 2026-11-12 new row: live harness for tool use by a small model; one model measured, run is opt-in and not in the normal tests
+F-PDF-14 2026-11-12 new row: the native_pdf_output field and the offer rule are built and tested; no Settings control or chat tool sets the field yet
+F-TALES-22 2026-11-12 new row: Save PDF is built and layout-tested at the four sizes; the screen and a real viewer were not looked at
+F-STUDY-08 2026-11-12 new row: Export PDF buttons built and layout-tested; the screens were not looked at
+F-PDF-11 2026-11-12 planned -> partial: embedded DejaVu subsets for Greek, Cyrillic and symbols built and tested with the repo's reader and an independent font reader; no real PDF viewer has opened a file
+F-ASSIST-47 2026-11-12 new screen: Settings -> Assistant is tested at four sizes, by keys and clicks, but a person has not looked at it
+F-ASSIST-46 2026-11-12 new screen: the stall limits and the footer token rate are tested but not looked at on a screen
+F-EXTA-17 2026-11-12 new chip: hit-tested at four sizes, not looked at on a screen
+F-DATA-08 2026-11-12 new table drawing and button in the chat: tested at four sizes, not looked at on a screen
+F-PDF-12 2026-11-12 new chat-to-viewer hand-off: each link is tested, the whole path was not seen on a screen
+F-SHELL-60 2026-11-12 forms converted to the file picker are tested but not looked at on a screen; the other fields are split to F-SHELL-61
+F-ASSIST-48 2026-11-12 new form field in the IDE project settings: tested, not looked at on a screen
+F-SHELL-61 2026-11-12 Browse on five path boxes: hit-tested at four sizes, not looked at on a screen
+F-BROX-01 2026-11-12 planned -> partial: the Downloads list opens text, tables and media in their tiles (request tested; the tile hand-over is not driven end to end)
+F-BROX-02 2026-11-12 planned -> partial: start page thumbnails built and tested on fixture sites; not seen on a real screen
+F-FW-14 2026-11-12 planned -> partial: per-rule counters and sets for long address lists built and tested on the generator, evaluator and netlink bytes; loaded into a real kernel once in a private namespace without traffic; counting under real packets not seen
+F-IDE-25 2026-11-12 moved from planned: the embed facility and the docked preview are built and tested at four sizes with a made-up app and the real tile app; the look was not seen on a screen
+F-DEV-16 2026-11-12 planned -> partial: the real terminal for `iyakki dev shell --tty` (pty, window size, Ctrl+C) is built and tested on a macOS pty; the Linux pty run and the client loop against a paired device have not been run
+F-WEBSVC-07 2026-11-12 stale planned row corrected to partial: the flow and tile routes already existed and are tested; data import is split into F-WEBSVC-08 and waits for an owner decision
+F-DEV-16 2026-11-12 listed at the M17 merge (round2 raised the partial count without listing it): real pty terminal built and tested on macOS only; the Linux run and a paired client from a real terminal are not tried
+F-WEBSVC-07 2026-11-12 listed at the M17 merge (round2 raised the partial count without listing it): flow routes ran on a fake engine only and one tile test fails on the Mac
+F-BROW-28 2026-11-12 planned -> partial: element sizes, getComputedStyle, matchMedia, IntersectionObserver and ResizeObserver are built and tested on small offline pages (estimated layout, not compared with a real browser); position, floats and real fonts are not done
+F-BROW-99 2026-11-12 planned -> partial: the engine compile cache on hosts without /proc and the href/src memo are built and measured in a release build on a Mac mini; the cost of the page scripts themselves is unchanged
+F-DISP-13 2026-11-12 new row: a display whose mode list is wrong (a 4K monitor listed at 1080p after the first USB-C plug) is read again by itself and by Look again; fake sysfs tests only, hardware re-test open (KI-160)
+F-KBD-20 2026-11-12 new row: pointer speed for a mouse and a touchpad (unit and page tests; not tried on a real mouse)
+F-RADIO-13 2026-11-13 planned -> partial: the search box is built and unit-tested in the shell's test rig; not looked at on a real screen
+F-VOICE-42 2026-11-13 new row: voice backend seam, `voice_backends` tool and the spoken-approvals setting (fakes only; the running session is not moved onto the registry yet)
+F-ASSIST-52 2026-11-13 new row: Google Gemini as the chat and tool-calling provider (experimental, optional, off by default); built and tested with a fake transport only (KI-460)
+F-VOICE-41 2026-11-13 new row: Google Gemini speech-to-text (experimental, optional, off by default); built and tested with a fake transport only, no real key and no call to Google (KI-460)
+F-CORE-19 2026-11-13 hello deprecations, update side and compat report built with fakes; peers are paired computers only
+F-CORE-22 2026-11-13 C interface rules and symbol gate built; the shared library itself does not exist yet
+F-BROX-04 2026-11-13 planned -> partial: animated WebP was already decoded and shown; the row was never updated: now tested through a page
+F-BROX-11 2026-11-13 planned -> partial: Happy Eyeballs built; tested with injected connects and on the loopback, not on a network with a dead IPv6 route
+F-BROX-12 2026-11-13 planned -> partial: async/defer order and parallel script fetching built; tested with a fake web, not on a real site
+F-BROX-13 2026-11-13 planned -> partial: decoded-picture cache built; tested on the cache and through a page, not measured on a real page
+F-BROX-14 2026-11-13 planned -> partial: parsed-style cache built; tested for identical results, not measured on a real page
+F-BROX-05 2026-11-13 planned -> partial: the row text was out of date: clipping, mask, blur and text were already built; patterns and other filters are not
+F-BROX-06 2026-11-13 planned -> partial: inline svg built; tested on the model and a page, not seen on a screen
+F-PICT-01 2026-11-13 planned -> partial: most already built (srcset, picture, lazy, gif loops) plus inline svg today; svg patterns missing
+F-WEB-05 2026-11-13 planned -> partial: iyakki-edit built as a WebAssembly module with a C-style interface and driven by node; no editor page uses it yet (KI-732)
+F-WEB-50 2026-11-13 planned -> partial: the audit route is paged and the Cloud access page shows older entries; tested in the service harness and under node, not in a real browser (KI-730)
+F-WEB-51 2026-11-13 planned -> partial: run and flow-run events on the event stream and the pages that refresh from it; tested in the harness and under node, not in a real browser (KI-730)
+F-WEB-52 2026-11-13 planned -> partial: the Chat page over the Runs routes; tested under node, not in a real browser (KI-730)
+F-WEBSVC-09 2026-11-13 planned -> partial: run progress and flow-run status on the services event WebSocket
+F-WEBSVC-09 2026-11-13 planned -> partial: run progress and flow-run status on the service event WebSocket; tested in the harness
+F-WEBSVC-10 2026-11-13 planned -> partial: GET /metrics with a small set of numbers and JSON logs; tested in the harness (KI-731)
+F-BROX-07 2026-11-13 planned -> partial: PDF passwords (RC4 and AES-128) built and tested with system-made files; AES-256 not supported (KI-710)
+F-DOCTOR-03 2026-11-13 dev doctor endpoint, verb and doctor_report chat tool built; live path untested without a device
+F-CORE-23 2026-11-13 golden fixtures for three binary formats built; the other fixtures and findings F-5, F-9, F-10 are open (KI-720)
+F-CORE-20 2026-11-13 two-phase migration library and boot-confirm wiring built; no real migration uses it yet
+F-CORE-24 2026-11-13 wizard engine state machine built; screen, chat tool and install hook not built (KI-721)
+F-BROX-10 2026-11-13 planned -> partial: HTTP/2 core (HPACK, framing, flow control) built and tested against the RFC examples; not connected to the browser's client (KI-712)
+F-BROW-98 2026-11-13 planned -> partial: mixed-content blocking for scripts and style sheets built; certificate view and known-bad list not (KI-713)
+F-CORE-25 2026-11-13 snapshot and migration runner with rollback built; WASM migrators, automatic snapshot before an update and chat tool not built (KI-722)
+F-UPD-01 2026-11-13 signed update bundle reader built; channel, official key, command and chat tool not built (KI-723)
+F-SDK-15 2026-11-13 dash and flows engine backends built; k3s namespace not built (KI-724)
+F-WEB-57 2026-11-13 planned -> partial: a tile call that asks first waits for the person's own click through the approvals routes; tested in the harness (KI-733)
+F-DASH-19 2026-11-13 planned -> partial: S3-compatible object storage as a DASH source with SigV4 signing; tested against the AWS examples and a fake server (KI-734)
+F-FLOW-16 2026-11-13 planned -> partial: run a flow on another IYAKKI through its web service (client library); tested against the real routes in one process (KI-735)
+F-FILE-14 2026-11-13 planned -> partial: ECDSA P-384 login keys for the SSH server, tried with a real OpenSSH client; RSA host key and P-521 not done (KI-736)
+F-VAULT-07 2026-11-13 planned -> partial: timed checkpoint of protected browser data built and tested with fake files and a fake clock; not tried with a real WPE profile
+F-VAULT-08 2026-11-13 planned -> partial: sealing at the lock screen built and tested on the module; the lock screen wiring is not driven by a shell test (KI-742)
+F-VAULT-09 2026-11-13 planned -> partial: never-keep and clear-on-exit built for site data; cookies are all or nothing (KI-740); fake files only
+F-VAULT-10 2026-11-13 planned -> partial: the reader browser data file inside the sealed profile, tested with fake files
+F-VOICE-36 2026-11-13 planned -> partial: echo canceller built and tested on synthetic signals; not in the audio path (KI-743)
+F-VOICE-37 2026-11-13 planned -> partial: finished work is spoken later through the waker, tested with fake ports; the live waker was compiled, not run
+F-VOICE-39 2026-11-13 planned -> partial: top-bar microphone glyph, tested as slot logic; not looked at on a screen
+F-VOICE-40 2026-11-13 planned -> partial: spoken turns are marked in the Voice conversation thread (text mark); unit-tested
+F-CORE-21 2026-11-13 rollback harness written, never run (KI-750)
+F-CORE-18 2026-11-13 contract 0.2 with base64 chunks built; pushed events not built (KI-751)
+F-BROX-08 2026-11-13 planned -> partial: PDF form fields filled in the viewer and the assistant and written as an incremental update; radio buttons, signatures, multi-line wrapping not done (KI-715)
+F-BJS-01 2026-11-13 planned -> partial: LivePage::interact (click, input, check, navigation after a click) built and tested at crate level; the browser does not use it yet (KI-716)
+F-SHARE-07 2026-11-13 planned -> partial: IPv6 loopback listener and IPv6 bind addresses for shares; HTTPS, .local, tool not done (KI-760)
+F-K8S-26 2026-11-13 planned -> partial: custom resource instances at the data layer against a fake kubectl; no tile page (KI-761)
+F-WEB-55 2026-11-13 planned -> partial: the Runs page as a wasm32 tile reading the person's runs through a read-only service domain; tested in the sandbox and the routes (KI-762)
+F-FLOW-16 2026-11-13 Impl 30 -> 60 (no new partial row): the remote_flow node, saved machines and chat tools
+F-WEBSVC-11 2026-11-13 planned -> partial: accounts moved into their own crate; no headless feature yet (KI-763)
+F-K3S-30 2026-11-13 Podman clock-step and certificate restart built, fake runner only
+F-LINAPP-16 2026-11-13 sandbox root to image library built; no command or tool yet, not run on a cluster (KI-781)
+F-RAG-14 2026-11-13 planned -> partial: second step that orders found passages (lexical and Lemonade reranker); fake server only
+F-RAG-15 2026-11-13 planned -> partial: Graph RAG with plain-rule name extraction; English-shaped (KI-745)
+F-RAG-16 2026-11-13 planned -> partial: single web pages kept as documents; fake page source
+F-PDF-08 2026-11-13 planned -> partial: reading order merged earlier, text from Identity-H TrueType fonts without ToUnicode now read; other font kinds not (KI-747)
+F-CAM-18 2026-11-13 planned -> partial: vision summary of a single motion event after opt-in; fake model only (KI-770)
+F-KBD-08 2026-11-13 planned -> partial: DDC/CI messages and rules against a fake monitor; no real bus (KI-748)
+F-NET-27 2026-11-13 planned -> partial: play, pause, stop and volume keys of a phone act on the player and volume; not tried on a phone (KI-771)
+F-GPU-02 2026-11-13 ROCm verdict, AMD plugin manifest and smoke pod built; no card, no pinned images, no Quick install entry (KI-782)
+F-WASM-12 2026-11-13 planned -> partial: picture table and both renderers built and equal in real Chrome; bundle manifest loader and service hand-over not built (KI-790)
+F-WEB-56 2026-11-13 planned -> partial: a read-only Settings overview as a wasm32 tile; tested in the sandbox and the routes (KI-764)
+F-WEB-54 2026-11-13 planned -> partial: a scratch editor as a wasm32 tile on iyakki-edit; no files (KI-765)
+F-WEB-53 2026-11-13 planned -> partial: one-conversation Chat as a wasm32 tile through chat.send and runs.get (KI-766)
+F-SHELL-62 2026-11-13 planned -> partial: theme files with readability rules, per-person choice and chat tools; no Settings listing and no live preview (KI-749); tested with temp files
+F-VAULT-11 2026-11-13 planned -> partial: the sealed browser data moves by export and import (chat tools, asks) with a one-session claim for the move; key not moved, running sessions do not hold the claim (KI-772); temp-folder tests
+F-BROW-33 2026-11-13 planned -> partial: the per-release site list and the script that runs it in the full engine are written and their specs parse; never run on the real sites; usability needs accounts (KI-791)
+F-IDE-25 2026-11-13 planned -> partial: the docked Preview was already built and tested (5 tests pass); never looked at on a screen
+F-VOICE-38 2026-11-13 planned -> partial: audio paths checked, whole loop over the page microphone tested with fakes (KI-810)
+F-ARCH-05 2026-11-13 planned -> partial: Os trait, LocalOs and AppCx.os built; no tile uses them yet (KI-812)
+F-BROX-15 2026-11-13 planned -> partial: speed report tool and the first fix (frame buffers share the parsed fonts); style and layout speed not changed (KI-840)
+F-WEBSVC-12 2026-11-13 planned -> partial: the flows-runner profile (sign-in and the person's flows) over the headless binary; tested in the harness and by script (KI-821)
+F-CHECKUP-04 2026-11-13 planned -> partial: GPU and USB steps built and tested on made-up machines; wording not judged on a real machine (KI-850)
+F-LINAPP-15 2026-11-13 planned -> partial: build job generator, packer, digest reader, image app writer and the image_build tool, with a fake cluster; no builder image, never run on a cluster (KI-851)
+F-CORE-26 2026-11-13 planned -> partial: the update-check badge text for needs-a-newer-IYAKKI built; the member kinds and the broker enforcement are open (KI-728)
+F-ARCH-06 2026-11-13 planned -> partial: Audio trait, Os::audio, disks and net, Fake and Local implementations; no tile moved (KI-852)
+F-DEVMODE-08 2026-11-13 reopened 2026-11-13 by owner decision: built by iyakki dev scan (F-NAME-04)
+F-LINAPP-12 2026-11-13 reopened 2026-11-13 by owner decision: the open gaps in its notes are real
+F-LINAPP-14 2026-11-13 reopened 2026-11-13 by owner decision: the pod fallback is not finished
+F-EDIT-17 2026-11-13 planned -> partial: iyakki-ui removed and iyakki-gui on iyakki-edit; the editor window compiles but was never started (Manual needed)
+F-SND-12 2026-11-13 planned -> partial: the media player's sound goes through the mixer when it is on, tested with a fake ffmpeg and sink; not run on a Linux sound card
+F-LOOK-01 2026-11-15 new partial row: Look stage 1+2 data and format written and tested; shell wiring, drawing, Settings page, chat tools and store packages not done
+F-LOOK-02 2026-11-15 new partial row: Look stage 1+2 data and format written and tested; shell wiring, drawing, Settings page, chat tools and store packages not done
+F-LOOK-03 2026-11-15 new partial row: Look stage 1+2 data and format written and tested; shell wiring, drawing, Settings page, chat tools and store packages not done
+F-LOOK-04 2026-11-15 new partial row: Look stage 1+2 data and format written and tested; shell wiring, drawing, Settings page, chat tools and store packages not done
+F-LOOK-05 2026-11-15 new partial row: Look stage 1+2 data and format written and tested; shell wiring, drawing, Settings page, chat tools and store packages not done
+F-GEMVOICE-01 2026-11-15 new row: Gemini voice slice 1 (fake server only; EXPERIMENTAL)
+F-GEMVOICE-02 2026-11-15 new row: Gemini voice slice 1 (fake server only; EXPERIMENTAL)
+F-GEMVOICE-03 2026-11-15 new row: Gemini voice slice 1 (fake server only; EXPERIMENTAL)
+F-GEMVOICE-04 2026-11-15 new row: Gemini voice slice 1 (fake server only; EXPERIMENTAL)
+F-GEMVOICE-05 2026-11-15 new row: Gemini voice slice 1 (fake server only; EXPERIMENTAL)
+F-GEMVOICE-06 2026-11-15 new row: Gemini voice slice 1 (fake server only; EXPERIMENTAL)
+F-ROUTER-01 2026-11-15 new partial row: model router slice 1 (registry, plan, escalation, strategy plugin, chat tools) written and tested on fake models only; no real model run, no core API or capability, no Settings page, not wired into the chat chain
+F-ROUTER-02 2026-11-15 new partial row: model router slice 1 (registry, plan, escalation, strategy plugin, chat tools) written and tested on fake models only; no real model run, no core API or capability, no Settings page, not wired into the chat chain
+F-ROUTER-04 2026-11-15 new partial row: model router slice 1 (registry, plan, escalation, strategy plugin, chat tools) written and tested on fake models only; no real model run, no core API or capability, no Settings page, not wired into the chat chain
+F-ROUTER-05 2026-11-15 new partial row: model router slice 1 (registry, plan, escalation, strategy plugin, chat tools) written and tested on fake models only; no real model run, no core API or capability, no Settings page, not wired into the chat chain
+F-ROUTER-06 2026-11-15 new partial row: model router slice 1 (registry, plan, escalation, strategy plugin, chat tools) written and tested on fake models only; no real model run, no core API or capability, no Settings page, not wired into the chat chain
+F-ROUTER-07 2026-11-15 new partial row: model router slice 1 (registry, plan, escalation, strategy plugin, chat tools) written and tested on fake models only; no real model run, no core API or capability, no Settings page, not wired into the chat chain
+F-GEMVOICE-07 2026-11-15 planned -> partial: tool calls through the chat wrappers, fake server only (EXPERIMENTAL)
+F-GEMVOICE-09 2026-11-15 new row: wake phrase hand-off engine, fake spotter only (EXPERIMENTAL)
+F-GEMVOICE-10 2026-11-15 new row: Gemini voice slice 4 (fake sink and synthetic signals only; EXPERIMENTAL)
+F-GEMVOICE-11 2026-11-15 new row: Gemini voice slice 4 (fake sink and synthetic signals only; EXPERIMENTAL)
+F-GEMVOICE-12 2026-11-15 new row: Gemini voice slice 4 (fake sink and synthetic signals only; EXPERIMENTAL)
+F-GEMVOICE-13 2026-11-15 new row: Gemini voice shell side (fakes only; EXPERIMENTAL)
+F-GEMVOICE-14 2026-11-15 new row: Gemini voice shell side (fakes only; EXPERIMENTAL)
+F-LAUNCH-01 2026-11-15 new partial row: the new home screen (launcher slices 1 to 3: pages, icons, dock, Look wiring, Appearance page; tested with fakes and renders, not seen on a real screen)
+F-LAUNCH-02 2026-11-15 new partial row: the new home screen (launcher slices 1 to 3: pages, icons, dock, Look wiring, Appearance page; tested with fakes and renders, not seen on a real screen)
+F-LAUNCH-03 2026-11-15 new partial row: the new home screen (launcher slices 1 to 3: pages, icons, dock, Look wiring, Appearance page; tested with fakes and renders, not seen on a real screen)
+F-LAUNCH-04 2026-11-15 new partial row: the new home screen (launcher slices 1 to 3: pages, icons, dock, Look wiring, Appearance page; tested with fakes and renders, not seen on a real screen)
+F-LAUNCH-05 2026-11-15 new partial row: the new home screen (launcher slices 1 to 3: pages, icons, dock, Look wiring, Appearance page; tested with fakes and renders, not seen on a real screen)
+F-LAUNCH-06 2026-11-15 new partial row: the new home screen (launcher slices 1 to 3: pages, icons, dock, Look wiring, Appearance page; tested with fakes and renders, not seen on a real screen)
+F-LAUNCH-10 2026-11-15 new partial row: the new home screen (launcher slices 1 to 3: pages, icons, dock, Look wiring, Appearance page; tested with fakes and renders, not seen on a real screen)
+F-LAUNCH-11 2026-11-15 new partial row: the new home screen (launcher slices 1 to 3: pages, icons, dock, Look wiring, Appearance page; tested with fakes and renders, not seen on a real screen)
+F-LAUNCH-12 2026-11-15 new partial row: the new home screen (launcher slices 1 to 3: pages, icons, dock, Look wiring, Appearance page; tested with fakes and renders, not seen on a real screen)
+F-LAUNCH-13 2026-11-15 new partial row: the new home screen (launcher slices 1 to 3: pages, icons, dock, Look wiring, Appearance page; tested with fakes and renders, not seen on a real screen)
+F-LAUNCH-14 2026-11-15 new partial row: the new home screen (launcher slices 1 to 3: pages, icons, dock, Look wiring, Appearance page; tested with fakes and renders, not seen on a real screen)
+F-MODELPICK-01 2026-11-15 new partial row: tested with fake screens and fake servers only, not seen on a real screen or against the real NVIDIA service
+F-MODELPICK-02 2026-11-15 new partial row: tested with fake screens and fake servers only, not seen on a real screen or against the real NVIDIA service
+F-NVIDIA-01 2026-11-15 new partial row: tested with fake screens and fake servers only, not seen on a real screen or against the real NVIDIA service
+F-NVIDIA-02 2026-11-15 new partial row: tested with fake screens and fake servers only, not seen on a real screen or against the real NVIDIA service
+F-BSHARE-01 2026-11-15 new partial row: proven with the real server binary in a real container, not yet on a k3s pod or from a second person's machine
+F-BSHARE-02 2026-11-15 new partial row: publish and fetch run against a real container and a local store; no second person has fetched a build
+F-BSHARE-03 2026-11-15 new partial row: chat tools tested with a fake backend and a fake streamer only, not seen on a real screen
+F-BSHARE-04 2026-11-15 new partial row: manifests accepted by the real k3s API but no pod could stay running (node disk-pressure from a 97% full disk)
+F-DEV-17 2026-11-15 new partial row: device UI test runner (unit tests and one real Lenovo run; the QEMU pairing path needs tesseract and was not run)
+F-DEV-18 2026-11-15 new partial row: why no other computer is seen on a one-cable link and the replug watch (not finished: last form never compiled; earlier form passed on fakes; not run on a device)
+F-SPLIT-01 2026-11-15 new partial row: the ui layer rules and the layer test are built; the program iyakki-ui does not exist yet and nothing ran on a device
+F-SPLIT-02 2026-11-15 new partial row: pack building is tested; the send/apply path and a device run are not
+F-SDK-17 2026-11-15 new partial row: UI SDK proof slice, tested with fakes and in memory only, not seen on a real screen or in a browser
+F-SDK-18 2026-11-15 new partial row: UI SDK proof slice, tested with fakes and in memory only, not seen on a real screen or in a browser
+F-SDK-19 2026-11-15 new partial row: UI SDK proof slice, tested with fakes and in memory only, not seen on a real screen or in a browser
+F-KBD-21 2026-11-15 new partial row: Home swipe tested with fake event streams only, not tried on a real trackpad or touch screen
+F-SPLIT-03 2026-11-15 row was planned, now partial: inventory, ratchet, Core handle and the mixer slice are built; the process cut is not
+F-DEVMODE-19 2026-11-15 new partial row: alpha.5 developer-mode pairing work, tested with fakes only, not tried on a real device
+F-DEVMODE-20 2026-11-15 new partial row: alpha.5 developer-mode pairing work, tested with fakes only, not tried on a real device
+F-DEVMODE-21 2026-11-15 new partial row: alpha.5 developer-mode pairing work, tested with fakes only, not tried on a real device
+F-DEVMODE-22 2026-11-15 new partial row: alpha.5 developer-mode pairing work, tested with fakes only, not tried on a real device
+F-SPLIT-05 2026-11-15 new partial row: layer decision and loop script tested; the push to a device is not run
+F-SPLIT-06 2026-11-15 new partial row: live restart module tested with fakes and one real exec; not wired into PID 1 and not run on any device
+F-INST-26 2026-11-15 planned row now built to a refuse-and-name decision, tested on an sfdisk-made table; not tried on a real disk
+F-INST-27 2026-11-15 planned row now a command line shrink tested on image files with the real tools; no window page or chat tool yet (F-INST-30)
+F-STORE-06 2026-11-15 planned row found already built (SquashFS root with an overlay, run in QEMU today); real firmware not tried
+F-BOOT-14 2026-11-15 planned row found already built as the lean boot (first stage plus root.sfs), run in QEMU today; real firmware gain not measured
+F-BOOT-15 2026-11-15 planned row found already built (critical and late boot split), unit tested; the order is not timed on a real machine
+F-UPG-07 2026-11-15 planned row now has the generic earlier-release checks and the capture script; the beta fixture itself does not exist yet
+F-DEV-19 2026-11-15 row left planned: the two chat tools are written (Impl 100) and tested with the fake link environment only, not run on a device
+F-SDK-20 2026-11-15 row left planned: the JavaScript renderer is written and run in a real Chrome against the real preview server; no phone, no person watching
+F-SDK-21 2026-11-15 row left planned: iyakki new-app is written and a generated app was built and tested with real cargo; the rest of the old row is F-SDK-23
+F-SPLIT-04 2026-11-15 row left planned: the client crate, the line transport, the reference server and the sample UI process are written and run over real sockets against a fake machine; the real core does not serve it yet (F-SPLIT-07)
+F-FLEET-01 2026-11-15 new partial row: fleet core slice built and tested on loopback and fakes; no two real computers and no screen yet
+F-FLEET-02 2026-11-15 new partial row: fleet core slice built and tested on loopback and fakes; no two real computers and no screen yet
+F-FLEET-07 2026-11-15 new partial row: fleet core slice built and tested on loopback and fakes; no two real computers and no screen yet
+F-FLEET-09 2026-11-15 new partial row: fleet core slice built and tested on loopback and fakes; no two real computers and no screen yet
+F-WASM-13 2026-11-15 row left partial: the font table is built and both renderers draw the same pixels in node and in a real Chrome; nobody has looked at the text on a screen or a phone
+F-WASM-06 2026-11-15 row left partial: shared-page snapshots and the measured fork budget are built and run on real Wasmtime sessions; the copy-on-write goal is the new planned row F-WASM-14
+F-ARCH-07 2026-11-15 row left partial: the sysinfo module moved into iyakki-core-local with its tests and every contract gate green; the rest of the extraction (about 500 agent reads, the shell, 44 tile lines) is not started
+F-SDK-14 2026-11-15 row left partial: the Markdown viewer exists as an SDK app tested in the harness; it is not a registered tile and markdown.view is not wired to it
+F-NET-26 2026-11-15 planned row now partial: A2DP source stream, real L2CAP sender and chat tools built; tested against our own sink and an independent SBC decoder, no real headphones tried
+F-RADIO-11 2026-11-15 planned row now partial: in-house Ogg Vorbis decoder and helper built and checked against ffmpeg's decode; Opus, the image install and a real speaker are not done
+F-PDF-09 2026-11-15 planned row now partial: in-house OCR built and measured on rendered and Ghostscript/ImageMagick pages; Latin script only, no real scanner pages
+F-BROX-09 2026-11-15 planned row now partial: the PDF viewer reads scanned pages with the in-house OCR; tested in the viewer harness, no device screen
+F-A11Y-06 2026-11-15 planned row now built as a vertical slice (ABI 2 Access operation into the toolkit tree, fakes only); Browser page nodes, guest SDK helper, web UI list and store lint remain
+F-CORE-17 2026-11-15 planned row now built against an in-memory relay (envelope, sealing, replay, expiry, switches, first-contact question); the owner-run relay and the network loop remain
+F-LAUNCH-07 2026-11-15 planned row became partial: code complete, pixel-checked in the real renderer, not seen on a real screen (Manual needed)
+F-LAUNCH-08 2026-11-15 planned row became partial: widget board written and tested on a fake core and fake machine, not seen on a real screen or touched (Manual needed); Impl 90
+F-LAUNCH-09 2026-11-15 planned row became partial: seven apps named through the core, one through App::status, the rest not done (Impl 60)
+F-SHELL-42 2026-11-15 planned row became partial: two font families chosen per person, tested with the real fonts and renderer, not seen on a real screen (Manual needed)
+F-SHELL-63 2026-11-15 planned row became partial: hand-picked Light colours checked by arithmetic on every colour in the source, not seen on a real screen (Manual needed)
+F-DISP-14 2026-11-15 planned row became partial: single-screen resolution tested on the fake card and made-up connectors only; the real KMS backend has never run (Impl 60)
+F-PDF-15 2026-11-16 planned row now partial: shaped and right-to-left PDF text written and checked with Ghostscript, pdffonts and pdftotext; no person has looked at a page in a real viewer
+F-DRIVERS-14 2026-11-16 planned row now partial: fan controller written and tested on a fake sysfs tree; no init service and no Mac run
+F-PKG-11 2026-11-16 planned row now partial: module split, optional-pack manifest and gzip writer tested (real gzip); no kernel option, build step or image
+F-APPSTORE-13 2026-11-16 planned row now partial: checkout address, licence receipt and refund path with chat tools tested with generated keys; Buy button and provider return not wired
+F-APPSTORE-14 2026-11-16 planned row now partial: root-key line and hosted-catalog audits tested with generated test roots; the real key, hosting and review are the owner's
+F-FLEET-03 2026-11-16 planned row built to 80/50 and left partial: an accepted task runs as a real task manager task and was proven on real loopback hubs and git with a scripted runner; the per-member memory cap, the Tasks tab view of a received task and a real two-computer run are open
+F-FLEET-04 2026-11-16 planned row built to 70/50 and left partial: the shared Context and the lost-member requeue are proven on real hubs and notes files; the rows-with-members drawing on the IDE Board and automatic requeue are not built
+F-FLEET-05 2026-11-16 planned row built to 80/50 and left partial: the Git bundle hand-back is proven with real git and loopback hubs; agent-typed questions and resuming a half-sent bundle are not built
+F-FLEET-06 2026-11-16 planned row built to 80/50 and left partial: the integration branch with ordering, conflicts and failing tests is proven with real git; follow-up tasks cannot yet start from the integration branch on a worker
+F-ROUTER-03 2026-11-16 planned row built to 70/30 and left partial: photo and sound requests are proven with fake models and fake senses only; the microphone has no path to the router and the camera adapter was never run on a camera
+F-ROUTER-08 2026-11-16 planned row built to 70/50 and left partial: a router step goes to the fitting fleet member in a three-hub loopback test with a scripted runner; the strategy plugin does not yet see the members and no two real computers ran it
+F-SPLIT-07 2026-11-16 planned row now partial: the real core serves the UI-client transport on a unix socket behind an off-by-default switch; no supervised UI program, pushed events or pairing yet
+F-WASM-14 2026-11-16 planned row now partial: copy-on-write image and fork measured at a constant 41 us; image making copies, snapshot/restore and branches still copy
+F-NET-28 2026-11-16 planned row now partial: the mixer's output routes into the A2DP stream with a recording fake sender; no Settings entry, no real headphones
+F-RADIO-14 2026-11-16 planned row now partial: build scripts install the audio helper (script-tested); no image built or boot-tested
+F-RADIO-15 2026-11-16 planned row now partial: Opus container, packet layer and range decoder checked against ffmpeg-made files; CELT and SILK decoders not written
+F-INST-30 2026-11-16 planned row now partial: chat tools plan and shrink with approvals, proven with the real tools on an image file; no window or boot pages
+F-INBOX-09 2026-11-16 planned row now partial: Web Push sender/receiver crypto proven with the RFC 8291 vector and OpenSSL; no page side, no real push service
+F-BROX-03 2026-11-16 planned row now partial: passkey authenticator proven against Chrome's virtual authenticator and OpenSSL; no page-facing navigator.credentials
+F-MSG-08 2026-11-16 planned row now partial: Olm and Megolm and the add-on's receive path checked against a second implementation; key query, claim and send not built
+F-SDK-22 2026-11-16 planned row now partial: the client WASM module draws the display list shapes, tree and input lines (real Chrome, real module); text is drawn by the page, not the module
+F-SDK-23 2026-11-16 planned row now partial: an SDK app builds as a real WASM tile and runs in the tile host against a scripted core; no device, no real core behind it
+F-FLEET-08 2026-11-16 planned row now partial: fleet members at an explicit tls:// address over real TLS on loopback with the pinned certificate; no second machine, no Settings switch, no relay
+F-VPN-05 2026-11-16 planned row now partial: init starts the privileged VPN helper as a supervised child (real child process test); session without root, roaming and hardware still open
+F-FW-10 2026-11-16 planned row now partial: outgoing and forwarding rule generator and checks, accepted by real nft -c in a private namespace; applying, tile and page not built
+F-SDK-16 2026-11-16 planned row now partial: listen backend over capture and recogniser traits tested through the real bridge with fakes; real microphone and engine, and the payment decision, open
+F-DEVMODE-23 2026-11-16 new partial row: keep the restart grant until switched off (unit tests only; no device run)
+F-WEBSVC-13 2026-11-16 planned row now partial: api:metrics scope for paired computers built and tested through the real routes; no device or Prometheus run
+F-WEBSVC-14 2026-11-16 planned row now partial: CLI follow of the event socket built and tested over real TLS in the harness; data-import and tile events not sent
+F-A11Y-07 2026-11-16 planned row now partial: braille translation, panning and routing written with unit tests; no display driver
+F-WEB-58 2026-11-16 planned row now partial: clipboard service domain and Ctrl+C/X/V in the Web Edit tile; browser clipboard bridge not built
+F-WEBSVC-08 2026-11-16 planned row now partial: data imports on the cloud profile wait for an approval from another sign-in, tested through the real routes on fakes; not run on a cloud machine
+F-BSHARE-05 2026-11-16 planned row now partial: promote dev to beta and per-person read tokens, 38 script checks against a local store; HTTPS, device fetch, base-aware packs, aarch64 not built
+F-BOOT-04 2026-11-16 planned row now partial: the broker rules as code with fakes; not wired into boot and not run on hardware
+F-AI-02 2026-11-16 planned row now partial: live checks for OpenAI, Claude and Gemini written as ignored tests; not run, no API keys
+F-PKG-07 2026-11-16 planned row now partial: Windows disk list, system-disk refusal and raw-write order tested on Linux with a fake; no Windows system calls
+F-FLEET-11 2026-11-16 planned row now partial: built in lane q-impl-core, fakes and loopback tests only
+F-FLEET-13 2026-11-16 planned row now partial: built in lane q-impl-core, fakes and loopback tests only
+F-FLEET-12 2026-11-16 planned row now partial: built in lane q-impl-core, fakes and loopback tests only
+F-FLEET-16 2026-11-16 planned row now partial: built in lane q-impl-core, fakes and loopback tests only
+F-FLEET-17 2026-11-16 planned row now partial: built in lane q-impl-core, fakes and loopback tests only
+F-FLEET-15 2026-11-16 planned row now partial: built in lane q-impl-core, fakes and loopback tests only
+F-BROX-19 2026-11-16 planned row now partial: web-font widths and kerning (TrueType/OpenType) in the box estimate, tested with a made font and a page; WOFF/WOFF2 not read
+F-LAUNCH-17 2026-11-16 new status: planned row built, Impl 100, Test 50, Manual needed (not yet seen on a real screen)
+F-LAUNCH-18 2026-11-16 new status: planned row built, Impl 100, Test 50, Manual needed (not yet seen on a real screen)
+F-LAUNCH-19 2026-11-16 new status: planned row built (volume item), Impl 100, Test 50, Manual needed
+F-LAUNCH-16 2026-11-16 new status: planned row built (scroll and edge resize), Impl 100, Test 50, Manual needed (touch and wheel not tried)
+F-LINAPP-17 2026-11-16 new status: planned row built, Impl 100, Test 50, Manual needed (live Ubuntu server and key rotation not tried)
+F-SDK-24 2026-11-16 new status: planned row partly built (dock calls through chat tools), Impl 100, Test 30; glue not run by a real tile in a browser
+F-PKG-08 2026-11-16 blocked row now partial: the writer window's state machine and view model tested without a screen; no renderer, no real write from the window
+F-VOICE-43 2026-11-16 blocked row now partial: Alexa Voice Service protocol logic tested against a fake service; no client id, no HTTP/2 transport, no MP3 decoder
+F-INST-28 2026-11-16 blocked row now partial: aarch64 install template layout and marker written and checked with sgdisk; genimage never run, planner not aarch64-aware, nothing booted
+F-BROW-40 2026-11-16 blocked row now partial: browser engine package install logic tested against a fake store; not out of the base image, not published, not wired
+F-ROUTER-09 2026-11-16 planned row now partial: built in lane q-impl-core, fakes and loopback tests only
+F-ROUTER-11 2026-11-16 planned row now partial: built in lane q-impl-core, fakes and loopback tests only
+F-ROUTER-12 2026-11-16 planned row now partial: built in lane q-impl-core, fakes and loopback tests only
+F-ROUTER-13 2026-11-16 planned row now partial: built in lane q-impl-core, fakes and loopback tests only
+F-ROUTER-14 2026-11-16 planned row now partial: built in lane q-impl-core, fakes and loopback tests only
+F-ROUTER-15 2026-11-16 planned row now partial: built in lane q-impl-core, fakes and loopback tests only
+F-CORE-27 2026-11-16 planned row now partial: planned row now partial: the shared library crate with the version and hello functions, its header script and gate rows; calls, events and the image loader not built
+F-CORE-28 2026-11-16 planned row now partial: planned row now partial: declarative app data migrations run by the real wizard environment, tested on temp folders and a fake store
+F-BROX-16 2026-11-16 planned row now partial: Developer tools console for the full engine through the helper's Script message, tested against the fake helper; Elements tab and real WebKit not done
+F-BROX-17 2026-11-16 planned row now partial: ClearCache helper message sent when the reader's cache is emptied, tested with the fake helper; the C handler is written but not compiled or run
+F-CLOUD-76 2026-11-16 blocked row now partial: the native tile connector's client half tested against the real cloud service on loopback TLS; shell side and a tenant pod open
+F-GEMVOICE-08 2026-11-16 blocked row now partial: language setting and token cost meter built and tested on the fake live server; the microphone and shell parts open
+F-BROX-18 2026-11-16 planned row now partial: video cap setting, chat tools and the MediaPolicy helper message with a fake-helper test; the C half waits for the video lane
+F-BROX-20 2026-11-16 planned row now partial: decoders choice and the same message; tenant setting and the helper side not built
+F-CORE-29 2026-11-16 planned row now partial: planned row now partial: live sessions and the radio decoder helper listed in the compat report
+F-CORE-33 2026-11-16 planned row now partial: planned row now partial: network client and outgoing loop proven over loopback HTTP; no real relay, no Settings row
+F-LAUNCH-21 2026-11-16 new status: planned row built, Impl 100, Test 50, Manual needed (the core's answer with a real waiting approval and a real screen not tried)
+F-LAUNCH-15 2026-11-16 new status: planned row built (picture from a file), Impl 100, Test 50, Manual needed (real screen; contrast over photographs not measured)
+F-SDK-25 2026-11-16 new status: planned row partly built (wallpaper port through chat tools), Impl 100, Test 30; glue not run by a real tile in a browser
+F-SHELL-65 2026-11-16 planned row now partial: resume of the signed-in person after a shell restart on a developer machine (owner answered yes); fakes and files only, no device run
+F-CORE-30 2026-11-16 planned row now partial: planned row now partial: the cross-process token lock only; the rest of the list not built
+F-CORE-32 2026-11-16 planned row now partial: planned row now partial: automatic declarative data move after an update; WASM migrators not built
+F-VOICE-44 2026-11-16 planned row now partial: planned row now partial: the mixer's whole output as the echo reference, synthetic fixture only
+F-WEB-59 2026-11-16 planned row now partial: assistant proposals and diffs in the Web Edit tile through the assist service domain, tested natively, in wasm and through the real routes; mouse review and selection context not built
+F-CLOUD-77 2026-11-16 planned row now partial: SSH tunnel and VPN peer targets for the local listener (route targets, flags, chat tool), tested with loopback upstreams; the device listener gets no VPN networks yet and nothing ran on a real tunnel or WireGuard
+F-LAUNCH-20 2026-11-16 new status: planned row built (bar buttons as a list, Look order), Impl 100, Test 50, Manual needed (real screen)
+F-SDK-33 2026-11-16 new status: planned row partly built (dock.status from a core source), Impl 100, Test 30; glue not run by a real tile in a browser
+F-SDK-26 2026-11-16 planned row now partial: drag and drop in the UI SDK host (SDK harness test only); display list operations split into a new planned row
+F-SDK-30 2026-11-16 planned row now partial: per-screen wallpaper and dock position kept through the core handle (files and fakes); the shell pane manager and the shell dock do not use them yet
+F-DISP-15 2026-11-16 planned row now partial: camera and media layout fixes found by the overflow sweep; the launcher at 800x480 and the media library page still overflow
+F-RAG-18 2026-11-16 planned row now partial: planned row now partial: recurring-term entities and a graph kept on disk; model-based extraction not built
+F-RAG-17 2026-11-16 planned row now partial: planned row now partial: refresh of kept pages by a tool call; no timer and no crawling
+F-CAM-21 2026-11-16 planned row now partial: planned row now partial: inbox notes carrying a thumbnail, drawn in the Inbox tile; fakes and test rig only
+F-GEMVOICE-16 2026-11-16 planned row now partial: planned row now partial: crossfaded early start of the next segment; fake sink and clock only
+F-CAM-19 2026-11-16 planned row now partial: planned row now partial: second copy of the recording ledger; shared camera connection and H.264 playback not built
+F-FLEET-14 2026-11-16 planned row now partial: planned row now partial: follow-up base shipped as a bundle; no Settings page for integration
+F-PDF-17 2026-11-16 planned row now partial: CCITT Group 3 and 4 fax pictures decoded and read by text recognition; JBIG2, JPEG 2000, accents and other scripts not built
+F-PDF-16 2026-11-16 planned row now partial: Thai word breaking, synthetic bold and shaped footer title built; rare scripts have no font
+F-SDK-60 2026-11-16 new partial row: embedded browser core facet and fake written; real session, agent adapter and hardware not done
+F-SDK-61 2026-11-16 new partial row: BrowserView and the sample browser pane written and run on fakes; not seen on a screen
+F-SDK-80 2026-11-16 planned row now partial: new row written with tests listed; real screen, browser and device runs not done
+F-SDK-81 2026-11-16 planned row now partial: new row written with tests listed; real screen, browser and device runs not done
+F-SDK-82 2026-11-16 planned row now partial: new row written with tests listed; real screen, browser and device runs not done
+F-SDK-83 2026-11-16 planned row now partial: new row written with tests listed; real screen, browser and device runs not done
+F-SDK-27 2026-11-16 planned row now partial: covered by the tests of F-SDK-21 and F-SDK-23 (owner rule: not deprecated)
+F-SDK-31 2026-11-16 planned row now partial: Markdown file list from the person's own home through the core (real folders and fakes; no screen)
+F-PDF-18 2026-11-16 planned row now partial: CFF Type1C built-in encodings read; CID-keyed CFF and table analysis not built; right-to-left lines read back in typed order
+F-LAUNCH-23 2026-11-16 new status: planned row built (bar off with handle and b key), Impl 100, Test 50, Manual needed (real screen and touch)
+F-SHELL-66 2026-11-16 new partial row: frame pieces kept between frames (28.7 to 7.4 ms on the build host); not measured on a Mac mini
+F-SDK-100 2026-11-16 new partial row: embeddable file browser (FilesView, Files facet, real and fake adapters); not seen on a real screen
+F-SDK-28 2026-11-16 planned row now partial: glyph atlas in the client engine module, tested natively and in real Chrome 154 (37 checks); no Firefox, Safari or person
+F-SDK-29 2026-11-16 planned row now partial: the served preview page uses the engine module (real Chrome run); the web UI and client pages do not
+F-SDK-161 2026-11-16 new partial row: facet for embedded camera views with a fake (unit tests, surface gate); contract socket and WASM tile are F-SDK-166
+F-SDK-162 2026-11-16 new partial row: camera views over the real hub and the loopback RTSP camera; no real camera, no PTZ source, shell sign not wired (F-SDK-165, F-SDK-167)
+F-SDK-140 2026-11-16 new partial row: embedded media facet, fake and home policy (Test 50, fake only)
+F-SDK-141 2026-11-16 new partial row: embedded player on the device, sound (Test 70 with a recording sink; Manual needed)
+F-SKIN-01 2026-11-16 new partial row: design tokens beyond colour (skin parts in the Look, Tokens in Metrics, widgets and two apps read only tokens); tested on the recording canvas, not seen on a screen
+F-SKIN-02 2026-11-16 new partial row: audit of hard-coded styling and the style-literal scan over widgets, ChatView, SAMPLE and the Markdown viewer; rough rule, Files/Browser/Terminal/Editor views not on this branch yet
+F-SKIN-03 2026-11-16 planned row now partial: shipped skins, validator, registry listing, per-person choice, live switch in the SDK host, cx.skin and the accent contrast fit; fonts in skins and the shell's own screens not done
+F-SDK-62 2026-11-16 planned row now partial: real embedded browser session written and run against a loopback server; not seen on a screen, full engine not embeddable
+F-SDK-63 2026-11-16 planned row now partial: device adapter written and run on the build host; account policy and audit sink not set by the shell, downloads not saved
+F-SDK-65 2026-11-16 planned row now partial: chat tools for the embedded browser switch run on the fake core; no Settings page control
+F-ROUTER-10 2026-11-16 planned row now partial: planned row now partial: parallel steps, tools for executors and the plan in the IDE's ROUTER panel; fake models and a fake provider server only, executors use free tools only
+F-VOICE-46 2026-11-16 planned row now partial: planned row now partial: chime, counters and the second check of the wake phrase; fakes only, never a real voice or engine
+F-GEMVOICE-15 2026-11-16 planned row now partial: planned row now partial: one account tool chain shared by the chat and the voice session; not tried in a live voice session
+F-CORE-31 2026-11-16 planned row now partial: planned row now partial: wake counters migrate through the two-phase library; temporary folders only, no installed schema-1 file exists yet
+F-SDK-164 2026-11-16 new partial row: the display list picture operation, tested natively and under node, not in a real browser
+F-SDK-160 2026-11-16 planned row now partial: CameraView widget with an in-memory port and a fake clock; no real screen or camera
+F-SDK-163 2026-11-16 planned row now partial: SAMPLE cameras tab over the in-memory and fake cores, not seen on a screen
+F-SDK-165 2026-11-16 planned row now partial: chat tools for the camera-views switch; no Settings row, shell sign not wired
+F-SKIN-04 2026-11-16 planned row now partial: font roles, cx.fonts, line height, letter spacing, tabular figures, per-script coverage; tested on the recording and pixel canvases
+F-SKIN-05 2026-11-16 planned row now partial: display list version 2 (textx, blur) in the Rust reader and writer, the pixel canvas, the engine and the browser renderer; browser harness not run
+F-SKIN-06 2026-11-16 planned row now partial: display_type tools and Settings keys for line height, letter spacing, tabular figures; tested on fakes
+F-SKIN-07 2026-11-16 planned row now partial: theming matrix tests (themes x size classes x text sizes x families) on the recording canvas
+F-SDK-102 2026-11-16 new partial row: embeddable terminal (TerminalView, Terminal facet with approvals through the core); not seen on a real screen
+F-SDK-104 2026-11-16 new partial row: embeddable text editor (EditorView over iyakki-edit, assistant hook as context and review); not seen on a real screen, not yet wired to the assistant component
+F-SDK-105 2026-11-16 new status: planned row built (editor assistant wiring), Impl 100, Test 50; not tried with a real model
+F-SDK-142 2026-11-16 planned row now partial: in-house FLAC decoder, Test 70 against ffmpeg on fixtures
+F-SDK-145 2026-11-16 planned row now partial: AudioView, Test 50 on the in-memory port, Manual needed
+F-SDK-146 2026-11-16 planned row now partial: SAMPLE Sound pane and the shell adapter, Test 50
+F-SDK-148 2026-11-16 new partial row: embedded media switch and chat tools, Test 50
+F-SDK-180 2026-11-16 new partial row: SDK developer guide and generated reference, Impl 100, Test 50
+F-SDK-181 2026-11-16 new partial row: tested recipes, Test 50 on fakes
+F-SDK-182 2026-11-16 new partial row: new-app improvements, Test 70
+F-SDK-183 2026-11-16 new partial row: SDK authoring skills, Test 50
+F-SDK-184 2026-11-16 new partial row: app-check, Test 50
+F-SDK-185 2026-11-16 new partial row: app-authoring benchmark, Test 50
+F-SDK-186 2026-11-16 new partial row: explaining failure messages, Test 70
+F-LAUNCH-24 2026-11-16 new status: planned row built (bar at the bottom, panels upward), Impl 100, Test 50, Manual needed (real screen)
+F-SDK-101 2026-11-16 new status: planned row built (file changes through the core with approvals), Impl 100, Test 50; not seen on a real screen
+F-SDK-106 2026-11-16 new partial row: tile home.list and home.read (read-only files in a WASM tile); not run by a real tile in a browser
+F-SDK-108 2026-11-16 new partial row: tile browser.* calls over the core's browser sessions; not run by a real tile in a browser
+F-SDK-143 2026-11-16 planned row now partial: Motion-JPEG in AVI video path, Test 70; other codecs missing
+F-SDK-144 2026-11-16 planned row now partial: internet addresses through the host policy, Test 70 on loopback
+F-SDK-147 2026-11-16 planned row now partial: media pictures through the camera lane image operation, Test 30
+F-SDK-149 2026-11-16 planned row now partial: MediaView, Test 50 on the in-memory port
+F-REL-11 2026-11-15 new partial row: layered tests and stamps, tested with fake trees and a fake cargo only, no end-to-end gate run yet
+F-SPLIT-08 2026-11-16 planned row now partial: the dev loop subcommand is written and tested with injected steps; not run against a device
+F-SDK-187 2026-11-16 new partial row: barcode encoders and BarcodeView, Test 70
+F-DEVMODE-30 2026-11-16 new partial row: trusted dev computer and Patches without asking, tested on a temporary folder only, not run on a device
+F-DEVMODE-31 2026-11-16 new partial row: chat tools of the trusted-computer switch, unit-tested only, not tried with a model
+F-DEVMODE-32 2026-11-16 new partial row: why Restarts without asking went off and the fixes, the Lenovo not re-tried yet
+F-SDK-188 2026-11-17 new partial row: app events engine and catalogue, Impl 100, Test 50
+F-SDK-189 2026-11-17 new partial row: AppEvents facet and its fake, Impl 100, Test 50
+F-SDK-190 2026-11-17 new partial row: local app events store and AgentCore wiring, Impl 90, Test 30
+F-SDK-191 2026-11-17 new partial row: SDK EventsPort, MemEvents and EventRouter, Impl 100, Test 50
+F-SDK-192 2026-11-17 new partial row: Settings page App events, Impl 100, Test 50
+F-SDK-193 2026-11-17 new partial row: chat tools app_events_*, Impl 100, Test 50
+F-SDK-194 2026-11-17 new partial row: SDK sample Events pane, adapter, recipe and app-check rules, Impl 100, Test 50
+F-SDK-195 2026-11-17 re-split from a planned row into a partial row: app event source connectivity, Impl 100, Test 50
+F-SDK-196 2026-11-17 re-split from a planned row into a partial row: sessions and vault, Impl 100, Test 50
+F-SDK-198 2026-11-17 re-split from a planned row into a partial row: display, accessibility and clock, Impl 100, Test 50
+F-SDK-199 2026-11-17 re-split from a planned row into a partial row: settings, flows, apps, updates, Impl 100, Test 50
+F-SDK-200 2026-11-17 re-split from a planned row into a partial row: files.changed with the file policy, Impl 100, Test 50
+F-SDK-201 2026-11-17 re-split from a planned row into a partial row: core-bound event actions, Impl 100, Test 50
+F-SDK-197 2026-11-17 re-split from a planned row into a partial row: devices, volumes and the scheduled backup, Impl 100, Test 50
+F-SDK-210 2026-11-17 new partial row: power, memory, heat, inbox and VPN event sources, Impl 100, Test 50
+F-SDK-212 2026-11-17 new partial row: app foreground and background events, Impl 100, Test 50
+F-SDK-213 2026-11-17 new partial row: app.permissions event, Impl 100, Test 50
+F-SDK-214 2026-11-17 new partial row: SDK side of app.permissions, Impl 100, Test 50
+F-SDK-215 2026-11-17 new partial row: sources of app.permissions, Impl 100, Test 50
+F-SDK-216 2026-11-17 new partial row: chat tool app_permissions_status, Impl 100, Test 50
+F-SDK-218 2026-11-18 new partial row: the person takes a permission away from an app, Impl 100, Test 50
+F-SDK-204 2026-11-18 planned row started (now partial): further app event sources, Impl 60, Test 30
+F-SDK-205 2026-11-18 planned row started (now partial): further app event sources, Impl 40, Test 30
+F-SDK-206 2026-11-18 planned row started (now partial): further app event sources, Impl 70, Test 30
+F-SDK-207 2026-11-18 planned row started (now partial): further app event sources, Impl 50, Test 30
+F-SDK-211 2026-11-18 planned row started (now partial): further app event sources, Impl 80, Test 30
+F-SDK-167 2026-11-18 planned row started (now partial): ONVIF PTZ, Impl 90, Test 50
+F-SDK-217 2026-11-18 planned row started (now partial): app.permissions pulled sources, Impl 55, Test 30
+F-BROW-100 2026-11-18 planned row now partial: code written (site_apps), Impl 85, Test 30
+F-BROW-101 2026-11-18 planned row now partial: protected-video message and detection written, Impl 60, Test 30
+F-VOICE-04 2026-11-18 planned row now partial: verification-only, code written elsewhere, Impl 100, Test 0
+F-VOICE-20 2026-11-18 planned row now partial: verification-only, code written elsewhere, Impl 100, Test 0
+F-VOICE-24 2026-11-18 planned row now partial: verification-only, code written elsewhere, Impl 100, Test 0
+F-BROW-64 2026-11-18 planned row now partial: code written under F-BROW-62/80, real playback open, Impl 100, Test 30
+F-SDK-208 2026-11-18 planned row re-rated (now partial): the core timer thread exists, Impl 60, Test 50
+F-SDK-103 2026-11-18 planned row now partial: the whole-session terminal on a pseudo-terminal is written, vi, top and ssh not run, Impl 100, Test 50
+F-SDK-107 2026-11-18 planned row now partial: home.change with the answer taken in the page is written, no real tile run, Impl 100, Test 50
+F-SDK-32 2026-11-18 planned row now partial: the per-app k3s namespace backend is written, no real cluster run, Impl 100, Test 50
+F-SDK-202 2026-11-18 planned row now partial: app events to WASM tiles (ABI 3) and client devices (contract 0.3) written, no real tile or client run, Impl 100, Test 50
+F-SDK-203 2026-11-18 planned row now partial: usb, sharing, location, storage quota and wake events written, no real device run, Impl 100, Test 50
+F-SDK-209 2026-11-18 planned row now partial: three QEMU session checks written, none run, Impl 100, Test 0
+F-BACKUP-06 2026-11-18 planned row now partial: incremental chain code written, Impl 70, Test 50
+F-BACKUP-04 2026-11-18 planned row now partial: share flow with fake mounter, Impl 65, Test 50
+F-BACKUP-05 2026-11-18 planned row now partial: system area, Impl 70, Test 50
+F-SDK-35 2026-11-18 planned row now partial: display list version 3 written, Impl 100, Test 50
+F-SDK-84 2026-11-18 new partial row: tile assistant.* calls over the core's embedded assistant; not run by a real tile in a browser
+F-SDK-85 2026-11-18 planned row now partial: assistant.* over the UI socket with pushed events, Impl 100, Test 50; no real UI program outside the repository
+F-SDK-166 2026-11-18 planned row now partial: cameras domain of the tile call and cameras.* over the UI socket, Impl 100, Test 50; no real camera
+F-WASM-16 2026-11-18 planned row now partial: bundle format for tile pictures (app.json images, install images), Impl 100, Test 50; not seen on a real screen
+F-WASM-17 2026-11-18 planned row now partial: shell renderer path and pictures.load route, Impl 100, Test 50; not seen on a real screen
+F-WASM-07 2026-11-18 planned row now partial: pause-in-process meaning built (D-WASM-07), Impl 100, Test 70; the serialisable meaning stays an owner choice
+F-WASM-15 2026-11-18 planned row now partial: images for text, passive-data and imported-memory guests, restore and incremental images, Impl 100, Test 70
+F-SDK-64 2026-11-18 planned row now partial: tile browser calls (F-SDK-108) and the client engine drawing a core session's frame, Impl 100, Test 50; not on a real screen
+F-ROUTER-40 2026-11-18 planned row now partial: a step's tool that asks is a card through the core, Impl 100, Test 50
+F-FLEET-10 2026-11-18 planned row now partial: relay transport and Settings controls written against FakeRelay, Impl 90, Test 50
+F-LAUNCH-22 2026-11-18 planned row now partial: built with the default of its D-LAUNCH decision, Impl 100, Test 50
+F-LAUNCH-25 2026-11-18 planned row now partial: built with the default of its D-LAUNCH decision, Impl 50, Test 50
+F-HOTSPOT-22 2026-11-18 planned row now partial: SAE exchange, frame driver and AKM-SAE handshake written with fakes, Impl 80, Test 30
+F-SYS-10 2026-11-18 planned row now partial: conntrack per-process bytes and ssh login owner written with made-up /proc, Impl 85, Test 30
+F-LINAPP-19 2026-11-18 planned row now partial: signed Release verification written with throw-away key fixtures, Impl 60, Test 30
+F-LINAPP-18 2026-11-18 planned row now partial: device grants for sandboxes written, tested on stand-ins, Impl 80, Test 30
+F-WEBSVC-15 2026-11-18 planned row now partial: headless image variant and size script written, never built, Impl 80, Test 0
+F-KBD-22 2026-11-18 planned row now partial: Fn-hold cycling written and tested with fakes, Impl 100, Test 50
+F-LOSS-06 2026-11-18 planned row now partial: hardware recipe and judging code written, never run on a device, Impl 100, Test 30
+F-REL-12 2026-11-18 new partial row: flaky-test cure (testkit, audit, ratchet, hunter), Impl 100, Test 70
+F-SDK-34 2026-11-18 planned row now partial: pinch event, dock.open, on-screen keyboard from wants_keyboard and pane placement written, Impl 80, Test 30
+F-CAM-20 2026-11-18 planned row now partial: code written, Impl 85, Test 30
+F-MEDIA-12 2026-11-18 planned row now partial: code written, Impl 85, Test 30
+F-BROX-22 2026-11-18 planned row now partial: code written, Impl 90, Test 50
+F-VOICE-45 2026-11-18 planned row now partial: code written, Impl 85, Test 30
+F-GEMVOICE-40 2026-11-18 planned row now partial: code written, Impl 40, Test 50
+F-VOICE-61 2026-11-18 planned row now partial: code written, Impl 60, Test 50
+F-VOICE-60 2026-11-18 planned row now partial: code written, Impl 55, Test 30
+F-RADIO-12 2026-11-18 planned row now partial: code written, Impl 25, Test 30
+F-RADIO-16 2026-11-18 planned row now partial: code written, Impl 15, Test 30
+F-MEDIA-11 2026-11-18 planned row now partial: code written, Impl 85, Test 50
+F-BROX-21 2026-11-18 planned row now partial: code written, Impl 70, Test 30
+F-SDK-209 2026-11-18 planned row now partial: code written, Impl 100, Test 0 (checks written, none run yet)
+F-BOOT-12 2026-11-18 planned row now partial: code written (formats and firmware verdict), Impl 30, Test 30

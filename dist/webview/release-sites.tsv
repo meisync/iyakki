@@ -1,0 +1,11 @@
+# The per-release list of web apps checked in the full engine (F-BROW-33). Tab separated; lines starting with # are comments.
+# name	start address	domains the run may touch (comma)	text that shows the page loaded and drew its sign-in screen	notes
+# The texts are first guesses for a signed-out visit; the first run on a device settles them (change them here, with the date).
+# No sign-in is made by this list: nothing here needs an account, and no real account may be used by it.
+Gmail	https://mail.google.com/	mail.google.com,accounts.google.com	Sign in	Google may show its "this browser may not be secure" page to an engine it does not know: that is a finding, not a pass.
+Google Docs	https://docs.google.com/document/	docs.google.com,accounts.google.com	Sign in	Same sign-in screen as Gmail.
+Google Sheets	https://docs.google.com/spreadsheets/	docs.google.com,accounts.google.com	Sign in	Same sign-in screen as Gmail.
+Outlook	https://outlook.live.com/	outlook.live.com,login.live.com,login.microsoftonline.com,www.microsoft.com	Sign in	The address redirects through several hosts.
+Notion	https://www.notion.so/login	www.notion.so,notion.so	Continue	A heavy single-page app: the sign-in form is drawn by scripts.
+Slack	https://slack.com/signin	slack.com,www.slack.com	Sign in	The page asks for a workspace address first.
+Proton Mail	https://account.proton.me/login	account.proton.me,proton.me	Sign in	Not on the owner's list: a second mail app that is not Google or Microsoft.

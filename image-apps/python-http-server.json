@@ -1,0 +1,40 @@
+{
+  "id": "python-http-server",
+  "name": "Python file server (example)",
+  "example": true,
+  "description": "EXAMPLE. Python's built-in http.server serving a folder listing on port 8000 (Alpine-based Python image). A starting point for your own small web app.",
+  "kind": "container",
+  "image": "docker.io/library/python:3.12-alpine@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "command": [
+    "python",
+    "-m",
+    "http.server",
+    "8000",
+    "--directory",
+    "/srv"
+  ],
+  "ports": [
+    {
+      "name": "http",
+      "port": 8000
+    }
+  ],
+  "env": [
+    {
+      "name": "PYTHONDONTWRITEBYTECODE",
+      "value": "1"
+    }
+  ],
+  "volumes": [
+    {
+      "name": "srv",
+      "path": "/srv",
+      "size_mb": 16
+    }
+  ],
+  "licence": "PSF-2.0 (Python), MIT (Alpine packages vary)",
+  "homepage": "https://www.python.org",
+  "run_as_user": 65534,
+  "memory_mb": 128,
+  "cpu_milli": 300
+}

@@ -1,0 +1,35 @@
+#!/bin/bash
+# mcargo WORKTREE_DIR CARGO_ARGS...   like rcargo, on a Mac (aarch64 macOS): compile checks and unit tests of the crates that build there.
+# Picks the least loaded of MAC_BUILD_HOSTS (a list of user@host in ~/.config/iyakki/buildhosts.env) unless MAC_HOST=user@host is set.
+set -u
+[ -f "${IYAKKI_BUILDHOSTS_ENV:-$HOME/.config/iyakki/buildhosts.env}" ] && . "${IYAKKI_BUILDHOSTS_ENV:-$HOME/.config/iyakki/buildhosts.env}"
+MAC_ROOT=${MAC_BUILD_ROOT:-iyakki-work}
+pick() {
+  best=""; bestl=999999
+  for h in ${MAC_BUILD_HOSTS:?set MAC_BUILD_HOSTS in ~/.config/iyakki/buildhosts.env}; do
+    l=$(ssh -o BatchMode=yes -o ConnectTimeout=4 $h "sysctl -n vm.loadavg | awk '{print int(\$2*100)}'; sysctl -n hw.ncpu" 2>/dev/null | tr '\n' ' ')
+    [ -z "$l" ] && continue
+    set -- $l; load=$1; cpu=$2; score=$((load / cpu))
+    if [ "$score" -lt "$bestl" ]; then bestl=$score; best=$h; fi
+  done
+  echo "$best"
+}
+# mcargo --retire WORKTREE_DIR [--host user@host]: the worktree is finished: remove its source copy and target folder on BOTH Macs
+if [ "${1:-}" = "--retire" ]; then
+  n=$(basename "$(cd "${2:?worktree dir}" && pwd)")
+  case "$n" in ""|*/*|.|..) echo "mcargo: bad name" >&2; exit 2;; esac
+  for h in ${MAC_BUILD_HOSTS:?set MAC_BUILD_HOSTS in ~/.config/iyakki/buildhosts.env}; do ssh -o BatchMode=yes -o ConnectTimeout=6 $h "pkill -u \$(id -u) -f '[m]-target/$n/'; true" >/dev/null 2>&1; sleep 1; ssh -o BatchMode=yes -o ConnectTimeout=6 $h "rm -rf \$HOME/$MAC_ROOT/m-$n \$HOME/$MAC_ROOT/m-target/$n; echo retired $n" 2>/dev/null; done
+  exit 0
+fi
+HOST=${MAC_HOST:-$(pick)}
+[ -z "$HOST" ] && { echo "mcargo: no Mac answers" >&2; exit 97; }
+dir=$(cd "${1:?worktree dir}" && pwd); shift
+name=$(basename "$dir")
+RH=$(ssh -o BatchMode=yes -o ConnectTimeout=10 $HOST 'echo $HOME') || exit 97
+remote=$RH/$MAC_ROOT/m-$name
+target=$RH/$MAC_ROOT/m-target/$name
+ssh -o BatchMode=yes -o ConnectTimeout=10 $HOST "mkdir -p $remote $target" || exit 97
+rsync -a --delete -e "ssh -o BatchMode=yes" --exclude target --exclude '/.git' --exclude .kube "$dir"/ $HOST:$remote/ || exit 98
+q=$(printf ' %q' "$@")
+echo "mcargo: on $HOST" >&2
+ssh -o BatchMode=yes $HOST "export PATH=\$HOME/.cargo/bin:\$PATH CARGO_TARGET_DIR=$target CARGO_INCREMENTAL=0; cd $remote && cargo$q"

@@ -1,0 +1,77 @@
+[package]
+name = "iyakki-shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dev-dependencies]
+iyakki-testkit = { path = "../iyakki-testkit" }
+# the unit tests and examples build the real wiring themselves (src/wiring.rs `test_wire`, examples/common); the program gets it from iyakki-compose
+iyakki-agent = { path = "../iyakki-agent" }
+iyakki-apps = { path = "../iyakki-apps", features = ["testing"] }
+iyakki-core-fake = { workspace = true }
+iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }
+iyakki-proxy = { path = "../iyakki-proxy", features = ["testcerts"] }
+iyakki-rtsp = { path = "../iyakki-rtsp" }
+# assembles the text form of a tiny test tile (already in the tree through wasmtime; dev only)
+wat = "1"
+
+[dependencies]
+iyakki-apps = { path = "../iyakki-apps" }
+iyakki-clock.workspace = true
+iyakki-cloudmode.workspace = true
+iyakki-shared.workspace = true
+iyakki-agent-api.workspace = true
+iyakki-filescope.workspace = true
+iyakki-proxy = { path = "../iyakki-proxy" }
+iyakki-link.workspace = true
+iyakki-enchome.workspace = true
+iyakki-battery.workspace = true
+iyakki-core-api = { workspace = true }
+iyakki-core-local = { workspace = true }
+iyakki-vt = { path = "../iyakki-vt" }
+iyakki-uikit = { path = "../iyakki-uikit" }
+iyakki-tile-api = { path = "../iyakki-tile-api" }
+iyakki-tile-abi = { path = "../iyakki-tile-abi" }
+iyakki-tile-host = { path = "../iyakki-tile-host" }
+iyakki-tile-usage = { path = "../iyakki-tile-usage" }
+iyakki-tile-radio = { path = "../iyakki-tile-radio" }
+iyakki-tile-calendar = { path = "../iyakki-tile-calendar" }
+iyakki-tile-remotefiles = { path = "../iyakki-tile-remotefiles" }
+iyakki-tile-cameras = { path = "../iyakki-tile-cameras" }
+iyakki-tile-pdf = { path = "../iyakki-tile-pdf" }
+iyakki-vpn = { path = "../iyakki-vpn" }
+iyakki-sec.workspace = true
+iyakki-accounts = { path = "../iyakki-accounts" }
+iyakki-storage.workspace = true
+iyakki-zram.workspace = true
+iyakki-fw.workspace = true
+iyakki-usb = { path = "../iyakki-usb" }
+iyakki-edit.workspace = true
+iyakki-hwinfo.workspace = true
+iyakki-drivers.workspace = true
+iyakki-devctl.workspace = true
+iyakki-web.workspace = true
+iyakki-pdf.workspace = true
+iyakki-js.workspace = true
+iyakki-netscan.workspace = true
+iyakki-webview.workspace = true
+iyakki-rfb.workspace = true
+iyakki-ledger.workspace = true
+iyakki-data.workspace = true
+iyakki-flow.workspace = true
+iyakki-flowsx.workspace = true
+iyakki-disksx.workspace = true
+iyakki-memx.workspace = true
+iyakki-extagentx.workspace = true
+iyakki-schema.workspace = true
+argon2 = { version = "0.5", features = ["std", "rand"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tiny-skia = "0.11"
+fontdue = "0.9"
+rustybuzz = "0.20"
+unicode-bidi = "0.3"
+libc = "0.2"
+thiserror.workspace = true
+log.workspace = true

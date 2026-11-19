@@ -1,0 +1,66 @@
+# IYAKKI on a Mac (Apple silicon)
+
+Three ways, from least to most work. Models run best in **Ollama on the Mac itself** (it uses the GPU through Metal and the
+Mac's unified memory); IYAKKI then talks to it over the network.
+
+## 1. The desktop window, natively on macOS  (status: compiles and runs on an Apple silicon Mac mini, with limits; KI-078)
+
+```
+xcode-select --install                                   # compiler and linker
+curl https://sh.rustup.rs -sSf | sh                      # Rust
+./run.sh window                                          # builds and opens the IYAKKI window
+```
+
+The window shows only **virtual disks** (files IYAKKI makes in `~/.local/share/iyakki-dev/disks`, `./run.sh disk add 8G`), never
+your Mac's drives, and keeps its accounts and settings in `~/.local/share/iyakki-dev`.
+
+**What is checked.** `./run.sh check-macos` (`dist/release/check-macos.sh`, also a WARN row "macOS cross-check" in `./run.sh alpha-check`)
+runs `cargo check` for `aarch64-apple-darwin` (and `x86_64-apple-darwin` when that Rust target is installed) on the agent, the shell, the
+core (window feature set and default set) and the window binary `iyakki-desktop`. That proves the code *compiles* for macOS; nothing is
+linked or started, so it says nothing about behaviour. The Linux-only pieces are fenced with `cfg(target_os = "linux")` and have a stub that
+answers "not available on this OS": mounts, `reboot`/`power off` and the RAM-root jail for k3s (`boot.rs`, `cluster.rs`), changing a network
+link (`iyakki-devctl`). Job and window-lock liveness use `ps`/`kill(pid, 0)` instead of `/proc`. The framebuffer and evdev readers
+compile everywhere but find no `/dev/fb0` or `/dev/input` on a Mac, so they stay unused in the window.
+
+**Bare-metal drivers are Linux only** (framebuffer, evdev, GPU/Wi-Fi/audio drivers, boot as init, data-disk mounting, zram/swap). On a Mac the
+story is the window (and Ollama), not booting IYAKKI; for the Mac mini 2014 booting from a stick see `MAC-HARDWARE.md`.
+
+**Run on a Mac (2026-11-11, alpha.3).** The window was started on a Mac mini (arm64) with only Rust installed, and a native AudioQueue sink carries the mixer's sound (the system consumed every frame queued; that it is *heard* needs a person listening). The window is always in desktop mode, the browser is the built-in reader (the full engine is a Linux helper), and the state is under `~/Library/Application Support/iyakki-dev`. Not verified: sound heard, a live radio stream, a live web page, mouse and keyboard in the window, Retina scaling. Limited on a Mac: Linux apps, VPN, hotspot, developer-mode patching, USB, Bluetooth, cameras, real disk management, AAC and HLS radio, the microphone, the wake phrase. The list in KI-078 of `KNOWN-ISSUES.md` is the current one; the paragraphs below were written before the run and describe what was expected.
+
+What is expected to work: every tile that is plain code (chat, RAG, editor, browser, calendar, usage, skills, MCP). What is Linux-specific and must degrade cleanly, and was not separately checked on a Mac:
+
+* `/proc` and `/sys` (SYSTEM tile, hardware tiles) are not there on macOS: those pages show zeros or "not available".
+* `ip`, `aplay`, `arecord` (network and sound settings, voice, the radio's sound) have no macOS equivalents wired in yet.
+* mounting a data disk is Linux-only (the storage code refuses it with a clear message; the virtual disks are never mounted).
+* the container cluster (k3s) needs Linux and root, so `sandbox_run` is not available.
+
+If the build fails on your Mac, the first error is the most useful thing to send back: the pieces that touch Linux directly are
+listed in `BOUNDARY.md`.
+
+## 2. Models through Ollama on the Mac
+
+1. Install Ollama from <https://ollama.com/download> (the Mac app). It listens on `127.0.0.1:11434`.
+2. Pull a model in the Ollama app or with `ollama pull qwen3:8b`.
+3. Sign in to IYAKKI as an administrator. IYAKKI looks for an Ollama on `127.0.0.1:11434` at sign-in and adds it to
+   Settings → Models as **ollama-local**; choose it and a model for the chat.
+4. Pictures: Ollama's image models (for example `x/z-image-turbo`, `x/flux2-klein`) only run on macOS today, so this is also the
+   way to use `generate_image` from the chat.
+
+NET SCAN finds Ollama servers elsewhere on your network too. AMD's Lemonade Server is Windows/Linux software for Ryzen AI machines,
+so it does not run on a Mac; a Lemonade on another machine is found by NET SCAN or added with the Auto-detect type (see
+`ADMIN-GUIDE.md`, *Lemonade*).
+
+## 3. IYAKKI in a virtual machine on the Mac
+
+Use the ARM image (`./run.sh build-arm`, then `./run.sh vm-arm`, or UTM with the `iyakki-aarch64.img` disk image). A virtual
+machine cannot use the Mac's GPU, so models should still run in the Mac's Ollama:
+
+* With QEMU's default networking the Mac is reachable from the VM as `10.0.2.2`: add a provider in Settings → Models of kind
+  Ollama with the address `http://10.0.2.2:11434`.
+* With UTM's shared network, use the Mac's own address and start Ollama with `OLLAMA_HOST=0.0.0.0` so it listens beyond the
+  loopback (do this only on a network you trust: Ollama has no sign-in).
+
+## Booting a Mac from a USB stick
+
+Not possible on M-series Macs: they only start operating systems that Apple's boot chain accepts. Use the window or a VM.
+(Intel Macs can boot the x86-64 ISO like any PC, with the usual caveats about their firmware.)

@@ -1,0 +1,2 @@
+{"at":1700000010,"app":"camera-notes","person":"amy","device":"dev-000001","capability":"camera.view","target":"front","allowed":true,"reason":""}
+{"at":1700000020,"app":"radio","person":"amy","device":"dev-000001","capability":"net.connect","target":"radio.example.org:443","allowed":false,"reason":"revoked"}

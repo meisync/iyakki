@@ -1,0 +1,24 @@
+[package]
+name = "iyakki-ui-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The UI SDK (docs/development/UI-SDK.md): what an app is written against so that it draws on the device, in a window, in a browser tab
+# or in a client. The `Canvas` trait, the display list, size classes, gestures, and the desktop parts (Look, dock, wallpaper, screens,
+# views). Depends on `iyakki-uikit` only (the Look and the pixel canvas); never on the agent, the shell or the core: an SDK app reaches the
+# machine through ports it is handed (the core rule), so the crate has no file, socket or device access of its own.
+
+[dependencies]
+iyakki-uikit = { path = "../iyakki-uikit", optional = true }
+# the editing engine (a text buffer with undo, the highlighter, the line diff and the assistant's edit proposals): plain Rust, no dependencies, no I/O
+iyakki-edit = { path = "../iyakki-edit", optional = true }
+
+[features]
+# The pixel side (Look, dock, wallpaper, the host, the raster canvas, the input session). Off, the crate is the display list alone
+# (canvas, geometry, list, events, size classes, gestures): what the client WASM engine links (F-SDK-22), with no fonts or rasteriser.
+default = ["uikit"]
+uikit = ["dep:iyakki-uikit", "dep:iyakki-edit"]
+
+[dev-dependencies]
+iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }

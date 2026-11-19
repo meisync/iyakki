@@ -1,0 +1,11 @@
+[package]
+name = "iyakki-netscan"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Finds the machines on the local network and what they run (Ollama and other model servers, cameras, media servers, printers…), from their own unauthenticated answers."
+
+[dependencies]
+libc = "0.2"
+serde_json = "1"
+ureq = { version = "3", default-features = false, features = ["rustls"] }

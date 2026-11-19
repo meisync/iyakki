@@ -1,0 +1,24 @@
+{
+  "default": "board",
+  "devices": [
+    {
+      "account": "admin",
+      "addr": "",
+      "fingerprint": "abababababababababababababababababababababababababababababababab",
+      "host": "192.0.2.20",
+      "name": "board",
+      "paired_at": 1700000000,
+      "port": 7979
+    },
+    {
+      "account": "",
+      "addr": "",
+      "fingerprint": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "host": "192.0.2.21",
+      "name": "mac",
+      "paired_at": 0,
+      "port": 7979
+    }
+  ],
+  "schema": 1
+}

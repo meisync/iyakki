@@ -1,0 +1,17 @@
+<!doctype html><meta charset=utf-8><title>MEDIA-TEST enumerate</title><link rel=stylesheet href=style.css>
+<h1>enumerateDevices</h1><div id=result>running</div><pre id=list></pre>
+<script src=common.js></script>
+<script>
+// Expected with mock devices: after one getUserMedia the list has labels: at least one audioinput "Mock audio device N" and one videoinput "Mock video device N".
+// With a real USB webcam and headset: at least one audioinput and one videoinput with a non-empty label.
+mediaTest.run('enumerate', 20000, async function () {
+  var s = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+  var list = await navigator.mediaDevices.enumerateDevices();
+  s.getTracks().forEach(function (t) { t.stop(); });
+  document.getElementById('list').textContent = list.map(function (d) { return d.kind + ' | ' + d.label; }).join('\n');
+  var a = list.filter(function (d) { return d.kind === 'audioinput'; }), v = list.filter(function (d) { return d.kind === 'videoinput'; });
+  if (!a.length || !v.length) throw new Error('audioinput ' + a.length + ', videoinput ' + v.length);
+  if (!a[0].label || !v[0].label) throw new Error('empty labels after a grant');
+  return a.length + ' audio, ' + v.length + ' video: ' + a[0].label + ' / ' + v[0].label;
+});
+</script>

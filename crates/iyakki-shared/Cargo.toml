@@ -1,0 +1,54 @@
+[package]
+name = "iyakki-shared"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pure data and logic the UI and the agent share (release info, screen saver, layout, git site, inbox, live mode), split out of iyakki-agent for F-SPLIT-03."
+
+[dependencies]
+miniz_oxide = "0.8"
+ruzstd = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+iyakki-sec = { workspace = true }
+iyakki-web = { workspace = true }
+iyakki-sshfs = { workspace = true }
+iyakki-clockfloor = { workspace = true }
+log.workspace = true
+iyakki-extagentx = { workspace = true }
+iyakki-battery = { workspace = true }
+iyakki-vpn = { path = "../iyakki-vpn" }
+iyakki-schema = { workspace = true }
+iyakki-netscan = { workspace = true }
+iyakki-devctl = { workspace = true }
+iyakki-wasm = { workspace = true }
+iyakki-vfs = { workspace = true }
+zeroize = "1"
+sha2 = "0.10"
+ed25519-dalek = "3"
+argon2 = { version = "0.5", features = ["std"] }
+chacha20poly1305 = "0.10"
+iyakki-proxy = { path = "../iyakki-proxy" }
+thiserror.workspace = true
+iyakki-clock = { workspace = true }
+iyakki-storage.workspace = true
+iyakki-core-api = { workspace = true }
+iyakki-link = { workspace = true }
+iyakki-fw = { workspace = true }
+libc = "0.2"
+iyakki-archive = { workspace = true }
+iyakki-openpgp = { workspace = true }
+iyakki-webview = { workspace = true }
+iyakki-wordtime = { workspace = true }
+iyakki-filescope = { workspace = true }
+iyakki-cloudmode = { workspace = true }
+iyakki-hotspot = { path = "../iyakki-hotspot" }
+iyakki-drivers = { workspace = true }
+iyakki-hwinfo = { workspace = true }
+
+[features]
+# test-only hooks for the tests of other crates (the signature skip of the Linux apps download tests); never on in a product build
+testing = []
+
+[dev-dependencies]
+iyakki-testkit = { path = "../iyakki-testkit" }

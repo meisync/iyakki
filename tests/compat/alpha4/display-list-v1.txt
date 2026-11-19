@@ -1,0 +1,13 @@
+iyakki-display-list 1 300 200
+grad 0 0 300 200 0b1020ff 05070dff
+text 10 10 18 e8ecf4ff bold Hello%20Probe
+clip 0 40 300 60
+rrect 5 45 290 50 8 1c2233ff
+hit 5 45 290 50 7 item Card
+endclip
+outline 10 120 140 24 8 1 3a4256ff
+line 0 0 10 10 2 ffffffff
+shadow 10 120 140 24 8 6 00000080
+rect 1 2 3 4 ff000080
+text 4 5 12 ffffffff mono ~
+hit 10 120 140 24 9 button Press%20me

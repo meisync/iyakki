@@ -1,0 +1,95 @@
+# Layer of each workspace crate, for dist/scripts/test-affected.py and the layered test gate (dist/scripts/testlayers.py). First matching glob wins; a crate with no match is an ERROR.
+# base: libraries below the core. core: the core and what only the core side uses. agent: the agent program (chat, tools, services). ui: the shell and the drawing/tile interface.
+# apps: the tile crates. tools: host-side tools that are not part of the running system (release checker, store server, SDK emulator, lint).
+# First draft: while the shell program holds the core, a ui change still rebuilds the one `iyakki` program (see dist/buildroot/layers.txt).
+iyakki-tile-api   ui
+iyakki-tile-kit   ui
+iyakki-tile-*     apps
+iyakki-shell      ui
+iyakki-apps       apps
+iyakki-uikit      ui
+iyakki-ui-sdk     ui
+iyakki-app-sample apps
+iyakki-sdk-tile   apps
+iyakki-app-markdown apps
+iyakki-ui-preview ui
+iyakki-ui-client  ui
+iyakki-ui-rpc     ui
+iyakki-ui-bin     ui
+iyakki-web        ui
+iyakki-core*      core
+iyakki-compose    core   # the composition root: names both the agent and the UI (alpha.6 split F)
+iyakki-agent      agent
+iyakki-remote     core
+iyakki-memx        core   # the knowledge base, embedder and history (F-SPLIT-03), below the agent
+iyakki-disksx      core   # the disk engine (F-SPLIT-03), below the agent
+iyakki-flowsx      core   # pure FLOWS parts (F-SPLIT-03), below the agent; same layer as the engine it builds on
+iyakki-flow*      core
+iyakki-usb        core
+iyakki-connect    core
+
+# host-side tools
+iyakki-relcheck     tools
+iyakki-store-server tools
+iyakki-sdk-emulator tools
+iyakki-lint         tools
+
+# Everything below is the base layer, named one by one on purpose: there is NO catch-all. A workspace crate with no line here fails
+# `python3 dist/scripts/testlayers.py check` (and the test layer_split), so a new crate must be given a layer when it is added.
+iyakki-accounts           base
+iyakki-archive            base
+iyakki-battery            base
+iyakki-bindelta           base
+iyakki-camdetect          base
+iyakki-client-engine      base
+iyakki-clock              base
+iyakki-testkit            base   # test support only (locks, ports, waits, gated children); a dev-dependency, never shipped
+iyakki-clockfloor         base
+iyakki-data               base
+iyakki-devctl             base
+iyakki-diskcrypt          base
+iyakki-drivers            base
+iyakki-edit               base
+iyakki-edit-wasm          base
+iyakki-extagentx          base
+iyakki-enchome            base
+iyakki-filter             base
+iyakki-fw                 base
+iyakki-hotspot            base
+iyakki-hw                 base
+iyakki-hwinfo             base
+iyakki-js                 base
+iyakki-ledger             base
+iyakki-link               base
+iyakki-macrecovery        base
+iyakki-mem                base
+iyakki-netscan            base
+iyakki-openpgp            base
+iyakki-pdf                base
+iyakki-proxy              base
+iyakki-qr                 base
+iyakki-regex              base
+iyakki-rfb                base
+iyakki-rtsp               base
+iyakki-schema             base
+iyakki-sec                base
+iyakki-sshfs              base
+iyakki-stage1             base
+iyakki-storage            base
+iyakki-swarm              base
+iyakki-vfs                base
+iyakki-volcrypt           base
+iyakki-vpn                base
+iyakki-vt                 base
+iyakki-wake               base
+iyakki-wasm               base
+iyakki-webview            base
+iyakki-wordtime           base
+iyakki-zram               base
+iyakki-audiodec           base
+iyakki-cloudmode          base
+iyakki-filescope          base
+iyakki-shared             base
+iyakki-dash               base
+iyakki-webcrypto          base
+iyakki-agent-api          base

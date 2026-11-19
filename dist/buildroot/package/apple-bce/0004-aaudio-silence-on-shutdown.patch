@@ -1,0 +1,68 @@
+From: IYAKKI <noreply@iyakki.invalid>
+Subject: [PATCH] aaudio: stop playback and zero its ring on shutdown and remove
+
+* The T2 plays a stream's DMA ring (16640 frames) in a loop until it is told to stop. When the OS powered off or restarted with a
+  playback stream still running, nothing stopped it, and the speaker repeated the last chunk of sound until the machine was
+  really off. The aaudio PCI driver now has a .shutdown callback, and aaudio_remove() does the same first: for every output
+  stream that was started it sends the stop-IO command and zeroes the ring (memset_io), so even if the stop is ignored the
+  chip loops silence.
+* Playback only (capture streams are never touched: opening them has hung the T2), and a stream that never started is left
+  alone, so it is safe when the device was never used. IYAKKI's userland also lowers the volume and ends the players first
+  (iyakki-agent quiet.rs); this is the safety net for anything it missed.
+
+Signed-off-by: IYAKKI
+---
+--- a/audio/audio.c
++++ b/audio/audio.c
+@@ -153,12 +153,43 @@
+ 
+ 
+ 
++/* The T2 plays a stream's DMA ring in a loop until it is told to stop: if the system goes down (or this driver is removed) while
++   a playback stream runs, the speaker repeats the last samples until the power is really gone. Stop every started playback
++   stream and zero its ring. Playback only: opening capture has hung the T2. Does nothing for a stream that never started. */
++static void aaudio_silence_outputs(struct aaudio_device *aaudio)
++{
++    struct aaudio_subdevice *sdev;
++    struct aaudio_stream *strm;
++    size_t i;
++
++    if (!aaudio)
++        return;
++    list_for_each_entry(sdev, &aaudio->subdevice_list, list) {
++        for (i = 0; i < sdev->out_stream_cnt; i++) {
++            strm = &sdev->out_streams[i];
++            if (!READ_ONCE(strm->started) || !strm->buffer_cnt || !strm->buffers || !strm->buffers[0].ptr)
++                continue;
++            if (aaudio_cmd_stop_io(aaudio, sdev->dev_id))
++                dev_warn(aaudio->dev, "aaudio: stop-IO failed for %s while silencing\n", sdev->uid);
++            memset_io(strm->buffers[0].ptr, 0, strm->buffers[0].size);
++            WRITE_ONCE(strm->started, 0);
++            dev_info(aaudio->dev, "aaudio: silenced output of %s on shutdown\n", sdev->uid);
++        }
++    }
++}
++
++static void aaudio_shutdown(struct pci_dev *dev)
++{
++    aaudio_silence_outputs(pci_get_drvdata(dev));
++}
++
+ static void aaudio_remove(struct pci_dev *dev)
+ {
+     struct aaudio_subdevice *sdev;
+     struct aaudio_device *aaudio = pci_get_drvdata(dev);
+     size_t i;
+ 
++    aaudio_silence_outputs(aaudio);
+     list_for_each_entry(sdev, &aaudio->subdevice_list, list) {
+         for (i = 0; i < sdev->in_stream_cnt; i++)
+             if (sdev->in_streams[i].period_work_ready)
+@@ -667,6 +698,7 @@
+         .id_table = aaudio_ids,
+         .probe = aaudio_probe,
+         .remove = aaudio_remove,
++        .shutdown = aaudio_shutdown,
+         .driver = {
+                 .pm = &aaudio_pci_driver_pm
+         }

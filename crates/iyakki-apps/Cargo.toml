@@ -1,0 +1,86 @@
+[package]
+name = "iyakki-apps"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dev-dependencies]
+iyakki-testkit = { path = "../iyakki-testkit" }
+iyakki-agent = { path = "../iyakki-agent" }
+iyakki-core-fake = { workspace = true }
+iyakki-uikit = { path = "../iyakki-uikit", features = ["testing"] }
+iyakki-proxy = { path = "../iyakki-proxy", features = ["testcerts"] }
+iyakki-rtsp = { path = "../iyakki-rtsp" }
+
+[features]
+# Test seams the shell's own tests use (the `tests` helper modules, test-only trait methods). Never on in a product build.
+testing = ["dep:iyakki-core-fake", "iyakki-uikit/testing"]
+
+[dependencies]
+iyakki-clock.workspace = true
+iyakki-camdetect.workspace = true
+iyakki-cloudmode.workspace = true
+iyakki-shared.workspace = true
+iyakki-dash.workspace = true
+iyakki-agent-api.workspace = true
+zeroize = "1"
+iyakki-filescope.workspace = true
+iyakki-proxy = { path = "../iyakki-proxy" }
+iyakki-diskcrypt.workspace = true
+iyakki-sshfs.workspace = true
+iyakki-wordtime.workspace = true
+iyakki-enchome.workspace = true
+iyakki-battery.workspace = true
+iyakki-qr.workspace = true
+iyakki-core-api = { workspace = true }
+iyakki-core-local = { workspace = true }
+iyakki-vt = { path = "../iyakki-vt" }
+iyakki-uikit = { path = "../iyakki-uikit" }
+iyakki-tile-api = { path = "../iyakki-tile-api" }
+iyakki-tile-abi = { path = "../iyakki-tile-abi" }
+iyakki-tile-host = { path = "../iyakki-tile-host" }
+iyakki-tile-usage = { path = "../iyakki-tile-usage" }
+iyakki-tile-radio = { path = "../iyakki-tile-radio" }
+iyakki-tile-calendar = { path = "../iyakki-tile-calendar" }
+iyakki-tile-remotefiles = { path = "../iyakki-tile-remotefiles" }
+iyakki-tile-cameras = { path = "../iyakki-tile-cameras" }
+iyakki-tile-pdf = { path = "../iyakki-tile-pdf" }
+iyakki-ui-sdk = { path = "../iyakki-ui-sdk" }
+iyakki-app-sample = { path = "../iyakki-app-sample" }
+iyakki-app-markdown = { path = "../iyakki-app-markdown" }
+iyakki-vpn = { path = "../iyakki-vpn" }
+iyakki-sec.workspace = true
+iyakki-accounts = { path = "../iyakki-accounts" }
+iyakki-storage.workspace = true
+iyakki-zram.workspace = true
+iyakki-fw.workspace = true
+iyakki-usb = { path = "../iyakki-usb" }
+iyakki-edit.workspace = true
+iyakki-hwinfo.workspace = true
+iyakki-drivers.workspace = true
+iyakki-devctl.workspace = true
+iyakki-web.workspace = true
+iyakki-pdf.workspace = true
+iyakki-js.workspace = true
+iyakki-netscan.workspace = true
+iyakki-webview.workspace = true
+iyakki-rfb.workspace = true
+iyakki-ledger.workspace = true
+iyakki-data.workspace = true
+iyakki-flow.workspace = true
+iyakki-flowsx.workspace = true
+iyakki-disksx.workspace = true
+iyakki-memx.workspace = true
+iyakki-extagentx.workspace = true
+iyakki-schema.workspace = true
+argon2 = { version = "0.5", features = ["std", "rand"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tiny-skia = "0.11"
+fontdue = "0.9"
+rustybuzz = "0.20"
+unicode-bidi = "0.3"
+libc = "0.2"
+iyakki-core-fake = { workspace = true, optional = true }
+thiserror.workspace = true
+log.workspace = true

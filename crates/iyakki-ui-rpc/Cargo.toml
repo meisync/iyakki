@@ -1,0 +1,34 @@
+[package]
+name = "iyakki-ui-rpc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "F-SPLIT-03: the facet traits of the agent as remote objects over the core's UI socket. The client half (`Remote*`, used inside the UI program) and the dispatcher half (`Host`, used in the core) are generated from the traits by dist/split/gen_rpc.py. This crate depends on the trait crate and never on the agent, so the UI program stays small."
+
+[dependencies]
+iyakki-agent-api = { workspace = true }
+iyakki-ui-client = { path = "../iyakki-ui-client" }
+iyakki-core-api = { workspace = true }
+iyakki-shared = { workspace = true }
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+
+iyakki-sec = { workspace = true }
+iyakki-vpn = { path = "../iyakki-vpn" }
+iyakki-drivers = { workspace = true }
+iyakki-web = { workspace = true }
+iyakki-vt = { workspace = true }
+iyakki-cloudmode = { workspace = true }
+iyakki-tile-host = { path = "../iyakki-tile-host" }
+iyakki-tile-api = { path = "../iyakki-tile-api", default-features = false }
+zeroize = "1"
+iyakki-flowsx = { workspace = true }
+iyakki-flow = { workspace = true }
+iyakki-extagentx = { workspace = true }
+iyakki-proxy = { path = "../iyakki-proxy" }
+iyakki-memx = { workspace = true }
+iyakki-clock = { workspace = true }
+iyakki-dash = { workspace = true }
+
+[dev-dependencies]
+iyakki-accounts = { path = "../iyakki-accounts" }

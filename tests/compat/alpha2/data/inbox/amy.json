@@ -1,0 +1,95 @@
+{
+  "notifications": [
+    {
+      "id": "n1",
+      "time": 1700000030,
+      "kind": "device",
+      "title": "3 new devices on your network",
+      "body": "aa:bb:cc:00:00:03 joined",
+      "source": "scan",
+      "link": null,
+      "read": false,
+      "flagged": false,
+      "snoozed_until": 0,
+      "group": "scan:new-devices",
+      "count": 3,
+      "plural": "{n} new devices on your network",
+      "items": [
+        {
+          "time": 1700000010,
+          "text": "aa:bb:cc:00:00:01 joined",
+          "id": ""
+        },
+        {
+          "time": 1700000020,
+          "text": "aa:bb:cc:00:00:02 joined",
+          "id": ""
+        },
+        {
+          "time": 1700000030,
+          "text": "aa:bb:cc:00:00:03 joined",
+          "id": ""
+        }
+      ]
+    },
+    {
+      "id": "n4",
+      "time": 1700000040,
+      "kind": "info",
+      "title": "Backup finished",
+      "body": "synthetic backup note",
+      "source": "jobs",
+      "link": null,
+      "read": true,
+      "flagged": false,
+      "snoozed_until": 0,
+      "group": "",
+      "count": 1,
+      "plural": "",
+      "items": []
+    },
+    {
+      "id": "n5",
+      "time": 1700000050,
+      "kind": "warning",
+      "title": "Disk is 90% full",
+      "body": "synthetic warning",
+      "source": "system",
+      "link": null,
+      "read": false,
+      "flagged": true,
+      "snoozed_until": 0,
+      "group": "",
+      "count": 1,
+      "plural": "",
+      "items": []
+    }
+  ],
+  "tasks": [
+    {
+      "id": "t1",
+      "title": "Water the plants",
+      "notes": "synthetic",
+      "due": 1700086400,
+      "priority": "normal",
+      "status": "pending",
+      "created_by": "user",
+      "created": 1700000000,
+      "updated": 1700000000
+    },
+    {
+      "id": "t2",
+      "title": "Pay the electricity bill",
+      "notes": "",
+      "due": null,
+      "priority": "high",
+      "status": "done",
+      "created_by": "user",
+      "created": 1700000005,
+      "updated": 1700000009
+    }
+  ],
+  "version": 2,
+  "levels": {},
+  "notice": "Your inbox was tidied: 5 notifications are now 3 entries, similar ones grouped (open one to see them all). Nothing else was removed."
+}

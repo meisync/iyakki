@@ -1,0 +1,7 @@
+# PLACEHOLDER: replace @ORG/TEAM-HANDLE with the project team's real GitHub team (or user) handle before this file is relied on.
+# Until then GitHub finds no valid owner and requests no automatic reviews.
+*                @ORG/TEAM-HANDLE
+/.github/        @ORG/TEAM-HANDLE
+/SECURITY.md     @ORG/TEAM-HANDLE
+/LICENSE         @ORG/TEAM-HANDLE
+/NOTICE          @ORG/TEAM-HANDLE

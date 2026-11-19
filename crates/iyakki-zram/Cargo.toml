@@ -1,0 +1,9 @@
+[package]
+name = "iyakki-zram"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Compressed swap in RAM (zram) and optional swap file: configuration, in-house mkswap, boot-time setup, live reconfiguration, memory figures."
+
+[dependencies]
+libc = "0.2"

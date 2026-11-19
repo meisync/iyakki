@@ -1,0 +1,135 @@
+[package]
+name = "iyakki-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dev-dependencies]
+iyakki-testkit = { path = "../iyakki-testkit" }
+iyakki-shared = { workspace = true, features = ["testing"] }
+iyakki-core-local = { workspace = true, features = ["test-support"] }
+iyakki-sshfs = { path = "../iyakki-sshfs", features = ["testing"] }
+wat = "1"
+iyakki-archive = { path = "../iyakki-archive", features = ["testing"] }
+iyakki-core-fake = { workspace = true }
+iyakki-proxy = { path = "../iyakki-proxy", features = ["testcerts"] }
+fontdue = "0.9"
+iyakki-connect = { path = "../iyakki-connect" }
+iyakki-audiodec = { workspace = true }
+iyakki-dash = { workspace = true, features = ["testing"] }
+
+[dependencies]
+log.workspace = true
+iyakki-sec.workspace = true
+# the SSH, SFTP and FTP protocol code (re-exported here under the old module paths)
+iyakki-sshfs.workspace = true
+iyakki-vt.workspace = true
+# camera motion detection, geometry, settings and the recording format (re-exported here under the old module paths)
+iyakki-camdetect.workspace = true
+# DISKS: the LUKS and BitLocker header parsers, the typed secret and the rate limit (re-exported as `disks_crypt`)
+iyakki-diskcrypt.workspace = true
+# Battery model and health logic, split out of iyakki-agent. Uses serde (already in the workspace).
+iyakki-battery.workspace = true
+iyakki-clockfloor.workspace = true
+iyakki-macrecovery.workspace = true
+iyakki-regex.workspace = true
+iyakki-openpgp.workspace = true
+# Deploy-file and Dockerfile lint rules (pure text), split out of iyakki-agent.
+iyakki-lint.workspace = true
+# The binary delta (build and apply), split out of iyakki-agent. Uses sha2 (already in the workspace).
+iyakki-bindelta.workspace = true
+# tar/zip readers and the in-house xz decoder, split out of iyakki-agent.
+iyakki-archive.workspace = true
+# QR code encoder and decoder, split out of iyakki-agent.
+iyakki-qr.workspace = true
+# Web Push, passkeys and Matrix Olm/Megolm cryptography (F-INBOX-09, F-BROX-03, F-MSG-08)
+iyakki-webcrypto.workspace = true
+# Number, date and time words (parse and say), split out of iyakki-agent.
+iyakki-wordtime.workspace = true
+# Wall-clock, zones, calendar and time-format helpers, split out of iyakki-agent.
+iyakki-clock.workspace = true
+iyakki-cloudmode.workspace = true
+iyakki-shared.workspace = true
+iyakki-dash.workspace = true
+iyakki-agent-api.workspace = true
+iyakki-filescope.workspace = true
+iyakki-core-api.workspace = true
+iyakki-core-browser = { path = "../iyakki-core-browser" }
+iyakki-core-local.workspace = true
+iyakki-ui-client = { path = "../iyakki-ui-client" }
+iyakki-edit.workspace = true
+iyakki-vfs.workspace = true
+iyakki-wasm.workspace = true
+iyakki-mem.workspace = true
+iyakki-ledger.workspace = true
+iyakki-netscan.workspace = true
+iyakki-proxy = { path = "../iyakki-proxy" }
+iyakki-web.workspace = true
+iyakki-pdf.workspace = true
+iyakki-wake.workspace = true
+iyakki-rtsp.workspace = true
+# camera recordings: the AES-256-XTS and HMAC primitives of the data-volume crate (camrec_format.rs)
+iyakki-volcrypt.workspace = true
+# Encrypted per-person home folders (F-STORE-05): lifecycle, migration, form state. Re-exported as `iyakki_agent::enchome`.
+iyakki-enchome.workspace = true
+iyakki-webview.workspace = true
+iyakki-data.workspace = true
+iyakki-drivers.workspace = true
+iyakki-devctl.workspace = true
+iyakki-hwinfo.workspace = true
+# hot patches: the same id/layer rules as the first-stage init that mounts them (iyakki dev patch)
+iyakki-stage1 = { path = "../iyakki-stage1" }
+# update-pack reads the boot partition of an install image with the installer's own FAT reader
+iyakki-usb = { path = "../iyakki-usb" }
+# DISKS: the partition-table reader and writer (GPT), human sizes
+iyakki-storage.workspace = true
+iyakki-flow.workspace = true
+iyakki-flowsx.workspace = true
+iyakki-disksx.workspace = true
+iyakki-memx.workspace = true
+iyakki-extagentx.workspace = true
+# VPN profiles: importers, route and guard plans, WireGuard netlink messages (vpn_mgr.rs)
+iyakki-filter = { path = "../iyakki-filter" }
+iyakki-vpn = { path = "../iyakki-vpn" }
+# the guard and DNS-redirect tables go through the Firewall's own netlink writer (vpn_nft.rs); the images ship no nft
+iyakki-fw.workspace = true
+iyakki-zram.workspace = true
+# the Wi-Fi hotspot core (pure); the real nl80211 and packet sockets are in nl80211_os.rs
+iyakki-hotspot = { path = "../iyakki-hotspot" }
+iyakki-schema.workspace = true
+# the desktop connector's client, WebSocket framing and picture codec live in the small crate the connector program shares (re-exported here)
+iyakki-link.workspace = true
+iyakki-js.workspace = true
+# WASM tiles served to a browser (webservice/tiles.rs): the sandbox host, the ABI types and the example tile
+iyakki-tile-host = { path = "../iyakki-tile-host" }
+iyakki-tile-abi = { path = "../iyakki-tile-abi" }
+# the radio's plain data lives in the tile facade (RADIO-EXTRACTION-PLAN.md step 1); `radio.rs` re-exports it
+iyakki-tile-api = { path = "../iyakki-tile-api", default-features = false }
+iyakki-tile-example = { path = "../iyakki-tile-example" }
+iyakki-tile-runs = { path = "../iyakki-tile-runs" }
+iyakki-tile-settings = { path = "../iyakki-tile-settings" }
+iyakki-tile-edit = { path = "../iyakki-tile-edit" }
+iyakki-tile-chat = { path = "../iyakki-tile-chat" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror.workspace = true
+chacha20poly1305 = "0.10"
+argon2 = { version = "0.5", features = ["std"] }
+zeroize = "1"
+sha2 = "0.10"
+miniz_oxide = "0.8"
+# the picture codec (pixelcodec.rs, shared with iyakki-remote) codes and reads PNG tiles with the same crate as the web front end
+tiny-skia = "0.11"
+ruzstd = "0.9"
+nanomp3 = { version = "0.2", default-features = false, features = ["std"] }
+ed25519-dalek = "3"
+# member key pairs for the shared vaults (cloudkeys.rs): X25519 only, no random-number feature (the bytes come from the system)
+x25519-dalek = { version = "3", default-features = false, features = ["zeroize"] }
+# SSH keys protected by a passphrase (aes256-ctr, see sshkey.rs)
+aes = "0.8"
+ctr = "0.9"
+# developer mode's client (`devmode::client`): the same TLS library and features as the web front end (iyakki-remote)
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+libc = "0.2"
+# the web service makes its own self-signed certificate (same crate and features as iyakki-remote)
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }

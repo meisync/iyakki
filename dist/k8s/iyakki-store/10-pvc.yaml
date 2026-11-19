@@ -1,0 +1,16 @@
+# 10 GiB on the local-path class (a folder on the node's disk; local-path does not enforce the size, so the server has its own cap:
+# --store-cap-mib 8192 in 30-deployment.yaml). Only the NEWEST build per machine type and channel is kept (about 0.45 GB each).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: store-data
+  namespace: iyakki-store
+  labels:
+    app.kubernetes.io/name: iyakki-store
+    app.kubernetes.io/part-of: iyakki-store
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi

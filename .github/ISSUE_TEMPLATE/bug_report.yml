@@ -1,0 +1,53 @@
+name: Bug report
+description: Something does not work as the documentation says
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        IYAKKI is an alpha preview for developers and testers. Please check KNOWN-ISSUES.md first: your problem may be listed.
+        Do not paste passwords, keys, tokens or addresses of your network. Read any diagnostics file before you attach it.
+  - type: input
+    id: version
+    attributes:
+      label: IYAKKI version
+      description: Settings, Overview or System, About; or the release you downloaded (for example 0.1.0-alpha.6).
+    validations:
+      required: true
+  - type: input
+    id: machine
+    attributes:
+      label: Machine model and how you run IYAKKI
+      description: "For example: Mac mini 2018 (Macmini8,1), USB SSD; or QEMU on Linux; or the desktop window on Linux."
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: DOCTOR output
+      description: Run `iyakki doctor --detail` in the terminal tile (or open the DOCTOR tile), and paste the result. If you can, attach a file made with Settings, Overview, Share diagnostics (it shows you what it holds and removes secrets).
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: "1. ...\n2. ...\n3. ..."
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what happened instead
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I looked at KNOWN-ISSUES.md and the existing issues.
+          required: true
+        - label: I removed passwords, keys, tokens and private addresses from everything I attached.
+          required: true

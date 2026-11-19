@@ -1,0 +1,16 @@
+[package]
+name = "iyakki-memx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The knowledge base, its text embedder and the per-workspace history of the assistant's work, split out of iyakki-agent for F-SPLIT-03."
+
+# No agent code and no Services: a namespace store, a hashing embedder and the history over them.
+[dependencies]
+iyakki-mem.workspace = true
+iyakki-ledger.workspace = true
+iyakki-clock.workspace = true
+iyakki-shared.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror.workspace = true
